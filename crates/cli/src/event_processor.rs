@@ -7,7 +7,7 @@
 //!
 //! ## Event Processing with Custom Handlers
 //!
-//! All commands use `process_events_with_handler` which allows custom handling
+//! All commands use `process_events` which allows custom handling
 //! of specific events while providing default behavior for standard events:
 //!
 //! ```rust,ignore
@@ -17,31 +17,28 @@
 //! ) -> i32 {
 //!     let processor = EventProcessor::new(reporter);
 //!
-//!     processor.process_events_with_handler(event_stream, |event, reporter| {
+//!     processor.process_events(event_stream, |event| {
 //!         match event {
 //!             PackageEvent::Progress { percent_complete, step, total_steps, message, .. } => {
-//!                 // Custom progress display with percentage
-//!                 reporter.report_progress(format!(
-//!                     "[{:.0}%] Step {}/{}: {}",
-//!                     percent_complete * 100.0, step, total_steps, message
-//!                 ));
-//!                 Some(true) // Continue processing
+//!                 // Custom progress handling
+//!                 println!("[{:.0}%] Step {}/{}: {}",
+//!                     percent_complete * 100.0, step, total_steps, message);
+//!                 true // Handled - continue processing
 //!             }
 //!             PackageEvent::Warning { message, .. } => {
-//!                 // Treat warnings as errors in this command
-//!                 reporter.report_error(message);
-//!                 Some(false) // Stop processing
+//!                 // Custom warning handling
+//!                 eprintln!("Warning: {}", message);
+//!                 true // Handled - continue processing
 //!             }
-//!             _ => None, // Use default handling for other events
+//!             _ => false, // Use default handling for other events
 //!         }
 //!     }).await
 //! }
 //! ```
 //!
 //! The custom handler should return:
-//! - `Some(true)` to continue processing after handling the event
-//! - `Some(false)` to stop processing after handling the event
-//! - `None` to use the default handling for the event
+//! - `true` to continue processing after handling the event (skip default handling)
+//! - `false` to use the default handling for the event
 
 use futures::StreamExt;
 use selfie::package::{
@@ -49,10 +46,7 @@ use selfie::package::{
     port::{PackageListError, PackageRepoError},
 };
 
-use crate::{
-    commands::package::handle_directory_not_found,
-    terminal_progress_reporter::TerminalProgressReporter,
-};
+use crate::terminal_progress_reporter::TerminalProgressReporter;
 
 /// A reusable event processor for handling package operation events
 ///
@@ -73,22 +67,20 @@ impl EventProcessor {
     ///
     /// This allows commands to provide custom handling for specific event types
     /// while still getting the default behavior for standard events.
-    pub async fn process_events_with_handler<F>(
-        self,
-        mut stream: EventStream,
-        mut custom_handler: F,
-    ) -> i32
+    ///
+    /// The custom handler should return:
+    /// - `true` if the event was handled (skip default handling)
+    /// - `false` to use default handling for the event
+    pub async fn process_events<F>(self, mut stream: EventStream, mut custom_handler: F) -> i32
     where
-        F: FnMut(&PackageEvent, &TerminalProgressReporter) -> Option<bool>,
+        F: FnMut(&PackageEvent) -> bool,
     {
         let mut exit_code = 0;
 
         while let Some(event) = stream.next().await {
             // Try custom handler first
-            if let Some(should_continue) = custom_handler(&event, &self.reporter) {
-                if !should_continue {
-                    break;
-                }
+            if custom_handler(&event) {
+                // Custom handler handled the event, continue to next event
                 continue;
             }
 
@@ -120,7 +112,7 @@ impl EventProcessor {
             }
 
             PackageEvent::Info { output, .. } => {
-                self.handle_console_output(output);
+                handle_console_output(output);
             }
 
             PackageEvent::Trace { message, .. } => {
@@ -142,7 +134,15 @@ impl EventProcessor {
                     StreamedError::PackageRepoError(PackageRepoError::PackageListError(
                         PackageListError::PackageDirectoryNotFound(path),
                     )) => {
-                        handle_directory_not_found(path, self.reporter);
+                        // Handle this specific error case directly since it needs special formatting
+                        self.reporter.report_error(format!(
+                            "Package directory not found: {}",
+                            path.display()
+                        ));
+                        self.reporter.report_suggestion(format!(
+                            "Run 'selfie config --package-directory <path>' to set a different directory, or create the directory with 'mkdir -p {}'",
+                            path.display()
+                        ));
                     }
                     _ => {
                         self.reporter.report_error(format!("{message}: {error}"));
@@ -168,27 +168,11 @@ impl EventProcessor {
                 return true; // Stop processing after cancellation
             }
 
-            PackageEvent::PackageInfoLoaded { .. } => {
-                // These structured events are handled by command-specific handlers
-                // If no custom handler processed them, just continue
-            }
-
-            PackageEvent::EnvironmentStatusChecked { .. } => {
-                // These structured events are handled by command-specific handlers
-                // If no custom handler processed them, just continue
-            }
-
-            PackageEvent::PackageListLoaded { .. } => {
-                // These structured events are handled by command-specific handlers
-                // If no custom handler processed them, just continue
-            }
-
-            PackageEvent::CheckResultCompleted { .. } => {
-                // These structured events are handled by command-specific handlers
-                // If no custom handler processed them, just continue
-            }
-
-            PackageEvent::ValidationResultCompleted { .. } => {
+            PackageEvent::PackageInfoLoaded { .. }
+            | PackageEvent::EnvironmentStatusChecked { .. }
+            | PackageEvent::PackageListLoaded { .. }
+            | PackageEvent::CheckResultCompleted { .. }
+            | PackageEvent::ValidationResultCompleted { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
@@ -196,16 +180,16 @@ impl EventProcessor {
 
         false // Continue processing
     }
+}
 
-    /// Handle console output appropriately
-    fn handle_console_output(&self, output: ConsoleOutput) {
-        match output {
-            ConsoleOutput::Stdout(msg) => {
-                println!("{msg}");
-            }
-            ConsoleOutput::Stderr(msg) => {
-                eprintln!("{msg}");
-            }
+/// Handle console output appropriately
+fn handle_console_output(output: ConsoleOutput) {
+    match output {
+        ConsoleOutput::Stdout(msg) => {
+            println!("{msg}");
+        }
+        ConsoleOutput::Stderr(msg) => {
+            eprintln!("{msg}");
         }
     }
 }
@@ -256,9 +240,7 @@ mod tests {
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
-        let exit_code = processor
-            .process_events_with_handler(event_stream, |_event, _reporter| None)
-            .await;
+        let exit_code = processor.process_events(event_stream, |_event| false).await;
 
         // Empty stream should return success
         assert_eq!(exit_code, 0);
@@ -275,9 +257,9 @@ mod tests {
         // Test that custom handler gets called with None for empty stream
         let mut handler_called = false;
         let exit_code = processor
-            .process_events_with_handler(event_stream, |_event, _reporter| {
+            .process_events(event_stream, |_event| {
                 handler_called = true;
-                Some(true)
+                true
             })
             .await;
 
@@ -314,9 +296,7 @@ mod tests {
 
         // Test with a nonexistent package - should get events but ultimately fail
         let event_stream = service.check("nonexistent-test-package").await;
-        let exit_code = processor
-            .process_events_with_handler(event_stream, |_event, _reporter| None)
-            .await;
+        let exit_code = processor.process_events(event_stream, |_event| false).await;
 
         // Should return error exit code since package doesn't exist
         assert_eq!(exit_code, 1);
@@ -354,21 +334,21 @@ mod tests {
 
         let event_stream = service.check("nonexistent-test-package").await;
         let exit_code = processor
-            .process_events_with_handler(event_stream, |event, _reporter| {
+            .process_events(event_stream, |event| {
                 match event {
                     PackageEvent::Started { .. } => {
                         started_events_seen += 1;
-                        None // Use default handling
+                        false // Use default handling
                     }
                     PackageEvent::Progress { .. } => {
                         progress_events_seen += 1;
-                        None // Use default handling
+                        false // Use default handling
                     }
                     PackageEvent::Completed { .. } => {
                         completed_events_seen += 1;
-                        None // Use default handling
+                        false // Use default handling
                     }
-                    _ => None, // Use default handling for all other events
+                    _ => false,
                 }
             })
             .await;
@@ -378,51 +358,6 @@ mod tests {
         assert!(progress_events_seen > 0);
         assert_eq!(completed_events_seen, 1);
         assert_eq!(exit_code, 1);
-    }
-
-    #[tokio::test]
-    async fn test_custom_handler_early_termination() {
-        use selfie::{
-            commands::ShellCommandRunner,
-            fs::real::RealFileSystem,
-            package::{
-                repository::YamlPackageRepository,
-                service::{PackageService, PackageServiceImpl},
-            },
-        };
-
-        // Create a minimal config for testing
-        let config = selfie::config::AppConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp/nonexistent")
-            .command_timeout_unchecked(1)
-            .use_colors(false)
-            .build();
-
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-        let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-        let service = PackageServiceImpl::new(repo, command_runner, config);
-
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
-
-        let mut events_after_started = 0;
-
-        let event_stream = service.check("nonexistent-test-package").await;
-        let exit_code = processor
-            .process_events_with_handler(event_stream, |event, _reporter| {
-                if let PackageEvent::Started { .. } = event {
-                    Some(false) // Stop processing immediately after started
-                } else {
-                    events_after_started += 1;
-                    None // Should not reach here
-                }
-            })
-            .await;
-
-        // Should have stopped processing early, so no events after Started
-        assert_eq!(events_after_started, 0);
-        assert_eq!(exit_code, 0); // Exit code should still be 0 since we stopped early
     }
 
     #[tokio::test]

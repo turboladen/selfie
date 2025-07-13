@@ -5,6 +5,7 @@ resolver = "3"
 [workspace.dependencies]
 console = "0.15"
 futures = "0.3.31"
+mockall = "0.13.1"
 serde_yaml = "0.9.34"
 tempfile = "3.17.1"
 tokio = "1.44"

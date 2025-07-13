@@ -1,3 +1,29 @@
+//! Package operation event system
+//!
+//! This module provides the event-driven interface for package operations in the selfie library.
+//! It implements a streaming event system that allows real-time monitoring of package operations
+//! including progress updates, log messages, and results.
+//!
+//! # Architecture
+//!
+//! The event system follows a publisher-subscriber pattern where:
+//! - Operations publish events through [`EventSender`]
+//! - Consumers receive events through [`EventStream`]
+//! - Events carry rich context including operation metadata and results
+//!
+//! # Event Types
+//!
+//! - [`PackageEvent::Started`] - Operation has begun
+//! - [`PackageEvent::Progress`] - Progress update with step information
+//! - [`PackageEvent::Completed`] - Operation finished with result
+//! - [`PackageEvent::Trace`], [`PackageEvent::Debug`], [`PackageEvent::Warning`] - Log messages
+//!
+//! # Usage
+//!
+//! Events are emitted by package service operations and consumed by UI layers
+//! to provide real-time feedback to users. The stream-based approach allows
+//! for non-blocking operation monitoring and flexible UI implementations.
+
 pub mod error;
 pub mod metadata;
 
@@ -13,8 +39,18 @@ use uuid::Uuid;
 
 use self::{error::StreamedError, metadata::OperationType};
 
+/// Type alias for a stream of package events
+///
+/// This stream emits [`PackageEvent`] items as operations progress, allowing
+/// consumers to react to operation updates in real-time. The stream is pinned
+/// and boxed to enable dynamic dispatch and async iteration.
 pub type EventStream = Pin<Box<dyn Stream<Item = PackageEvent> + Send>>;
 
+/// Internal event sender for package operations
+///
+/// Provides a high-level interface for emitting package events with consistent
+/// operation context. Automatically includes operation metadata in all events
+/// and handles the underlying channel communication.
 #[derive(Debug, Clone)]
 pub(crate) struct EventSender {
     operation_info: OperationInfo,
@@ -22,6 +58,15 @@ pub(crate) struct EventSender {
 }
 
 impl EventSender {
+    /// Create a new event sender with operation context
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - Channel sender for transmitting events
+    /// * `operation_type` - Type of operation being performed
+    /// * `package_name` - Name of the package being operated on
+    /// * `environment` - Environment context for the operation
+    /// * `context` - Additional operation context
     pub(crate) fn new_with_context(
         tx: mpsc::Sender<PackageEvent>,
         operation_type: OperationType,
@@ -41,6 +86,15 @@ impl EventSender {
         Self { operation_info, tx }
     }
 
+    /// Send an event through the channel
+    ///
+    /// Transmits the event to all consumers listening on the event stream.
+    /// Channel send errors are silently ignored as they typically indicate
+    /// that the consumer has disconnected.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The package event to send
     pub(crate) async fn send(&self, event: PackageEvent) {
         let _ = self.tx.send(event).await;
     }
@@ -77,6 +131,7 @@ impl EventSender {
             "operation progress",
         );
 
+        #[allow(clippy::cast_precision_loss)]
         self.send(PackageEvent::Progress {
             operation_info,
             step,
@@ -107,6 +162,14 @@ impl EventSender {
     }
 
     /// Send a log message at the specified level
+    ///
+    /// Emits a log event with the appropriate tracing level and event type.
+    /// This method handles the conversion from log levels to specific event variants.
+    ///
+    /// # Arguments
+    ///
+    /// * `level` - The log level for the message
+    /// * `message` - The log message content
     pub(crate) async fn send_log(&self, level: LogLevel, message: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
         let message = message.to_string();

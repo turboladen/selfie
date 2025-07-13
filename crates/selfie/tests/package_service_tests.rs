@@ -15,8 +15,8 @@
 use tempfile::TempDir;
 use test_common::{
     assert_failed_operation, assert_successful_operation, collect_events,
-    create_service_invalid_package_file, create_service_test_package_file,
-    create_service_test_service, get_operation_result,
+    create_service_install_test_package_file, create_service_invalid_package_file,
+    create_service_test_package_file, create_service_test_service, get_operation_result,
 };
 
 use selfie::package::{
@@ -108,7 +108,7 @@ async fn test_service_check_no_check_command() {
 async fn test_service_install_success() {
     // Arrange
     let temp_dir = TempDir::new().unwrap();
-    create_test_package_file(&temp_dir, "install-package", true);
+    let _ = create_service_install_test_package_file(&temp_dir, "install-package");
     let service = create_service_test_service(&temp_dir);
 
     // Act
@@ -118,15 +118,15 @@ async fn test_service_install_success() {
     // Assert
     assert_successful_operation(&events);
 
-    // Verify we have progress events for install (should be 5 steps)
+    // Verify we have progress events for install (should be 7 steps)
     let progress_events: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, PackageEvent::Progress { .. }))
         .collect();
     assert_eq!(
         progress_events.len(),
-        5,
-        "Should have 5 progress events for install operation"
+        7,
+        "Should have 7 progress events for install operation"
     );
 }
 
@@ -270,15 +270,9 @@ async fn test_service_event_metadata() {
     // Assert - verify all events have proper metadata
     for event in &events {
         match event {
-            PackageEvent::Started { operation_info, .. } => {
-                assert_eq!(operation_info.package_name, "metadata-test");
-                assert_eq!(operation_info.environment, "test");
-            }
-            PackageEvent::Progress { operation_info, .. } => {
-                assert_eq!(operation_info.package_name, "metadata-test");
-                assert_eq!(operation_info.environment, "test");
-            }
-            PackageEvent::Completed { operation_info, .. } => {
+            PackageEvent::Started { operation_info, .. }
+            | PackageEvent::Progress { operation_info, .. }
+            | PackageEvent::Completed { operation_info, .. } => {
                 assert_eq!(operation_info.package_name, "metadata-test");
                 assert_eq!(operation_info.environment, "test");
             }

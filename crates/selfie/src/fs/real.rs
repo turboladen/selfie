@@ -299,7 +299,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            _ => panic!("Expected IoError with NotFound"),
+            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
         }
     }
 
@@ -315,7 +315,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            _ => panic!("Expected IoError with NotFound"),
+            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
         }
     }
 
@@ -331,7 +331,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            _ => panic!("Expected IoError with NotFound"),
+            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
         }
     }
 
@@ -356,7 +356,7 @@ mod tests {
                 assert_eq!(inner.kind(), std::io::ErrorKind::Other);
                 assert_eq!(inner.to_string(), "test error");
             }
-            _ => panic!("Expected IoError variant"),
+            FileSystemError::HomeDirNotFound => panic!("Expected IoError variant"),
         }
     }
 }

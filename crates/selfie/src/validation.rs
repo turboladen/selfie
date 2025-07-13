@@ -1,9 +1,14 @@
 use core::fmt;
 
+/// Collection of validation issues (errors and warnings)
+///
+/// Provides methods to query and filter validation results, allowing
+/// callers to handle errors and warnings differently based on their needs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationIssues(Vec<ValidationIssue>);
 
 impl ValidationIssues {
+    /// Get all validation issues regardless of level
     #[must_use]
     pub fn all_issues(&self) -> &[ValidationIssue] {
         &self.0
@@ -11,11 +16,14 @@ impl ValidationIssues {
 
     /// Returns true if the validation passed (no errors)
     ///
+    /// Note: This returns `true` even if there are warnings, as warnings
+    /// do not prevent successful validation.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         !self.has_errors()
     }
 
+    /// Returns true if there are any issues (errors or warnings)
     #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.0.is_empty()
@@ -23,6 +31,7 @@ impl ValidationIssues {
 
     /// Returns true if the validation has errors
     ///
+    /// Errors indicate validation failures that should prevent further processing.
     #[must_use]
     pub fn has_errors(&self) -> bool {
         self.0
@@ -32,6 +41,8 @@ impl ValidationIssues {
 
     /// Get all errors (not warnings)
     ///
+    /// Returns only the validation issues that are marked as errors,
+    /// filtering out any warnings.
     #[must_use]
     pub fn errors(&self) -> Vec<&ValidationIssue> {
         self.0
@@ -42,6 +53,8 @@ impl ValidationIssues {
 
     /// Returns true if the validation has warnings
     ///
+    /// Warnings indicate potential issues that don't prevent validation
+    /// but should be brought to the user's attention.
     #[must_use]
     pub fn has_warnings(&self) -> bool {
         self.0
@@ -51,6 +64,8 @@ impl ValidationIssues {
 
     /// Get all warnings (not errors)
     ///
+    /// Returns only the validation issues that are marked as warnings,
+    /// filtering out any errors.
     #[must_use]
     pub fn warnings(&self) -> Vec<&ValidationIssue> {
         self.0
@@ -61,6 +76,8 @@ impl ValidationIssues {
 
     /// Get issues by category
     ///
+    /// Filters all issues to return only those matching the specified category.
+    /// Useful for handling specific types of validation problems.
     #[must_use]
     pub fn issues_by_category(&self, category: &ValidationErrorCategory) -> Vec<&ValidationIssue> {
         self.0

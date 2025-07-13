@@ -8,7 +8,10 @@ use selfie::{
     },
 };
 
-use crate::{formatters::format_key, terminal_progress_reporter::TerminalProgressReporter};
+use crate::{
+    event_processor::EventProcessor, formatters::format_key,
+    terminal_progress_reporter::TerminalProgressReporter,
+};
 
 use super::common;
 
@@ -17,45 +20,50 @@ pub(crate) async fn handle_info(
     config: &AppConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
-    tracing::debug!("Finding package info for: {}", package_name);
+    tracing::debug!("Finding package info for: {package_name}");
+
+    // Status message:
+    common::report_status(&format!("Getting info for {package_name}..."));
 
     // Create the package service implementation
     let service = common::create_package_service(config);
 
     // Call the service's info method to get an event stream
+    #[allow(clippy::match_same_arms)]
     match service.info(package_name).await {
         Ok(event_stream) => {
             // Process the event stream with custom handling for structured data
-            common::process_events_with_custom_handler(
-                event_stream,
-                reporter,
-                handle_info_event,
-                config,
-            )
-            .await
+            let processor = EventProcessor::new(reporter);
+            processor
+                .process_events(event_stream, |event| {
+                    match event {
+                        PackageEvent::PackageInfoLoaded { package_info, .. } => {
+                            let table = create_package_info_table(package_info, config);
+                            println!("{table}");
+                            true // Handled
+                        }
+                        PackageEvent::EnvironmentStatusChecked {
+                            environment_status, ..
+                        } => {
+                            let table = create_environment_table(environment_status, config);
+                            println!("\n{table}");
+                            true // Handled
+                        }
+                        PackageEvent::Progress { .. } => {
+                            true // Handled
+                        }
+                        PackageEvent::Completed { .. } => {
+                            false // Use default completion handling
+                        }
+                        _ => false, // Use default handling for other events
+                    }
+                })
+                .await
         }
         Err(e) => {
             reporter.report_error(format!("Failed to get package info: {e}"));
             1
         }
-    }
-}
-
-fn handle_info_event(event: &PackageEvent, config: &AppConfig) -> Option<bool> {
-    match event {
-        PackageEvent::PackageInfoLoaded { package_info, .. } => {
-            let table = create_package_info_table(package_info, config);
-            println!("{table}");
-            Some(true) // Continue processing
-        }
-        PackageEvent::EnvironmentStatusChecked {
-            environment_status, ..
-        } => {
-            let table = create_environment_table(environment_status, config);
-            println!("\n{table}");
-            Some(true) // Continue processing
-        }
-        _ => None, // Use default handling for other events
     }
 }
 

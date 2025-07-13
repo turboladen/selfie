@@ -42,6 +42,10 @@ pub struct AppConfig {
     pub(crate) max_parallel_installations: NonZeroUsize,
 }
 
+/// # Panics
+///
+/// This function uses `unsafe` code but cannot panic because it is called with
+/// the constant value 60, which is guaranteed to be non-zero.
 fn default_command_timeout() -> NonZeroU64 {
     unsafe { NonZeroU64::new_unchecked(60) }
 }
@@ -50,6 +54,12 @@ fn default_stop_on_error() -> bool {
     true
 }
 
+/// # Panics
+///
+/// This function uses `unsafe` code in the fallback case but cannot panic because
+/// it is called with the constant value 4, which is guaranteed to be non-zero.
+/// The `num_cpus::get()` call may return 0 on some systems, which is handled
+/// safely by the `unwrap_or_else` fallback.
 fn default_max_parallel() -> NonZeroUsize {
     NonZeroUsize::new(num_cpus::get()).unwrap_or_else(|| unsafe { NonZeroUsize::new_unchecked(4) })
 }
@@ -59,53 +69,64 @@ fn default_use_colors() -> bool {
 }
 
 impl AppConfig {
+    /// Get the current environment name
     #[must_use]
     pub fn environment(&self) -> &str {
         &self.environment
     }
 
+    /// Get the package directory path
     #[must_use]
     pub fn package_directory(&self) -> &PathBuf {
         &self.package_directory
     }
 
+    /// Check if verbose logging is enabled
     #[must_use]
     pub fn verbose(&self) -> bool {
         self.verbose
     }
 
+    /// Check if colored output is enabled
     #[must_use]
     pub fn use_colors(&self) -> bool {
         self.use_colors
     }
 
+    /// Get the command execution timeout duration
     #[must_use]
     pub fn command_timeout(&self) -> Duration {
         Duration::from_secs(self.command_timeout.into())
     }
 
+    /// Get the maximum number of parallel installations allowed
     #[must_use]
     pub fn max_parallel_installations(&self) -> NonZeroUsize {
         self.max_parallel_installations
     }
 
+    /// Check if operations should stop on first error
     #[must_use]
     pub fn stop_on_error(&self) -> bool {
         self.stop_on_error
     }
 
+    /// Get a mutable reference to the environment name
     pub fn environment_mut(&mut self) -> &mut String {
         &mut self.environment
     }
 
+    /// Get a mutable reference to the package directory path
     pub fn package_directory_mut(&mut self) -> &mut PathBuf {
         &mut self.package_directory
     }
 
+    /// Get a mutable reference to the verbose flag
     pub fn verbose_mut(&mut self) -> &mut bool {
         &mut self.verbose
     }
 
+    /// Get a mutable reference to the `use_colors` flag
     pub fn use_colors_mut(&mut self) -> &mut bool {
         &mut self.use_colors
     }
@@ -113,6 +134,8 @@ impl AppConfig {
 
 /// Builder pattern for `AppConfig` testing
 ///
+/// Provides a convenient way to construct `AppConfig` instances for testing
+/// with default values that can be selectively overridden.
 #[derive(Default, Debug)]
 pub struct AppConfigBuilder {
     environment: String,
@@ -152,12 +175,18 @@ impl AppConfigBuilder {
         self
     }
 
+    /// # Panics
+    ///
+    /// This panics if `timeout` is non-zero.
     #[must_use]
     pub fn command_timeout_unchecked(mut self, timeout: u64) -> Self {
         self.command_timeout = Some(NonZeroU64::new(timeout).unwrap());
         self
     }
 
+    /// # Panics
+    ///
+    /// This panics if `max` is non-zero.
     #[must_use]
     pub fn max_parallel_unchecked(mut self, max: usize) -> Self {
         self.max_parallel = Some(NonZeroUsize::new(max).unwrap());

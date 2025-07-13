@@ -28,17 +28,25 @@ async fn test_command_streaming_captures_all_output() {
     // Command that produces output line by line - simpler and more reliable
     let command = r#"for i in $(seq 1 5); do echo "Line $i"; done"#;
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let output_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = output_chunks.clone();
 
-    let output = runner
-        .execute_streaming(command, Duration::from_secs(10), move |chunk| {
+    // Spawn task to collect output chunks
+    let collect_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
             if let OutputChunk::Stdout(text) = chunk {
                 chunks_clone.lock().unwrap().push(text);
             }
-        })
+        }
+    });
+
+    let output = runner
+        .execute_streaming(command, Duration::from_secs(10), tx)
         .await
         .unwrap();
+
+    let _ = collect_task.await;
 
     // Check final output
     assert!(output.is_success());
@@ -109,16 +117,24 @@ async fn test_command_streaming_timeout() {
     // Command that runs longer than the timeout
     let command = "sleep 1";
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let output_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = output_chunks.clone();
 
-    let result = runner
-        .execute_streaming(command, Duration::from_millis(100), move |chunk| {
+    // Spawn task to collect output chunks
+    let collect_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
             if let OutputChunk::Stdout(text) = chunk {
                 chunks_clone.lock().unwrap().push(text);
             }
-        })
+        }
+    });
+
+    let result = runner
+        .execute_streaming(command, Duration::from_millis(100), tx)
         .await;
+
+    let _ = collect_task.await;
 
     // Should timeout
     assert!(matches!(
@@ -130,26 +146,34 @@ async fn test_command_streaming_timeout() {
 #[tokio::test]
 async fn test_command_streaming_stderr_capture() {
     let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+    let command = "echo 'stdout message' && echo 'stderr message' >&2";
 
-    // Command that outputs to stderr
-    let command = r#"echo "stdout line" && echo "stderr line" >&2"#;
-
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let stdout_chunks = Arc::new(Mutex::new(Vec::new()));
     let stderr_chunks = Arc::new(Mutex::new(Vec::new()));
     let stdout_clone = stdout_chunks.clone();
     let stderr_clone = stderr_chunks.clone();
 
+    // Spawn task to collect output chunks
+    let collect_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                OutputChunk::Stdout(text) => {
+                    stdout_clone.lock().unwrap().push(text);
+                }
+                OutputChunk::Stderr(text) => {
+                    stderr_clone.lock().unwrap().push(text);
+                }
+            }
+        }
+    });
+
     let output = runner
-        .execute_streaming(command, Duration::from_secs(5), move |chunk| match chunk {
-            OutputChunk::Stdout(text) => {
-                stdout_clone.lock().unwrap().push(text);
-            }
-            OutputChunk::Stderr(text) => {
-                stderr_clone.lock().unwrap().push(text);
-            }
-        })
+        .execute_streaming(command, Duration::from_secs(5), tx)
         .await
         .unwrap();
+
+    let _ = collect_task.await;
 
     // Check final output
     assert!(output.is_success());
@@ -157,15 +181,15 @@ async fn test_command_streaming_stderr_capture() {
     // Verify stdout chunks
     let stdout_combined = stdout_chunks.lock().unwrap().join("");
     assert!(
-        stdout_combined.contains("stdout line"),
-        "Should contain stdout line: '{stdout_combined}'"
+        stdout_combined.contains("stdout message"),
+        "Should contain stdout message: '{stdout_combined}'"
     );
 
     // Verify stderr chunks
     let stderr_combined = stderr_chunks.lock().unwrap().join("");
     assert!(
-        stderr_combined.contains("stderr line"),
-        "Should contain stderr line: '{stderr_combined}'"
+        stderr_combined.contains("stderr message"),
+        "Should contain stderr message: '{stderr_combined}'"
     );
 }
 
@@ -173,20 +197,28 @@ async fn test_command_streaming_stderr_capture() {
 async fn test_command_streaming_preserves_order() {
     let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
 
-    // Command that outputs numbered lines to ensure we can verify ordering
-    let command = r#"for i in $(seq 1 10); do echo "Message $i"; done"#;
+    // Command that outputs sequential numbers
+    let command = r#"for i in $(seq 1 10); do echo "Number $i"; done"#;
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let output_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = output_chunks.clone();
 
-    let output = runner
-        .execute_streaming(command, Duration::from_secs(10), move |chunk| {
+    // Spawn task to collect output chunks
+    let collect_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
             if let OutputChunk::Stdout(text) = chunk {
                 chunks_clone.lock().unwrap().push(text);
             }
-        })
+        }
+    });
+
+    let output = runner
+        .execute_streaming(command, Duration::from_secs(10), tx)
         .await
         .unwrap();
+
+    let _ = collect_task.await;
 
     // Check final output
     assert!(output.is_success());
@@ -211,7 +243,7 @@ async fn test_command_streaming_preserves_order() {
     // Verify ordering is preserved - each line should contain its sequential number
     for (index, line) in lines.iter().enumerate() {
         let expected_number = index + 1;
-        let expected_content = format!("Message {expected_number}");
+        let expected_content = format!("Number {expected_number}");
         assert_eq!(
             line.trim(),
             expected_content,
@@ -242,15 +274,23 @@ async fn test_command_streaming_stdout_stderr_interleaving() {
     // Simplified command that outputs to both stdout and stderr
     let command = r#"echo "stdout-line" && echo "stderr-line" >&2"#;
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let all_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = all_chunks.clone();
 
-    let output = runner
-        .execute_streaming(command, Duration::from_secs(10), move |chunk| {
+    // Spawn task to collect output chunks
+    let collect_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
             chunks_clone.lock().unwrap().push(chunk);
-        })
+        }
+    });
+
+    let output = runner
+        .execute_streaming(command, Duration::from_secs(10), tx)
         .await
         .unwrap();
+
+    let _ = collect_task.await;
 
     assert!(output.is_success());
 
@@ -262,7 +302,7 @@ async fn test_command_streaming_stdout_stderr_interleaving() {
         .iter()
         .filter_map(|chunk| match chunk {
             OutputChunk::Stdout(text) => Some(text.clone()),
-            _ => None,
+            OutputChunk::Stderr(_) => None,
         })
         .collect();
 
@@ -270,7 +310,7 @@ async fn test_command_streaming_stdout_stderr_interleaving() {
         .iter()
         .filter_map(|chunk| match chunk {
             OutputChunk::Stderr(text) => Some(text.clone()),
-            _ => None,
+            OutputChunk::Stdout(_) => None,
         })
         .collect();
 

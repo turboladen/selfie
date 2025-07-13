@@ -14,7 +14,7 @@ fn test_package_install() {
         .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing test package'")
-                .check_some("echo 'Checking test package'")
+                .check_some("exit 1")
         })
         .build();
     add_package(&temp_dir, &package);
@@ -22,7 +22,7 @@ fn test_package_install() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "install", "test-package"]);
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("will be installed in"));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "Installation completed successfully",
+    ));
 }

@@ -36,9 +36,7 @@ pub(crate) async fn handle_validate(
             // Process the event stream with custom handling for structured data
             let processor = EventProcessor::new(reporter);
             processor
-                .process_events_with_handler(event_stream, |event, _reporter| {
-                    handle_validate_event(event, config)
-                })
+                .process_events(event_stream, |event| handle_validate_event(event, config))
                 .await
         }
         Err(e) => {
@@ -48,15 +46,15 @@ pub(crate) async fn handle_validate(
     }
 }
 
-fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> Option<bool> {
+fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
             display_validation_result(validation_result, config);
-            Some(true) // Continue processing
+            true // Handled
         }
-        _ => None, // Use default handling for other events
+        _ => false, // Use default handling for other events
     }
 }
 

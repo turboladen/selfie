@@ -29,7 +29,7 @@ impl ValidationTableReporter {
     pub(crate) fn add_validation_errors(
         &mut self,
         error_issues: &[&ValidationIssue],
-        reporter: &TerminalProgressReporter,
+        reporter: TerminalProgressReporter,
     ) -> &mut Self {
         for error in error_issues {
             self.table.add_row(vec![
@@ -49,7 +49,7 @@ impl ValidationTableReporter {
     pub(crate) fn add_validation_warnings(
         &mut self,
         warning_issues: &[&ValidationIssue],
-        reporter: &TerminalProgressReporter,
+        reporter: TerminalProgressReporter,
     ) -> &mut Self {
         for warning in warning_issues {
             self.table.add_row(vec![

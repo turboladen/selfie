@@ -65,7 +65,7 @@ pub(crate) async fn dispatch_command(
             dispatch_package_command(&package_cmd.command, config, reporter).await
         }
         ClapCommands::Config(config_cmd) => {
-            dispatch_config_command(&config_cmd.command, original_config, reporter)
+            dispatch_config_command(&config_cmd.command, &original_config, reporter)
         }
     }
 }
@@ -103,7 +103,7 @@ async fn dispatch_package_command(
 
     match command {
         PackageSubcommands::Install { package_name } => {
-            package::install::handle_install(package_name, config, reporter)
+            package::install::handle_install(package_name, config, reporter).await
         }
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(package_name, config, reporter).await
@@ -115,12 +115,12 @@ async fn dispatch_package_command(
         PackageSubcommands::Create {
             package_name,
             interactive,
-        } => package::create::handle_create(package_name, config, reporter, *interactive).await,
+        } => package::create::handle_create(package_name, config, reporter, *interactive),
         PackageSubcommands::Edit { package_name } => {
-            package::edit::handle_edit(package_name, config, reporter).await
+            package::edit::handle_edit(package_name, config, reporter)
         }
         PackageSubcommands::Remove { package_name } => {
-            package::remove::handle_remove(package_name, config, reporter).await
+            package::remove::handle_remove(package_name, config, reporter)
         }
         PackageSubcommands::Validate { package_name } => {
             package::validate::handle_validate(package_name, config, reporter).await
@@ -149,13 +149,13 @@ async fn dispatch_package_command(
 /// - `validate`: Validate the configuration file structure and values
 fn dispatch_config_command(
     command: &ConfigSubcommands,
-    original_config: AppConfig,
+    original_config: &AppConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     debug!("Handling config command: {:?}", command);
 
     match command {
-        ConfigSubcommands::Validate => config::handle_validate(&original_config, reporter),
+        ConfigSubcommands::Validate => config::handle_validate(original_config, reporter),
     }
 }
 

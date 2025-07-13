@@ -98,8 +98,8 @@ pub async fn get_command<'a>(
     }
 }
 
-/// Step to execute a command
-pub async fn execute_command<CR>(
+/// Step to execute a command with streaming output for real-time feedback
+pub async fn execute_command_streaming<CR>(
     command_runner: &CR,
     cmd: &str,
     command_type: &str,
@@ -110,6 +110,9 @@ pub async fn execute_command<CR>(
 where
     CR: CommandRunner,
 {
+    use crate::commands::runner::OutputChunk;
+    use tokio::sync::mpsc;
+
     let is_final_execution = progress.current_step() + 1 == progress.total_steps();
     let step_message = if is_final_execution {
         format!("Executing final `{command_type}` command: `{cmd}`")
@@ -119,28 +122,44 @@ where
 
     progress.next(sender, step_message).await;
 
-    match command_runner
-        .execute_with_timeout(cmd, config.command_timeout())
-        .await
-    {
-        Ok(output) => {
-            if config.verbose() {
-                if !output.stdout_str().trim().is_empty() {
-                    sender
-                        .send_info(crate::package::event::ConsoleOutput::Stdout(
-                            output.stdout_str().to_string(),
-                        ))
+    // Create a channel for streaming output
+    let (tx, mut rx) = mpsc::channel::<OutputChunk>(1000);
+
+    // Clone the sender for the async task
+    let sender_clone = sender.clone();
+
+    // Spawn a task to handle the streaming output
+    let output_task = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                OutputChunk::Stdout(line) => {
+                    sender_clone
+                        .send_info(crate::package::event::ConsoleOutput::Stdout(line))
                         .await;
                 }
-                if !output.stderr_str().trim().is_empty() {
-                    sender
-                        .send_info(crate::package::event::ConsoleOutput::Stderr(
-                            output.stderr_str().to_string(),
-                        ))
+                OutputChunk::Stderr(line) => {
+                    sender_clone
+                        .send_info(crate::package::event::ConsoleOutput::Stderr(line))
                         .await;
                 }
             }
+        }
+    });
 
+    // Execute the command with streaming channel
+    let result = command_runner
+        .execute_streaming(cmd, config.command_timeout(), tx)
+        .await;
+
+    // Wait for the output task to finish and handle any task errors
+    if let Err(join_error) = output_task.await {
+        sender
+            .send_warning(format!("Output streaming task failed: {join_error}"))
+            .await;
+    }
+
+    match result {
+        Ok(output) => {
             if output.is_success() {
                 if is_final_execution {
                     sender

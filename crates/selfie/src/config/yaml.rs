@@ -112,14 +112,14 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
             PathBuf::from("~/.config/selfie")
         })?;
 
-        let config_yaml = config_dir.join("config.yaml");
-        let config_yml = config_dir.join("config.yml");
+        let first_yaml = config_dir.join("config.yaml");
+        let second_yaml = config_dir.join("config.yml");
 
-        if self.fs.path_exists(&config_yaml) {
-            paths.push(config_yaml);
+        if self.fs.path_exists(&first_yaml) {
+            paths.push(first_yaml);
         }
-        if self.fs.path_exists(&config_yml) {
-            paths.push(config_yml);
+        if self.fs.path_exists(&second_yaml) {
+            paths.push(second_yaml);
         }
 
         if paths.is_empty() {

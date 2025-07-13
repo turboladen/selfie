@@ -8,6 +8,7 @@ use std::{borrow::Cow, fmt, path::PathBuf, process::Output, sync::Arc, time::Dur
 
 use async_trait::async_trait;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 /// A chunk of output from a running command
 ///
@@ -96,14 +97,14 @@ pub trait CommandRunner: Send + Sync {
     /// Execute a command with streaming output
     ///
     /// Runs the command and streams stdout/stderr output through the provided
-    /// callback as it becomes available. This is ideal for long-running commands
+    /// channel as it becomes available. This is ideal for long-running commands
     /// or when real-time feedback is needed.
     ///
     /// # Arguments
     ///
     /// * `command` - The shell command to execute
     /// * `timeout` - Maximum duration to wait for command completion
-    /// * `output_callback` - Function to call with each chunk of output
+    /// * `output_sender` - Channel sender to send output chunks to
     ///
     /// # Errors
     ///
@@ -111,15 +112,13 @@ pub trait CommandRunner: Send + Sync {
     /// - The command cannot be started (IO error)
     /// - The command exits with a non-zero status code
     /// - The command times out before completion
-    /// - The output callback encounters an error
-    async fn execute_streaming<F>(
+    /// - Channel communication fails
+    async fn execute_streaming(
         &self,
         command: &str,
         timeout: Duration,
-        output_callback: F,
-    ) -> Result<CommandOutput, CommandError>
-    where
-        F: FnMut(OutputChunk) + Send + 'static;
+        output_sender: mpsc::Sender<OutputChunk>,
+    ) -> Result<CommandOutput, CommandError>;
 }
 
 /// Result of executing a command

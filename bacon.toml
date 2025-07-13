@@ -1,0 +1,2 @@
+[jobs.clippy-pedant]
+command = ["cargo", "clippy", "--tests", "--" , "-W", "clippy::pedantic"]

@@ -39,6 +39,17 @@ impl ValidationResult {
 
 impl Package {
     /// Perform all basic domain validations
+    ///
+    /// Validates the package definition against all known validation rules,
+    /// including required fields, URL formats, environment configurations,
+    /// and command syntax. Returns a comprehensive validation result that
+    /// can be used to provide user feedback.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_env` - The current environment name to use for validation context
+    ///
+    /// All validation issues are collected and returned in the `ValidationResult` structure.
     #[must_use]
     pub fn validate(&self, current_env: &str) -> ValidationResult {
         let mut issues = Vec::new();
@@ -55,6 +66,14 @@ impl Package {
         }
     }
 
+    /// Validate that all required fields are present and properly formatted
+    ///
+    /// Checks for the presence and validity of essential package fields:
+    /// - Package name (non-empty, valid characters)
+    /// - Package version (semantic version format)
+    /// - At least one environment configuration
+    ///
+    /// All validation issues are collected and returned as a vector of `ValidationIssue`.
     pub(crate) fn validate_required_fields(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -76,8 +95,27 @@ impl Package {
         issues
     }
 
+    /// Validate the package name format
+    ///
+    /// Package names must be non-empty and contain only alphanumeric characters,
+    /// hyphens, and underscores. They cannot start or end with special characters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ValidationIssue` if the package name is invalid:
+    /// - Empty name
+    /// - Contains invalid characters
+    /// - Starts or ends with special characters
     fn validate_name(&self) -> Result<(), ValidationIssue> {
         /// Check if a string is a valid package name
+        ///
+        /// # Arguments
+        ///
+        /// * `name` - The package name to validate
+        ///
+        /// # Returns
+        ///
+        /// `true` if the name is valid, `false` otherwise
         fn is_valid_package_name(name: &str) -> bool {
             // Package names should only contain alphanumeric chars, hyphens, and underscores
             !name.is_empty()
@@ -105,7 +143,24 @@ impl Package {
         Ok(())
     }
 
+    /// Validate the package version format
+    ///
+    /// Checks that the version follows semantic versioning format (major.minor.patch).
+    /// Uses a basic regex pattern to validate the format.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ValidationIssue` if:
+    /// - Version is empty (error)
+    /// - Version doesn't follow semantic versioning format (warning)
     fn validate_version(&self) -> Result<(), ValidationIssue> {
+        /// Check if a version string follows semantic versioning format
+        ///
+        /// # Panics
+        ///
+        /// This function contains a call to `unwrap()` on regex compilation, but this
+        /// cannot panic because the regex pattern is a compile-time constant that has
+        /// been verified to be valid.
         fn is_valid_version(version: &str) -> bool {
             // Simple check for semver format: major.minor.patch
             let semver_regex = regex::Regex::new(r"^\d+\.\d+\.\d+").unwrap();
@@ -131,6 +186,14 @@ impl Package {
         Ok(())
     }
 
+    /// Validate that at least one environment is defined
+    ///
+    /// Ensures the package has at least one environment configuration,
+    /// which is required for package operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ValidationIssue` error if no environments are defined.
     fn validate_environments_exists(&self) -> Result<(), ValidationIssue> {
         if self.environments.is_empty() {
             Err(ValidationIssue::error(
@@ -144,6 +207,16 @@ impl Package {
         }
     }
 
+    /// Validate environment configurations and content
+    ///
+    /// Checks that environments are properly configured, including whether
+    /// the current environment is defined and that install commands are present.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_env` - The current environment name to validate against
+    ///
+    /// All validation issues are collected and returned as a vector of `ValidationIssue`.
     fn validate_environments_contents(&self, current_env: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 

@@ -82,7 +82,8 @@ this would be via `package create` and `package edit` commands.
 ### Later
 
 - [ ] Add `--dry-run` flag for `package install`
-- [ ] Support `use:` to Environments
+- [ ] Support `use:` to Environments (environment inheritance/fallback)
+- [ ] Assess library for use of `pub`
 
 ### Ideas
 

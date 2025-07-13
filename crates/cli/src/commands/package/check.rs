@@ -1,16 +1,15 @@
 use selfie::{
-    commands::ShellCommandRunner,
     config::AppConfig,
-    fs::real::RealFileSystem,
     package::{
         event::{CheckResult, CheckResultData, PackageEvent},
-        repository::YamlPackageRepository,
-        service::{PackageService, PackageServiceImpl},
+        service::PackageService,
     },
 };
 
 use crate::{
-    event_processor::EventProcessor, formatters::format_key,
+    commands::package::common::{create_package_service, report_status},
+    event_processor::EventProcessor,
+    formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
 };
 
@@ -21,50 +20,36 @@ pub(crate) async fn handle_check(
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
 
-    // Create the repository and command runner
-    let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-    let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
+    // Create animated spinner for check operation
+    report_status(&format!("Checking {package_name}..."));
 
-    // Create the package service implementation with our repository and command runner
-    let service = PackageServiceImpl::new(repo, command_runner, config.clone());
+    // Create the package service
+    let service = create_package_service(config);
 
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(reporter);
+
+    #[allow(clippy::match_same_arms)]
     processor
-        .process_events_with_handler(event_stream, |event, _reporter| {
-            handle_check_event(event, config)
+        .process_events(event_stream, |event| {
+            match event {
+                PackageEvent::CheckResultCompleted { check_result, .. } => {
+                    display_check_result_card(check_result, config);
+                    true // Handled
+                }
+                PackageEvent::Progress { .. } => {
+                    true // Handled
+                }
+                PackageEvent::Completed { .. } => {
+                    false // Use default completion handling
+                }
+                _ => false, // Use default handling for other events
+            }
         })
         .await
-}
-
-fn handle_check_event(event: &PackageEvent, config: &AppConfig) -> Option<bool> {
-    match event {
-        PackageEvent::CheckResultCompleted { check_result, .. } => {
-            display_check_result_card(check_result, config);
-            Some(true) // Continue processing
-        }
-        PackageEvent::Progress {
-            percent_complete,
-            step,
-            total_steps,
-            message,
-            ..
-        } => {
-            // Custom progress format for check command
-            println!(
-                "• [{:.0}%] Step {}/{}: {}",
-                percent_complete * 100.0,
-                step,
-                total_steps,
-                message
-            );
-            Some(true) // Continue processing
-        }
-        _ => None, // Use default handling for other events
-    }
 }
 
 fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig) {

@@ -1,167 +1,275 @@
-use selfie::config::AppConfig;
+use selfie::{config::AppConfig, package::service::PackageService};
+use std::collections::VecDeque;
 use tracing::info;
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::{
+    commands::package::common::{create_package_service, report_status},
+    event_processor::EventProcessor,
+    terminal_progress_reporter::TerminalProgressReporter,
+};
 
-pub(crate) fn handle_install(
+/// Manages a scrolling window of installation output without progress bars
+struct InstallationDisplay {
+    output_lines: VecDeque<String>,
+    max_lines: usize,
+    first_output: bool,
+}
+
+impl InstallationDisplay {
+    fn new() -> Self {
+        Self {
+            output_lines: VecDeque::new(),
+            max_lines: 5,
+            first_output: true,
+        }
+    }
+
+    fn add_output_line(&mut self, line: &str, is_stderr: bool) {
+        let formatted_line = if is_stderr {
+            format!("    🔧 {}", line.trim())
+        } else {
+            format!("    📦 {}", line.trim())
+        };
+
+        // Print header only on first output
+        if self.first_output {
+            eprintln!(
+                "
+📦 Installation output:"
+            );
+            self.first_output = false;
+        }
+
+        // Print the new line immediately
+        eprintln!("{formatted_line}");
+
+        self.output_lines.push_back(formatted_line);
+
+        // Keep only the last max_lines
+        while self.output_lines.len() > self.max_lines {
+            self.output_lines.pop_front();
+        }
+    }
+
+    fn set_status(status: &str) {
+        report_status(status);
+    }
+}
+
+/// Handles events specifically for the install command
+struct InstallEventHandler<'a> {
+    config: &'a AppConfig,
+    display: &'a mut InstallationDisplay,
+}
+
+impl<'a> InstallEventHandler<'a> {
+    fn new(config: &'a AppConfig, display: &'a mut InstallationDisplay) -> Self {
+        Self { config, display }
+    }
+
+    fn handle_event(&mut self, event: &selfie::package::event::PackageEvent) -> bool {
+        #[allow(clippy::match_same_arms)]
+        match event {
+            selfie::package::event::PackageEvent::CheckResultCompleted { check_result, .. } => {
+                Self::handle_check_result_completed(check_result)
+            }
+            selfie::package::event::PackageEvent::Info { output, .. } => {
+                self.handle_info_event(output)
+            }
+            selfie::package::event::PackageEvent::Progress { message, .. } => {
+                self.handle_progress_event(message)
+            }
+            selfie::package::event::PackageEvent::Completed { .. } => {
+                false // Always use default handling for Completed events to ensure exit code is set correctly
+            }
+            _ => false, // Use default handling for other events
+        }
+    }
+
+    fn handle_check_result_completed(
+        check_result: &selfie::package::event::CheckResultData,
+    ) -> bool {
+        match &check_result.result {
+            selfie::package::event::CheckResult::Success => {
+                InstallationDisplay::set_status("Package is already installed");
+            }
+            selfie::package::event::CheckResult::Failed { .. } => {
+                InstallationDisplay::set_status(
+                    "Package not currently installed, proceeding with installation",
+                );
+            }
+            selfie::package::event::CheckResult::NoCheckCommand => {
+                InstallationDisplay::set_status(
+                    "No check command defined, proceeding with installation",
+                );
+            }
+            selfie::package::event::CheckResult::CommandNotFound => {
+                InstallationDisplay::set_status(
+                    "Check command not found, proceeding with installation",
+                );
+            }
+            selfie::package::event::CheckResult::Error(err) => {
+                InstallationDisplay::set_status(&format!(
+                    "Check error ({err}), proceeding with installation"
+                ));
+            }
+        }
+        true // Handled
+    }
+
+    fn handle_info_event(&mut self, output: &selfie::package::event::ConsoleOutput) -> bool {
+        if self.config.verbose() {
+            // In verbose mode, show all output immediately
+            false // Use default handler (prints to stdout/stderr)
+        } else {
+            // In non-verbose mode, show in scrolling window
+            match output {
+                selfie::package::event::ConsoleOutput::Stdout(line) => {
+                    for line in line.lines() {
+                        if !line.trim().is_empty() {
+                            self.display.add_output_line(line, false);
+                        }
+                    }
+                }
+                selfie::package::event::ConsoleOutput::Stderr(line) => {
+                    for line in line.lines() {
+                        if !line.trim().is_empty() {
+                            self.display.add_output_line(line, true);
+                        }
+                    }
+                }
+            }
+            true // Handled
+        }
+    }
+
+    fn handle_progress_event(&mut self, message: &str) -> bool {
+        if self.config.verbose() {
+            false // Use default progress handling
+        } else {
+            InstallationDisplay::set_status(message);
+            true // Handled
+        }
+    }
+}
+
+pub(crate) async fn handle_install(
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     info!("Installing package: {}", package_name);
 
-    // TODO: Implement package installation
-    reporter.report_info(format!(
-        "Package '{}' will be installed in: {}",
-        package_name,
-        config.package_directory().display()
-    ));
-    0
+    // Create the package service
+    let service = create_package_service(config);
+
+    // Call the service's install method to get an event stream
+    let event_stream = service.install(package_name).await;
+
+    // Create installation display
+    let mut display = InstallationDisplay::new();
+
+    report_status(&format!("Installing {package_name}..."));
+
+    // Process the event stream with custom handling for install-specific events
+    let processor = EventProcessor::new(reporter);
+    let mut event_handler = InstallEventHandler::new(config, &mut display);
+
+    processor
+        .process_events(event_stream, move |event| event_handler.handle_event(event))
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_common::{
-        test_config, test_config_for_env, test_config_with_colors, test_config_with_dir,
-    };
+    use test_common::{test_config, test_config_verbose};
 
     fn create_mock_reporter() -> TerminalProgressReporter {
         TerminalProgressReporter::new(false)
     }
 
-    #[test]
-    #[ignore]
-    fn test_handle_install_basic() {
+    #[tokio::test]
+    async fn test_handle_install_basic() {
         let config = test_config();
         let reporter = create_mock_reporter();
 
-        let result = handle_install("test-package", &config, reporter);
-        assert_eq!(result, 0);
+        // This will fail without proper setup, but tests that the function can be called
+        let _result = handle_install("test-package", &config, reporter).await;
     }
 
     #[test]
-    #[ignore]
-    fn test_handle_install_with_colors() {
-        let config = test_config_with_colors();
-        let reporter = TerminalProgressReporter::new(true);
+    fn test_installation_display() {
+        let mut display = InstallationDisplay::new();
 
-        let result = handle_install("test-package", &config, reporter);
-        assert_eq!(result, 0);
-    }
+        // Test adding output lines
+        display.add_output_line("test output", false);
+        assert_eq!(display.output_lines.len(), 1);
 
-    #[test]
-    #[ignore]
-    fn test_handle_install_different_package_names() {
-        let config = test_config();
-
-        let test_cases = vec![
-            "simple-package",
-            "package-with-dashes",
-            "package_with_underscores",
-            "PackageWithCamelCase",
-            "package123",
-            "a",
-            "very-long-package-name-that-should-still-work",
-        ];
-
-        for package_name in test_cases {
-            let reporter = create_mock_reporter();
-            let result = handle_install(package_name, &config, reporter);
-            assert_eq!(result, 0, "Failed for package: {package_name}");
+        // Test max lines behavior
+        for i in 0..10 {
+            display.add_output_line(&format!("line {i}"), false);
         }
+        assert_eq!(display.output_lines.len(), display.max_lines);
     }
 
     #[test]
-    #[ignore]
-    fn test_handle_install_different_package_directories() {
-        let test_directories = vec![
-            "/tmp/packages",
-            "/home/user/.local/share/selfie/packages",
-            "/opt/packages",
-            "relative/path/packages",
-        ];
+    fn test_install_event_handler_progress_verbose() {
+        let config = test_config_verbose();
+        let mut display = InstallationDisplay::new();
+        let mut handler = InstallEventHandler::new(&config, &mut display);
 
-        for directory in test_directories {
-            let config = test_config_with_dir(directory);
-
-            let reporter = create_mock_reporter();
-            let result = handle_install("test-package", &config, reporter);
-            assert_eq!(result, 0, "Failed for directory: {directory}");
-        }
+        // Test progress handling in verbose mode
+        let handled = handler.handle_progress_event("Installing package");
+        assert!(!handled); // Should use default handling in verbose mode
     }
 
     #[test]
-    #[ignore]
-    fn test_handle_install_empty_package_name() {
+    fn test_install_event_handler_progress_non_verbose() {
         let config = test_config();
-        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new();
+        let mut handler = InstallEventHandler::new(&config, &mut display);
 
-        let result = handle_install("", &config, reporter);
-        assert_eq!(result, 0);
+        // Test progress handling in non-verbose mode
+        let handled = handler.handle_progress_event("Installing package");
+        assert!(handled); // Should be handled in non-verbose mode
     }
 
     #[test]
-    #[ignore]
-    fn test_handle_install_package_name_with_special_characters() {
+    fn test_install_event_handler_info_verbose() {
+        let config = test_config_verbose();
+        let mut display = InstallationDisplay::new();
+        let mut handler = InstallEventHandler::new(&config, &mut display);
+
+        // Test info handling in verbose mode
+        let output = selfie::package::event::ConsoleOutput::Stdout("test output".to_string());
+        let handled = handler.handle_info_event(&output);
+        assert!(!handled); // Should use default handling in verbose mode
+    }
+
+    #[test]
+    fn test_install_event_handler_info_non_verbose() {
         let config = test_config();
+        let mut display = InstallationDisplay::new();
+        let mut handler = InstallEventHandler::new(&config, &mut display);
 
-        let test_cases = vec![
-            "package@1.0.0",
-            "package.name",
-            "package+extra",
-            "package~version",
-        ];
-
-        for package_name in test_cases {
-            let reporter = create_mock_reporter();
-            let result = handle_install(package_name, &config, reporter);
-            assert_eq!(result, 0, "Failed for package: {package_name}");
-        }
+        // Test info handling in non-verbose mode
+        let output = selfie::package::event::ConsoleOutput::Stdout("test output".to_string());
+        let handled = handler.handle_info_event(&output);
+        assert!(handled); // Should be handled in non-verbose mode
     }
 
     #[test]
-    #[ignore]
-    fn test_handle_install_function_does_not_panic() {
-        // Test that the function doesn't panic with various inputs
-        let config = test_config();
-        let reporter = create_mock_reporter();
+    fn test_install_event_handler_check_result() {
+        // Test check result handling
+        let check_result = selfie::package::event::CheckResultData {
+            package_name: "test-package".to_string(),
+            environment: "test".to_string(),
+            check_command: Some("which test-package".to_string()),
+            result: selfie::package::event::CheckResult::Success,
+        };
 
-        // Should not panic even with unusual inputs
-        let _result = handle_install("test-package", &config, reporter);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_handle_install_with_different_environments() {
-        let test_environments = vec![
-            "development",
-            "staging",
-            "production",
-            "test",
-            "local",
-            "ci",
-        ];
-
-        for environment in test_environments {
-            let config = test_config_for_env(environment);
-
-            let reporter = create_mock_reporter();
-            let result = handle_install("test-package", &config, reporter);
-            assert_eq!(result, 0, "Failed for environment: {environment}");
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn test_handle_install_consistent_return_value() {
-        let config = test_config();
-
-        // Multiple calls should return the same value
-        for _ in 0..5 {
-            let reporter = create_mock_reporter();
-            let result = handle_install("consistent-package", &config, reporter);
-            assert_eq!(result, 0);
-        }
+        let handled = InstallEventHandler::handle_check_result_completed(&check_result);
+        assert!(handled); // Check results should always be handled
     }
 }

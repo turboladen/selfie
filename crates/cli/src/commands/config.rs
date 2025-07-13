@@ -20,15 +20,15 @@ pub(crate) fn handle_validate(
         let mut table_reporter = ValidationTableReporter::new();
         table_reporter
             .setup(vec!["Category", "Field", "Message", "Suggestion"])
-            .add_validation_errors(&result.issues().errors(), &reporter)
-            .add_validation_warnings(&result.issues().warnings(), &reporter)
+            .add_validation_errors(&result.issues().errors(), reporter)
+            .add_validation_warnings(&result.issues().warnings(), reporter)
             .print();
         1
     } else if result.issues().has_warnings() {
         let mut table_reporter = ValidationTableReporter::new();
         table_reporter
             .setup(vec!["Category", "Field", "Message", "Suggestion"])
-            .add_validation_warnings(&result.issues().warnings(), &reporter)
+            .add_validation_warnings(&result.issues().warnings(), reporter)
             .print();
         0
     } else {

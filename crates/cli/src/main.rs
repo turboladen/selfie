@@ -55,7 +55,6 @@ use crate::{cli::ClapCli, commands::dispatch_command};
 /// # Arguments
 ///
 /// * `verbose` - Whether to enable verbose (DEBUG) logging
-
 fn init_tracing(verbose: bool) {
     let level = if verbose {
         tracing::Level::DEBUG
@@ -78,14 +77,22 @@ fn init_tracing(verbose: bool) {
 ///
 /// # Errors
 ///
-/// Returns errors if:
-/// - Configuration loading fails
-/// - Critical initialization steps fail
-/// - Command parsing fails
+/// Returns [`anyhow::Error`] if:
+/// - Configuration file cannot be found or parsed
+/// - Configuration file contains invalid YAML syntax
+/// - Required configuration fields are missing or invalid
+/// - File system permissions prevent configuration access
+/// - Critical initialization steps fail before command dispatch
 ///
-/// Note: Most command-specific errors are handled within the command
-/// dispatch system and result in appropriate exit codes rather than
-/// propagated errors.
+/// # Panics
+///
+/// This function calls `process::exit()` which terminates the program
+/// and does not return normally. Most command-specific errors are handled
+/// within the command dispatch system and result in appropriate exit codes
+/// rather than propagated errors.
+///
+/// Note: Command parsing errors are handled by clap and will cause the
+/// program to exit with usage information rather than returning an error.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = ClapCli::parse();

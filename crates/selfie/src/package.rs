@@ -120,16 +120,19 @@ impl EnvironmentConfig {
         }
     }
 
+    /// Get the install command for this environment
     #[must_use]
     pub fn install(&self) -> &str {
         &self.install
     }
 
+    /// Get the optional check command for this environment
     #[must_use]
     pub fn check(&self) -> Option<&str> {
         self.check.as_deref()
     }
 
+    /// Get the list of dependencies for this environment
     #[must_use]
     pub fn dependencies(&self) -> &[String] {
         &self.dependencies
@@ -187,31 +190,37 @@ impl Package {
         }
     }
 
+    /// Get the package name
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Get the package version
     #[must_use]
     pub fn version(&self) -> &str {
         &self.version
     }
 
+    /// Get the optional homepage URL
     #[must_use]
     pub fn homepage(&self) -> Option<&str> {
         self.homepage.as_deref()
     }
 
+    /// Get the optional package description
     #[must_use]
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
     }
 
+    /// Get the environment configurations
     #[must_use]
     pub fn environments(&self) -> &HashMap<String, EnvironmentConfig> {
         &self.environments
     }
 
+    /// Get the package file path
     #[must_use]
     pub fn path(&self) -> &PathBuf {
         &self.path
