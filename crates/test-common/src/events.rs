@@ -130,6 +130,10 @@ pub fn assert_failed_operation(events: &[PackageEvent]) {
 /// let events = collect_events(stream).await;
 /// assert_has_progress_steps(&events, &["Loading package", "Running check", "Complete"]);
 /// ```
+///
+/// # Panics
+///
+/// Panics if any `expected_steps` aren't in the `events` progress messages.
 pub fn assert_has_progress_steps(events: &[PackageEvent], expected_steps: &[&str]) {
     let progress_messages: Vec<String> = events
         .iter()
@@ -183,6 +187,11 @@ pub fn get_error_messages(events: &[PackageEvent]) -> Vec<String> {
 /// let events = collect_events(stream).await;
 /// assert_no_errors(&events);
 /// ```
+///
+/// # Panics
+///
+/// Panics if `events` has errors.
+///
 pub fn assert_no_errors(events: &[PackageEvent]) {
     let error_count = count_events_of_type(events, |e| matches!(e, PackageEvent::Error { .. }));
     assert_eq!(

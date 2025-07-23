@@ -9,16 +9,16 @@ pub const SELFIE_ENV: &str = "test-env";
 // Helper to create a temporary config environment
 #[must_use]
 pub fn setup_default_test_config() -> TempDir {
-    _setup_test_config(None)
+    setup_optional_test_config(None)
 }
 
 // Helper to create a temporary config environment
 #[must_use]
 pub fn setup_test_config(config_yaml: &str) -> TempDir {
-    _setup_test_config(Some(config_yaml))
+    setup_optional_test_config(Some(config_yaml))
 }
 
-fn _setup_test_config(config_yaml: Option<&str>) -> TempDir {
+fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
     let temp_dir = tempfile::tempdir().unwrap();
 
     // Create config directory
@@ -47,6 +47,12 @@ fn _setup_test_config(config_yaml: Option<&str>) -> TempDir {
     temp_dir
 }
 
+/// # Panics
+///
+/// Panics if:
+/// - YAML serialization of the package fails
+/// - The packages directory cannot be created
+/// - Writing the package file fails
 pub fn add_package(base_dir: &TempDir, package: &Package) {
     let yaml = serde_yaml::to_string(package).unwrap();
     let packages_path = base_dir.path().join("packages");
@@ -57,6 +63,9 @@ pub fn add_package(base_dir: &TempDir, package: &Package) {
 }
 
 // Helper function to get a command instance with environment variables pointing to our test config
+/// # Panics
+///
+/// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn get_command_with_test_config(temp_dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("selfie-cli").unwrap();
@@ -72,6 +81,9 @@ pub fn get_command_with_test_config(temp_dir: &TempDir) -> Command {
 }
 
 // Helper function to get a command instance
+/// # Panics
+///
+/// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn get_command() -> Command {
     Command::cargo_bin("selfie-cli").unwrap()

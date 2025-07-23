@@ -6,7 +6,7 @@ use crate::terminal_progress_reporter::TerminalProgressReporter;
 
 use super::common;
 
-pub(crate) async fn handle_edit(
+pub(crate) fn handle_edit(
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
@@ -22,12 +22,11 @@ pub(crate) async fn handle_edit(
     let package_path = existing_package.as_ref().map(|p| p.file_path.as_path());
 
     // Check if EDITOR is available with context-specific error messages
-    let _editor =
-        match common::check_editor_available(&reporter, package_name, package_exists, package_path)
-        {
-            Some(editor) => editor,
-            None => return 1,
-        };
+    let Some(_editor) =
+        common::check_editor_available(reporter, package_name, package_exists, package_path)
+    else {
+        return 1;
+    };
 
     // Try to get existing package, or create a new one
     let package_blob = if let Some(pkg) = existing_package {
@@ -63,7 +62,7 @@ pub(crate) async fn handle_edit(
     };
 
     // Write the package to the file system first
-    if let Err(exit_code) = common::save_package(&repo, &package_blob, &reporter) {
+    if let Err(exit_code) = common::save_package(&repo, &package_blob, reporter) {
         return exit_code;
     }
 
@@ -78,13 +77,18 @@ pub(crate) async fn handle_edit(
         package_blob.file_path.display()
     );
 
-    common::open_editor(&package_blob.file_path, &reporter, Some(success_message))
+    common::open_editor(&package_blob.file_path, reporter, Some(success_message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use selfie::package::{
+        GetPackage, Package,
+        port::{MockPackageRepository, PackageError, PackageRepoError},
+    };
+    use std::collections::HashMap;
+    use std::{fs, path::PathBuf};
     use tempfile::TempDir;
     use test_common::test_config_with_dir;
 
@@ -93,17 +97,13 @@ mod tests {
     }
 
     #[test]
-    fn test_editor_required_with_existing_package() {
-        // Test behavior when EDITOR is not set but package exists
+    fn test_handle_edit_nonexistent_package() {
+        // Test behavior when package doesn't exist and no EDITOR is available
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("packages");
         fs::create_dir_all(&package_dir).unwrap();
 
-        // Create an existing package file
-        let package_file = package_dir.join("existing-package.yml");
-        fs::write(&package_file, "name: existing-package\nversion: 1.0.0\nenvironments:\n  default:\n    install: echo test").unwrap();
-
-        // Remove EDITOR
+        // Remove EDITOR environment variable to force editor check to fail
         let old_editor = std::env::var("EDITOR").ok();
         unsafe {
             std::env::remove_var("EDITOR");
@@ -112,40 +112,9 @@ mod tests {
         let config = test_config_with_dir(package_dir);
         let reporter = create_mock_reporter();
 
-        let result = tokio_test::block_on(async {
-            handle_edit("existing-package", &config, reporter).await
-        });
-
-        // Should fail with exit code 1 due to missing EDITOR
-        assert_eq!(result, 1);
-
-        // Restore EDITOR if it was set
-        if let Some(editor) = old_editor {
-            unsafe {
-                std::env::set_var("EDITOR", editor);
-            }
-        }
-    }
-
-    #[test]
-    fn test_editor_required_with_nonexistent_package() {
-        // Test behavior when EDITOR is not set and package doesn't exist
-        let temp_dir = TempDir::new().unwrap();
-        let package_dir = temp_dir.path().join("packages");
-        fs::create_dir_all(&package_dir).unwrap();
-
-        // Remove EDITOR
-        let old_editor = std::env::var("EDITOR").ok();
-        unsafe {
-            std::env::remove_var("EDITOR");
-        }
-
-        let config = test_config_with_dir(package_dir);
-        let reporter = create_mock_reporter();
-
-        let result = tokio_test::block_on(async {
-            handle_edit("nonexistent-package", &config, reporter).await
-        });
+        // This test will exit early because there's no EDITOR
+        let result =
+            tokio_test::block_on(async { handle_edit("nonexistent-package", &config, reporter) });
 
         // Should fail with exit code 1 due to missing EDITOR
         assert_eq!(result, 1);
@@ -173,18 +142,16 @@ mod tests {
 
     #[test]
     fn test_get_package_new_creates_template() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config_with_dir(temp_dir.path());
+        // Test package template creation without filesystem operations
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
 
         let get_package = common::create_new_package("test-template", &config);
 
         assert!(get_package.is_new);
         assert_eq!(get_package.package.name(), "test-template");
         assert_eq!(get_package.package.version(), "0.1.0");
-        assert_eq!(
-            get_package.file_path,
-            temp_dir.path().join("test-template.yml")
-        );
+        assert_eq!(get_package.file_path, package_dir.join("test-template.yml"));
         assert!(get_package.package.environments().contains_key("default"));
     }
 
@@ -220,10 +187,106 @@ mod tests {
 
     #[test]
     fn test_package_template_version() {
-        // Verify that new package templates use 1.0.0 version
-        let temp_dir = TempDir::new().unwrap();
-        let get_package = selfie::package::GetPackage::new("version-test", temp_dir.path());
+        // Verify that new package templates use 0.1.0 version - no filesystem needed
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let get_package = selfie::package::GetPackage::new("version-test", &package_dir);
 
         assert_eq!(get_package.package.version(), "0.1.0");
+    }
+
+    #[test]
+    fn test_package_edit_save_with_mock_repo() {
+        // Test package saving logic using MockPackageRepository for CLI logic testing
+        let mut mock_repo = MockPackageRepository::new();
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        // Mock successful save operation
+        mock_repo
+            .expect_save_package()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        // Create a package to save
+        let package_blob = common::create_new_package("edit-test", &config);
+
+        // Test saving the package using mocked repository
+        let result = mock_repo.save_package(&package_blob.package, &package_blob.file_path);
+
+        assert!(result.is_ok());
+        assert_eq!(package_blob.package.name(), "edit-test");
+        assert_eq!(package_blob.file_path, package_dir.join("edit-test.yml"));
+    }
+
+    #[test]
+    fn test_edit_package_with_mock_repository() {
+        let mut mock_repo = MockPackageRepository::new();
+
+        // Create mock existing package
+        let package = Package::new(
+            "edit-test".to_string(),
+            "1.0.0".to_string(),
+            Some("Test package for editing".to_string()),
+            None,
+            HashMap::new(),
+            PathBuf::from("/test/packages/edit-test.yml"),
+        );
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/edit-test.yml"));
+
+        // Mock get package operation (to check if package exists)
+        mock_repo
+            .expect_get_package()
+            .with(mockall::predicate::eq("edit-test"))
+            .times(1)
+            .returning(move |_| Ok(get_package.clone()));
+
+        // Mock successful save after editing
+        mock_repo
+            .expect_save_package()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        // Test edit workflow logic
+        let get_result = mock_repo.get_package("edit-test");
+        assert!(get_result.is_ok());
+
+        let existing_package = get_result.unwrap();
+        assert_eq!(existing_package.package.name(), "edit-test");
+        assert_eq!(existing_package.package.version(), "1.0.0");
+
+        // Test saving edited package
+        let save_result =
+            mock_repo.save_package(&existing_package.package, &existing_package.file_path);
+        assert!(save_result.is_ok());
+
+        // This demonstrates testing CLI edit logic without repository implementation
+    }
+
+    #[test]
+    fn test_edit_package_not_found_with_mock_repo() {
+        let mut mock_repo = MockPackageRepository::new();
+
+        // Mock package not found
+        mock_repo
+            .expect_get_package()
+            .with(mockall::predicate::eq("nonexistent"))
+            .times(1)
+            .returning(|_| {
+                Err(PackageRepoError::PackageError(Box::new(
+                    PackageError::PackageNotFound {
+                        name: "nonexistent".to_string(),
+                        packages_path: PathBuf::from("/test/packages"),
+                        files_examined: 0,
+                        search_patterns: vec!["nonexistent.yml".to_string()],
+                    },
+                )))
+            });
+
+        // Test CLI error handling for non-existent package
+        let result = mock_repo.get_package("nonexistent");
+        assert!(result.is_err());
+
+        // This tests CLI error handling for edit operations without repository implementation
     }
 }

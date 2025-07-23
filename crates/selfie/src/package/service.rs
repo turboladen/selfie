@@ -109,6 +109,11 @@ pub trait PackageService: Send + Sync {
     /// # Returns
     ///
     /// An event stream that will emit progress events and the final check result
+    ///
+    /// # Errors
+    ///
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
     async fn check(&self, package_name: &str) -> EventStream;
 
     /// Install a package using its configured installation method
@@ -124,6 +129,11 @@ pub trait PackageService: Send + Sync {
     /// # Returns
     ///
     /// An event stream that will emit progress events and the final installation result
+    ///
+    /// # Errors
+    ///
+    /// This method returns an `EventStream` directly and cannot fail at the call site,
+    /// however, errors may be emitted through the event stream.
     async fn install(&self, package_name: &str) -> EventStream;
 
     /// Get detailed information about a package
@@ -144,8 +154,10 @@ pub trait PackageService: Send + Sync {
     ///
     /// Returns [`PackageError`] if:
     /// - The package definition file cannot be found
+    /// - Multiple packages with the same name are found
     /// - The package definition file is malformed
-    /// - File system access fails
+    /// - File system access fails during package loading
+    /// - The package repository is inaccessible
     async fn info(&self, package_name: &str) -> Result<EventStream, PackageError>;
 
     /// Validate a package definition file
@@ -166,9 +178,12 @@ pub trait PackageService: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found (when path not specified)
-    /// - The specified package path does not exist
-    /// - File system access fails
+    /// - The package definition file cannot be found when path not specified
+    /// - Multiple packages with the same name are found
+    /// - The specified package path does not exist or is not accessible
+    /// - The package definition file cannot be read due to permissions
+    /// - File system access fails during validation setup
+    /// - The package repository is inaccessible
     async fn validate(
         &self,
         package_name: &str,
@@ -187,9 +202,11 @@ pub trait PackageService: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PackageError`] if:
-    /// - The package directory cannot be accessed
-    /// - Package definition files cannot be read
-    /// - File system access fails
+    /// - The package directory cannot be accessed due to permissions or path issues
+    /// - The package directory does not exist
+    /// - Package definition files cannot be read due to permissions
+    /// - File system access fails during directory traversal
+    /// - The package repository encounters critical errors during listing
     async fn list(&self) -> Result<EventStream, PackageError>;
 
     /// Create a new package definition file
@@ -208,9 +225,12 @@ pub trait PackageService: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PackageError`] if:
-    /// - A package with the same name already exists
-    /// - The package directory is not writable
-    /// - File system access fails
+    /// - A package with the same name already exists in the package directory
+    /// - The package directory is not writable due to permissions
+    /// - The package directory does not exist and cannot be created
+    /// - File system access fails during template creation or file writing
+    /// - Package name contains invalid characters for file system usage
+    /// - Disk space is insufficient for creating the package file
     async fn create(&self, package_name: &str) -> Result<EventStream, PackageError>;
 }
 
@@ -467,7 +487,7 @@ where
             OperationType::PackageInstall,
             package_name,
             OperationContext::default(),
-            5, // fetch_package + find_env + get_command + execute_command + result processing
+            7, // fetch_package + find_env + pre_check + get_command + execute_command + post_check + completion
             move |repo, command_runner, config, sender, mut progress| async move {
                 install::handle_install(
                     &package_name_owned,

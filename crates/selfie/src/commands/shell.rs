@@ -13,7 +13,7 @@ use std::{
 
 use async_trait::async_trait;
 
-use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
+use tokio::{io::AsyncReadExt, process::Command};
 
 use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk};
 
@@ -170,15 +170,12 @@ impl CommandRunner for ShellCommandRunner {
     /// - The command times out before completion
     /// - Output stream handling fails
     /// - The callback function encounters an error
-    async fn execute_streaming<F>(
+    async fn execute_streaming(
         &self,
         command: &str,
         timeout: Duration,
-        mut callback: F,
-    ) -> Result<CommandOutput, CommandError>
-    where
-        F: FnMut(OutputChunk) + Send + 'static,
-    {
+        output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
+    ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
 
         let mut cmd = Command::new(&self.shell);
@@ -217,8 +214,6 @@ impl CommandRunner for ShellCommandRunner {
         let mut stdout_buf = vec![0; 1024]; // Buffer of 1024 bytes
         let mut stderr_buf = vec![0; 1024]; // Buffer of 1024 bytes
 
-        let (tx, mut rx) = mpsc::channel(32);
-
         let timeout_future = tokio::time::timeout(timeout, async {
             let mut stdout_done = false;
             let mut stderr_done = false;
@@ -228,12 +223,12 @@ impl CommandRunner for ShellCommandRunner {
             loop {
                 tokio::select! {
                     result = stdout.read(&mut stdout_buf), if !stdout_done => {
-                        if handle_chunked_read_result(result, &mut full_stdout, &mut stdout_buf, &tx, OutputChunk::Stdout).await? {
+                        if handle_chunked_read_result_streaming(result, &mut full_stdout, &mut stdout_buf, &output_sender, OutputChunk::Stdout)? {
                             stdout_done = true;  // EOF reached
                         }
                     },
                     result = stderr.read(&mut stderr_buf), if !stderr_done => {
-                        if handle_chunked_read_result(result, &mut full_stderr, &mut stderr_buf, &tx, OutputChunk::Stderr).await? {
+                        if handle_chunked_read_result_streaming(result, &mut full_stderr, &mut stderr_buf, &output_sender, OutputChunk::Stderr)? {
                             stderr_done = true;  // EOF reached
                         }
                     },
@@ -254,17 +249,12 @@ impl CommandRunner for ShellCommandRunner {
                 }
             }
 
-            // Close the sender to signal no more chunks will be sent
-            drop(tx);
-
-            // Process all remaining chunks in the callback
-            while let Some(chunk) = rx.recv().await {
-                callback(chunk);
-            }
-
             let duration = start_time.elapsed();
             Ok(CommandOutput {
                 output: Output {
+                    // SAFETY: exit_status is guaranteed to be Some(_) at this point because
+                    // the loop only exits when process_done is true, which is only set to true
+                    // after exit_status is assigned Some(status) from child.wait()
                     status: exit_status.unwrap(),
                     stdout: full_stdout,
                     stderr: full_stderr,
@@ -287,18 +277,17 @@ impl CommandRunner for ShellCommandRunner {
     }
 }
 
-/// Handle the result of reading a chunk from stdout or stderr
+/// Handle the result of reading a chunk with real-time streaming callback
 ///
 /// Processes the result of an async read operation, updating the full output
-/// buffer and sending chunks to the callback. Returns whether the stream
-/// has reached EOF.
+/// buffer and calling the callback immediately for real-time streaming.
 ///
 /// # Arguments
 ///
 /// * `result` - Result of the read operation
 /// * `full_output` - Buffer to accumulate complete output
 /// * `buffer` - Read buffer containing the latest chunk
-/// * `tx` - Channel sender for streaming chunks to callback
+/// * `output_sender` - Mutable sender channel for streaming chunks
 /// * `output_type` - Function to wrap chunks as stdout or stderr
 ///
 /// # Returns
@@ -307,14 +296,12 @@ impl CommandRunner for ShellCommandRunner {
 ///
 /// # Errors
 ///
-/// Returns [`CommandError`] if:
-/// - The read operation failed (IO error)
-/// - The channel send operation failed
-async fn handle_chunked_read_result(
+/// Returns [`CommandError`] if the read operation failed (IO error)
+fn handle_chunked_read_result_streaming(
     result: Result<usize, tokio::io::Error>,
     full_output: &mut Vec<u8>,
     buffer: &mut [u8],
-    tx: &mpsc::Sender<OutputChunk>,
+    output_sender: &tokio::sync::mpsc::Sender<OutputChunk>,
     output_type: fn(String) -> OutputChunk,
 ) -> Result<bool, CommandError> {
     match result {
@@ -322,9 +309,8 @@ async fn handle_chunked_read_result(
         Ok(n) => {
             full_output.extend_from_slice(&buffer[..n]);
             let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-            tx.send(output_type(chunk))
-                .await
-                .map_err(|e| CommandError::Callback(e.0))?;
+            // Send the chunk immediately for real-time streaming
+            let _ = output_sender.try_send(output_type(chunk));
             // Note: Don't clear the buffer here - tokio reuses it for the next read
             Ok(false) // Continue reading
         }

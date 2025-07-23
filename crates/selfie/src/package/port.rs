@@ -28,7 +28,7 @@ use crate::{
 /// - Database-backed repositories
 /// - Remote repository clients
 /// - In-memory repositories for testing
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(feature = "with_mocks", mockall::automock)]
 pub trait PackageRepository: Send + Sync {
     /// Get a package by name from the repository
     ///
@@ -231,6 +231,7 @@ pub enum PackageListError {
 pub enum PackageError {
     /// No package with the specified name could be found
     #[error("Package `{name}` not found in path {}", packages_path.display())]
+    #[allow(clippy::doc_link_with_quotes)]
     PackageNotFound {
         name: String,
         packages_path: PathBuf,
@@ -393,9 +394,9 @@ impl PackageParseError {
     #[must_use]
     pub fn package_path(&self) -> &Path {
         match self {
-            PackageParseError::YamlParse { package_path, .. } => package_path,
-            PackageParseError::IoError { package_path, .. } => package_path,
-            PackageParseError::FileSystemError { package_path, .. } => package_path,
+            PackageParseError::YamlParse { package_path, .. }
+            | PackageParseError::IoError { package_path, .. }
+            | PackageParseError::FileSystemError { package_path, .. } => package_path,
         }
     }
 }

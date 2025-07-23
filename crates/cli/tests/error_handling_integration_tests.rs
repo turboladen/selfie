@@ -81,14 +81,6 @@ command_timeout: 30
         .stderr(predicate::str::contains("exists, but cannot be expanded"));
 }
 
-#[test]
-#[ignore]
-fn test_config_permission_denied_error() {
-    // This test is tricky to implement reliably across platforms
-    // We'll skip it for now as it requires special setup
-    todo!("Implement with proper permission manipulation");
-}
-
 // =============================================================================
 // Package Directory Error Handling Tests
 // =============================================================================
@@ -106,7 +98,7 @@ fn test_package_directory_not_found_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package Directory Not Found"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 #[test]
@@ -127,7 +119,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package Directory Not Found"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 // =============================================================================
@@ -275,7 +267,9 @@ fn test_package_install_missing_environment_error() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "install", "wrong-env-package"]);
 
-    cmd.assert().success(); // Install command doesn't validate environment yet
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Environment not supported"));
 }
 
 // =============================================================================
@@ -346,7 +340,7 @@ fn test_invalid_package_directory_override_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package Directory Not Found"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 // =============================================================================

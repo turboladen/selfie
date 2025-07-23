@@ -263,6 +263,7 @@ mod tests {
     use crate::fs::filesystem::MockFileSystem;
     use crate::fs::real::RealFileSystem;
     use crate::package::port::PackageRepoError;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -362,11 +363,16 @@ mod tests {
             .returning(|_| true);
 
         // Mock list_directory to return both files
-        let yaml_path_for_list = yaml_path.clone();
-        let yml_path_for_list = yml_path.clone();
+        let long_path_for_list = yaml_path.clone();
+        let short_path_for_list = yml_path.clone();
         fs.expect_list_directory()
             .with(predicate::eq(package_dir.clone()))
-            .returning(move |_| Ok(vec![yaml_path_for_list.clone(), yml_path_for_list.clone()]));
+            .returning(move |_| {
+                Ok(vec![
+                    long_path_for_list.clone(),
+                    short_path_for_list.clone(),
+                ])
+            });
 
         let repo = YamlPackageRepository::new(fs, package_dir.clone());
         let result = repo.get_package("ripgrep");
@@ -538,7 +544,7 @@ mod tests {
             .returning(|_| true);
 
         // Add valid and invalid package files
-        let package1 = r"
+        let ripgrep_package = r"
             name: ripgrep
             version: 1.0.0
             environments:
@@ -546,7 +552,7 @@ mod tests {
                 install: brew install ripgrep
         ";
 
-        let package2 = r"
+        let fzf_package = r"
             name: fzf
             version: 0.2.0
             environments:
@@ -563,19 +569,19 @@ mod tests {
             ],
         );
 
-        fs.mock_read_file(package_dir.join("ripgrep.yaml"), package1);
-        fs.mock_read_file(package_dir.join("fzf.yml"), package2);
+        fs.mock_read_file(package_dir.join("ripgrep.yaml"), ripgrep_package);
+        fs.mock_read_file(package_dir.join("fzf.yml"), fzf_package);
         fs.mock_read_file(package_dir.join("invalid.yaml"), "not valid yaml: :");
 
         let repo = YamlPackageRepository::new(fs, package_dir.clone());
-        let packages = repo.available_packages().unwrap();
+        let available_packages = repo.available_packages().unwrap();
 
         // Should find only valid packages
-        assert_eq!(packages.len(), 2);
+        assert_eq!(available_packages.len(), 2);
 
         // Check package details
-        assert!(packages.iter().any(|p| *p == "ripgrep"));
-        assert!(packages.iter().any(|p| *p == "fzf"));
+        assert!(available_packages.iter().any(|p| *p == "ripgrep"));
+        assert!(available_packages.iter().any(|p| *p == "fzf"));
     }
 
     #[test]
@@ -649,7 +655,7 @@ mod tests {
             PackageListError::PackageDirectoryNotFound(path) => {
                 assert_eq!(path, nonexistent_dir);
             }
-            _ => panic!("Expected PackageDirectoryNotFound error"),
+            PackageListError::IoError(_) => panic!("Expected PackageDirectoryNotFound error"),
         }
     }
 
@@ -995,5 +1001,190 @@ environments:
         let dir_error = PackageListError::PackageDirectoryNotFound(package_dir.clone());
         assert!(dir_error.to_string().contains("/packages"));
         assert!(dir_error.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_save_package_success() {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = PathBuf::from("/test/packages/test-package.yml");
+
+        // Create a test package
+        let package = Package::new(
+            "test-package".to_string(),
+            "1.0.0".to_string(),
+            None,
+            None,
+            HashMap::new(),
+            package_path.clone(),
+        );
+
+        // Mock the write_file operation
+        fs.mock_write_file(&package_path);
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+
+        // Test saving the package
+        let result = repo.save_package(&package, &package_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_save_package_filesystem_error() {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = PathBuf::from("/test/packages/test-package.yml");
+
+        // Create a test package
+        let package = Package::new(
+            "test-package".to_string(),
+            "1.0.0".to_string(),
+            None,
+            None,
+            HashMap::new(),
+            package_path.clone(),
+        );
+
+        // Mock write_file to fail
+        fs.expect_write_file()
+            .with(
+                mockall::predicate::eq(package_path.clone()),
+                mockall::predicate::always(),
+            )
+            .returning(|_, _| {
+                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+                )))
+            });
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+
+        // Test saving the package should fail
+        let result = repo.save_package(&package, &package_path);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            PackageRepoError::FileSystemError(_)
+        ));
+    }
+
+    #[test]
+    fn test_remove_package_success() {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_name = "test-package";
+        let package_path = package_dir.join("test-package.yml");
+
+        // Mock get_package to return a valid package
+        let package_yaml = r#"
+name: test-package
+version: 1.0.0
+environments:
+  default:
+    install: echo "install"
+    check: echo "check"
+"#;
+
+        // Set up mocks for get_package operation
+        fs.expect_path_exists()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(|_| true);
+
+        let package_path_for_list = package_path.clone();
+        fs.expect_list_directory()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(move |_| Ok(vec![package_path_for_list.clone()]));
+
+        let package_path_for_read = package_path.clone();
+        fs.expect_read_file()
+            .with(mockall::predicate::eq(package_path_for_read.clone()))
+            .returning(move |_| Ok(package_yaml.to_string()));
+
+        // Mock the remove_file operation
+        fs.mock_remove_file(&package_path);
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+
+        // Test removing the package
+        let result = repo.remove_package(package_name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_remove_package_not_found() {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_name = "nonexistent-package";
+
+        // Mock get_package to return package not found
+        fs.expect_path_exists()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(|_| true);
+
+        fs.expect_list_directory()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(|_| Ok(vec![])); // No packages found
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+
+        // Test removing non-existent package should fail
+        let result = repo.remove_package(package_name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            PackageRepoError::PackageError(_)
+        ));
+    }
+
+    #[test]
+    fn test_remove_package_filesystem_error() {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_name = "test-package";
+        let package_path = package_dir.join("test-package.yml");
+
+        // Mock get_package to return a valid package
+        let package_yaml = r#"
+name: test-package
+version: 1.0.0
+environments:
+  default:
+    install: echo "install"
+    check: echo "check"
+"#;
+
+        // Set up mocks for get_package operation
+        fs.expect_path_exists()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(|_| true);
+
+        let package_path_for_list = package_path.clone();
+        fs.expect_list_directory()
+            .with(mockall::predicate::eq(package_dir.clone()))
+            .returning(move |_| Ok(vec![package_path_for_list.clone()]));
+
+        let package_path_for_read = package_path.clone();
+        fs.expect_read_file()
+            .with(mockall::predicate::eq(package_path_for_read.clone()))
+            .returning(move |_| Ok(package_yaml.to_string()));
+
+        // Mock remove_file to fail
+        fs.expect_remove_file()
+            .with(mockall::predicate::eq(package_path.clone()))
+            .returning(|_| {
+                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+                )))
+            });
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+
+        // Test removing package should fail due to filesystem error
+        let result = repo.remove_package(package_name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            PackageRepoError::FileSystemError(_)
+        ));
     }
 }

@@ -18,7 +18,7 @@ use thiserror::Error;
 /// (real file system, in-memory for testing, etc.) and to enable comprehensive testing
 /// through mocking. All file system interactions in the selfie library go through
 /// this abstraction.
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(feature = "with_mocks", mockall::automock)]
 #[async_trait::async_trait]
 pub trait FileSystem: Send + Sync {
     /// Read a file and return its contents as a string
@@ -94,19 +94,22 @@ pub trait FileSystem: Send + Sync {
     /// Performs path expansion including tilde (~) expansion to the user's
     /// home directory and other shell-like expansions. This is useful for
     /// handling user-provided paths in configuration files.
+    /// Expand path with tilde (~) and environment variables
     ///
     /// # Arguments
     ///
-    /// * `path` - Path to expand
+    /// * `path` - The path to expand
     ///
     /// # Returns
     ///
-    /// The expanded absolute path
+    /// The expanded path
     ///
     /// # Errors
     ///
     /// Returns [`FileSystemError`] if:
-    /// - The home directory cannot be determined (for ~ expansion)
+    /// - The home directory cannot be determined for ~ expansion
+    /// - Environment variable expansion fails
+    /// - The expanded path contains invalid characters
     /// - Path expansion fails for any other reason
     fn expand_path(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 
@@ -175,8 +178,30 @@ pub enum FileSystemError {
     HomeDirNotFound,
 }
 
-#[cfg(test)]
+#[cfg(feature = "with_mocks")]
 impl MockFileSystem {
+    /// # Example Usage in CLI Tests
+    ///
+    /// The mock methods are now public to enable comprehensive testing
+    /// in the CLI layer while avoiding real filesystem operations:
+    ///
+    /// ```rust
+    /// use selfie::fs::filesystem::MockFileSystem;
+    /// use selfie::package::repository::yaml::YamlPackageRepository;
+    /// use std::path::PathBuf;
+    ///
+    /// let mut fs = MockFileSystem::default();
+    /// let package_path = PathBuf::from("/test/packages/test-package.yml");
+    ///
+    /// // Mock successful save operation
+    /// fs.mock_write_file(&package_path);
+    ///
+    /// // Mock successful remove operation
+    /// fs.mock_remove_file(&package_path);
+    ///
+    /// let repo = YamlPackageRepository::new(fs, PathBuf::from("/test/packages"));
+    /// // Now test save/remove operations without touching real filesystem
+    /// ```
     /// Set up a mock for reading a file with specific content
     ///
     /// Configures the mock to return the specified content when the given
@@ -187,13 +212,13 @@ impl MockFileSystem {
     ///
     /// * `path` - Path that should trigger this mock response
     /// * `content` - Content to return when the path is read
-    pub(crate) fn mock_read_file<P, S>(&mut self, path: P, content: S)
+    pub fn mock_read_file<P, S>(&mut self, path: P, content: S)
     where
         PathBuf: From<P>,
-        S: ToString,
+        S: AsRef<str>,
     {
         let path_buf = PathBuf::from(path);
-        let content_string = content.to_string();
+        let content_string = content.as_ref().to_string();
         self.expect_read_file()
             .with(mockall::predicate::eq(path_buf.clone()))
             .returning(move |_| Ok(content_string.clone()));
@@ -208,7 +233,7 @@ impl MockFileSystem {
     ///
     /// * `path` - Directory path that should trigger this mock response
     /// * `entries` - List of entries to return for the directory
-    pub(crate) fn mock_list_directory<P>(&mut self, path: P, entries: &[P])
+    pub fn mock_list_directory<P>(&mut self, path: P, entries: &[P])
     where
         PathBuf: From<P>,
         P: Clone + Sync,
@@ -230,7 +255,7 @@ impl MockFileSystem {
     ///
     /// * `path` - Path to mock existence for
     /// * `exists` - Whether the path should be reported as existing
-    pub(crate) fn mock_path_exists<P>(&mut self, path: P, exists: bool)
+    pub fn mock_path_exists<P>(&mut self, path: P, exists: bool)
     where
         PathBuf: From<P>,
     {
@@ -247,7 +272,7 @@ impl MockFileSystem {
     /// # Arguments
     ///
     /// * `path` - Configuration directory path to return
-    pub(crate) fn mock_config_dir_ok<P>(&mut self, path: P)
+    pub fn mock_config_dir_ok<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
     {
@@ -265,7 +290,7 @@ impl MockFileSystem {
     ///
     /// * `config_dir` - Directory where the config file should be found
     /// * `config_yaml` - YAML content to return when the config file is read
-    pub(crate) fn mock_config_file(&mut self, config_dir: &Path, config_yaml: &str) {
+    pub fn mock_config_file(&mut self, config_dir: &Path, config_yaml: &str) {
         let config_dir_owned = PathBuf::from(config_dir);
         let config_path = config_dir.join("config.yaml");
 
@@ -285,7 +310,7 @@ impl MockFileSystem {
     /// # Arguments
     ///
     /// * `path` - Path where the write should succeed
-    pub(crate) fn mock_write_file<P>(&mut self, path: P)
+    pub fn mock_write_file<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
     {
@@ -306,7 +331,7 @@ impl MockFileSystem {
     /// # Arguments
     ///
     /// * `path` - Path where the file removal should succeed
-    pub(crate) fn mock_remove_file<P>(&mut self, path: P)
+    pub fn mock_remove_file<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
     {
@@ -326,7 +351,7 @@ impl MockFileSystem {
     ///
     /// * `input` - Input path that should trigger expansion
     /// * `output` - Expanded path to return
-    pub(crate) fn mock_expand_path<P>(&mut self, input: P, output: P)
+    pub fn mock_expand_path<P>(&mut self, input: P, output: P)
     where
         PathBuf: From<P>,
     {

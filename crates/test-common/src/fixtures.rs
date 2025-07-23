@@ -33,6 +33,10 @@ pub fn create_test_package_file(dir: &TempDir, name: &str) -> PathBuf {
 /// // Package without check command
 /// let no_check = create_package_file_with_check(&temp_dir, "pkg2", false);
 /// ```
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_package_file_with_check(dir: &TempDir, name: &str, has_check: bool) -> PathBuf {
     let check_command = if has_check {
@@ -66,6 +70,10 @@ environments:
 /// ```rust
 /// let package_path = create_multi_env_package_file(&temp_dir, "cross-platform-tool");
 /// ```
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_multi_env_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = format!(
@@ -103,6 +111,10 @@ environments:
 /// let invalid_path = create_invalid_package_file(&temp_dir, "broken-package");
 /// // This file will cause YAML parsing errors when loaded
 /// ```
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_invalid_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = r#"# Invalid YAML - syntax error
@@ -127,6 +139,10 @@ environments:
 /// let incomplete_path = create_incomplete_package_file(&temp_dir, "incomplete-pkg");
 /// // This file will cause validation errors when processed
 /// ```
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_incomplete_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = format!(
@@ -167,6 +183,10 @@ environments:
 ///     Some("make test")
 /// );
 /// ```
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_custom_package_file(
     dir: &TempDir,
@@ -248,10 +268,62 @@ pub fn create_slow_package_file(dir: &TempDir, name: &str, sleep_seconds: u32) -
 /// This is specifically for service layer integration tests.
 #[must_use]
 pub fn create_service_test_package_file(dir: &TempDir, name: &str, has_check: bool) -> PathBuf {
-    let check_command = if has_check {
-        format!("\n    check: \"echo 'checking {name}'\"")
+    create_service_test_package_file_with_behavior(
+        dir,
+        name,
+        has_check,
+        TestPackageBehavior::CheckSuccess,
+    )
+}
+
+/// Behavior configuration for test packages
+#[derive(Clone, Copy, Debug)]
+pub enum TestPackageBehavior {
+    /// Check command always succeeds (for testing successful check operations)
+    CheckSuccess,
+    /// Check command always fails (for testing installation flow)
+    CheckFailure,
+    /// Realistic behavior: check fails initially, succeeds after install
+    InstallFlow,
+}
+
+/// Creates a service test package file with configurable behavior
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
+#[must_use]
+pub fn create_service_test_package_file_with_behavior(
+    dir: &TempDir,
+    name: &str,
+    has_check: bool,
+    behavior: TestPackageBehavior,
+) -> PathBuf {
+    let (check_command, install_command) = if has_check {
+        match behavior {
+            TestPackageBehavior::CheckSuccess => (
+                format!("\n    check: \"echo 'checking {name}'\""),
+                format!("echo 'installing {name}'"),
+            ),
+            TestPackageBehavior::CheckFailure => (
+                "\n    check: \"exit 1\"".to_string(),
+                format!("echo 'installing {name}'"),
+            ),
+            TestPackageBehavior::InstallFlow => {
+                let unique_id = std::process::id();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let unique_file = format!("/tmp/{name}-{unique_id}-{timestamp}-installed");
+                (
+                    format!("\n    check: \"test -f {unique_file}\""),
+                    format!("echo 'installing {name}' && touch {unique_file}"),
+                )
+            }
+        }
     } else {
-        String::new()
+        (String::new(), format!("echo 'installing {name}'"))
     };
 
     let content = format!(
@@ -262,7 +334,7 @@ homepage: "https://example.com/{name}"
 
 environments:
   {SERVICE_TEST_ENV}:
-    install: "echo 'installing {name}'"{check_command}
+    install: "{install_command}"{check_command}
     dependencies: []
 "#
     );
@@ -272,7 +344,22 @@ environments:
     file_path
 }
 
+/// Creates a service test package specifically for install testing (realistic install flow)
+#[must_use]
+pub fn create_service_install_test_package_file(dir: &TempDir, name: &str) -> PathBuf {
+    create_service_test_package_file_with_behavior(
+        dir,
+        name,
+        true,
+        TestPackageBehavior::InstallFlow,
+    )
+}
+
 /// Creates an invalid package file for service tests using the correct "test" environment.
+///
+/// # Panics
+///
+/// Panics if it can't write the package file to disk.
 #[must_use]
 pub fn create_service_invalid_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = r#"# Invalid YAML - syntax error

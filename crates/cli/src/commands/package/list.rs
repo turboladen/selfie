@@ -28,13 +28,11 @@ impl ListCommand<'_> {
         match service.list().await {
             Ok(event_stream) => {
                 // Process the event stream with custom handling for structured data
-                common::process_events_with_custom_handler(
-                    event_stream,
-                    self.reporter,
-                    handle_list_event,
-                    self.config,
-                )
-                .await
+                let processor = crate::event_processor::EventProcessor::new(self.reporter);
+                let config = self.config;
+                processor
+                    .process_events(event_stream, move |event| handle_list_event(event, config))
+                    .await
             }
             Err(e) => {
                 self.reporter
@@ -45,7 +43,7 @@ impl ListCommand<'_> {
     }
 }
 
-fn handle_list_event(event: &PackageEvent, config: &AppConfig) -> Option<bool> {
+fn handle_list_event(event: &PackageEvent, config: &AppConfig) -> bool {
     match event {
         PackageEvent::PackageListLoaded { package_list, .. } => {
             // Show package directory path
@@ -59,14 +57,14 @@ fn handle_list_event(event: &PackageEvent, config: &AppConfig) -> Option<bool> {
                 // Report invalid packages as separate messages after the table
                 for invalid_package in &package_list.invalid_packages {
                     eprintln!(
-                        "⚠️  Invalid package at {}: {}",
+                        "⚠️ Invalid package at {}: {}",
                         invalid_package.path, invalid_package.error
                     );
                 }
             }
-            Some(true) // Continue processing
+            true // Handled
         }
-        _ => None, // Use default handling for other events
+        _ => false, // Use default handling for other events
     }
 }
 

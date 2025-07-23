@@ -9,7 +9,7 @@ and operating systems.
 ## Guidelines
 
 When generating code, use Rust's `stdlib` when possible, `tokio` when async makes sense, and common
-third-party libraries. Use the `indicatif`, `console`, and `dialoguer` crates for working with
+third-party libraries. Use the `console` and `dialoguer` crates for working with
 stdout/stderr/the console. Use the `tracing` crate for logging. Use `clap` for CLI and argument
 parsing. Use `anyhow` and `thiserror` for error handling. Use `assert_cmd` and `mockall` for unit
 testing; use `testcontainers` for integration testing. Always use the latest versions of Rust and
