@@ -5,6 +5,7 @@ use selfie::package::Package;
 use tempfile::TempDir;
 
 pub const SELFIE_ENV: &str = "test-env";
+const SELFIE_BIN_NAME: &str = "selfie";
 
 // Helper to create a temporary config environment
 #[must_use]
@@ -68,7 +69,7 @@ pub fn add_package(base_dir: &TempDir, package: &Package) {
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn get_command_with_test_config(temp_dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("selfie-cli").unwrap();
+    let mut cmd = Command::cargo_bin(SELFIE_BIN_NAME).unwrap();
 
     // Override the config directory location
     // This assumes we can add a CLI flag or env var to override the config directory
@@ -86,5 +87,5 @@ pub fn get_command_with_test_config(temp_dir: &TempDir) -> Command {
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn get_command() -> Command {
-    Command::cargo_bin("selfie-cli").unwrap()
+    Command::cargo_bin(SELFIE_BIN_NAME).unwrap()
 }
