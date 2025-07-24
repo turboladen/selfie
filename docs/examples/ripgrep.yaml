@@ -1,0 +1,72 @@
+name: ripgrep
+version: 1.0.0
+description: Fast text search tool that respects gitignore
+homepage: https://github.com/BurntSushi/ripgrep
+
+environments:
+  macos:
+    install: brew install ripgrep
+    check: which rg && rg --version
+    dependencies: [homebrew]
+
+  ubuntu:
+    install: |
+      # Install via apt if available, otherwise download binary
+      if apt-cache show ripgrep >/dev/null 2>&1; then
+        sudo apt update
+        sudo apt install -y ripgrep
+      else
+        # Download latest release for older Ubuntu versions
+        LATEST=$(curl -s https://api.github.com/repos/BurntSushi/ripgrep/releases/latest | grep tag_name | cut -d '"' -f 4)
+        curl -Lo rg.deb "https://github.com/BurntSushi/ripgrep/releases/download/${LATEST}/ripgrep_${LATEST}_amd64.deb"
+        sudo dpkg -i rg.deb || sudo apt-get install -f -y
+        rm -f rg.deb
+      fi
+    check: which rg && rg --version
+
+  debian:
+    install: |
+      sudo apt update
+      sudo apt install -y ripgrep
+    check: which rg && rg --version
+
+  arch:
+    install: sudo pacman -S ripgrep
+    check: which rg && rg --version
+
+  fedora:
+    install: sudo dnf install -y ripgrep
+    check: which rg && rg --version
+
+  alpine:
+    install: sudo apk add ripgrep
+    check: which rg && rg --version
+
+  ci:
+    install: |
+      # Download latest release binary for CI environments
+      LATEST=$(curl -s https://api.github.com/repos/BurntSushi/ripgrep/releases/latest | grep tag_name | cut -d '"' -f 4)
+      curl -Lo ripgrep.tar.gz "https://github.com/BurntSushi/ripgrep/releases/download/${LATEST}/ripgrep-${LATEST}-x86_64-unknown-linux-musl.tar.gz"
+      tar xzf ripgrep.tar.gz
+      sudo cp "ripgrep-${LATEST}-x86_64-unknown-linux-musl/rg" /usr/local/bin/
+      rm -rf ripgrep.tar.gz "ripgrep-${LATEST}-x86_64-unknown-linux-musl"
+    check: which rg && rg --version
+
+  windows:
+    install: |
+      # Download latest Windows release
+      $latest = (Invoke-RestMethod https://api.github.com/repos/BurntSushi/ripgrep/releases/latest).tag_name
+      $url = "https://github.com/BurntSushi/ripgrep/releases/download/$latest/ripgrep-$latest-x86_64-pc-windows-msvc.zip"
+      Invoke-WebRequest -Uri $url -OutFile ripgrep.zip
+      Expand-Archive ripgrep.zip -DestinationPath .
+      Move-Item "ripgrep-$latest-x86_64-pc-windows-msvc\rg.exe" "$env:USERPROFILE\bin\"
+      Remove-Item ripgrep.zip, "ripgrep-$latest-x86_64-pc-windows-msvc" -Recurse
+    check: where.exe rg && rg --version
+
+  manual:
+    install: |
+      # Manual installation from source (requires Rust)
+      cargo install ripgrep
+    check: which rg && rg --version
+    dependencies:
+      - rust

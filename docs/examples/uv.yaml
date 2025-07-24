@@ -1,0 +1,102 @@
+name: uv
+version: 1.0.0
+description: Fast Python package and project manager
+homepage: https://github.com/astral-sh/uv
+
+environments:
+  macos:
+    install: |
+      # Install uv via official installer (recommended method)
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Source the environment to make uv available immediately
+      source ~/.local/bin/env
+    check: which uv && uv --version
+
+  ubuntu:
+    install: |
+      set -e  # Example of best practice error handling
+      # Install uv via official installer
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Add to PATH for current session
+      export PATH="$HOME/.local/bin:$PATH"
+      # Add to shell profile for future sessions
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    check: which uv && uv --version
+
+  debian:
+    install: |
+      # Install uv via official installer
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Add to PATH for current session
+      export PATH="$HOME/.local/bin:$PATH"
+      # Add to shell profile for future sessions
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    check: which uv && uv --version
+
+  arch:
+    install: |
+      # Try pacman first (if available), fallback to installer
+      if pacman -Qi uv &>/dev/null || sudo pacman -S uv; then
+        echo "Installed uv via pacman"
+      else
+        echo "Installing uv via official installer"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+      fi
+    check: which uv && uv --version
+
+  fedora:
+    install: |
+      # Install uv via official installer
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Add to PATH for current session
+      export PATH="$HOME/.local/bin:$PATH"
+      # Add to shell profile for future sessions
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    check: which uv && uv --version
+
+  ci:
+    install: |
+      set -e  # Critical for CI environments to fail fast
+      # Install uv in CI environment
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Add to PATH
+      export PATH="$HOME/.local/bin:$PATH"
+      # Add to GitHub Actions PATH if in GitHub Actions
+      if [ -n "$GITHUB_PATH" ]; then
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+      fi
+    check: which uv && uv --version
+
+  windows:
+    install: |
+      # Install uv for Windows via PowerShell installer
+      powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+    check: where.exe uv && uv --version
+
+  manual:
+    install: |
+      # Manual installation from GitHub releases
+      UV_VERSION="0.1.6"  # Update to current version
+      ARCH=$(uname -m)
+      OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+      case $ARCH in
+        x86_64) UV_ARCH=x86_64 ;;
+        aarch64) UV_ARCH=aarch64 ;;
+        arm64) UV_ARCH=aarch64 ;;
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+      esac
+
+      # Download and install
+      curl -Lo uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_ARCH}-unknown-${OS}-gnu.tar.gz"
+      tar xzf uv.tar.gz
+      mkdir -p ~/.local/bin
+      mv uv-${UV_ARCH}-unknown-${OS}-gnu/uv ~/.local/bin/
+      rm -rf uv.tar.gz uv-${UV_ARCH}-unknown-${OS}-gnu
+
+      # Add to PATH
+      export PATH="$HOME/.local/bin:$PATH"
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    check: which uv && uv --version

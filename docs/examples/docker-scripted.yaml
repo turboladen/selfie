@@ -1,0 +1,195 @@
+name: docker-scripted
+version: 1.0.0
+description: Docker container platform (using external scripts for complex installations)
+homepage: https://www.docker.com
+
+# This example demonstrates using external shell scripts for complex package installations.
+# Benefits of this approach:
+# - Better code organization and reusability
+# - Easier testing and debugging of individual scripts
+# - Shared utilities across different environments
+# - Version control friendly (separate files for different concerns)
+# - IDE syntax highlighting and linting for shell scripts
+
+environments:
+  macos:
+    install: |
+      # Source common utilities and run macOS-specific installation script
+      cd "$SELFIE_CONFIG_DIR"
+      source ./docker-scripted/common.sh
+      ./docker-scripted/macos_install.sh
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  ubuntu:
+    install: |
+      # Change to package directory and run Ubuntu installation script
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/ubuntu_install.sh
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  debian:
+    install: |
+      # Debian can reuse the Ubuntu script with minor modifications
+      cd "$SELFIE_CONFIG_DIR"
+      source ./docker-scripted/common.sh
+
+      log_info "Installing Docker on Debian (using Ubuntu-compatible method)..."
+
+      # Modify the script for Debian-specific repository
+      sed 's/ubuntu/debian/g' ./docker-scripted/ubuntu_install.sh > /tmp/debian_install.sh
+      chmod +x /tmp/debian_install.sh
+      /tmp/debian_install.sh
+      rm /tmp/debian_install.sh
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  arch:
+    install: |
+      # Simple Arch installation using common utilities
+      cd "$SELFIE_CONFIG_DIR"
+      source ./docker-scripted/common.sh
+
+      print_system_info
+      log_info "Installing Docker on Arch Linux..."
+
+      sudo pacman -S --noconfirm docker docker-compose
+      add_user_to_docker_group
+      start_docker_service
+
+      verify_docker_installation
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  fedora:
+    install: |
+      # Fedora installation with error handling
+      set -e
+      cd "$SELFIE_CONFIG_DIR"
+      source ./docker-scripted/common.sh
+
+      log_info "Installing Docker on Fedora..."
+
+      # Remove old versions
+      sudo dnf remove -y docker \
+        docker-client \
+        docker-client-latest \
+        docker-common \
+        docker-latest \
+        docker-latest-logrotate \
+        docker-logrotate \
+        docker-selinux \
+        docker-engine-selinux \
+        docker-engine || true
+
+      # Install prerequisites
+      sudo dnf install -y dnf-plugins-core
+
+      # Add Docker repository
+      sudo dnf config-manager \
+        --add-repo \
+        https://download.docker.com/linux/fedora/docker-ce.repo
+
+      # Install Docker Engine
+      sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      add_user_to_docker_group
+      start_docker_service
+      verify_docker_installation
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  ci:
+    install: |
+      # CI environments get the specialized CI script
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/ci_install.sh
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+  windows:
+    install: |
+      # Windows PowerShell script would go in a separate .ps1 file
+      # For now, inline the Windows installation
+      $ErrorActionPreference = "Stop"
+
+      $url = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+      $output = "$env:TEMP\DockerDesktopInstaller.exe"
+
+      Write-Host "Downloading Docker Desktop for Windows..."
+      Invoke-WebRequest -Uri $url -OutFile $output
+
+      Write-Host "Installing Docker Desktop..."
+      Start-Process -FilePath $output -ArgumentList "install", "--quiet" -Wait
+
+      Remove-Item $output
+      Write-Host "Docker Desktop installed. Please restart your computer and start Docker Desktop manually."
+    check: |
+      docker --version && `
+      docker info && `
+      docker compose version
+
+  # Demonstrates script composition and reusability
+  development:
+    install: |
+      # Development environment with additional tools
+      cd "$SELFIE_CONFIG_DIR"
+      source ./docker-scripted/common.sh
+
+      log_info "Setting up Docker for development environment..."
+
+      # First install Docker using the appropriate OS script
+      case "$(detect_os)" in
+        ubuntu|debian)
+          ./docker-scripted/ubuntu_install.sh
+          ;;
+        macos)
+          ./docker-scripted/macos_install.sh
+          ;;
+        arch)
+          sudo pacman -S --noconfirm docker docker-compose
+          ;;
+        *)
+          log_error "Unsupported OS for development setup"
+          exit 1
+          ;;
+      esac
+
+      # Then add development-specific configurations
+      log_info "Configuring Docker for development..."
+
+      # Create docker group if it doesn't exist
+      if ! getent group docker >/dev/null; then
+        sudo groupadd docker
+      fi
+
+      add_user_to_docker_group
+      start_docker_service
+
+      # Install additional development tools
+      if command_exists pip; then
+        pip install --user docker-compose
+      fi
+
+      # Create useful aliases
+      echo "# Docker development aliases" >> ~/.bashrc
+      echo "alias dps='docker ps'" >> ~/.bashrc
+      echo "alias dimg='docker images'" >> ~/.bashrc
+      echo "alias dex='docker exec -it'" >> ~/.bashrc
+
+      verify_docker_installation
+      log_success "Development environment setup complete!"
+    check: |
+      cd "$SELFIE_CONFIG_DIR"
+      ./docker-scripted/check.sh
+
+# Dependencies can also reference other scripted packages
+dependencies:
+  - homebrew # For macOS environments

@@ -1,0 +1,301 @@
+name: docker
+version: 1.0.0
+description: Docker container platform for building and running applications
+homepage: https://www.docker.com
+
+environments:
+  macos:
+    install: |
+      # Install Docker Desktop for Mac via Homebrew Cask
+      # Note: Selfie will warn about missing 'set -e' in multi-line scripts
+      brew install --cask docker
+      # Start Docker Desktop (this will open the GUI)
+      open /Applications/Docker.app
+      # Wait for Docker to start up
+      echo "Waiting for Docker to start..."
+      timeout=60
+      while ! docker info >/dev/null 2>&1; do
+        if [ $timeout -le 0 ]; then
+          echo "Docker failed to start within 60 seconds"
+          exit 1
+        fi
+        echo "Docker not ready yet, waiting..."
+        sleep 5
+        timeout=$((timeout - 5))
+      done
+      echo "Docker is ready!"
+    check: |
+      docker --version && \
+      docker info >/dev/null 2>&1 && \
+      docker-compose --version
+
+  ubuntu:
+    install: |
+      set -e  # Example of best practice error handling
+      # Install Docker Engine on Ubuntu
+      # Remove old versions
+      sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
+
+      # Update package index
+      sudo apt-get update
+
+      # Install prerequisites
+      sudo apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release
+
+      # Add Docker's official GPG key
+      sudo mkdir -p /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+      # Set up the repository
+      echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+        $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+      # Install Docker Engine
+      sudo apt-get update
+      sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Add user to docker group to run without sudo
+      sudo usermod -aG docker $USER
+
+      # Start and enable Docker service
+      sudo systemctl start docker
+      sudo systemctl enable docker
+
+      echo "Docker installed successfully!"
+      echo "You may need to log out and back in for group changes to take effect."
+    check: |
+      docker --version && \
+      sudo docker info >/dev/null 2>&1 && \
+      docker compose version
+
+  debian:
+    install: |
+      # Install Docker Engine on Debian
+      # Remove old versions
+      sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
+
+      # Update package index
+      sudo apt-get update
+
+      # Install prerequisites
+      sudo apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release
+
+      # Add Docker's official GPG key
+      sudo mkdir -p /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+      # Set up the repository
+      echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+        $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+      # Install Docker Engine
+      sudo apt-get update
+      sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Add user to docker group
+      sudo usermod -aG docker $USER
+
+      # Start and enable Docker service
+      sudo systemctl start docker
+      sudo systemctl enable docker
+    check: |
+      docker --version && \
+      sudo docker info >/dev/null 2>&1 && \
+      docker compose version
+
+  arch:
+    install: |
+      # Install Docker on Arch Linux
+      sudo pacman -S docker docker-compose
+
+      # Add user to docker group
+      sudo usermod -aG docker $USER
+
+      # Start and enable Docker service
+      sudo systemctl start docker.service
+      sudo systemctl enable docker.service
+
+      echo "Docker installed successfully!"
+      echo "You may need to log out and back in for group changes to take effect."
+    check: |
+      docker --version && \
+      sudo docker info >/dev/null 2>&1 && \
+      docker compose version
+
+  fedora:
+    install: |
+      set -e  # Example of explicit error handling
+      # Install Docker Engine on Fedora
+      # Remove old versions
+      sudo dnf remove -y docker \
+        docker-client \
+        docker-client-latest \
+        docker-common \
+        docker-latest \
+        docker-latest-logrotate \
+        docker-logrotate \
+        docker-selinux \
+        docker-engine-selinux \
+        docker-engine || true
+
+      # Install prerequisites
+      sudo dnf install -y dnf-plugins-core
+
+      # Add Docker repository
+      sudo dnf config-manager \
+        --add-repo \
+        https://download.docker.com/linux/fedora/docker-ce.repo
+
+      # Install Docker Engine
+      sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Add user to docker group
+      sudo usermod -aG docker $USER
+
+      # Start and enable Docker service
+      sudo systemctl start docker
+      sudo systemctl enable docker
+    check: |
+      docker --version && \
+      sudo docker info >/dev/null 2>&1 && \
+      docker compose version
+
+  alpine:
+    install: |
+      # Install Docker on Alpine Linux
+      sudo apk add docker docker-compose
+
+      # Add user to docker group
+      sudo addgroup $USER docker
+
+      # Start Docker service
+      sudo rc-service docker start
+
+      # Add Docker to startup
+      sudo rc-update add docker default
+    check: |
+      docker --version && \
+      sudo docker info >/dev/null 2>&1 && \
+      docker-compose --version
+
+  ci:
+    install: |
+      set -e  # Critical for CI environments to fail fast
+      # Docker is typically pre-installed in CI environments
+      # Just verify it's working and update if needed
+      if ! command -v docker &> /dev/null; then
+        echo "Installing Docker in CI environment..."
+        curl -fsSL https://get.docker.com | sh
+        sudo usermod -aG docker $USER
+      fi
+
+      # Ensure Docker service is running
+      sudo systemctl start docker || sudo service docker start
+
+      # Install docker-compose if not present
+      if ! command -v docker-compose &> /dev/null; then
+        sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+      fi
+    check: |
+      docker --version && \
+      docker info >/dev/null 2>&1 && \
+      (docker compose version || docker-compose --version)
+
+  windows:
+    install: |
+      # Install Docker Desktop for Windows
+      # Note: Requires Windows 10/11 with WSL2 or Hyper-V
+      $url = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+      $output = "$env:TEMP\DockerDesktopInstaller.exe"
+
+      Write-Host "Downloading Docker Desktop..."
+      Invoke-WebRequest -Uri $url -OutFile $output
+
+      Write-Host "Installing Docker Desktop..."
+      Start-Process -FilePath $output -ArgumentList "install", "--quiet" -Wait
+
+      Remove-Item $output
+
+      Write-Host "Docker Desktop installed. Please restart your computer and start Docker Desktop manually."
+    check: |
+      docker --version && `
+      docker info && `
+      docker compose version
+
+  rootless:
+    install: |
+      # Install Docker in rootless mode (no sudo required after setup)
+      # Install Docker Engine first if not present
+      if ! command -v docker &> /dev/null; then
+        echo "Docker engine not found. Please install Docker first using the appropriate environment."
+        exit 1
+      fi
+
+      # Install rootless Docker
+      curl -fsSL https://get.docker.com/rootless | sh
+
+      # Add to PATH
+      echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+      echo 'export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"' >> ~/.bashrc
+
+      # Source the changes
+      export PATH="$HOME/bin:$PATH"
+      export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
+
+      # Start rootless Docker
+      systemctl --user start docker
+      systemctl --user enable docker
+
+      echo "Rootless Docker installed successfully!"
+      echo "Please restart your shell or run: source ~/.bashrc"
+    check: |
+      docker --version && \
+      docker info >/dev/null 2>&1 && \
+      [ "$DOCKER_HOST" = "unix://$XDG_RUNTIME_DIR/docker.sock" ]
+
+  podman:
+    install: |
+      # Install Podman as Docker alternative (no set -e to show alternative approach)
+      case "$(uname -s)" in
+        Linux*)
+          # Detect distribution and install accordingly
+          if command -v apt-get &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+          elif command -v dnf &> /dev/null; then
+            sudo dnf install -y podman
+          elif command -v pacman &> /dev/null; then
+            sudo pacman -S podman
+          else
+            echo "Unsupported distribution for Podman installation"
+            exit 1
+          fi
+          ;;
+        Darwin*)
+          brew install podman
+          ;;
+        *)
+          echo "Unsupported OS for Podman installation"
+          exit 1
+          ;;
+      esac
+
+      # Create docker alias for compatibility
+      echo 'alias docker=podman' >> ~/.bashrc
+
+      echo "Podman installed successfully!"
+      echo "Docker commands will be aliased to Podman."
+    check: |
+      podman --version && \
+      podman info >/dev/null 2>&1

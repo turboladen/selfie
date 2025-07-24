@@ -1,0 +1,188 @@
+name: node
+version: 1.0.0
+description: Node.js runtime via fnm version manager
+homepage: https://nodejs.org
+
+environments:
+  macos:
+    install: |
+      # Install Node.js LTS via fnm (avoids conflicts with system package managers)
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Verify npm is working
+      npm --version
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  ubuntu:
+    install: |
+      set -e  # Example of best practice error handling
+      # Install Node.js via fnm for version consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Verify installation
+      node --version
+      npm --version
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  debian:
+    install: |
+      # Install Node.js via fnm for version consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Update npm to latest
+      npm install -g npm@latest
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  arch:
+    install: |
+      # Install Node.js via fnm
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Verify versions
+      node --version
+      npm --version
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  fedora:
+    install: |
+      # Install Node.js via fnm
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Update npm to latest
+      npm install -g npm@latest
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  alpine:
+    install: |
+      # Install Node.js via fnm for consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Verify installation
+      node --version
+      npm --version
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  ci:
+    install: |
+      set -e  # Critical for CI environments to fail fast
+      # Install Node.js via fnm in CI environment
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Configure npm for CI
+      npm config set fund false
+      npm config set audit-level moderate
+      # Add to PATH for GitHub Actions
+      if [ -n "$GITHUB_PATH" ]; then
+        echo "$(npm bin -g)" >> $GITHUB_PATH
+      fi
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      which node && \
+      which npm
+    dependencies:
+      - fnm
+
+  windows:
+    install: |
+      # Download and install Node.js LTS for Windows
+      $version = "20.10.0"  # Update to current LTS
+      $url = "https://nodejs.org/dist/v$version/node-v$version-x64.msi"
+      $output = "$env:TEMP\nodejs.msi"
+      Invoke-WebRequest -Uri $url -OutFile $output
+      Start-Process msiexec.exe -Wait -ArgumentList "/i $output /quiet"
+      Remove-Item $output
+      # Refresh environment variables
+      $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+    check: |
+      node --version | Select-String "v20" && `
+      npm --version && `
+      where.exe node && `
+      where.exe npm
+
+  fnm-alt:
+    install: |
+      # Alternative fnm setup for systems where fnm isn't in PATH
+      # This assumes fnm is already installed but not configured
+      eval "$(fnm env --use-on-cd)"
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+      # Update npm
+      npm install -g npm@latest
+    check: |
+      node --version | grep -q "v20" && \
+      npm --version && \
+      fnm current | grep -q "v20"
+    dependencies:
+      - fnm
+
+  manual:
+    install: |
+      # Manual installation from official binary
+      NODE_VERSION="20.10.0"
+      ARCH=$(uname -m)
+      case $ARCH in
+        x86_64) NODE_ARCH=x64 ;;
+        aarch64) NODE_ARCH=arm64 ;;
+        armv7l) NODE_ARCH=armv7l ;;
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+      esac
+
+      # Download and extract
+      cd /tmp
+      curl -Lo node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+      sudo tar -C /usr/local --strip-components=1 -xf node.tar.xz
+      rm node.tar.xz
+
+      # Verify installation
+      /usr/local/bin/node --version
+      /usr/local/bin/npm --version
+    check: |
+      /usr/local/bin/node --version | grep -q "v20" && \
+      /usr/local/bin/npm --version && \
+      which node && \
+      which npm
