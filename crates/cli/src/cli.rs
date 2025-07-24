@@ -22,6 +22,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete;
 
 /// Selfie - A personal package manager
 ///
@@ -86,6 +87,17 @@ pub(crate) enum ClapCommands {
     /// Commands for validating and managing the selfie configuration file.
     /// These operations work with the application settings and validation.
     Config(ConfigCommands),
+
+    /// Generate shell completion scripts
+    ///
+    /// Creates completion scripts for various shells to enable tab completion
+    /// for selfie commands, subcommands, and options.
+    #[clap(hide = true)] // Hide from main help to keep it clean
+    Completion {
+        /// The shell to generate completions for
+        #[clap(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Package command group container

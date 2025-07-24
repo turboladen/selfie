@@ -23,7 +23,85 @@ You should see the main help output with available commands.
 
 ## Initial Setup
 
-### 1. Create Configuration Directory
+### 1. Set Up Shell Completion (Optional)
+
+Enable tab completion for selfie commands by generating completion scripts for your shell. **Note:**
+Completion paths and setup vary by system and shell configuration - these are common examples that
+you may need to adapt for your environment.
+
+#### Bash
+
+The location for bash completions varies by system. Here are some common examples:
+
+```bash
+# User-local (most Linux distributions)
+selfie completion bash > ~/.local/share/bash-completion/completions/selfie
+
+# System-wide (most Linux distributions)
+sudo selfie completion bash > /usr/local/share/bash-completion/completions/selfie
+
+# macOS (user-local)
+selfie completion bash > ~/.bash_completion.d/selfie
+
+# Some systems may use different paths like:
+# ~/.bash_completion.d/selfie
+# /etc/bash_completion.d/selfie
+```
+
+Check your system's bash completion setup or consult your distribution's documentation for the
+correct path.
+
+#### Zsh
+
+Zsh completion setup depends on your configuration. Here's a common approach:
+
+```bash
+# Create the completion directory if it doesn't exist
+mkdir -p ~/.zfunc
+
+# Generate the completion script
+selfie completion zsh > ~/.zfunc/_selfie
+
+# Add to your ~/.zshrc if not already present
+echo 'fpath=(~/.zfunc $fpath)' >> ~/.zshrc
+echo 'autoload -U compinit && compinit' >> ~/.zshrc
+```
+
+If you use a framework like Oh My Zsh or have a custom setup, you may need to place the completion
+file in a different location or modify your configuration accordingly.
+
+#### Fish
+
+Fish typically loads completions from a standard location, but this may vary:
+
+```fish
+# Standard location (most systems)
+selfie completion fish > ~/.config/fish/completions/selfie.fish
+
+# Some systems may use:
+# /usr/local/share/fish/completions/selfie.fish
+```
+
+Fish will automatically load the completions on next shell start.
+
+#### PowerShell
+
+PowerShell profile locations vary by platform and PowerShell version:
+
+```powershell
+# Generate the completion script
+selfie completion powershell > selfie.ps1
+
+# Add to your PowerShell profile (location varies by system)
+# You may need to check $PROFILE to find your profile path
+. ./selfie.ps1
+```
+
+Consult `Get-Help about_Profiles` for your system's profile locations.
+
+Once installed, you'll have tab completion for all selfie commands, subcommands, and options.
+
+### 2. Create Configuration Directory
 
 Selfie stores its configuration and package files in `~/.config/selfie/`:
 
@@ -31,7 +109,7 @@ Selfie stores its configuration and package files in `~/.config/selfie/`:
 mkdir -p ~/.config/selfie/packages
 ```
 
-### 2. Set Your Environment
+### 3. Set Your Environment
 
 Create your configuration file at `~/.config/selfie/config.yml`:
 
@@ -48,7 +126,7 @@ Choose an environment name that makes sense for your current system and context.
 - `github-actions`, `ci` for CI/CD environments
 - Any custom name that describes your environment and context
 
-### 3. Validate Your Configuration
+### 4. Validate Your Configuration
 
 ```bash
 selfie config validate
