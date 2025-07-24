@@ -236,17 +236,34 @@ where
 {
     progress.next(sender, step_description).await;
 
-    if let Some(cmd) = check_command {
-        sender
-            .send_debug(format!("Running check command: {cmd}"))
-            .await;
+    execute_check_command_quiet(
+        package_name,
+        environment,
+        check_command,
+        command_runner,
+        sender,
+    )
+    .await
+}
 
+/// Execute a check command without updating progress
+///
+/// This is useful for bulk operations like package listing where individual
+/// check progress updates would be too noisy.
+pub(super) async fn execute_check_command_quiet<CR>(
+    package_name: &str,
+    environment: &str,
+    check_command: Option<&str>,
+    command_runner: &CR,
+    _sender: &EventSender,
+) -> CheckResultData
+where
+    CR: CommandRunner,
+{
+    if let Some(cmd) = check_command {
         let check_result = match command_runner.execute(cmd).await {
             Ok(output) => {
                 if output.is_success() {
-                    sender
-                        .send_debug(format!("Check command output: {}", output.stdout_str()))
-                        .await;
                     CheckResultData {
                         package_name: package_name.to_string(),
                         environment: environment.to_string(),
@@ -274,23 +291,13 @@ where
             },
         };
 
-        // Send structured check result
-        sender.send_check_result(check_result.clone()).await;
         check_result
     } else {
-        sender
-            .send_debug("No check command defined for this environment, skipping")
-            .await;
-
-        let check_result = CheckResultData {
+        CheckResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
             check_command: None,
             result: CheckResult::NoCheckCommand,
-        };
-
-        // Send structured check result
-        sender.send_check_result(check_result.clone()).await;
-        check_result
+        }
     }
 }

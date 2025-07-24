@@ -518,6 +518,7 @@ pub struct PackageListItem {
     pub name: String,
     pub version: String,
     pub environments: Vec<String>,
+    pub status: Option<CheckResult>,
 }
 
 /// Information about an invalid package

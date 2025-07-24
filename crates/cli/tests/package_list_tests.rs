@@ -193,6 +193,55 @@ fn test_package_list_with_no_color_flag() {
 }
 
 #[test]
+fn test_package_list_shows_status_column() {
+    let temp_dir = setup_default_test_config();
+
+    // Create a package with a check command
+    let package = PackageBuilder::default()
+        .name("test-package-with-check")
+        .version("1.0.0")
+        .environment(SELFIE_ENV, |b| {
+            b.install("echo 'Installing'")
+                .check(Some("echo 'check command' > /dev/null && exit 0"))
+        })
+        .build();
+
+    add_package(&temp_dir, &package);
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    // Should contain the Status column header and status indicators
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Status"))
+        .stdout(predicate::str::contains("test-package-with-check"));
+}
+
+#[test]
+fn test_package_list_shows_no_check_status() {
+    let temp_dir = setup_default_test_config();
+
+    // Create a package without a check command
+    let package = PackageBuilder::default()
+        .name("no-check-package")
+        .version("1.0.0")
+        .environment(SELFIE_ENV, |b| b.install("echo 'Installing'"))
+        .build();
+
+    add_package(&temp_dir, &package);
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    // Should contain the Status column header
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Status"))
+        .stdout(predicate::str::contains("no-check-package"));
+}
+
+#[test]
 fn test_package_list_non_existent_directory() {
     let temp_dir = setup_default_test_config();
 

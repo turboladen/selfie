@@ -16,7 +16,7 @@ use crate::{
 pub(super) async fn handle_list<PR, CR>(
     repo: &PR,
     config: &AppConfig,
-    _command_runner: &CR,
+    command_runner: &CR,
     sender: &EventSender,
     progress: &mut crate::package::service::ProgressTracker,
 ) -> OperationResult
@@ -48,15 +48,38 @@ where
     let valid_packages: Vec<_> = list_output.valid_packages().collect();
     let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
 
-    // Convert to structured data and sort by name
-    let mut valid_package_items: Vec<PackageListItem> = valid_packages
-        .iter()
-        .map(|package| PackageListItem {
+    // Step 3: Check installation status for each package
+    progress
+        .next(sender, "Checking package installation status")
+        .await;
+
+    // Convert to structured data with check results
+    let mut valid_package_items: Vec<PackageListItem> = Vec::new();
+
+    for package in &valid_packages {
+        // Get the check command for the current environment
+        let check_command = package
+            .environments()
+            .get(config.environment())
+            .and_then(|env_config| env_config.check.as_ref());
+
+        // Execute the check command to get status (quietly to avoid noisy progress updates)
+        let check_result = super::check::execute_check_command_quiet(
+            package.name(),
+            config.environment(),
+            check_command.map(|s| s.as_str()),
+            command_runner,
+            sender,
+        )
+        .await;
+
+        valid_package_items.push(PackageListItem {
             name: package.name().to_string(),
             version: package.version().to_string(),
             environments: package.environments().keys().cloned().collect(),
-        })
-        .collect();
+            status: Some(check_result.result),
+        });
+    }
 
     // Sort packages alphabetically by name
     valid_package_items.sort_by(|a, b| a.name.cmp(&b.name));
@@ -79,7 +102,7 @@ where
     // Send structured data event
     sender.send_package_list(package_list_data).await;
 
-    // Step 3: Complete operation
+    // Step 4: Complete operation
     progress.next(sender, "Finalizing package list").await;
 
     let success_msg = format!(

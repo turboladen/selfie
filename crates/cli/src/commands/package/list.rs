@@ -77,7 +77,7 @@ fn display_packages_table(
     }
 
     let mut table = common::create_formatted_table();
-    table.set_header(vec!["Name", "Version", "Environments"]);
+    table.set_header(vec!["Name", "Version", "Environments", "Status"]);
 
     for package in packages {
         let package_name = if config.use_colors() {
@@ -95,10 +95,62 @@ fn display_packages_table(
         let environments =
             common::format_environment_names(&package.environments, config.environment(), config);
 
-        table.add_row(vec![package_name, version, environments]);
+        let status = format_status(&package.status, config);
+
+        table.add_row(vec![package_name, version, environments, status]);
     }
 
     println!("{table}");
+}
+
+fn format_status(
+    status: &Option<selfie::package::event::CheckResult>,
+    config: &AppConfig,
+) -> String {
+    match status {
+        Some(selfie::package::event::CheckResult::Success) => {
+            if config.use_colors() {
+                console::style("✅ Installed").green().to_string()
+            } else {
+                "✅ Installed".to_string()
+            }
+        }
+        Some(selfie::package::event::CheckResult::Failed { .. }) => {
+            if config.use_colors() {
+                console::style("❌ Not installed").red().to_string()
+            } else {
+                "❌ Not installed".to_string()
+            }
+        }
+        Some(selfie::package::event::CheckResult::NoCheckCommand) => {
+            if config.use_colors() {
+                console::style("⚠️ No check").yellow().to_string()
+            } else {
+                "⚠️ No check".to_string()
+            }
+        }
+        Some(selfie::package::event::CheckResult::CommandNotFound) => {
+            if config.use_colors() {
+                console::style("❌ Cmd not found").red().to_string()
+            } else {
+                "❌ Cmd not found".to_string()
+            }
+        }
+        Some(selfie::package::event::CheckResult::Error(_)) => {
+            if config.use_colors() {
+                console::style("❌ Error").red().to_string()
+            } else {
+                "❌ Error".to_string()
+            }
+        }
+        None => {
+            if config.use_colors() {
+                console::style("? Unknown").dim().to_string()
+            } else {
+                "? Unknown".to_string()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +189,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
+            status: Some(selfie::package::event::CheckResult::Success),
         }];
 
         // Should not panic
@@ -150,6 +203,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
+            status: Some(selfie::package::event::CheckResult::Success),
         }];
 
         // Should not panic with colors enabled
