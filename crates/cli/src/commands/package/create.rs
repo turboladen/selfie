@@ -382,11 +382,14 @@ fn prompt_dependencies(
     reporter: TerminalProgressReporter,
 ) -> Result<Vec<String>, i32> {
     let repo = common::create_package_repository(config);
-    let available_packages = repo.available_packages().unwrap_or_default();
+    let mut available_packages = repo.available_packages().unwrap_or_default();
 
     if available_packages.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Sort packages alphabetically for consistent presentation
+    available_packages.sort();
 
     let selected = MultiSelect::with_theme(&SimpleTheme)
         .with_prompt("Dependencies (select with space, confirm with enter)")
