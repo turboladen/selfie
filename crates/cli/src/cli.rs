@@ -22,7 +22,6 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use clap_complete;
 
 /// Selfie - A personal package manager
 ///
@@ -146,13 +145,21 @@ pub(crate) enum PackageSubcommands {
         package_name: String,
     },
 
-    /// List all available packages in the package directory
+    /// List packages relevant to the current environment
     ///
-    /// Discovers and displays all package definition files, showing basic
-    /// information about each package including name, version, and description.
+    /// By default, displays only packages that support the current environment,
+    /// showing name, version, and installation status. Use --all to see all packages
+    /// regardless of environment relevance.
     ///
     /// Example: `selfie package list`
-    List,
+    List {
+        /// Show all packages regardless of current environment relevance
+        ///
+        /// By default, only packages relevant to the current environment are shown.
+        /// Use this flag to display all packages with their supported environments.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Show detailed information about a package
     ///

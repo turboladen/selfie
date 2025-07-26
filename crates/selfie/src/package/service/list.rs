@@ -19,6 +19,7 @@ pub(super) async fn handle_list<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut crate::package::service::ProgressTracker,
+    show_all: bool,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -57,28 +58,35 @@ where
     let mut valid_package_items: Vec<PackageListItem> = Vec::new();
 
     for package in &valid_packages {
-        // Get the check command for the current environment
-        let check_command = package
-            .environments()
-            .get(config.environment())
-            .and_then(|env_config| env_config.check.as_ref());
+        // Check if package supports the current environment
+        let status = if let Some(env_config) = package.environments().get(config.environment()) {
+            // Package supports current environment - check for installation
+            let check_command = env_config.check.as_ref();
 
-        // Execute the check command to get status (quietly to avoid noisy progress updates)
-        let check_result = super::check::execute_check_command_quiet(
-            package.name(),
-            config.environment(),
-            check_command.map(|s| s.as_str()),
-            command_runner,
-            sender,
-        )
-        .await;
+            let check_result = super::check::execute_check_command_quiet(
+                package.name(),
+                config.environment(),
+                check_command.map(std::string::String::as_str),
+                command_runner,
+                sender,
+            )
+            .await;
 
-        valid_package_items.push(PackageListItem {
-            name: package.name().to_string(),
-            version: package.version().to_string(),
-            environments: package.environments().keys().cloned().collect(),
-            status: Some(check_result.result),
-        });
+            Some(check_result.result)
+        } else {
+            // Package doesn't support current environment - mark as not relevant
+            None
+        };
+
+        // If show_all is false, only include packages relevant to current environment
+        if show_all || package.environments().contains_key(config.environment()) {
+            valid_package_items.push(PackageListItem {
+                name: package.name().to_string(),
+                version: package.version().to_string(),
+                environments: package.environments().keys().cloned().collect(),
+                status,
+            });
+        }
     }
 
     // Sort packages alphabetically by name

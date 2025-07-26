@@ -76,15 +76,19 @@ fn test_package_list_multiple_packages() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Should list all packages
+    // Should list only packages relevant to current environment (package-a and package-b)
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("package-a"))
         .stdout(predicate::str::contains("package-b"))
-        .stdout(predicate::str::contains("package-c"))
         .stdout(predicate::str::contains("v1.0.0"))
-        .stdout(predicate::str::contains("v2.0.0"))
-        .stdout(predicate::str::contains("v3.0.0"));
+        .stdout(predicate::str::contains("v2.0.0"));
+
+    // package-c should NOT be listed since it doesn't support current environment
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(!output_str.contains("package-c"));
+    assert!(!output_str.contains("v3.0.0"));
 }
 
 #[test]
@@ -155,20 +159,16 @@ fn test_package_list_different_environments() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Should show all packages, but mark current environment with *
+    // Should show only packages relevant to current environment
     let output = cmd.assert().success().get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
-    // Verify current environment marking
+    // Verify only relevant packages are shown
     assert!(output_str.contains("current-env-package"));
     assert!(output_str.contains("multi-env-package"));
-    assert!(output_str.contains("different-env-package"));
 
-    // Current environments should be marked
-    assert!(output_str.contains(&format!("*{SELFIE_ENV}")));
-
-    // The "other-env" should be listed but not marked
-    assert!(output_str.contains("other-env"));
+    // different-env-package should NOT be shown since it doesn't support current environment
+    assert!(!output_str.contains("different-env-package"));
 }
 
 #[test]
@@ -257,4 +257,241 @@ fn test_package_list_non_existent_directory() {
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Package directory not found"));
+}
+
+#[test]
+fn test_package_list_all_flag_environment_ordering() {
+    let temp_dir = setup_default_test_config();
+
+    // Create packages with multiple environments in different orders
+    let packages = vec![
+        // Package where current environment is not first alphabetically
+        PackageBuilder::default()
+            .name("bacon")
+            .version("1.0.0")
+            .environment("arch-home", |b| b.install("echo 'Install on arch'"))
+            .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
+            .build(),
+        // Package where current environment is first alphabetically
+        PackageBuilder::default()
+            .name("bat")
+            .version("1.0.0")
+            .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
+            .environment("ubuntu-server", |b| b.install("echo 'Install on ubuntu'"))
+            .build(),
+    ];
+
+    for package in &packages {
+        add_package(&temp_dir, package);
+    }
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list", "--all"]);
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let output_str = String::from_utf8_lossy(&output);
+
+    // For bacon: current environment (test-env) should come first, then arch-home
+    let bacon_line = output_str
+        .lines()
+        .find(|line| line.contains("bacon"))
+        .expect("bacon package should be in output");
+
+    // Extract the environments column (3rd column after splitting by ┆)
+    let bacon_parts: Vec<&str> = bacon_line.split('┆').collect();
+    assert!(bacon_parts.len() >= 4, "Should have at least 4 columns");
+    let bacon_envs = bacon_parts[2].trim();
+
+    // Should be "*test-env, arch-home" (current first, then alphabetical)
+    assert!(
+        bacon_envs.starts_with("*test-env"),
+        "Current environment should be first for bacon: {bacon_envs}"
+    );
+    assert!(
+        bacon_envs.contains("arch-home"),
+        "Should contain arch-home for bacon: {bacon_envs}"
+    );
+
+    // For bat: current environment (test-env) should come first, then ubuntu-server
+    let bat_line = output_str
+        .lines()
+        .find(|line| line.contains("bat"))
+        .expect("bat package should be in output");
+
+    let bat_parts: Vec<&str> = bat_line.split('┆').collect();
+    assert!(bat_parts.len() >= 4, "Should have at least 4 columns");
+    let bat_envs = bat_parts[2].trim();
+
+    // Should be "*test-env, ubuntu-server" (current first, then alphabetical)
+    assert!(
+        bat_envs.starts_with("*test-env"),
+        "Current environment should be first for bat: {bat_envs}"
+    );
+    assert!(
+        bat_envs.contains("ubuntu-server"),
+        "Should contain ubuntu-server for bat: {bat_envs}"
+    );
+}
+
+#[test]
+fn test_package_list_all_flag_shows_all_packages() {
+    let temp_dir = setup_default_test_config();
+
+    // Create packages with different environment support
+    let packages = vec![
+        // Package with current environment
+        PackageBuilder::default()
+            .name("current-env-package")
+            .version("1.0.0")
+            .environment(SELFIE_ENV, |b| b.install("echo 'Current'"))
+            .build(),
+        // Package without current environment
+        PackageBuilder::default()
+            .name("different-env-package")
+            .version("2.0.0")
+            .environment("other-env", |b| b.install("echo 'Different'"))
+            .build(),
+    ];
+
+    for package in &packages {
+        add_package(&temp_dir, package);
+    }
+
+    // Test default behavior (only relevant packages)
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("current-env-package"));
+    assert!(!output_str.contains("different-env-package"));
+
+    // Test --all flag behavior (all packages)
+    let mut cmd_all = get_command_with_test_config(&temp_dir);
+    cmd_all.args(["package", "list", "--all"]);
+
+    let output_all = cmd_all.assert().success().get_output().stdout.clone();
+    let output_all_str = String::from_utf8_lossy(&output_all);
+
+    assert!(output_all_str.contains("current-env-package"));
+    assert!(output_all_str.contains("different-env-package"));
+    assert!(output_all_str.contains("Environments")); // Should have environments column
+}
+
+#[test]
+fn test_package_list_all_flag_not_relevant_status() {
+    let temp_dir = setup_default_test_config();
+
+    // Create a package that doesn't support the current environment
+    let package_not_relevant = PackageBuilder::default()
+        .name("not-relevant-package")
+        .version("1.0.0")
+        .environment("other-env", |b| {
+            b.install("echo 'Install on other-env'")
+                .check(Some("echo 'check on other-env'"))
+        })
+        .build();
+
+    // Create a package that supports current environment but has no check
+    let package_no_check = PackageBuilder::default()
+        .name("no-check-package")
+        .version("1.0.0")
+        .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
+        .build();
+
+    add_package(&temp_dir, &package_not_relevant);
+    add_package(&temp_dir, &package_no_check);
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list", "--all"]);
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let output_str = String::from_utf8_lossy(&output);
+
+    // Package not relevant to current environment should show N/A
+    let not_relevant_line = output_str
+        .lines()
+        .find(|line| line.contains("not-relevant-package"))
+        .expect("not-relevant-package should be in output");
+
+    let not_relevant_parts: Vec<&str> = not_relevant_line.split('┆').collect();
+    assert!(
+        not_relevant_parts.len() >= 4,
+        "Should have at least 4 columns"
+    );
+    let not_relevant_status = not_relevant_parts[3].trim();
+    assert!(
+        not_relevant_status.contains("N/A"),
+        "Package not relevant should show N/A: {not_relevant_status}"
+    );
+
+    // Package with no check command should show "No check"
+    let no_check_line = output_str
+        .lines()
+        .find(|line| line.contains("no-check-package"))
+        .expect("no-check-package should be in output");
+
+    let no_check_parts: Vec<&str> = no_check_line.split('┆').collect();
+    assert!(no_check_parts.len() >= 4, "Should have at least 4 columns");
+    let no_check_status = no_check_parts[3].trim();
+    assert!(
+        no_check_status.contains("No check"),
+        "Package with no check should show 'No check': {no_check_status}"
+    );
+}
+
+#[test]
+fn test_package_list_default_behavior_filters_by_environment() {
+    let temp_dir = setup_default_test_config();
+
+    // Create a package that supports current environment but has no check
+    let package_no_check = PackageBuilder::default()
+        .name("no-check-package")
+        .version("1.0.0")
+        .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
+        .build();
+
+    // Create a package that supports current environment with check
+    let package_with_check = PackageBuilder::default()
+        .name("with-check-package")
+        .version("1.0.0")
+        .environment(SELFIE_ENV, |b| {
+            b.install("echo 'Install on test-env'")
+                .check(Some("echo 'check on test-env'"))
+        })
+        .build();
+
+    add_package(&temp_dir, &package_no_check);
+    add_package(&temp_dir, &package_with_check);
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let output_str = String::from_utf8_lossy(&output);
+
+    // Should only have 3 columns (Name, Version, Status) - no Environments column
+    assert!(!output_str.contains("Environments"));
+    assert!(output_str.contains("Name"));
+    assert!(output_str.contains("Version"));
+    assert!(output_str.contains("Status"));
+
+    // Both packages should be shown since they support current environment
+    assert!(output_str.contains("no-check-package"));
+    assert!(output_str.contains("with-check-package"));
+
+    // Package with no check command should show "No check"
+    let no_check_line = output_str
+        .lines()
+        .find(|line| line.contains("no-check-package"))
+        .expect("no-check-package should be in output");
+
+    let no_check_parts: Vec<&str> = no_check_line.split('┆').collect();
+    assert!(no_check_parts.len() >= 3, "Should have at least 3 columns");
+    let no_check_status = no_check_parts[2].trim();
+    assert!(
+        no_check_status.contains("No check"),
+        "Package with no check should show 'No check': {no_check_status}"
+    );
 }

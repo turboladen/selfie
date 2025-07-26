@@ -261,7 +261,7 @@ where
     CR: CommandRunner,
 {
     if let Some(cmd) = check_command {
-        let check_result = match command_runner.execute(cmd).await {
+        match command_runner.execute(cmd).await {
             Ok(output) => {
                 if output.is_success() {
                     CheckResultData {
@@ -289,9 +289,7 @@ where
                 check_command: Some(cmd.to_string()),
                 result: CheckResult::Error(err.to_string()),
             },
-        };
-
-        check_result
+        }
     } else {
         CheckResultData {
             package_name: package_name.to_string(),

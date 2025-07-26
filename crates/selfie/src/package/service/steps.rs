@@ -348,7 +348,7 @@ mod tests {
                 PackageEvent::Warning { message, .. } => {
                     assert!(message.contains("Multi-line shell command detected"));
                 }
-                _ => panic!("Expected warning event, got: {:?}", event),
+                _ => panic!("Expected warning event, got: {event:?}"),
             }
         } else {
             panic!("Expected warning event to be sent");
@@ -367,14 +367,14 @@ mod tests {
         );
 
         // Complex multi-line script without error handling
-        let command = r#"#!/bin/bash
+        let command = r"#!/bin/bash
 # Install some package
 curl -o package.tar.gz https://example.com/package.tar.gz
 tar -xzf package.tar.gz
 cd package
 ./install.sh
 cd ..
-rm -rf package package.tar.gz"#;
+rm -rf package package.tar.gz";
         check_command_safety(command, &sender).await;
 
         // Check that a warning event was sent
@@ -383,7 +383,7 @@ rm -rf package package.tar.gz"#;
                 PackageEvent::Warning { message, .. } => {
                     assert!(message.contains("Multi-line shell command detected"));
                 }
-                _ => panic!("Expected warning event, got: {:?}", event),
+                _ => panic!("Expected warning event, got: {event:?}"),
             }
         } else {
             panic!("Expected warning event to be sent");

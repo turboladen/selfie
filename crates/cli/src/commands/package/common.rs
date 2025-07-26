@@ -153,12 +153,26 @@ pub(super) fn create_formatted_table() -> Table {
 }
 
 /// Format environment names with current environment highlighting
+/// Current environment appears first, followed by others sorted alphabetically
 pub(super) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
     config: &AppConfig,
 ) -> String {
-    environments
+    let mut sorted_envs = environments.to_vec();
+
+    // Sort so current environment comes first, then alphabetically
+    sorted_envs.sort_by(|a, b| {
+        if a == current_environment && b != current_environment {
+            std::cmp::Ordering::Less
+        } else if a != current_environment && b == current_environment {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
+        }
+    });
+
+    sorted_envs
         .iter()
         .map(|env_name| {
             if env_name == current_environment {
@@ -333,6 +347,63 @@ mod tests {
         // Just test that it doesn't panic and returns something
         assert!(!result.is_empty());
         assert!(result.contains("test"));
+    }
+
+    #[test]
+    fn test_format_environment_names_ordering() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        // Test with current environment not first in input list
+        let environments = vec![
+            "arch-home".to_string(),
+            "macos-work".to_string(),
+            "ubuntu-server".to_string(),
+        ];
+
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        // Current environment should come first, marked with *
+        assert!(result.starts_with("*macos-work"));
+
+        // Should contain all environments
+        assert!(result.contains("arch-home"));
+        assert!(result.contains("ubuntu-server"));
+
+        // Split by comma and check order
+        let parts: Vec<&str> = result.split(", ").collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "*macos-work");
+
+        // Remaining should be alphabetically sorted
+        let remaining: Vec<&str> = parts[1..].to_vec();
+        assert_eq!(remaining, vec!["arch-home", "ubuntu-server"]);
+    }
+
+    #[test]
+    fn test_format_environment_names_single_environment() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        let environments = vec!["macos-work".to_string()];
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        assert_eq!(result, "*macos-work");
+    }
+
+    #[test]
+    fn test_format_environment_names_current_not_present() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        let environments = vec!["arch-home".to_string(), "ubuntu-server".to_string()];
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        // Should not contain asterisk since current environment is not in the list
+        assert!(!result.contains('*'));
+
+        // Should be alphabetically sorted
+        assert_eq!(result, "arch-home, ubuntu-server");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Shell completion generation for the selfie CLI
 //!
 //! This module provides functionality to generate shell completion scripts
-//! for various shells including bash, zsh, fish, and PowerShell. The completions
+//! for various shells including bash, zsh, fish, and `PowerShell`. The completions
 //! enable tab completion for commands, subcommands, options, and flags.
 //!
 //! # Usage
@@ -69,7 +69,7 @@ use crate::cli::ClapCli;
 /// selfie completion fish > ~/.config/fish/completions/selfie.fish
 /// ```
 ///
-/// ## PowerShell
+/// ## `PowerShell`
 /// ```powershell
 /// selfie completion powershell > selfie.ps1
 /// # Then source the file in your PowerShell profile

@@ -115,7 +115,11 @@ async fn dispatch_package_command(
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(package_name, config, reporter).await
         }
-        PackageSubcommands::List => ListCommand::new(config, reporter).handle_command().await,
+        PackageSubcommands::List { all } => {
+            ListCommand::new(config, reporter, *all)
+                .handle_command()
+                .await
+        }
         PackageSubcommands::Info { package_name } => {
             package::info::handle_info(package_name, config, reporter).await
         }

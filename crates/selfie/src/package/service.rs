@@ -207,7 +207,7 @@ pub trait PackageService: Send + Sync {
     /// - Package definition files cannot be read due to permissions
     /// - File system access fails during directory traversal
     /// - The package repository encounters critical errors during listing
-    async fn list(&self) -> Result<EventStream, PackageError>;
+    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError>;
 
     /// Create a new package definition file
     ///
@@ -579,14 +579,22 @@ where
     /// - The package directory cannot be accessed
     /// - Package definition files cannot be read
     /// - File system operations fail
-    async fn list(&self) -> Result<EventStream, PackageError> {
+    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError> {
         Ok(self.execute_operation_with_deps(
             OperationType::PackageList,
             "", // No specific package for list operation
             OperationContext::default(),
             4, // Load packages + process + check status + finalize
             move |repo, command_runner, config, sender, mut progress| async move {
-                list::handle_list(&repo, &config, &command_runner, &sender, &mut progress).await
+                list::handle_list(
+                    &repo,
+                    &config,
+                    &command_runner,
+                    &sender,
+                    &mut progress,
+                    show_all,
+                )
+                .await
             },
         ))
     }
