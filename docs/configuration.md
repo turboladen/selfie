@@ -18,6 +18,40 @@ Selfie looks for configuration files in this order:
 You can also override the configuration directory using the `SELFIE_CONFIG_DIR` environment
 variable.
 
+## Environment Variables
+
+Selfie recognizes several environment variables that affect its behavior:
+
+### `SELFIE_CONFIG_DIR`
+
+Override the default configuration directory location. When set, selfie will look for configuration
+files in this directory instead of `~/.config/selfie/`.
+
+**Example:**
+
+```bash
+export SELFIE_CONFIG_DIR=/custom/config/path
+selfie config validate
+```
+
+### `EDITOR`
+
+Specifies which editor to use for the `selfie package edit` command. This environment variable is
+required when using package editing functionality.
+
+**Example:**
+
+```bash
+export EDITOR=code    # Use VS Code
+export EDITOR=vim     # Use Vim
+export EDITOR=nano    # Use Nano
+
+selfie package edit my-package
+```
+
+If `EDITOR` is not set, the `selfie package edit` command will fail with an error message
+instructing you to set this environment variable.
+
 If no configuration file is found, selfie will create a default configuration at
 `~/.config/selfie/config.yml`.
 
@@ -212,6 +246,26 @@ selfie config validate
 # Supported fields: environment, package_directory, verbose, use_colors,
 # command_timeout, stop_on_error, max_parallel_installations
 ```
+
+### EDITOR Environment Variable Not Set
+
+```
+Error: EDITOR environment variable is not set.
+```
+
+**Solution:** Set the EDITOR environment variable to your preferred editor:
+
+```bash
+# Temporarily for current session
+export EDITOR=code    # VS Code
+export EDITOR=vim     # Vim
+export EDITOR=nano    # Nano
+
+# Permanently in your shell profile (~/.bashrc, ~/.zshrc, etc.)
+echo 'export EDITOR=code' >> ~/.bashrc
+```
+
+This environment variable is required for the `selfie package edit` command.
 
 ## Best Practices
 
