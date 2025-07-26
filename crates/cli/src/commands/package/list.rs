@@ -137,9 +137,9 @@ fn format_status(
         }
         Some(selfie::package::event::CheckResult::Failed { .. }) => {
             if config.use_colors() {
-                console::style("❌ Not installed").red().to_string()
+                console::style("📦 Not installed").cyan().to_string()
             } else {
-                "❌ Not installed".to_string()
+                "📦 Not installed".to_string()
             }
         }
         Some(selfie::package::event::CheckResult::NoCheckCommand) => {
@@ -151,23 +151,23 @@ fn format_status(
         }
         Some(selfie::package::event::CheckResult::CommandNotFound) => {
             if config.use_colors() {
-                console::style("❌ Cmd not found").red().to_string()
+                console::style("🔍 Cmd not found").red().to_string()
             } else {
-                "❌ Cmd not found".to_string()
+                "🔍 Cmd not found".to_string()
             }
         }
         Some(selfie::package::event::CheckResult::Error(_)) => {
             if config.use_colors() {
-                console::style("❌ Error").red().to_string()
+                console::style("💥 Error").red().to_string()
             } else {
-                "❌ Error".to_string()
+                "💥 Error".to_string()
             }
         }
         None => {
             if config.use_colors() {
-                console::style("N/A").dim().to_string()
+                console::style("⚪ N/A").dim().to_string()
             } else {
-                "N/A".to_string()
+                "⚪ N/A".to_string()
             }
         }
     }
@@ -361,5 +361,91 @@ mod tests {
         let error3 = "missing field `name`";
         let cleaned3 = clean_error_message(error3, file_path);
         assert_eq!(cleaned3, "missing field `name`");
+    }
+
+    #[test]
+    fn test_format_status_n_a() {
+        let config = test_config();
+        let config_with_colors = test_config_with_colors();
+
+        // Test N/A status without colors
+        let result = format_status(None, &config);
+        assert_eq!(result, "⚪ N/A");
+
+        // Test N/A status with colors
+        let result_colored = format_status(None, &config_with_colors);
+        assert!(result_colored.contains("⚪ N/A"));
+    }
+
+    #[test]
+    fn test_format_status_not_installed() {
+        let config = test_config();
+        let config_with_colors = test_config_with_colors();
+
+        // Test "Not installed" status without colors
+        let result = format_status(
+            Some(&selfie::package::event::CheckResult::Failed {
+                stdout: String::new(),
+                stderr: "".to_string(),
+                exit_code: Some(1),
+            }),
+            &config,
+        );
+        assert_eq!(result, "📦 Not installed");
+
+        // Test "Not installed" status with colors (should contain the emoji and text)
+        let result_colored = format_status(
+            Some(&selfie::package::event::CheckResult::Failed {
+                stdout: String::new(),
+                stderr: "".to_string(),
+                exit_code: Some(1),
+            }),
+            &config_with_colors,
+        );
+        assert!(result_colored.contains("📦 Not installed"));
+    }
+
+    #[test]
+    fn test_format_status_command_not_found() {
+        let config = test_config();
+        let config_with_colors = test_config_with_colors();
+
+        // Test "Cmd not found" status without colors
+        let result = format_status(
+            Some(&selfie::package::event::CheckResult::CommandNotFound),
+            &config,
+        );
+        assert_eq!(result, "🔍 Cmd not found");
+
+        // Test "Cmd not found" status with colors
+        let result_colored = format_status(
+            Some(&selfie::package::event::CheckResult::CommandNotFound),
+            &config_with_colors,
+        );
+        assert!(result_colored.contains("🔍 Cmd not found"));
+    }
+
+    #[test]
+    fn test_format_status_error() {
+        let config = test_config();
+        let config_with_colors = test_config_with_colors();
+
+        // Test "Error" status without colors
+        let result = format_status(
+            Some(&selfie::package::event::CheckResult::Error(
+                "test error".to_string(),
+            )),
+            &config,
+        );
+        assert_eq!(result, "💥 Error");
+
+        // Test "Error" status with colors
+        let result_colored = format_status(
+            Some(&selfie::package::event::CheckResult::Error(
+                "test error".to_string(),
+            )),
+            &config_with_colors,
+        );
+        assert!(result_colored.contains("💥 Error"));
     }
 }
