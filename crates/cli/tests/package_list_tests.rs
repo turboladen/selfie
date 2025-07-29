@@ -495,3 +495,55 @@ fn test_package_list_default_behavior_filters_by_environment() {
         "Package with no check should show 'No check': {no_check_status}"
     );
 }
+
+#[test]
+fn test_package_list_environment_mismatch_shows_stats() {
+    let temp_dir = setup_default_test_config();
+
+    // Create packages that support different environments but not the current one
+    let packages = vec![
+        PackageBuilder::default()
+            .name("macos-package")
+            .version("1.0.0")
+            .environment("macos", |b| b.install("echo 'Install on macOS'"))
+            .build(),
+        PackageBuilder::default()
+            .name("ubuntu-package")
+            .version("1.0.0")
+            .environment("ubuntu", |b| b.install("echo 'Install on Ubuntu'"))
+            .environment("debian", |b| b.install("echo 'Install on Debian'"))
+            .build(),
+        PackageBuilder::default()
+            .name("multi-env-package")
+            .version("1.0.0")
+            .environment("windows", |b| b.install("echo 'Install on Windows'"))
+            .environment("macos", |b| b.install("echo 'Install on macOS'"))
+            .environment("ubuntu", |b| b.install("echo 'Install on Ubuntu'"))
+            .build(),
+    ];
+
+    for package in packages {
+        add_package(&temp_dir, &package);
+    }
+
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "No packages found for environment 'test-env'.",
+        ))
+        .stdout(predicate::str::contains(
+            "📊 Packages by environment in this directory:",
+        ))
+        .stdout(predicate::str::contains("Environment"))
+        .stdout(predicate::str::contains("Package Count"))
+        .stdout(predicate::str::contains("macos"))
+        .stdout(predicate::str::contains("ubuntu"))
+        .stdout(predicate::str::contains("windows"))
+        .stdout(predicate::str::contains("debian"))
+        .stdout(predicate::str::contains("💡 Try:"))
+        .stdout(predicate::str::contains("--environment <env>"))
+        .stdout(predicate::str::contains("--all"));
+}

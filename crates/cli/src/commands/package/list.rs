@@ -60,15 +60,21 @@ fn handle_list_event(event: &PackageEvent, config: &AppConfig, show_all: bool) -
             // Show package directory path
             println!("📁 Package directory: {}", package_list.package_directory);
 
-            if package_list.valid_packages.is_empty() && package_list.invalid_packages.is_empty() {
+            if package_list.valid_packages.is_empty() && package_list.environment_stats.is_empty() {
                 println!("No packages found.");
+            } else if package_list.valid_packages.is_empty() {
+                println!(
+                    "No packages found for environment '{}'.",
+                    config.environment()
+                );
+                display_environment_stats(&package_list.environment_stats, config);
             } else {
                 display_packages_table(&package_list.valid_packages, config, show_all);
+            }
 
-                // Display invalid packages in a separate table to stderr
-                if !package_list.invalid_packages.is_empty() {
-                    display_invalid_packages_table(&package_list.invalid_packages, config);
-                }
+            // Always display invalid packages if they exist
+            if !package_list.invalid_packages.is_empty() {
+                display_invalid_packages_table(&package_list.invalid_packages, config);
             }
             true // Handled
         }
@@ -239,6 +245,65 @@ fn clean_error_message(error: &str, file_path: &str) -> String {
         }
     } else {
         error.to_string()
+    }
+}
+
+fn display_environment_stats(
+    environment_stats: &std::collections::HashMap<String, usize>,
+    config: &AppConfig,
+) {
+    if environment_stats.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("📊 Packages by environment in this directory:");
+
+    // Sort environments by package count (descending), then by name
+    let mut env_counts: Vec<(String, usize)> = environment_stats
+        .iter()
+        .map(|(env, count)| (env.clone(), *count))
+        .collect();
+    env_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let mut table = common::create_formatted_table();
+    table.set_header(vec!["Environment", "Package Count"]);
+
+    for (env_name, count) in env_counts {
+        let env_styled = if config.use_colors() {
+            if env_name == config.environment() {
+                console::style(&env_name).green().bold().to_string()
+            } else {
+                env_name.clone()
+            }
+        } else {
+            env_name.clone()
+        };
+
+        let count_str = count.to_string();
+        let count_styled = if config.use_colors() {
+            console::style(count_str).cyan().to_string()
+        } else {
+            count_str
+        };
+
+        table.add_row(vec![env_styled, count_styled]);
+    }
+
+    println!("{table}");
+
+    if config.use_colors() {
+        println!(
+            "💡 Try: {} to see packages for a different environment",
+            console::style("--environment <env>").yellow()
+        );
+        println!(
+            "   or: {} to see all packages regardless of environment",
+            console::style("--all").yellow()
+        );
+    } else {
+        println!("💡 Try: --environment <env> to see packages for a different environment");
+        println!("   or: --all to see all packages regardless of environment");
     }
 }
 
@@ -447,5 +512,187 @@ mod tests {
             &config_with_colors,
         );
         assert!(result_colored.contains("💥 Error"));
+    }
+
+    #[test]
+    fn test_display_environment_stats_empty() {
+        let config = test_config();
+        let environment_stats = std::collections::HashMap::new();
+
+        // Should not panic with empty stats
+        display_environment_stats(&environment_stats, &config);
+    }
+
+    #[test]
+    fn test_display_environment_stats_single_environment() {
+        let config = test_config();
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert("macos".to_string(), 3);
+
+        // Should not panic with single environment
+        display_environment_stats(&environment_stats, &config);
+    }
+
+    #[test]
+    fn test_display_environment_stats_multiple_environments() {
+        let config = test_config();
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert("macos".to_string(), 3);
+        environment_stats.insert("ubuntu".to_string(), 2);
+        environment_stats.insert("windows".to_string(), 1);
+
+        // Should not panic with multiple environments
+        display_environment_stats(&environment_stats, &config);
+    }
+
+    #[test]
+    fn test_display_environment_stats_with_colors() {
+        let config = test_config_with_colors();
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert(TEST_ENV.to_string(), 2);
+        environment_stats.insert("other-env".to_string(), 1);
+
+        // Should not panic with colors enabled
+        display_environment_stats(&environment_stats, &config);
+    }
+
+    #[test]
+    fn test_handle_list_event_empty_packages_and_stats() {
+        let config = test_config();
+        let package_list = selfie::package::event::PackageListData {
+            valid_packages: vec![],
+            invalid_packages: vec![],
+            current_environment: TEST_ENV.to_string(),
+            package_directory: "/test/path".to_string(),
+            environment_stats: std::collections::HashMap::new(),
+        };
+
+        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list,
+        };
+
+        // Should handle empty packages and empty stats (shows "No packages found.")
+        let result = handle_list_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_no_packages_but_has_environment_stats() {
+        let config = test_config();
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert("macos".to_string(), 3);
+        environment_stats.insert("ubuntu".to_string(), 2);
+
+        let package_list = selfie::package::event::PackageListData {
+            valid_packages: vec![],
+            invalid_packages: vec![],
+            current_environment: TEST_ENV.to_string(),
+            package_directory: "/test/path".to_string(),
+            environment_stats,
+        };
+
+        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list,
+        };
+
+        // Should handle no packages but with environment stats (shows environment stats)
+        let result = handle_list_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_with_valid_packages() {
+        let config = test_config();
+        let package_item = selfie::package::event::PackageListItem {
+            name: "test-package".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(selfie::package::event::CheckResult::Success),
+        };
+
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert(TEST_ENV.to_string(), 1);
+
+        let package_list = selfie::package::event::PackageListData {
+            valid_packages: vec![package_item],
+            invalid_packages: vec![],
+            current_environment: TEST_ENV.to_string(),
+            package_directory: "/test/path".to_string(),
+            environment_stats,
+        };
+
+        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list,
+        };
+
+        // Should handle valid packages (shows package table)
+        let result = handle_list_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_with_invalid_packages_only() {
+        let config = test_config();
+        let invalid_package = selfie::package::event::InvalidPackageInfo {
+            path: "/test/invalid.yml".to_string(),
+            error: "missing field `name`".to_string(),
+        };
+
+        let package_list = selfie::package::event::PackageListData {
+            valid_packages: vec![],
+            invalid_packages: vec![invalid_package],
+            current_environment: TEST_ENV.to_string(),
+            package_directory: "/test/path".to_string(),
+            environment_stats: std::collections::HashMap::new(),
+        };
+
+        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list,
+        };
+
+        // Should handle invalid packages only (shows "No packages found." + invalid table)
+        let result = handle_list_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_mixed_packages_and_environment_stats() {
+        let config = test_config();
+        let package_item = selfie::package::event::PackageListItem {
+            name: "test-package".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(selfie::package::event::CheckResult::Success),
+        };
+
+        let invalid_package = selfie::package::event::InvalidPackageInfo {
+            path: "/test/invalid.yml".to_string(),
+            error: "missing field `name`".to_string(),
+        };
+
+        let mut environment_stats = std::collections::HashMap::new();
+        environment_stats.insert(TEST_ENV.to_string(), 1);
+        environment_stats.insert("other-env".to_string(), 2);
+
+        let package_list = selfie::package::event::PackageListData {
+            valid_packages: vec![package_item],
+            invalid_packages: vec![invalid_package],
+            current_environment: TEST_ENV.to_string(),
+            package_directory: "/test/path".to_string(),
+            environment_stats,
+        };
+
+        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list,
+        };
+
+        // Should handle mixed scenario (shows package table + invalid table)
+        let result = handle_list_event(&event, &config, false);
+        assert!(result);
     }
 }

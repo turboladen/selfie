@@ -510,6 +510,7 @@ pub struct PackageListData {
     pub invalid_packages: Vec<InvalidPackageInfo>,
     pub current_environment: String,
     pub package_directory: String,
+    pub environment_stats: std::collections::HashMap<String, usize>,
 }
 
 /// Information about a package in the list

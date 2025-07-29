@@ -2,6 +2,8 @@
 //! Helps break down the pieces of running the `package list` command.
 //!
 
+use std::collections::HashMap;
+
 use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
@@ -100,11 +102,23 @@ where
         })
         .collect();
 
+    // Calculate environment statistics from all packages before filtering
+    let mut environment_stats: HashMap<String, usize> = HashMap::new();
+    for package in &valid_packages {
+        for env_name in package.environments().keys() {
+            *environment_stats.entry(env_name.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Calculate the count before moving the vector
+    let valid_count = valid_package_items.len();
+
     let package_list_data = PackageListData {
         valid_packages: valid_package_items,
         invalid_packages: invalid_package_items,
         current_environment: config.environment().to_string(),
         package_directory: config.package_directory().display().to_string(),
+        environment_stats,
     };
 
     // Send structured data event
@@ -115,7 +129,7 @@ where
 
     let success_msg = format!(
         "Package listing completed with {} valid package(s){}",
-        valid_packages.len(),
+        valid_count,
         if invalid_packages.is_empty() {
             String::new()
         } else {

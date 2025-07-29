@@ -99,12 +99,22 @@ impl EventProcessor {
     fn handle_event(&self, event: PackageEvent, exit_code: &mut i32) -> bool {
         match event {
             PackageEvent::Started { operation_info } => {
-                self.reporter.report_info(format!(
-                    "{} package '{}' in environment '{}'",
-                    operation_info.operation_type.to_string().to_title_case(),
-                    operation_info.package_name,
-                    operation_info.environment
-                ));
+                // Handle list operations differently since they don't have a specific package name
+                let message = if operation_info.package_name.is_empty() {
+                    format!(
+                        "{} in environment '{}'",
+                        operation_info.operation_type.to_string().to_title_case(),
+                        operation_info.environment
+                    )
+                } else {
+                    format!(
+                        "{} package '{}' in environment '{}'",
+                        operation_info.operation_type.to_string().to_title_case(),
+                        operation_info.package_name,
+                        operation_info.environment
+                    )
+                };
+                self.reporter.report_info(message);
             }
 
             PackageEvent::Progress { message, .. } => {
@@ -201,7 +211,9 @@ trait ToTitleCase {
 
 impl ToTitleCase for str {
     fn to_title_case(&self) -> String {
-        let mut chars = self.chars();
+        // Replace underscores with spaces and convert to title case
+        let cleaned = self.replace('_', " ");
+        let mut chars = cleaned.chars();
         match chars.next() {
             None => String::new(),
             Some(first) => {
@@ -360,12 +372,12 @@ mod tests {
         assert_eq!(exit_code, 1);
     }
 
-    #[tokio::test]
-    async fn test_title_case_with_different_operations() {
+    #[test]
+    fn test_title_case_with_different_operations() {
         // Test the ToTitleCase trait with operation names that might come from the system
-        assert_eq!("package_check".to_title_case(), "Package_check");
-        assert_eq!("package_install".to_title_case(), "Package_install");
-        assert_eq!("package_validate".to_title_case(), "Package_validate");
-        assert_eq!("PACKAGE_LIST".to_title_case(), "Package_list");
+        assert_eq!("package_check".to_title_case(), "Package check");
+        assert_eq!("package_install".to_title_case(), "Package install");
+        assert_eq!("package_validate".to_title_case(), "Package validate");
+        assert_eq!("PACKAGE_LIST".to_title_case(), "Package list");
     }
 }
