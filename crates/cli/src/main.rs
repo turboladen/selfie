@@ -56,13 +56,16 @@ use crate::{cli::ClapCli, commands::dispatch_command};
 ///
 /// * `verbose` - Whether to enable verbose (DEBUG) logging
 fn init_tracing(verbose: bool) {
-    let level = if verbose {
-        tracing::Level::DEBUG
+    if verbose {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
     } else {
-        tracing::Level::ERROR
-    };
-
-    tracing_subscriber::fmt().with_max_level(level).init();
+        // Use a no-op subscriber to disable output while keeping trace calls
+        let subscriber = tracing_subscriber::registry();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Failed to set tracing subscriber");
+    }
 }
 
 /// Main entry point for the selfie CLI application
