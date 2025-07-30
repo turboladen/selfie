@@ -52,12 +52,8 @@ package-directory/
 ```yaml
 environments:
   ubuntu:
-    install: |
-      cd "$SELFIE_CONFIG_DIR"
-      ./docker-scripted/ubuntu_install.sh
-    check: |
-      cd "$SELFIE_CONFIG_DIR"
-      ./docker-scripted/check.sh
+    install: ./docker-scripted/ubuntu_install.sh
+    check: ./docker-scripted/check.sh
 ```
 
 ### Pattern 2: Script with Common Utilities
@@ -66,7 +62,6 @@ environments:
 environments:
   arch:
     install: |
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       log_info "Installing Docker on Arch Linux..."
@@ -82,7 +77,6 @@ environments:
 environments:
   development:
     install: |
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       # Install Docker using OS-specific script
@@ -146,7 +140,7 @@ setup_docker_repository() {
 You can test individual scripts outside of selfie:
 
 ```bash
-# Test the Ubuntu installation script
+# Test the Ubuntu installation script (from package directory)
 cd docs/examples
 chmod +x docker-scripted/*.sh
 ./docker-scripted/ubuntu_install.sh
@@ -164,8 +158,8 @@ print_system_info
 Scripts can access environment variables and selfie context:
 
 ```bash
-# Package directory is available via environment variable
-cd "$SELFIE_CONFIG_DIR"
+# Commands automatically run in package directory
+# No need to change directories manually
 
 # User information
 echo "Installing for user: $USER"
@@ -214,16 +208,17 @@ check_prerequisites() {
 
 When using external scripts with selfie:
 
-1. **Working Directory**: Scripts run from selfie's working directory, so use
-   `cd "$SELFIE_CONFIG_DIR"` to change to the package directory first
+1. **Working Directory**: Commands automatically run in the package directory (where the `.yaml`
+   file is located), so you can use relative paths like `./scripts/install.sh` directly
 2. **Error Handling**: Use `set -e` or proper error checking to ensure selfie detects failures
 3. **Output**: Use consistent logging for better user experience
 4. **Permissions**: Ensure scripts are executable (`chmod +x`)
-5. **Environment Variables**: `SELFIE_CONFIG_DIR` is available to locate your package directory
+5. **Relative Paths**: Use paths relative to the package directory (e.g.,
+   `./docker-scripted/common.sh`)
 
 ## Best Practices
 
-1. **Always use `cd "$SELFIE_CONFIG_DIR"`** to navigate to package directory first
+1. **Use relative paths** since commands automatically run in the package directory
 2. **Include proper error handling** with `set -e` in scripts
 3. **Use shared utilities** from `common.sh` for consistency
 4. **Document script purpose** and usage in comments

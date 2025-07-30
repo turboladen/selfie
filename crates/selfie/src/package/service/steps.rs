@@ -149,9 +149,13 @@ where
         }
     });
 
-    // Execute the command with streaming channel
+    // Wrap the command to run in the package directory
+    let package_dir = config.package_directory();
+    let wrapped_cmd = format!("cd '{}' && {}", package_dir.display(), cmd);
+
+    // Execute the wrapped command with streaming channel
     let result = command_runner
-        .execute_streaming(cmd, config.command_timeout(), tx)
+        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx)
         .await;
 
     // Wait for the output task to finish and handle any task errors

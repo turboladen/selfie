@@ -59,7 +59,7 @@ fn init_tracing(verbose: bool) {
     let level = if verbose {
         tracing::Level::DEBUG
     } else {
-        tracing::Level::WARN
+        tracing::Level::ERROR
     };
 
     tracing_subscriber::fmt().with_max_level(level).init();

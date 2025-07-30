@@ -15,26 +15,21 @@ environments:
   macos:
     install: |
       # Source common utilities and run macOS-specific installation script
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
       ./docker-scripted/macos_install.sh
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   ubuntu:
     install: |
-      # Change to package directory and run Ubuntu installation script
-      cd "$SELFIE_CONFIG_DIR"
+      # Run Ubuntu installation script (automatic working directory)
       ./docker-scripted/ubuntu_install.sh
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   debian:
     install: |
       # Debian can reuse the Ubuntu script with minor modifications
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       log_info "Installing Docker on Debian (using Ubuntu-compatible method)..."
@@ -45,13 +40,11 @@ environments:
       /tmp/debian_install.sh
       rm /tmp/debian_install.sh
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   arch:
     install: |
       # Simple Arch installation using common utilities
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       print_system_info
@@ -63,14 +56,12 @@ environments:
 
       verify_docker_installation
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   fedora:
     install: |
       # Fedora installation with error handling
       set -e
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       log_info "Installing Docker on Fedora..."
@@ -102,16 +93,13 @@ environments:
       start_docker_service
       verify_docker_installation
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   ci:
     install: |
       # CI environments get the specialized CI script
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/ci_install.sh
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
   windows:
@@ -140,7 +128,6 @@ environments:
   development:
     install: |
       # Development environment with additional tools
-      cd "$SELFIE_CONFIG_DIR"
       source ./docker-scripted/common.sh
 
       log_info "Setting up Docker for development environment..."
@@ -187,7 +174,6 @@ environments:
       verify_docker_installation
       log_success "Development environment setup complete!"
     check: |
-      cd "$SELFIE_CONFIG_DIR"
       ./docker-scripted/check.sh
 
 # Dependencies can also reference other scripted packages
