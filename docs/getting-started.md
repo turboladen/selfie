@@ -84,23 +84,6 @@ selfie completion fish > ~/.config/fish/completions/selfie.fish
 
 Fish will automatically load the completions on next shell start.
 
-#### PowerShell
-
-PowerShell profile locations vary by platform and PowerShell version:
-
-```powershell
-# Generate the completion script
-selfie completion powershell > selfie.ps1
-
-# Add to your PowerShell profile (location varies by system)
-# You may need to check $PROFILE to find your profile path
-. ./selfie.ps1
-```
-
-Consult `Get-Help about_Profiles` for your system's profile locations.
-
-Once installed, you'll have tab completion for all selfie commands, subcommands, and options.
-
 ### 2. Create Configuration Directory
 
 Selfie stores its configuration and package files in `~/.config/selfie/`:

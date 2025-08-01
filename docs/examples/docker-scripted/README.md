@@ -75,19 +75,22 @@ environments:
 
 ```yaml
 environments:
-  development:
+  fedora:
     install: |
       source ./docker-scripted/common.sh
 
-      # Install Docker using OS-specific script
-      case "$(detect_os)" in
-        ubuntu) ./docker-scripted/ubuntu_install.sh ;;
-        macos)  ./docker-scripted/macos_install.sh ;;
-        *)      log_error "Unsupported OS"; exit 1 ;;
-      esac
+      log_info "Installing Docker on Fedora..."
 
-      # Add development-specific configuration
-      setup_development_environment
+      # Install prerequisites and add repository
+      sudo dnf install -y dnf-plugins-core
+      sudo dnf config-manager --add-repo \
+        https://download.docker.com/linux/fedora/docker-ce.repo
+
+      # Install Docker and configure
+      sudo dnf install -y docker-ce docker-ce-cli containerd.io
+      add_user_to_docker_group
+      start_docker_service
+      verify_docker_installation
 ```
 
 ## Script Guidelines

@@ -88,6 +88,8 @@ homepage: https://nodejs.org
 environments:
   macos:
     install: |
+      set -e
+
       fnm install --lts
       fnm use lts-latest
       fnm default lts-latest
@@ -121,6 +123,8 @@ homepage: https://github.com/astral-sh/uv
 environments:
   macos:
     install: |
+      set -e
+
       # Install uv via official installer (preferred method)
       curl -LsSf https://astral.sh/uv/install.sh | sh
       # Source the environment to make uv available
@@ -137,6 +141,8 @@ homepage: https://python.org
 environments:
   macos:
     install: |
+      set -e
+
       # Install Python 3.11 via uv
       uv python install 3.11
       # Set as default for projects
@@ -185,6 +191,7 @@ homepage: https://www.rust-lang.org
 environments:
   macos:
     install: |
+      set -e
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       source ~/.cargo/env
       rustup component add rust-analyzer

@@ -11,6 +11,24 @@ tool is available via multiple package managers you're already using, and instal
 conflicts with your preferred setup. Define your installation preferences once, then let selfie
 handle the details.
 
+## Quick Navigation
+
+### 🚀 Getting Started
+
+- [**Installation**](#installation) - Get selfie up and running
+- [**Quick Start**](#quick-start) - Your first package in minutes
+- [**Documentation**](#documentation) - Complete guides and references
+
+### 📖 Core Concepts
+
+- [**Package Files Reference**](docs/package-files.md) - Complete package definition format
+- [**Example Packages**](docs/examples/) - Ready-to-use package definitions
+- [**Configuration Guide**](docs/configuration.md) - Environment setup and options
+
+### 🎯 Real-World Usage
+
+- [**Polyglot Developer**](docs/use-cases/polyglot-developer.md) - Individual developer workflow
+
 ## The Problem
 
 As developers, we use tools from everywhere:
@@ -20,7 +38,7 @@ As developers, we use tools from everywhere:
 - `cargo install bat` for Rust tools, but `apt install fd-find` for system utilities
 - **Package manager conflicts**: `yaml-language-server` is available via homebrew, but that would
   install Node.js via homebrew too, conflicting with your `fnm`-managed Node.js versions
-- **Version managers**: You use `fnm` for Node.js, `pyenv` for Python, `rustup` for Rust, but some
+- **Version managers**: You use `fnm` for Node.js, `uv` for Python, `rustup` for Rust, but some
   tools want to install language runtimes via the OS package manager
 - Different commands for checking if things are installed
 - Different approaches across team members and environments
@@ -68,14 +86,57 @@ inconsistency.
 - **Flexibility**: Any shell command can be a package
 - **Environment-aware**: Different installation methods for macOS, Linux, CI, work, home, etc.
 
+## How Selfie Is Different
+
+### Why not use existing package managers?
+
+As a developer, you can't always get everything you need from one package manager:
+
+- **OS package managers** (apt/yum/pacman/homebrew): Great for system tools, but often have outdated
+  versions of development tools, and you lose control over language runtime versions
+- **Language package managers** (npm/pip/gem/cargo): Essential for language-specific tools, but
+  limited to their ecosystems and don't handle system dependencies
+- **Specialized tools** like Mason (Neovim): Excellent for editor tooling, but tied to specific
+  applications, limited package registry, and don't work outside their context out of the box
+- **Universal solutions** (Nix/Guix): Powerful but complex, steep learning curve, and can conflict
+  with existing workflows
+
+### What makes selfie different?
+
+Selfie is a **meta-package manager** that orchestrates your existing package managers based on your
+preferences and environment. Unlike traditional package managers:
+
+- **Personal**: You control installation methods and preferences
+- **Simple**: Package definitions can be as simple as a name, version, environment, and install
+  command
+- **Multi-platform**: Same package definition works anywhere you can run a shell script: macOS,
+  Linux, CI, k8s, VMs, etc.
+- **Multi-manager**: Use homebrew, apt, npm, cargo, etc. in the same workflow
+- **Flexible**: Works with any installation method, not just package repositories
+
+The reality is you probably need multiple package managers, but remembering which tool comes from
+where, and avoiding conflicts between them, is the real challenge. Selfie solves the "which package
+manager?" problem without forcing you into a single ecosystem.
+
+## Installation
+
+### From Source
+
+```bash
+git clone https://github.com/turboladen/selfie.git
+cd selfie
+cargo install --path crates/cli
+```
+
+### Verify Installation
+
+```bash
+selfie --help
+```
+
 ## Quick Start
 
-1. **Install the selfie CLI:**
-   ```bash
-   git clone https://github.com/turboladen/selfie.git
-   cd selfie
-   cargo install --path crates/cli
-   ```
+1. **Install the selfie CLI** (see [Installation](#installation) above)
 
 2. **Create your config file:**
    ```bash
@@ -105,55 +166,69 @@ inconsistency.
    selfie package install ripgrep
    ```
 
-## Real-World Usage
-
-See how selfie works for polyglot developers:
-
-- [Polyglot developer workflow](docs/use-cases/polyglot-developer.md) - Managing tools across
-  homebrew, npm, pip, cargo, etc.
-
 ## Documentation
 
-- [Getting Started Guide](docs/getting-started.md) - Detailed setup and first steps
-- [Package File Reference](docs/package-files.md) - Complete package definition format
-- [Configuration Guide](docs/configuration.md) - Environment setup and options
-- [Example Packages](docs/examples/) - Ready-to-use package definitions
+### Complete Documentation
 
-## How It's Different
+- [**Getting Started Guide**](docs/getting-started.md) - Detailed setup and first steps
+- [**Configuration Guide**](docs/configuration.md) - Environment setup and options
+- [**Package Files Reference**](docs/package-files.md) - Complete package definition format
+- [**Example Packages**](docs/examples/) - Ready-to-use package definitions
 
-As a developer, you can't get everything from one package manager, nor would you want to:
+### Use Cases
 
-- **OS package managers** (apt/yum/pacman/homebrew): Great for system tools, but often have outdated
-  versions of development tools, and you lose control over language runtime versions
-- **Language package managers** (npm/pip/gem/cargo): Essential for language-specific tools, but
-  limited to their ecosystems and don't handle system dependencies
-- **Specialized tools** like Mason (Neovim): Excellent for editor tooling, but tied to specific
-  applications, limited package registry, and don't work outside their context out of the box
-- **Universal solutions** (Nix/Guix): Powerful but complex, steep learning curve, and can conflict
-  with existing workflows
+- [**Polyglot Developer**](docs/use-cases/polyglot-developer.md) - Managing tools across homebrew,
+  npm, pip, cargo, etc.
 
-The reality is you need multiple package managers, but remembering which tool comes from where, and
-avoiding conflicts between them, is the real challenge.
+### Documentation Structure
 
-Selfie is a **meta-package manager** that orchestrates your existing package managers based on your
-preferences and environment, solving the "which package manager?" problem without forcing you into a
-single ecosystem.
-
-## Installation
-
-### From Source
-
-```bash
-git clone https://github.com/turboladen/selfie.git
-cd selfie
-cargo install --path crates/cli
+```
+docs/
+├── getting-started.md           # Installation and first steps
+├── configuration.md             # Setup and configuration options
+├── package-files.md             # Package definition reference
+├── use-cases/                   # Real-world scenarios
+│   └── polyglot-developer.md    # Individual developer workflow
+└── examples/                    # Example package definitions
+    ├── README.md                # Guide to examples
+    ├── ripgrep.yaml             # Multi-platform text search tool
+    ├── node.yaml                # Node.js with version management
+    ├── docker.yaml              # Container platform setup
+    └── ...                      # More tool examples
 ```
 
-### Verify Installation
+## Help and Support
+
+### CLI Help
+
+Every command has built-in help:
 
 ```bash
-selfie --help
+selfie --help                    # Main help
+selfie package --help           # Package commands
+selfie package install --help   # Specific command help
 ```
+
+### Debugging
+
+Use verbose mode for detailed output:
+
+```bash
+selfie --verbose package install package-name
+```
+
+### Common Issues
+
+- **Permission errors**: Check if install commands need `sudo`
+- **Command not found**: Verify PATH includes tool installation locations
+- **Package validation fails**: Use `selfie package validate package-name`
+- **Configuration issues**: Run `selfie config validate`
+
+### Community
+
+- **Issues**: Report bugs and request features in [GitHub Issues](../../issues)
+- **Discussions**: Share usage patterns and ask questions in [GitHub Discussions](../../discussions)
+- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
 
 ## Status
 

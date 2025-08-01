@@ -215,6 +215,7 @@ pub fn assert_no_errors(events: &[PackageEvent]) {
 /// let operation_info = create_test_operation_info("package_check", "test-package", "test-env");
 /// let event = PackageEvent::Started { operation_info };
 /// ```
+#[must_use]
 pub fn create_test_operation_info(
     operation_type: &str,
     package_name: &str,

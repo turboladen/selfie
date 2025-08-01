@@ -19,16 +19,19 @@ environments:
       ./docker-scripted/macos_install.sh
     check: |
       ./docker-scripted/check.sh
+    dependencies:
+      - homebrew
 
   ubuntu:
     install: |
-      # Run Ubuntu installation script (automatic working directory)
       ./docker-scripted/ubuntu_install.sh
     check: |
       ./docker-scripted/check.sh
 
   debian:
     install: |
+      set -e
+
       # Debian can reuse the Ubuntu script with minor modifications
       source ./docker-scripted/common.sh
 
@@ -44,7 +47,8 @@ environments:
 
   arch:
     install: |
-      # Simple Arch installation using common utilities
+      set -e
+
       source ./docker-scripted/common.sh
 
       print_system_info
@@ -60,7 +64,6 @@ environments:
 
   fedora:
     install: |
-      # Fedora installation with error handling
       set -e
       source ./docker-scripted/common.sh
 
@@ -101,81 +104,3 @@ environments:
       ./docker-scripted/ci_install.sh
     check: |
       ./docker-scripted/check.sh
-
-  windows:
-    install: |
-      # Windows PowerShell script would go in a separate .ps1 file
-      # For now, inline the Windows installation
-      $ErrorActionPreference = "Stop"
-
-      $url = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-      $output = "$env:TEMP\DockerDesktopInstaller.exe"
-
-      Write-Host "Downloading Docker Desktop for Windows..."
-      Invoke-WebRequest -Uri $url -OutFile $output
-
-      Write-Host "Installing Docker Desktop..."
-      Start-Process -FilePath $output -ArgumentList "install", "--quiet" -Wait
-
-      Remove-Item $output
-      Write-Host "Docker Desktop installed. Please restart your computer and start Docker Desktop manually."
-    check: |
-      docker --version && `
-      docker info && `
-      docker compose version
-
-  # Demonstrates script composition and reusability
-  development:
-    install: |
-      # Development environment with additional tools
-      source ./docker-scripted/common.sh
-
-      log_info "Setting up Docker for development environment..."
-
-      # First install Docker using the appropriate OS script
-      case "$(detect_os)" in
-        ubuntu|debian)
-          ./docker-scripted/ubuntu_install.sh
-          ;;
-        macos)
-          ./docker-scripted/macos_install.sh
-          ;;
-        arch)
-          sudo pacman -S --noconfirm docker docker-compose
-          ;;
-        *)
-          log_error "Unsupported OS for development setup"
-          exit 1
-          ;;
-      esac
-
-      # Then add development-specific configurations
-      log_info "Configuring Docker for development..."
-
-      # Create docker group if it doesn't exist
-      if ! getent group docker >/dev/null; then
-        sudo groupadd docker
-      fi
-
-      add_user_to_docker_group
-      start_docker_service
-
-      # Install additional development tools
-      if command_exists pip; then
-        pip install --user docker-compose
-      fi
-
-      # Create useful aliases
-      echo "# Docker development aliases" >> ~/.bashrc
-      echo "alias dps='docker ps'" >> ~/.bashrc
-      echo "alias dimg='docker images'" >> ~/.bashrc
-      echo "alias dex='docker exec -it'" >> ~/.bashrc
-
-      verify_docker_installation
-      log_success "Development environment setup complete!"
-    check: |
-      ./docker-scripted/check.sh
-
-# Dependencies can also reference other scripted packages
-dependencies:
-  - homebrew # For macOS environments

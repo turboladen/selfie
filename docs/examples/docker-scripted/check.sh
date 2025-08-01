@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # Docker check script
 # This script verifies that Docker is properly installed and working

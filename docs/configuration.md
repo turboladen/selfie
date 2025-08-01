@@ -107,7 +107,6 @@ environment: macos
 - `macos`, `macos-work`, `macos-home` - macOS systems with context
 - `ubuntu`, `debian`, `fedora`, `arch` - Linux distributions
 - `linux-dev`, `linux-ci` - Linux with context
-- `windows` - Windows systems
 - `ci`, `github-actions` - CI/CD environments
 - `dev`, `staging`, `prod` - Deployment environments
 

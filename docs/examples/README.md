@@ -1,8 +1,6 @@
 # Example Package Definitions
 
 This directory contains example package definitions for common development tools and utilities.
-These examples demonstrate best practices for creating selfie packages, including how to handle
-package manager conflicts and use version managers properly for your personal development setup.
 
 ## Usage
 
@@ -27,14 +25,6 @@ Most examples include configurations for:
 - **Ubuntu** - Using version managers, apt, and direct downloads
 - **Arch Linux** - Using pacman and version managers
 - **CI** - Using direct downloads and binaries for reproducibility
-
-## Package Manager Conflicts
-
-These examples demonstrate how to avoid common conflicts:
-
-- **Node.js tools**: Use npm with fnm-managed Node.js instead of homebrew's node
-- **Python tools**: Use pip with pyenv-managed Python instead of system python
-- **Language servers**: Install via language package managers to match your runtime setup
 
 ## Customization Tips
 
@@ -86,6 +76,7 @@ environments:
 environments:
   ubuntu:
     install: |
+      set -e
       curl -Lo tool https://releases.example.com/tool-linux-amd64
       sudo install tool /usr/local/bin/
     check: which tool
@@ -113,6 +104,8 @@ check: tool --version | grep -q "expected-version"
 
 ```yaml
 install: |
+  # Exit on error
+  set -e
   # Download
   curl -Lo installer.sh https://get.example.com/install.sh
   # Make executable

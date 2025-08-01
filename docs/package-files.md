@@ -16,13 +16,13 @@ Package files follow this basic structure:
 ```yaml
 name: package-name
 version: 1.0.0
-description: Brief description of what this package provides
-homepage: https://example.com
+description: (optional) Brief description of what this package provides
+homepage: (optional) https://example.com
 
 environments:
   environment-name:
     install: command to install the package
-    check: command to verify installation
+    check: (optional) command to verify installation
     dependencies:
       - dependency-package-1
       - dependency-package-2
@@ -42,6 +42,14 @@ The package name, which must match the filename (without `.yaml` extension).
 name: ripgrep # for file ripgrep.yaml
 ```
 
+### `version`
+
+Semantic version of your package definition (not the tool version).
+
+```yaml
+version: 1.2.0
+```
+
 ### `environments`
 
 A map of environment names to their installation configurations. At least one environment must be
@@ -55,14 +63,6 @@ environments:
 ```
 
 ## Optional Fields
-
-### `version`
-
-Semantic version of your package definition (not the tool version).
-
-```yaml
-version: 1.2.0
-```
 
 ### `description`
 
@@ -98,9 +98,9 @@ install: brew install ripgrep
 
 ```yaml
 install: |
-  curl -Lo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/13.0.0/ripgrep-13.0.0-x86_64-unknown-linux-musl.tar.gz
-  tar xzf ripgrep.tar.gz
-  sudo cp ripgrep-13.0.0-x86_64-unknown-linux-musl/rg /usr/local/bin/
+  curl -Lo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/13.0.0/ripgrep-13.0.0-x86_64-unknown-linux-musl.tar.gz \
+    && tar xzf ripgrep.tar.gz \
+    && sudo cp ripgrep-13.0.0-x86_64-unknown-linux-musl/rg /usr/local/bin/
 ```
 
 > **Working Directory**: All install and check commands automatically run in the package directory
@@ -127,8 +127,9 @@ install: |
 
 ### `check`
 
-Command to verify the package is installed correctly. Should exit with code 0 if installed, non-zero
-if not.
+Optional command to verify the package is installed correctly. Should exit with code 0 if installed,
+non-zero if not. If not given, executing the `check` command will always behave as if the package is
+not yet installed.
 
 **Simple binary check:**
 
@@ -147,8 +148,8 @@ check: node --version | grep -q "v20"
 ```yaml
 check: |
   which docker && \
-  docker --version && \
-  docker info > /dev/null 2>&1
+    docker --version && \
+    docker info > /dev/null 2>&1
 ```
 
 **Service status check:**
@@ -185,6 +186,8 @@ or other resources without needing to manually change directories.
 environments:
   macos:
     install: |
+      set -e
+
       # These paths are relative to the package directory
       source ./scripts/common.sh
       ./scripts/macos_install.sh
@@ -208,10 +211,6 @@ package-directory/
     └── check.sh           # Verification script
 ```
 
-> **Important**: You no longer need to manually change directories with `cd` commands in your
-> package scripts. Commands like `cd "$SELFIE_CONFIG_DIR"` or `cd /path/to/package/directory` are
-> unnecessary and should be removed.
-
 ### Error Handling
 
 For multi-line scripts, consider adding proper error handling to ensure scripts exit immediately if
@@ -234,6 +233,8 @@ You can use environment variables in your commands:
 
 ```yaml
 install: |
+  set -e
+
   export VERSION=${TERRAFORM_VERSION:-1.6.0}
   wget https://releases.hashicorp.com/terraform/${VERSION}/terraform_${VERSION}_linux_amd64.zip
   unzip terraform_${VERSION}_linux_amd64.zip
@@ -259,9 +260,9 @@ Install tools in user space rather than system-wide:
 
 ```yaml
 install: |
-  mkdir -p ~/.local/bin
-  curl -Lo ~/.local/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
-  chmod +x ~/.local/bin/jq
+  mkdir -p ~/.local/bin \
+    && curl -Lo ~/.local/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 \
+    && chmod +x ~/.local/bin/jq
 check: ~/.local/bin/jq --version
 ```
 
@@ -271,14 +272,18 @@ Perform additional configuration after installation:
 
 ```yaml
 install: |
+  set -e
   brew install docker
+
   # Start Docker Desktop
   open /Applications/Docker.app
+
   # Wait for Docker to start
   while ! docker info > /dev/null 2>&1; do
     echo "Waiting for Docker to start..."
     sleep 5
   done
+
   echo "Docker is ready!"
 ```
 
@@ -301,8 +306,8 @@ environments:
 environments:
   ubuntu:
     install: |
-      sudo apt update
-      sudo apt install -y package-name
+      sudo apt update \
+        && sudo apt install -y package-name
     check: dpkg -l | grep -q package-name
 ```
 
@@ -354,6 +359,7 @@ environments:
 
 ```yaml
 install: |
+  set -e
   LATEST=$(curl -s https://api.github.com/repos/owner/repo/releases/latest | jq -r .tag_name)
   curl -Lo binary https://github.com/owner/repo/releases/download/${LATEST}/binary-linux-amd64
   sudo install binary /usr/local/bin/
@@ -363,6 +369,7 @@ install: |
 
 ```yaml
 install: |
+  set -e
   curl -fsSL https://get.example.com | bash
   source ~/.bashrc
 ```
@@ -384,11 +391,14 @@ dependencies:
 environments:
   macos:
     install: |
+      set -e
+
       # Install nvm if not present
       if ! command -v nvm &> /dev/null; then
         curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
         source ~/.bashrc
       fi
+
       nvm install 20
       nvm use 20
       nvm alias default 20
@@ -399,10 +409,12 @@ environments:
 
 ```yaml
 install: |
+  set -e
   python3 -m venv ~/.virtualenvs/myproject
   source ~/.virtualenvs/myproject/bin/activate
   pip install -r requirements.txt
 check: |
+  set -e
   source ~/.virtualenvs/myproject/bin/activate
   python -c "import required_package"
 ```
@@ -435,8 +447,6 @@ Selfie validates package files according to these rules:
 - Multi-line commands should consider including `set -e` for proper error handling (stops execution
   on first failure)
 - Commands should handle errors appropriately and provide meaningful error messages
-- For Windows PowerShell commands, consider using `$ErrorActionPreference = "Stop"` for similar
-  error handling
 - Long-running commands should provide progress feedback
 
 ## Best Practices
@@ -525,16 +535,13 @@ install: ./my-package/ubuntu_install.sh
 
 # Alternative: Multi-line with relative paths
 install: |
+  set -e
   source ./my-package/common.sh
   ./my-package/ubuntu_install.sh
 
-# Legacy: Absolute paths (still works but not necessary)
+# Absolute paths work too of, course
 install: /absolute/path/to/packages/my-package/ubuntu_install.sh
 ```
-
-> **Note**: Since commands automatically run in the package directory, you no longer need to
-> manually change directories with `cd` commands. Simply use relative paths like
-> `./scripts/install.sh`.
 
 **Script patterns:**
 
