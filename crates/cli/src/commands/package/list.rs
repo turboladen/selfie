@@ -39,11 +39,12 @@ impl ListCommand<'_> {
                 // Process the event stream with custom handling for structured data
                 let processor = crate::event_processor::EventProcessor::new(self.reporter);
                 let config = self.config;
-                processor
+                let result = processor
                     .process_events(event_stream, move |event| {
                         handle_list_event(event, config, self.show_all)
                     })
-                    .await
+                    .await;
+                result.exit_code
             }
             Err(e) => {
                 self.reporter
@@ -451,7 +452,7 @@ mod tests {
         let result = format_status(
             Some(&selfie::package::event::CheckResult::Failed {
                 stdout: String::new(),
-                stderr: "".to_string(),
+                stderr: String::new(),
                 exit_code: Some(1),
             }),
             &config,
@@ -462,7 +463,7 @@ mod tests {
         let result_colored = format_status(
             Some(&selfie::package::event::CheckResult::Failed {
                 stdout: String::new(),
-                stderr: "".to_string(),
+                stderr: String::new(),
                 exit_code: Some(1),
             }),
             &config_with_colors,

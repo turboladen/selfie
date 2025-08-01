@@ -7,7 +7,7 @@ use crate::{
     config::AppConfig,
     package::{
         event::{CheckResult, CheckResultData, EventSender, OperationResult},
-        port::PackageRepository,
+        port::{PackageRepoError, PackageRepository},
     },
 };
 
@@ -35,9 +35,10 @@ where
         }
     };
 
-    // Step 2: Find environment configuration (reusing shared step)
-    let env_config = match steps::find_environment_config(
-        &package_blob.package,
+    // Step 2: Find environment configuration
+    let env_config = match get_environment_config(
+        package_name,
+        &package_blob,
         config.environment(),
         sender,
         progress,
@@ -45,9 +46,7 @@ where
     .await
     {
         Ok(config) => config,
-        Err(err) => {
-            return OperationResult::Failure(format!("Environment configuration error: {err}"));
-        }
+        Err(result) => return result,
     };
 
     // Step 3: Check if package is already installed
@@ -260,6 +259,52 @@ where
         progress.current_step(),
         progress.total_steps()
     ))
+}
+
+async fn get_environment_config<'a>(
+    package_name: &str,
+    package_blob: &'a crate::package::GetPackage,
+    current_env: &str,
+    sender: &EventSender,
+    progress: &mut crate::package::service::ProgressTracker,
+) -> Result<&'a crate::package::EnvironmentConfig, OperationResult> {
+    progress.next(sender, "Checking package environment").await;
+
+    // Get environment configuration
+    let Some(env_config) = package_blob.package.environments().get(current_env) else {
+        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+    };
+
+    sender
+        .send_debug(format!(
+            "Found environment configuration for '{current_env}'"
+        ))
+        .await;
+    Ok(env_config)
+}
+
+async fn handle_missing_environment(
+    package_name: &str,
+    package_blob: &crate::package::GetPackage,
+    current_env: &str,
+    sender: &EventSender,
+) -> Result<&'static crate::package::EnvironmentConfig, OperationResult> {
+    let err = Box::new(crate::package::port::PackageError::EnvironmentNotFound {
+        package_name: package_name.to_string(),
+        environment: current_env.to_string(),
+        available_environments: package_blob
+            .package
+            .environments()
+            .keys()
+            .cloned()
+            .collect(),
+        package_file: package_blob.package.path().clone(),
+    });
+    let error_msg = format!("Environment configuration error: {err}");
+    sender
+        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .await;
+    Err(OperationResult::Failure(error_msg))
 }
 
 async fn verify_installation<CR>(

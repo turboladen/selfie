@@ -269,7 +269,8 @@ fn test_package_install_missing_environment_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Environment not supported"));
+        .stdout(predicate::str::contains("doesn't support environment"))
+        .stdout(predicate::str::contains("Available environments"));
 }
 
 // =============================================================================

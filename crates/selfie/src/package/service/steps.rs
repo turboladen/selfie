@@ -3,9 +3,7 @@ use std::borrow::Cow;
 use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
-    package::{
-        EnvironmentConfig, GetPackage, Package, event::EventSender, port::PackageRepository,
-    },
+    package::{EnvironmentConfig, GetPackage, event::EventSender, port::PackageRepository},
 };
 
 /// Step to fetch a package from the repository
@@ -33,37 +31,6 @@ where
                 .await;
             Err("Unable to fetch package")
         }
-    }
-}
-
-/// Step to find environment configuration for a package
-pub async fn find_environment_config<'a>(
-    package: &'a Package,
-    environment: &str,
-    sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<&'a EnvironmentConfig, Cow<'static, str>> {
-    progress
-        .next(
-            sender,
-            format!("Checking if package supports current environment: {environment}"),
-        )
-        .await;
-
-    if let Some(env_config) = package.environments().get(environment) {
-        sender
-            .send_trace("Current environment supported by package")
-            .await;
-        Ok(env_config)
-    } else {
-        sender
-            .send_warning(format!(
-                "Package '{}' does not support environment '{}'",
-                package.name(),
-                environment
-            ))
-            .await;
-        Err("Environment not supported".into())
     }
 }
 

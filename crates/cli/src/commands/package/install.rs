@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use tracing::info;
 
 use crate::{
-    commands::package::common::{create_package_service, report_status},
+    commands::package::common::{self, create_package_service, report_status},
     event_processor::EventProcessor,
     terminal_progress_reporter::TerminalProgressReporter,
 };
@@ -79,8 +79,18 @@ impl<'a> InstallEventHandler<'a> {
             selfie::package::event::PackageEvent::Progress { message, .. } => {
                 self.handle_progress_event(message)
             }
-            selfie::package::event::PackageEvent::Completed { .. } => {
-                false // Always use default handling for Completed events to ensure exit code is set correctly
+            selfie::package::event::PackageEvent::Completed { result, .. } => {
+                // Skip duplicate error display for environment configuration errors
+                match result {
+                    selfie::package::event::OperationResult::Failure(failure_msg) => {
+                        if failure_msg.contains("Environment configuration error") {
+                            true // Handled - we already showed the error message above
+                        } else {
+                            false // Use default failure handling for other types of failures
+                        }
+                    }
+                    _ => false, // Use default handling for success
+                }
             }
             _ => false, // Use default handling for other events
         }
@@ -174,10 +184,65 @@ pub(crate) async fn handle_install(
     // Process the event stream with custom handling for install-specific events
     let processor = EventProcessor::new(reporter);
     let mut event_handler = InstallEventHandler::new(config, &mut display);
+    let result = processor
+        .process_events(event_stream, |event| {
+            // Check for environment errors first
+            if let selfie::package::event::PackageEvent::Error { message, error, .. } = event {
+                if message.contains("Environment configuration error") {
+                    handle_environment_error(error, config);
+                    return true; // Handled completely - prevent duplicate error display
+                }
+            }
 
-    processor
-        .process_events(event_stream, move |event| event_handler.handle_event(event))
-        .await
+            event_handler.handle_event(event)
+        })
+        .await;
+
+    // Return proper exit code - 1 for environment errors, otherwise use result from processor
+    if result.environment_error_handled {
+        1
+    } else {
+        result.exit_code
+    }
+}
+
+/// Handle environment configuration errors with helpful suggestions
+fn handle_environment_error(
+    error: &selfie::package::event::error::StreamedError,
+    config: &AppConfig,
+) {
+    // Show helpful information about available environments
+    println!();
+
+    // Try to extract environment information from the structured error
+    if let selfie::package::event::error::StreamedError::PackageRepoError(
+        selfie::package::port::PackageRepoError::PackageError(package_error),
+    ) = error
+    {
+        if let selfie::package::port::PackageError::EnvironmentNotFound {
+            package_name,
+            available_environments,
+            ..
+        } = package_error.as_ref()
+        {
+            common::display_environment_summary(
+                package_name,
+                config.environment(),
+                available_environments,
+                config,
+                "install",
+            );
+            return;
+        }
+    }
+
+    // Fallback to generic suggestion if we can't extract environment info
+    common::display_generic_environment_suggestion(
+        "package",
+        config.environment(),
+        config,
+        "install",
+    );
 }
 
 #[cfg(test)]

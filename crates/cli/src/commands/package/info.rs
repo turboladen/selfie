@@ -34,7 +34,7 @@ pub(crate) async fn handle_info(
         Ok(event_stream) => {
             // Process the event stream with custom handling for structured data
             let processor = EventProcessor::new(reporter);
-            processor
+            let result = processor
                 .process_events(event_stream, |event| {
                     match event {
                         PackageEvent::PackageInfoLoaded { package_info, .. } => {
@@ -58,7 +58,8 @@ pub(crate) async fn handle_info(
                         _ => false, // Use default handling for other events
                     }
                 })
-                .await
+                .await;
+            result.exit_code
         }
         Err(e) => {
             reporter.report_error(format!("Failed to get package info: {e}"));

@@ -216,6 +216,91 @@ pub(super) fn report_status(message: &str) {
     eprintln!("{} {}", console::style("⚡").green(), message);
 }
 
+/// Display environment error with available environments for a specific package
+pub(crate) fn display_environment_summary(
+    package_name: &str,
+    current_environment: &str,
+    available_environments: &[String],
+    config: &AppConfig,
+    context: &str, // "check" or "install"
+) {
+    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
+
+    if available_environments.is_empty() {
+        display_generic_environment_suggestion(package_name, current_environment, config, context);
+    } else {
+        println!("   Available environments for this package:");
+
+        let mut table = create_formatted_table();
+        table.set_header(vec!["Environment"]);
+
+        // Sort environments, highlighting the current one if present
+        let mut sorted_envs = available_environments.to_vec();
+        sorted_envs.sort();
+
+        for env in sorted_envs {
+            let env_display = if config.use_colors() {
+                if env == current_environment {
+                    console::style(&env).green().bold().to_string()
+                } else {
+                    env.clone()
+                }
+            } else {
+                env
+            };
+            table.add_row(vec![env_display]);
+        }
+
+        println!("{table}");
+
+        if config.use_colors() {
+            println!(
+                "   💡 Try: {} with one of the environments above",
+                console::style(format!(
+                    "selfie package {context} --environment <env> <package>"
+                ))
+                .yellow()
+            );
+        } else {
+            println!(
+                "   💡 Try: selfie package {context} --environment <env> <package> with one of the environments above"
+            );
+        }
+    }
+}
+
+/// Display generic environment suggestion when specific environment info is not available
+pub(crate) fn display_generic_environment_suggestion(
+    package_name: &str,
+    current_environment: &str,
+    config: &AppConfig,
+    context: &str, // "check" or "install"
+) {
+    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
+    println!("   Try one of these options:");
+    if config.use_colors() {
+        println!(
+            "   • {} to {} with a different environment",
+            console::style(format!(
+                "selfie package {context} --environment <env> <package>"
+            ))
+            .yellow(),
+            context
+        );
+        println!(
+            "   • {} to see which environments this package supports",
+            console::style("selfie package info <package>").yellow()
+        );
+    } else {
+        println!(
+            "   • selfie package {context} --environment <env> <package> to {context} with a different environment"
+        );
+        println!(
+            "   • selfie package info <package> to see which environments this package supports"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +585,43 @@ mod tests {
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation
+    }
+
+    #[test]
+    fn test_display_environment_summary() {
+        let config = test_common::test_config();
+        let environments = vec![
+            "macos".to_string(),
+            "ubuntu".to_string(),
+            "windows".to_string(),
+        ];
+
+        // Should not panic with valid environments
+        display_environment_summary("test-package", "test-env", &environments, &config, "check");
+    }
+
+    #[test]
+    fn test_display_environment_summary_empty() {
+        let config = test_common::test_config();
+        let environments = vec![];
+
+        // Should not panic with empty environments (falls back to generic suggestion)
+        display_environment_summary("test-package", "test-env", &environments, &config, "check");
+    }
+
+    #[test]
+    fn test_display_generic_environment_suggestion() {
+        let config = test_common::test_config();
+
+        // Should not panic with any inputs
+        display_generic_environment_suggestion("test-package", "test-env", &config, "check");
+    }
+
+    #[test]
+    fn test_display_generic_environment_suggestion_with_colors() {
+        let config = test_common::test_config_with_colors();
+
+        // Should not panic with colors enabled
+        display_generic_environment_suggestion("test-package", "test-env", &config, "install");
     }
 }

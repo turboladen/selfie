@@ -35,9 +35,10 @@ pub(crate) async fn handle_validate(
         Ok(event_stream) => {
             // Process the event stream with custom handling for structured data
             let processor = EventProcessor::new(reporter);
-            processor
+            let result = processor
                 .process_events(event_stream, |event| handle_validate_event(event, config))
-                .await
+                .await;
+            result.exit_code
         }
         Err(e) => {
             reporter.report_error(format!("Failed to validate package: {e}"));

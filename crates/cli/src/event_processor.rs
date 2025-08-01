@@ -48,6 +48,27 @@ use selfie::package::{
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
 
+/// Result of processing events, including metadata about what was encountered
+#[derive(Debug, Clone)]
+pub struct EventProcessingResult {
+    /// The exit code for the operation
+    pub exit_code: i32,
+    /// Whether an environment configuration error was encountered and handled
+    pub environment_error_handled: bool,
+    /// Whether any errors were encountered during processing
+    pub had_errors: bool,
+}
+
+impl EventProcessingResult {
+    fn new() -> Self {
+        Self {
+            exit_code: 0,
+            environment_error_handled: false,
+            had_errors: false,
+        }
+    }
+}
+
 /// A reusable event processor for handling package operation events
 ///
 /// This processor standardizes how events from the selfie library are handled
@@ -71,13 +92,24 @@ impl EventProcessor {
     /// The custom handler should return:
     /// - `true` if the event was handled (skip default handling)
     /// - `false` to use default handling for the event
-    pub async fn process_events<F>(self, mut stream: EventStream, mut custom_handler: F) -> i32
+    pub async fn process_events<F>(
+        self,
+        mut stream: EventStream,
+        mut custom_handler: F,
+    ) -> EventProcessingResult
     where
         F: FnMut(&PackageEvent) -> bool,
     {
-        let mut exit_code = 0;
+        let mut result = EventProcessingResult::new();
 
         while let Some(event) = stream.next().await {
+            // Check for environment errors before custom handling
+            if let PackageEvent::Error { message, .. } = &event {
+                if message.contains("Environment configuration error") {
+                    result.environment_error_handled = true;
+                }
+            }
+
             // Try custom handler first
             if custom_handler(&event) {
                 // Custom handler handled the event, continue to next event
@@ -85,18 +117,18 @@ impl EventProcessor {
             }
 
             // Fall back to default handling
-            if self.handle_event(event, &mut exit_code) {
+            if self.handle_event(event, &mut result) {
                 break;
             }
         }
 
-        exit_code
+        result
     }
 
-    /// Handle a single event and update the exit code as needed
+    /// Handle a single event and update the result as needed
     ///
     /// Returns true if processing should stop (early termination)
-    fn handle_event(&self, event: PackageEvent, exit_code: &mut i32) -> bool {
+    fn handle_event(&self, event: PackageEvent, result: &mut EventProcessingResult) -> bool {
         match event {
             PackageEvent::Started { operation_info } => {
                 // Handle list operations differently since they don't have a specific package name
@@ -158,23 +190,28 @@ impl EventProcessor {
                         self.reporter.report_error(format!("{message}: {error}"));
                     }
                 }
-                *exit_code = 1;
+                result.exit_code = 1;
+                result.had_errors = true;
             }
 
-            PackageEvent::Completed { result, .. } => match result {
+            PackageEvent::Completed {
+                result: op_result, ..
+            } => match op_result {
                 OperationResult::Success(msg) => {
                     self.reporter.report_success(msg);
                 }
                 OperationResult::Failure(err) => {
                     self.reporter.report_error(err);
-                    *exit_code = 1;
+                    result.exit_code = 1;
+                    result.had_errors = true;
                 }
             },
 
             PackageEvent::Canceled { reason, .. } => {
                 self.reporter
                     .report_warning(format!("Operation canceled: {reason}"));
-                *exit_code = 1;
+                result.exit_code = 1;
+                result.had_errors = true;
                 return true; // Stop processing after cancellation
             }
 
@@ -252,10 +289,12 @@ mod tests {
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
-        let exit_code = processor.process_events(event_stream, |_event| false).await;
+        let result = processor.process_events(event_stream, |_event| false).await;
 
         // Empty stream should return success
-        assert_eq!(exit_code, 0);
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.environment_error_handled);
+        assert!(!result.had_errors);
     }
 
     #[tokio::test]
@@ -268,14 +307,14 @@ mod tests {
 
         // Test that custom handler gets called with None for empty stream
         let mut handler_called = false;
-        let exit_code = processor
+        let result = processor
             .process_events(event_stream, |_event| {
                 handler_called = true;
                 true
             })
             .await;
 
-        assert_eq!(exit_code, 0);
+        assert_eq!(result.exit_code, 0);
         // Handler should not be called for empty stream
         assert!(!handler_called);
     }
@@ -308,10 +347,11 @@ mod tests {
 
         // Test with a nonexistent package - should get events but ultimately fail
         let event_stream = service.check("nonexistent-test-package").await;
-        let exit_code = processor.process_events(event_stream, |_event| false).await;
+        let result = processor.process_events(event_stream, |_event| false).await;
 
         // Should return error exit code since package doesn't exist
-        assert_eq!(exit_code, 1);
+        assert_eq!(result.exit_code, 1);
+        assert!(result.had_errors);
     }
 
     #[tokio::test]
@@ -345,7 +385,7 @@ mod tests {
         let mut completed_events_seen = 0;
 
         let event_stream = service.check("nonexistent-test-package").await;
-        let exit_code = processor
+        let result = processor
             .process_events(event_stream, |event| {
                 match event {
                     PackageEvent::Started { .. } => {
@@ -369,7 +409,8 @@ mod tests {
         assert_eq!(started_events_seen, 1);
         assert!(progress_events_seen > 0);
         assert_eq!(completed_events_seen, 1);
-        assert_eq!(exit_code, 1);
+        assert_eq!(result.exit_code, 1);
+        assert!(result.had_errors);
     }
 
     #[test]
