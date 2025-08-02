@@ -6,8 +6,13 @@ use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, EventSender, OperationResult},
-        port::{PackageRepoError, PackageRepository},
+        EnvironmentConfig,
+        event::{
+            CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
+            OperationSuccess,
+        },
+        port::{PackageError, PackageRepoError, PackageRepository},
+        service::ProgressTracker,
     },
 };
 
@@ -19,7 +24,7 @@ pub(super) async fn handle_install<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -60,9 +65,15 @@ where
     .await;
 
     // If package is already installed, exit early
-    if let Some(result) =
-        handle_already_installed_package(package_name, &pre_install_check, command_runner, sender)
-            .await
+    if let Some(result) = handle_already_installed_package(
+        package_name,
+        &pre_install_check,
+        command_runner,
+        sender,
+        progress,
+        config,
+    )
+    .await
     {
         return result;
     }
@@ -102,14 +113,12 @@ where
                 })
                 .collect();
 
-            return OperationResult::Failure(
-                crate::package::event::OperationFailure::no_install_command(
-                    package_name.to_string(),
-                    config.environment().to_string(),
-                    package_blob.package.path().clone(),
-                    other_envs_with_install,
-                ),
-            );
+            return OperationResult::Failure(OperationFailure::no_install_command(
+                package_name.to_string(),
+                config.environment().to_string(),
+                package_blob.package.path().clone(),
+                other_envs_with_install,
+            ));
         }
     };
 
@@ -130,6 +139,8 @@ async fn handle_already_installed_package<CR>(
     pre_install_check: &CheckResultData,
     command_runner: &CR,
     sender: &EventSender,
+    progress: &ProgressTracker,
+    config: &AppConfig,
 ) -> Option<OperationResult>
 where
     CR: CommandRunner,
@@ -141,13 +152,24 @@ where
 
         let executable_path = find_executable_path(package_name, command_runner, sender).await;
 
-        let message = if let Some(path) = executable_path {
+        let _message = if let Some(ref path) = executable_path {
             format!("Package '{package_name}' is already installed at: {path}")
         } else {
             format!("Package '{package_name}' is already installed, skipping installation")
         };
 
-        return Some(OperationResult::Success(message));
+        return Some(OperationResult::Success(
+            OperationSuccess::package_installed(
+                package_name.to_string(),
+                config.environment().to_string(),
+                true, // was_already_installed
+                executable_path,
+                (
+                    progress.current_step() as usize,
+                    progress.total_steps() as usize,
+                ),
+            ),
+        ));
     }
     None
 }
@@ -230,7 +252,7 @@ async fn log_proceeding_with_installation(
 struct InstallationContext<'a> {
     package_name: &'a str,
     install_cmd: &'a str,
-    env_config: &'a crate::package::EnvironmentConfig,
+    env_config: &'a EnvironmentConfig,
     config: &'a AppConfig,
     pre_install_check: &'a CheckResultData,
 }
@@ -239,7 +261,7 @@ async fn execute_installation_and_verification<CR>(
     context: InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     CR: CommandRunner,
@@ -266,7 +288,7 @@ where
                 context.package_name
             ))
             .await;
-        return OperationResult::Failure(crate::package::event::OperationFailure::command_failed(
+        return OperationResult::Failure(OperationFailure::command_failed(
             context.install_cmd.to_string(),
             Some(install_output.exit_code()),
             install_output.stdout_str().to_string(),
@@ -282,10 +304,15 @@ where
         .next(sender, "Package installation completed")
         .await;
 
-    OperationResult::Success(format!(
-        "Installation completed successfully ({}/{} steps)",
-        progress.current_step(),
-        progress.total_steps()
+    OperationResult::Success(OperationSuccess::package_installed(
+        context.package_name.to_string(),
+        context.config.environment().to_string(),
+        false, // was_already_installed
+        None,  // executable_path - could be enhanced to detect this
+        (
+            progress.current_step() as usize,
+            progress.total_steps() as usize,
+        ),
     ))
 }
 
@@ -294,8 +321,8 @@ async fn get_environment_config<'a>(
     package_blob: &'a crate::package::GetPackage,
     current_env: &str,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<&'a crate::package::EnvironmentConfig, OperationResult> {
+    progress: &mut ProgressTracker,
+) -> Result<&'a EnvironmentConfig, OperationResult> {
     progress.next(sender, "Checking package environment").await;
 
     // Get environment configuration
@@ -316,8 +343,8 @@ async fn handle_missing_environment(
     package_blob: &crate::package::GetPackage,
     current_env: &str,
     sender: &EventSender,
-) -> Result<&'static crate::package::EnvironmentConfig, OperationResult> {
-    let err = Box::new(crate::package::port::PackageError::EnvironmentNotFound {
+) -> Result<&'static EnvironmentConfig, OperationResult> {
+    let err = Box::new(PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),
         environment: current_env.to_string(),
         available_environments: package_blob
@@ -339,7 +366,7 @@ async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) where
     CR: CommandRunner,
 {

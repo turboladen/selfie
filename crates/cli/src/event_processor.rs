@@ -205,8 +205,8 @@ impl EventProcessor {
             PackageEvent::Completed {
                 result: op_result, ..
             } => match op_result {
-                OperationResult::Success(msg) => {
-                    self.reporter.report_success(msg);
+                OperationResult::Success(success) => {
+                    self.reporter.report_success(&success.to_string());
                 }
                 OperationResult::Failure(err) => {
                     self.reporter.report_error(&err.to_string());

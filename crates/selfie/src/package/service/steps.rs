@@ -1,9 +1,14 @@
 use std::borrow::Cow;
 
 use crate::{
-    commands::runner::CommandRunner,
+    commands::runner::{CommandError, CommandOutput, CommandRunner},
     config::AppConfig,
-    package::{EnvironmentConfig, GetPackage, event::EventSender, port::PackageRepository},
+    package::{
+        EnvironmentConfig, GetPackage,
+        event::{ConsoleOutput, EventSender},
+        port::{PackageRepoError, PackageRepository},
+        service::ProgressTracker,
+    },
 };
 
 /// Step to fetch a package from the repository
@@ -11,8 +16,8 @@ pub async fn fetch_package<PR>(
     repo: &PR,
     package_name: &str,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<GetPackage, crate::package::port::PackageRepoError>
+    progress: &mut ProgressTracker,
+) -> Result<GetPackage, PackageRepoError>
 where
     PR: PackageRepository,
 {
@@ -40,7 +45,7 @@ pub async fn get_command<'a>(
     command_type: &str,
     command_getter: impl FnOnce(&EnvironmentConfig) -> Option<&str>,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> Result<&'a str, Cow<'static, str>> {
     progress
         .next(
@@ -72,8 +77,8 @@ pub async fn execute_command_streaming<CR>(
     command_type: &str,
     config: &AppConfig,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+    progress: &mut ProgressTracker,
+) -> Result<CommandOutput, CommandError>
 where
     CR: CommandRunner,
 {
@@ -103,14 +108,10 @@ where
         while let Some(chunk) = rx.recv().await {
             match chunk {
                 OutputChunk::Stdout(line) => {
-                    sender_clone
-                        .send_info(crate::package::event::ConsoleOutput::Stdout(line))
-                        .await;
+                    sender_clone.send_info(ConsoleOutput::Stdout(line)).await;
                 }
                 OutputChunk::Stderr(line) => {
-                    sender_clone
-                        .send_info(crate::package::event::ConsoleOutput::Stderr(line))
-                        .await;
+                    sender_clone.send_info(ConsoleOutput::Stderr(line)).await;
                 }
             }
         }

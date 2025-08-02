@@ -4,8 +4,13 @@ use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, EventSender, OperationResult},
+        GetPackage,
+        event::{
+            CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
+            OperationResult, OperationSuccess,
+        },
         port::{PackageError, PackageRepoError, PackageRepository},
+        service::ProgressTracker,
     },
 };
 
@@ -15,7 +20,7 @@ pub(super) async fn handle_check<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository + Clone,
@@ -61,8 +66,8 @@ async fn load_package<PR>(
     package_name: &str,
     repo: &PR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<crate::package::GetPackage, OperationResult>
+    progress: &mut ProgressTracker,
+) -> Result<GetPackage, OperationResult>
 where
     PR: PackageRepository,
 {
@@ -86,10 +91,10 @@ where
 
 async fn get_check_command(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> Result<Option<String>, OperationResult> {
     progress.next(sender, "Checking package environment").await;
 
@@ -114,7 +119,7 @@ async fn get_check_command(
 
 async fn handle_missing_environment(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
@@ -138,7 +143,7 @@ async fn handle_missing_environment(
 
 async fn handle_missing_check_command(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
@@ -182,18 +187,18 @@ async fn handle_missing_check_command(
 fn create_operation_result(
     check_result: &CheckResultData,
     package_name: &str,
-    progress: &crate::package::service::ProgressTracker,
+    progress: &ProgressTracker,
 ) -> OperationResult {
     match &check_result.result {
-        CheckResult::Success => {
-            let success_msg = format!(
-                "Package '{}' check completed successfully ({}/{} steps)",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Success(success_msg)
-        }
+        CheckResult::Success => OperationResult::Success(OperationSuccess::package_checked(
+            package_name.to_string(),
+            check_result.environment.clone(),
+            check_result.result.clone(),
+            (
+                progress.current_step() as usize,
+                progress.total_steps() as usize,
+            ),
+        )),
         CheckResult::Failed {
             stdout,
             stderr,
@@ -203,7 +208,7 @@ fn create_operation_result(
                 .check_command
                 .as_deref()
                 .unwrap_or("unknown command");
-            OperationResult::Failure(crate::package::event::OperationFailure::command_failed(
+            OperationResult::Failure(OperationFailure::command_failed(
                 command.to_string(),
                 *exit_code,
                 stdout.clone(),
@@ -215,8 +220,8 @@ fn create_operation_result(
                 .check_command
                 .as_deref()
                 .unwrap_or("unknown command");
-            OperationResult::Failure(crate::package::event::OperationFailure::CommandError(
-                crate::package::event::CommandFailure::InvalidCommand {
+            OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InvalidCommand {
                     command: command.to_string(),
                     reason: error.clone(),
                 },
@@ -239,7 +244,7 @@ pub(super) async fn execute_check_command<CR>(
     check_command: Option<&str>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
     step_description: &str,
 ) -> CheckResultData
 where

@@ -7,10 +7,11 @@ use crate::{
     config::AppConfig,
     package::{
         event::{
-            EventSender, OperationResult, ValidationIssueData, ValidationLevel,
+            EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
             ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
+        service::ProgressTracker,
     },
 };
 
@@ -20,7 +21,7 @@ pub(super) async fn handle_validate<PR, CR>(
     config: &AppConfig,
     _command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -98,27 +99,32 @@ where
     // Return appropriate operation result
     match status {
         ValidationStatus::Valid => {
-            let success_msg = format!(
-                "Package '{}' validation completed successfully ({}/{} steps)",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
             sender
                 .send_debug("Package definition is valid for the current environment")
                 .await;
-            OperationResult::Success(success_msg)
+            OperationResult::Success(OperationSuccess::package_validated(
+                package_name.to_string(),
+                config.environment().to_string(),
+                ValidationStatus::Valid,
+                None,
+                (
+                    progress.current_step() as usize,
+                    progress.total_steps() as usize,
+                ),
+            ))
         }
         ValidationStatus::HasWarnings => {
             let warning_count = issues.warnings().len();
-            let success_msg = format!(
-                "Package '{}' validation completed with {} warning(s) ({}/{} steps)",
-                package_name,
-                warning_count,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Success(success_msg)
+            OperationResult::Success(OperationSuccess::package_validated(
+                package_name.to_string(),
+                config.environment().to_string(),
+                ValidationStatus::HasWarnings,
+                Some(warning_count),
+                (
+                    progress.current_step() as usize,
+                    progress.total_steps() as usize,
+                ),
+            ))
         }
         ValidationStatus::HasErrors => {
             let error_count = issues.errors().len();

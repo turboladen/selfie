@@ -9,9 +9,11 @@ use crate::{
     config::AppConfig,
     package::{
         event::{
-            EventSender, InvalidPackageInfo, OperationResult, PackageListData, PackageListItem,
+            EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, PackageListData,
+            PackageListItem,
         },
-        port::PackageRepository,
+        port::{PackageRepoError, PackageRepository},
+        service::ProgressTracker,
     },
 };
 
@@ -20,7 +22,7 @@ pub(super) async fn handle_list<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
     show_all: bool,
 ) -> OperationResult
 where
@@ -37,7 +39,7 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to list packages: {err}");
-            let repo_error = crate::package::port::PackageRepoError::PackageListError(err);
+            let repo_error = PackageRepoError::PackageListError(err);
             sender.send_error(repo_error, &error_msg).await;
             return OperationResult::Failure(error_msg.into());
         }
@@ -127,19 +129,17 @@ where
     // Step 4: Complete operation
     progress.next(sender, "Finalizing package list").await;
 
-    let success_msg = format!(
-        "Package listing completed with {} valid package(s){}",
-        valid_count,
-        if invalid_packages.is_empty() {
-            String::new()
-        } else {
-            format!(" and {} invalid package(s)", invalid_packages.len())
-        }
-    );
-
     sender
         .send_debug("Package listing completed successfully")
         .await;
 
-    OperationResult::Success(success_msg)
+    OperationResult::Success(OperationSuccess::package_list_generated(
+        valid_count,
+        invalid_packages.len(),
+        config.environment().to_string(),
+        (
+            progress.current_step() as usize,
+            progress.total_steps() as usize,
+        ),
+    ))
 }

@@ -7,9 +7,11 @@ use crate::{
     config::AppConfig,
     package::{
         event::{
-            EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult, PackageInfoData,
+            EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult,
+            OperationSuccess, PackageInfoData,
         },
         port::PackageRepository,
+        service::ProgressTracker,
     },
 };
 
@@ -19,7 +21,7 @@ pub(super) async fn handle_info<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -106,18 +108,19 @@ where
         sender.send_environment_status(environment_status).await;
     }
 
-    let success_msg = format!(
-        "Package '{}' information retrieved successfully ({}/{} steps)",
-        package_name,
-        progress.current_step(),
-        progress.total_steps()
-    );
-
+    // Send success message
     sender
-        .send_debug("Package information gathering completed")
+        .send_debug(format!("Package information retrieved for: {package_name}"))
         .await;
 
-    OperationResult::Success(success_msg)
+    OperationResult::Success(OperationSuccess::package_info_retrieved(
+        package_name.to_string(),
+        config.environment().to_string(),
+        (
+            progress.current_step() as usize,
+            progress.total_steps() as usize,
+        ),
+    ))
 }
 
 async fn get_installation_status(

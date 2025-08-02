@@ -679,7 +679,9 @@ where
             1, // Just one step for creation
             |_sender, mut _progress| async move {
                 // TODO: Implement actual creation logic
-                OperationResult::Success("Create operation not yet implemented".to_string())
+                OperationResult::Success(crate::package::event::OperationSuccess::Generic(
+                    "Create operation not yet implemented".to_string(),
+                ))
             },
         ))
     }

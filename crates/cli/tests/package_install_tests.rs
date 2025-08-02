@@ -23,6 +23,6 @@ fn test_package_install() {
     cmd.args(["package", "install", "test-package"]);
 
     cmd.assert().success().stdout(predicate::str::contains(
-        "Installation completed successfully",
+        "Package 'test-package' installation completed successfully",
     ));
 }
