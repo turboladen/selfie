@@ -39,7 +39,7 @@ where
             let error_msg = format!("Failed to list packages: {err}");
             let repo_error = crate::package::port::PackageRepoError::PackageListError(err);
             sender.send_error(repo_error, &error_msg).await;
-            return OperationResult::Failure(error_msg);
+            return OperationResult::Failure(error_msg.into());
         }
     };
 

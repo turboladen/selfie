@@ -1,4 +1,11 @@
-use selfie::{config::AppConfig, package::service::PackageService};
+use selfie::{
+    config::AppConfig,
+    package::{
+        event::{OperationResult, PackageEvent, error::StreamedError},
+        port::{PackageError, PackageRepoError},
+        service::PackageService,
+    },
+};
 use std::collections::VecDeque;
 use tracing::info;
 
@@ -67,26 +74,23 @@ impl<'a> InstallEventHandler<'a> {
         Self { config, display }
     }
 
-    fn handle_event(&mut self, event: &selfie::package::event::PackageEvent) -> bool {
+    fn handle_event(&mut self, event: &PackageEvent) -> bool {
         #[allow(clippy::match_same_arms)]
         match event {
-            selfie::package::event::PackageEvent::CheckResultCompleted { check_result, .. } => {
+            PackageEvent::CheckResultCompleted { check_result, .. } => {
                 Self::handle_check_result_completed(check_result)
             }
-            selfie::package::event::PackageEvent::Info { output, .. } => {
-                self.handle_info_event(output)
-            }
-            selfie::package::event::PackageEvent::Progress { message, .. } => {
-                self.handle_progress_event(message)
-            }
-            selfie::package::event::PackageEvent::Completed { result, .. } => {
+            PackageEvent::Info { output, .. } => self.handle_info_event(output),
+            PackageEvent::Progress { message, .. } => self.handle_progress_event(message),
+            PackageEvent::Completed { result, .. } => {
                 // Skip duplicate error display for environment configuration errors
                 match result {
-                    selfie::package::event::OperationResult::Failure(failure_msg) => {
-                        if failure_msg.contains("Environment configuration error") {
-                            true // Handled - we already showed the error message above
-                        } else {
-                            false // Use default failure handling for other types of failures
+                    OperationResult::Failure(failure) => {
+                        match failure {
+                            selfie::package::event::OperationFailure::EnvironmentError(_) => {
+                                true // Handled - we already showed the error message above
+                            }
+                            _ => false, // Use default failure handling for other types of failures
                         }
                     }
                     _ => false, // Use default handling for success
@@ -187,10 +191,18 @@ pub(crate) async fn handle_install(
     let result = processor
         .process_events(event_stream, |event| {
             // Check for environment errors first
-            if let selfie::package::event::PackageEvent::Error { message, error, .. } = event {
-                if message.contains("Environment configuration error") {
-                    handle_environment_error(error, config);
-                    return true; // Handled completely - prevent duplicate error display
+            if let PackageEvent::Error { error, .. } = event {
+                match error {
+                    StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) => {
+                        if matches!(
+                            pkg_error.as_ref(),
+                            selfie::package::port::PackageError::EnvironmentNotFound { .. }
+                        ) {
+                            handle_environment_error(error, config);
+                            return true; // Handled completely - prevent duplicate error display
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -207,19 +219,13 @@ pub(crate) async fn handle_install(
 }
 
 /// Handle environment configuration errors with helpful suggestions
-fn handle_environment_error(
-    error: &selfie::package::event::error::StreamedError,
-    config: &AppConfig,
-) {
+fn handle_environment_error(error: &StreamedError, config: &AppConfig) {
     // Show helpful information about available environments
     println!();
 
     // Try to extract environment information from the structured error
-    if let selfie::package::event::error::StreamedError::PackageRepoError(
-        selfie::package::port::PackageRepoError::PackageError(package_error),
-    ) = error
-    {
-        if let selfie::package::port::PackageError::EnvironmentNotFound {
+    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
+        if let PackageError::EnvironmentNotFound {
             package_name,
             available_environments,
             ..

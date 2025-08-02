@@ -29,9 +29,7 @@ where
     let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
         Ok(pkg) => pkg,
         Err(err) => {
-            return OperationResult::Failure(format!(
-                "Failed to fetch package '{package_name}': {err}"
-            ));
+            return OperationResult::Failure(err.into());
         }
     };
 
@@ -83,7 +81,36 @@ where
     .await
     {
         Ok(cmd) => cmd,
-        Err(err) => return OperationResult::Failure(format!("Install command error: {err}")),
+        Err(_) => {
+            // Create typed error for missing install command
+            let other_envs_with_install = package_blob
+                .package
+                .environments()
+                .keys()
+                .filter_map(|env_name| {
+                    if package_blob
+                        .package
+                        .environments()
+                        .get(env_name)?
+                        .install()
+                        .is_empty()
+                    {
+                        None
+                    } else {
+                        Some(env_name.clone())
+                    }
+                })
+                .collect();
+
+            return OperationResult::Failure(
+                crate::package::event::OperationFailure::no_install_command(
+                    package_name.to_string(),
+                    config.environment().to_string(),
+                    package_blob.package.path().clone(),
+                    other_envs_with_install,
+                ),
+            );
+        }
     };
 
     // Step 5: Execute installation and verification
@@ -218,7 +245,7 @@ where
     CR: CommandRunner,
 {
     // Execute install command with streaming output
-    let install_success = match steps::execute_command_streaming(
+    let install_output = match steps::execute_command_streaming(
         command_runner,
         context.install_cmd,
         "install",
@@ -228,21 +255,22 @@ where
     )
     .await
     {
-        Ok(success) => success,
-        Err(err) => return OperationResult::Failure(format!("Command execution error: {err}")),
+        Ok(output) => output,
+        Err(err) => return OperationResult::Failure(err.into()),
     };
 
-    if !install_success {
+    if !install_output.is_success() {
         sender
             .send_warning(format!(
                 "Package '{}' installation command failed",
                 context.package_name
             ))
             .await;
-        return OperationResult::Failure(format!(
-            "Installation failed at step {}/{}",
-            progress.current_step(),
-            progress.total_steps()
+        return OperationResult::Failure(crate::package::event::OperationFailure::command_failed(
+            context.install_cmd.to_string(),
+            Some(install_output.exit_code()),
+            install_output.stdout_str().to_string(),
+            install_output.stderr_str().to_string(),
         ));
     }
 
@@ -302,9 +330,9 @@ async fn handle_missing_environment(
     });
     let error_msg = format!("Environment configuration error: {err}");
     sender
-        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
         .await;
-    Err(OperationResult::Failure(error_msg))
+    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn verify_installation<CR>(

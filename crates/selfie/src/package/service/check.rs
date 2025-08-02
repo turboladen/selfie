@@ -77,8 +77,9 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to load package '{package_name}': {err}");
+            let err_for_conversion = err.clone();
             sender.send_error(err, &error_msg).await;
-            Err(OperationResult::Failure(error_msg))
+            Err(OperationResult::Failure(err_for_conversion.into()))
         }
     }
 }
@@ -130,9 +131,9 @@ async fn handle_missing_environment(
     });
     let error_msg = format!("Environment configuration error: {err}");
     sender
-        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
         .await;
-    Err(OperationResult::Failure(error_msg))
+    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn handle_missing_check_command(
@@ -173,9 +174,9 @@ async fn handle_missing_check_command(
 
     let error_msg = format!("Check command configuration error: {err}");
     sender
-        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
         .await;
-    Err(OperationResult::Failure(error_msg))
+    Err(OperationResult::Failure((*err).into()))
 }
 
 fn create_operation_result(
@@ -193,27 +194,37 @@ fn create_operation_result(
             );
             OperationResult::Success(success_msg)
         }
-        CheckResult::Failed { .. } => {
-            let error_msg = format!(
-                "Package '{}' check failed at step {}/{}",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Failure(error_msg)
+        CheckResult::Failed {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            let command = check_result
+                .check_command
+                .as_deref()
+                .unwrap_or("unknown command");
+            OperationResult::Failure(crate::package::event::OperationFailure::command_failed(
+                command.to_string(),
+                *exit_code,
+                stdout.clone(),
+                stderr.clone(),
+            ))
         }
-        CheckResult::Error(_) => {
-            let error_msg = format!(
-                "Failed to execute check command for package '{}' at step {}/{}",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Failure(error_msg)
+        CheckResult::Error(error) => {
+            let command = check_result
+                .check_command
+                .as_deref()
+                .unwrap_or("unknown command");
+            OperationResult::Failure(crate::package::event::OperationFailure::CommandError(
+                crate::package::event::CommandFailure::InvalidCommand {
+                    command: command.to_string(),
+                    reason: error.clone(),
+                },
+            ))
         }
         _ => {
             // This case is already handled above, but included for completeness
-            OperationResult::Failure("Unexpected check result".to_string())
+            OperationResult::Failure("Unexpected check result".into())
         }
     }
 }

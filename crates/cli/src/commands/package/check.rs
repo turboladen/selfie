@@ -1,7 +1,8 @@
 use selfie::{
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, PackageEvent},
+        event::{CheckResult, CheckResultData, PackageEvent, error::StreamedError},
+        port::{PackageError, PackageRepoError},
         service::PackageService,
     },
 };
@@ -41,13 +42,21 @@ pub(crate) async fn handle_check(
                 PackageEvent::Progress { .. } => {
                     true // Handled
                 }
-                PackageEvent::Error { message, error, .. } => {
+                PackageEvent::Error { error, .. } => {
                     // Handle environment configuration errors specially
-                    if message.contains("Environment configuration error") {
-                        handle_environment_error(package_name, error, config);
-                        true // Handled completely - prevent duplicate error display
-                    } else {
-                        false // Use default handling for other errors
+                    match error {
+                        StreamedError::PackageRepoError(PackageRepoError::PackageError(
+                            pkg_error,
+                        )) => {
+                            match pkg_error.as_ref() {
+                                PackageError::EnvironmentNotFound { .. } => {
+                                    handle_environment_error(package_name, error, config);
+                                    true // Handled completely - prevent duplicate error display
+                                }
+                                _ => false, // Use default handling for other errors
+                            }
+                        }
+                        _ => false, // Use default handling for other errors
                     }
                 }
                 PackageEvent::Completed {
@@ -55,11 +64,12 @@ pub(crate) async fn handle_check(
                 } => {
                     // Skip duplicate error display for environment configuration errors
                     match op_result {
-                        selfie::package::event::OperationResult::Failure(failure_msg) => {
-                            if failure_msg.contains("Environment configuration error") {
-                                true // Handled - we already showed the error message above
-                            } else {
-                                false // Use default failure handling for other types of failures
+                        selfie::package::event::OperationResult::Failure(failure) => {
+                            match failure {
+                                selfie::package::event::OperationFailure::EnvironmentError(_) => {
+                                    true // Handled - we already showed the error message above
+                                }
+                                _ => false, // Use default failure handling for other types of failures
                             }
                         }
                         _ => false, // Use default handling for success
@@ -79,20 +89,13 @@ pub(crate) async fn handle_check(
 }
 
 /// Handle environment configuration errors with helpful suggestions
-fn handle_environment_error(
-    package_name: &str,
-    error: &selfie::package::event::error::StreamedError,
-    config: &AppConfig,
-) {
+fn handle_environment_error(package_name: &str, error: &StreamedError, config: &AppConfig) {
     // Show helpful information about available environments
     println!();
 
     // Try to extract environment information from the structured error
-    if let selfie::package::event::error::StreamedError::PackageRepoError(
-        selfie::package::port::PackageRepoError::PackageError(package_error),
-    ) = error
-    {
-        if let selfie::package::port::PackageError::EnvironmentNotFound {
+    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
+        if let PackageError::EnvironmentNotFound {
             available_environments,
             ..
         } = package_error.as_ref()

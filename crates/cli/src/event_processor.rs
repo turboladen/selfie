@@ -104,9 +104,17 @@ impl EventProcessor {
 
         while let Some(event) = stream.next().await {
             // Check for environment errors before custom handling
-            if let PackageEvent::Error { message, .. } = &event {
-                if message.contains("Environment configuration error") {
-                    result.environment_error_handled = true;
+            if let PackageEvent::Error { error, .. } = &event {
+                if let selfie::package::event::error::StreamedError::PackageRepoError(
+                    selfie::package::port::PackageRepoError::PackageError(pkg_error),
+                ) = error
+                {
+                    if matches!(
+                        pkg_error.as_ref(),
+                        selfie::package::port::PackageError::EnvironmentNotFound { .. }
+                    ) {
+                        result.environment_error_handled = true;
+                    }
                 }
             }
 
@@ -201,7 +209,7 @@ impl EventProcessor {
                     self.reporter.report_success(msg);
                 }
                 OperationResult::Failure(err) => {
-                    self.reporter.report_error(err);
+                    self.reporter.report_error(&err.to_string());
                     result.exit_code = 1;
                     result.had_errors = true;
                 }

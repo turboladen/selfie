@@ -12,7 +12,7 @@ pub async fn fetch_package<PR>(
     package_name: &str,
     sender: &EventSender,
     progress: &mut crate::package::service::ProgressTracker,
-) -> Result<GetPackage, &'static str>
+) -> Result<GetPackage, crate::package::port::PackageRepoError>
 where
     PR: PackageRepository,
 {
@@ -27,9 +27,9 @@ where
         }
         Err(e) => {
             sender
-                .send_error(e, "Error fetching package from repository")
+                .send_error(e.clone(), "Error fetching package from repository")
                 .await;
-            Err("Unable to fetch package")
+            Err(e)
         }
     }
 }
@@ -73,7 +73,7 @@ pub async fn execute_command_streaming<CR>(
     config: &AppConfig,
     sender: &EventSender,
     progress: &mut crate::package::service::ProgressTracker,
-) -> Result<bool, Cow<'static, str>>
+) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
 where
     CR: CommandRunner,
 {
@@ -144,7 +144,6 @@ where
                         ))
                         .await;
                 }
-                Ok(true)
             } else {
                 sender
                     .send_warning(format!(
@@ -154,13 +153,13 @@ where
                         output.exit_code()
                     ))
                     .await;
-                Ok(false)
             }
+            Ok(output)
         }
         Err(error) => {
             sender
                 .send_error(
-                    error,
+                    error.clone(),
                     format!(
                         "Failed to execute {command_type} command at step {}/{}",
                         progress.current_step(),
@@ -168,13 +167,7 @@ where
                     ),
                 )
                 .await;
-            Err(format!(
-                "Command execution failed: {} (step {}/{})",
-                command_type,
-                progress.current_step(),
-                progress.total_steps()
-            )
-            .into())
+            Err(error)
         }
     }
 }

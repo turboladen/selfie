@@ -37,8 +37,9 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to load package '{package_name}': {err}");
+            let err_for_conversion = err.clone();
             sender.send_error(err, &error_msg).await;
-            return OperationResult::Failure(error_msg);
+            return OperationResult::Failure(err_for_conversion.into());
         }
     };
 

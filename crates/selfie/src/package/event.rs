@@ -381,7 +381,402 @@ pub struct OperationContext {
 #[derive(Debug, Clone)]
 pub enum OperationResult {
     Success(String),
-    Failure(String),
+    Failure(OperationFailure),
+}
+
+/// Typed failure information for operations
+#[derive(Debug, Clone)]
+pub enum OperationFailure {
+    /// Environment configuration issues
+    EnvironmentError(EnvironmentFailure),
+    /// Package loading/parsing issues
+    PackageError(PackageFailure),
+    /// Command execution issues
+    CommandError(CommandFailure),
+    /// Generic failures with just a message (for backward compatibility)
+    Generic(String),
+}
+
+/// Environment-related failure details
+#[derive(Debug, Clone)]
+pub enum EnvironmentFailure {
+    NotFound {
+        package_name: String,
+        environment: String,
+        available_environments: Vec<String>,
+        package_file: std::path::PathBuf,
+    },
+    NoCheckCommand {
+        package_name: String,
+        environment: String,
+        package_file: std::path::PathBuf,
+        other_envs_with_check: Vec<String>,
+    },
+    NoInstallCommand {
+        package_name: String,
+        environment: String,
+        package_file: std::path::PathBuf,
+        other_envs_with_install: Vec<String>,
+    },
+}
+
+/// Package-related failure details
+#[derive(Debug, Clone)]
+pub enum PackageFailure {
+    NotFound {
+        name: String,
+        packages_path: std::path::PathBuf,
+        files_examined: usize,
+        search_patterns: Vec<String>,
+    },
+    ParseError {
+        name: String,
+        packages_path: std::path::PathBuf,
+        failed_file: std::path::PathBuf,
+        file_size_bytes: u64,
+        source_error: String,
+    },
+    MultiplePackagesFound {
+        name: String,
+        packages_path: std::path::PathBuf,
+        conflicting_paths: Vec<std::path::PathBuf>,
+        files_examined: usize,
+        search_patterns: Vec<String>,
+    },
+}
+
+/// Command execution failure details
+#[derive(Debug, Clone)]
+pub enum CommandFailure {
+    ExecutionFailed {
+        command: String,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    CommandNotFound {
+        command: String,
+    },
+    InvalidCommand {
+        command: String,
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for OperationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OperationFailure::EnvironmentError(env_err) => {
+                write!(f, "Environment configuration error: {env_err}")
+            }
+            OperationFailure::PackageError(pkg_err) => write!(f, "Package error: {pkg_err}"),
+            OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
+            OperationFailure::Generic(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::fmt::Display for EnvironmentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnvironmentFailure::NotFound {
+                package_name,
+                environment,
+                ..
+            } => write!(
+                f,
+                "Environment `{environment}` not found in package `{package_name}`"
+            ),
+            EnvironmentFailure::NoCheckCommand {
+                package_name,
+                environment,
+                ..
+            } => write!(
+                f,
+                "No check command defined for package `{package_name}` in environment `{environment}`"
+            ),
+            EnvironmentFailure::NoInstallCommand {
+                package_name,
+                environment,
+                ..
+            } => write!(
+                f,
+                "No install command defined for package `{package_name}` in environment `{environment}`"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PackageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackageFailure::NotFound { name, .. } => write!(f, "Package `{name}` not found"),
+            PackageFailure::ParseError { name, .. } => write!(f, "Parse error in package `{name}`"),
+            PackageFailure::MultiplePackagesFound { name, .. } => {
+                write!(f, "Multiple packages found with name `{name}`")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandFailure::ExecutionFailed {
+                command, exit_code, ..
+            } => {
+                if let Some(code) = exit_code {
+                    write!(f, "Command `{command}` failed with exit code {code}")
+                } else {
+                    write!(f, "Command `{command}` failed")
+                }
+            }
+            CommandFailure::CommandNotFound { command } => {
+                write!(f, "Command `{command}` not found")
+            }
+            CommandFailure::InvalidCommand { command, reason } => {
+                write!(f, "Invalid command `{command}`: {reason}")
+            }
+        }
+    }
+}
+
+// Backward compatibility: allow creating OperationFailure from strings
+impl From<String> for OperationFailure {
+    fn from(msg: String) -> Self {
+        OperationFailure::Generic(msg)
+    }
+}
+
+impl From<&str> for OperationFailure {
+    fn from(msg: &str) -> Self {
+        OperationFailure::Generic(msg.to_string())
+    }
+}
+
+// Conversions from existing error types to typed failures
+impl From<crate::package::port::PackageError> for OperationFailure {
+    fn from(err: crate::package::port::PackageError) -> Self {
+        match err {
+            crate::package::port::PackageError::EnvironmentNotFound {
+                package_name,
+                environment,
+                available_environments,
+                package_file,
+            } => OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
+                package_name,
+                environment,
+                available_environments,
+                package_file,
+            }),
+            crate::package::port::PackageError::NoCheckCommand {
+                package_name,
+                environment,
+                package_file,
+                other_envs_with_check,
+            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
+                package_name,
+                environment,
+                package_file,
+                other_envs_with_check,
+            }),
+            crate::package::port::PackageError::NoInstallCommand {
+                package_name,
+                environment,
+                package_file,
+                other_envs_with_install,
+            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
+                package_name,
+                environment,
+                package_file,
+                other_envs_with_install,
+            }),
+            crate::package::port::PackageError::PackageNotFound {
+                name,
+                packages_path,
+                files_examined,
+                search_patterns,
+            } => OperationFailure::PackageError(PackageFailure::NotFound {
+                name,
+                packages_path,
+                files_examined,
+                search_patterns,
+            }),
+            crate::package::port::PackageError::ParseError {
+                name,
+                packages_path,
+                failed_file,
+                file_size_bytes,
+                source,
+            } => OperationFailure::PackageError(PackageFailure::ParseError {
+                name,
+                packages_path,
+                failed_file,
+                file_size_bytes,
+                source_error: source.to_string(),
+            }),
+            crate::package::port::PackageError::MultiplePackagesFound {
+                name,
+                packages_path,
+                conflicting_paths,
+                files_examined,
+                search_patterns,
+            } => OperationFailure::PackageError(PackageFailure::MultiplePackagesFound {
+                name,
+                packages_path,
+                conflicting_paths,
+                files_examined,
+                search_patterns,
+            }),
+        }
+    }
+}
+
+impl From<crate::commands::runner::CommandError> for OperationFailure {
+    fn from(err: crate::commands::runner::CommandError) -> Self {
+        match err {
+            crate::commands::runner::CommandError::NonZeroExit {
+                command,
+                exit_code,
+                stdout,
+                stderr,
+                ..
+            } => OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+                command,
+                exit_code: Some(exit_code),
+                stdout,
+                stderr,
+            }),
+            crate::commands::runner::CommandError::IoError { command, .. } => {
+                OperationFailure::CommandError(CommandFailure::CommandNotFound { command })
+            }
+            crate::commands::runner::CommandError::Timeout { command, .. } => {
+                OperationFailure::CommandError(CommandFailure::InvalidCommand {
+                    command,
+                    reason: "Command timed out".to_string(),
+                })
+            }
+            _ => OperationFailure::Generic(err.to_string()),
+        }
+    }
+}
+
+// Helper methods for creating typed failures
+impl OperationFailure {
+    /// Creates an environment not found error
+    pub fn environment_not_found(
+        package_name: String,
+        environment: String,
+        available_environments: Vec<String>,
+        package_file: std::path::PathBuf,
+    ) -> Self {
+        OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
+            package_name,
+            environment,
+            available_environments,
+            package_file,
+        })
+    }
+
+    /// Creates a no check command error
+    pub fn no_check_command(
+        package_name: String,
+        environment: String,
+        package_file: std::path::PathBuf,
+        other_envs_with_check: Vec<String>,
+    ) -> Self {
+        OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
+            package_name,
+            environment,
+            package_file,
+            other_envs_with_check,
+        })
+    }
+
+    /// Creates a no install command error
+    pub fn no_install_command(
+        package_name: String,
+        environment: String,
+        package_file: std::path::PathBuf,
+        other_envs_with_install: Vec<String>,
+    ) -> Self {
+        OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
+            package_name,
+            environment,
+            package_file,
+            other_envs_with_install,
+        })
+    }
+
+    /// Creates a package not found error
+    pub fn package_not_found(
+        name: String,
+        packages_path: std::path::PathBuf,
+        files_examined: usize,
+        search_patterns: Vec<String>,
+    ) -> Self {
+        OperationFailure::PackageError(PackageFailure::NotFound {
+            name,
+            packages_path,
+            files_examined,
+            search_patterns,
+        })
+    }
+
+    /// Creates a command execution failed error
+    pub fn command_failed(
+        command: String,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    ) -> Self {
+        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+            command,
+            exit_code,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Checks if this is an environment-related error
+    pub fn is_environment_error(&self) -> bool {
+        matches!(self, OperationFailure::EnvironmentError(_))
+    }
+
+    /// Checks if this is a package-related error
+    pub fn is_package_error(&self) -> bool {
+        matches!(self, OperationFailure::PackageError(_))
+    }
+
+    /// Checks if this is a command-related error
+    pub fn is_command_error(&self) -> bool {
+        matches!(self, OperationFailure::CommandError(_))
+    }
+
+    /// Gets the environment failure details if this is an environment error
+    pub fn environment_failure(&self) -> Option<&EnvironmentFailure> {
+        match self {
+            OperationFailure::EnvironmentError(env_err) => Some(env_err),
+            _ => None,
+        }
+    }
+}
+
+impl From<crate::package::port::PackageRepoError> for OperationFailure {
+    fn from(err: crate::package::port::PackageRepoError) -> Self {
+        match err {
+            crate::package::port::PackageRepoError::PackageError(pkg_err) => (*pkg_err).into(),
+            crate::package::port::PackageRepoError::PackageListError(list_err) => {
+                OperationFailure::Generic(list_err.to_string())
+            }
+            crate::package::port::PackageRepoError::IoError(io_err) => {
+                OperationFailure::Generic(format!("IO error: {io_err}"))
+            }
+            crate::package::port::PackageRepoError::FileSystemError(fs_err) => {
+                OperationFailure::Generic(format!("File system error: {fs_err}"))
+            }
+        }
+    }
 }
 
 /// Events that can be emitted during package operations

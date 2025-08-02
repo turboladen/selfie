@@ -223,9 +223,9 @@ fn test_package_check_command_failure() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "check", "failing-check-package"]);
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("check failed"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "Command error: Command `exit 1` failed with exit code 1",
+    ));
 }
 
 #[test]
