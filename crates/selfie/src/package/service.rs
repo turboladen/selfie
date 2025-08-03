@@ -38,9 +38,9 @@ use crate::{commands::runner::CommandRunner, config::AppConfig, package::port::P
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressTracker {
     /// Current step number (0-based internally, 1-based for display)
-    current_step: u32,
+    current_step: usize,
     /// Total number of steps in the operation
-    total_steps: u32,
+    total_steps: usize,
 }
 
 impl ProgressTracker {
@@ -49,7 +49,7 @@ impl ProgressTracker {
     /// # Arguments
     ///
     /// * `total_steps` - Total number of steps in the operation
-    pub(crate) fn new(total_steps: u32) -> Self {
+    pub(crate) fn new(total_steps: usize) -> Self {
         Self {
             current_step: 0,
             total_steps,
@@ -74,12 +74,12 @@ impl ProgressTracker {
     }
 
     /// Get the current step number (1-based for display)
-    pub(crate) fn current_step(&self) -> u32 {
+    pub(crate) fn current_step(&self) -> usize {
         self.current_step
     }
 
     /// Get the total number of steps in the operation
-    pub(crate) fn total_steps(&self) -> u32 {
+    pub(crate) fn total_steps(&self) -> usize {
         self.total_steps
     }
 }
@@ -323,7 +323,7 @@ where
         operation_type: OperationType,
         package_name: &str,
         context: OperationContext,
-        total_steps: u32,
+        total_steps: usize,
         handler: F,
     ) -> EventStream
     where
@@ -377,7 +377,7 @@ where
         operation_type: OperationType,
         package_name: &str,
         context: OperationContext,
-        total_steps: u32,
+        total_steps: usize,
         handler: F,
     ) -> EventStream
     where

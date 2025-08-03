@@ -93,7 +93,7 @@ impl<'a> InstallEventHandler<'a> {
                             _ => false, // Use default failure handling for other types of failures
                         }
                     }
-                    _ => false, // Use default handling for success
+                    OperationResult::Success(_) => false,
                 }
             }
             _ => false, // Use default handling for other events
@@ -192,17 +192,16 @@ pub(crate) async fn handle_install(
         .process_events(event_stream, |event| {
             // Check for environment errors first
             if let PackageEvent::Error { error, .. } = event {
-                match error {
-                    StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) => {
-                        if matches!(
-                            pkg_error.as_ref(),
-                            selfie::package::port::PackageError::EnvironmentNotFound { .. }
-                        ) {
-                            handle_environment_error(error, config);
-                            return true; // Handled completely - prevent duplicate error display
-                        }
+                if let StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) =
+                    error
+                {
+                    if matches!(
+                        pkg_error.as_ref(),
+                        selfie::package::port::PackageError::EnvironmentNotFound { .. }
+                    ) {
+                        handle_environment_error(error, config);
+                        return true; // Handled completely - prevent duplicate error display
                     }
-                    _ => {}
                 }
             }
 

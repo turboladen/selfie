@@ -206,10 +206,10 @@ impl EventProcessor {
                 result: op_result, ..
             } => match op_result {
                 OperationResult::Success(success) => {
-                    self.reporter.report_success(&success.to_string());
+                    self.reporter.report_success(success.to_string());
                 }
                 OperationResult::Failure(err) => {
-                    self.reporter.report_error(&err.to_string());
+                    self.reporter.report_error(err.to_string());
                     result.exit_code = 1;
                     result.had_errors = true;
                 }

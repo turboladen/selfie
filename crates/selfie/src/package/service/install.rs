@@ -82,7 +82,7 @@ where
     log_proceeding_with_installation(package_name, &pre_install_check, sender).await;
 
     // Step 4: Get install command (reusing shared step with custom getter function)
-    let install_cmd = match steps::get_command(
+    let Ok(install_cmd) = steps::get_command(
         env_config,
         "install",
         |ec| Some(ec.install()),
@@ -90,36 +90,33 @@ where
         progress,
     )
     .await
-    {
-        Ok(cmd) => cmd,
-        Err(_) => {
-            // Create typed error for missing install command
-            let other_envs_with_install = package_blob
-                .package
-                .environments()
-                .keys()
-                .filter_map(|env_name| {
-                    if package_blob
-                        .package
-                        .environments()
-                        .get(env_name)?
-                        .install()
-                        .is_empty()
-                    {
-                        None
-                    } else {
-                        Some(env_name.clone())
-                    }
-                })
-                .collect();
+    else {
+        // Create typed error for missing install command
+        let other_envs_with_install = package_blob
+            .package
+            .environments()
+            .keys()
+            .filter_map(|env_name| {
+                if package_blob
+                    .package
+                    .environments()
+                    .get(env_name)?
+                    .install()
+                    .is_empty()
+                {
+                    None
+                } else {
+                    Some(env_name.clone())
+                }
+            })
+            .collect();
 
-            return OperationResult::Failure(OperationFailure::no_install_command(
-                package_name.to_string(),
-                config.environment().to_string(),
-                package_blob.package.path().clone(),
-                other_envs_with_install,
-            ));
-        }
+        return OperationResult::Failure(OperationFailure::no_install_command(
+            package_name.to_string(),
+            config.environment().to_string(),
+            package_blob.package.path().clone(),
+            other_envs_with_install,
+        ));
     };
 
     // Step 5: Execute installation and verification
@@ -164,10 +161,7 @@ where
                 config.environment().to_string(),
                 true, // was_already_installed
                 executable_path,
-                (
-                    progress.current_step() as usize,
-                    progress.total_steps() as usize,
-                ),
+                (progress.current_step(), progress.total_steps()).into(),
             ),
         ));
     }
@@ -309,10 +303,7 @@ where
         context.config.environment().to_string(),
         false, // was_already_installed
         None,  // executable_path - could be enhanced to detect this
-        (
-            progress.current_step() as usize,
-            progress.total_steps() as usize,
-        ),
+        (progress.current_step(), progress.total_steps()).into(),
     ))
 }
 

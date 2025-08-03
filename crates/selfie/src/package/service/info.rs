@@ -116,10 +116,7 @@ where
     OperationResult::Success(OperationSuccess::package_info_retrieved(
         package_name.to_string(),
         config.environment().to_string(),
-        (
-            progress.current_step() as usize,
-            progress.total_steps() as usize,
-        ),
+        (progress.current_step(), progress.total_steps()).into(),
     ))
 }
 

@@ -27,6 +27,32 @@
 pub mod error;
 pub mod metadata;
 
+/// Represents the completion status of steps in an operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepCount {
+    pub completed: usize,
+    pub total: usize,
+}
+
+impl StepCount {
+    #[must_use]
+    pub fn new(completed: usize, total: usize) -> Self {
+        Self { completed, total }
+    }
+}
+
+impl std::fmt::Display for StepCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}/{} steps)", self.completed, self.total)
+    }
+}
+
+impl From<(usize, usize)> for StepCount {
+    fn from((completed, total): (usize, usize)) -> Self {
+        Self::new(completed, total)
+    }
+}
+
 use std::{
     fmt::{self, Debug},
     pin::Pin,
@@ -116,8 +142,8 @@ impl EventSender {
     /// Send a progress update
     pub(crate) async fn send_progress(
         &self,
-        step: u32,
-        total_steps: u32,
+        step: usize,
+        total_steps: usize,
         message: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
@@ -378,6 +404,63 @@ pub struct OperationContext {
 }
 
 /// Result of an operation
+///
+/// Example usage for clients handling typed success results
+///
+/// ```rust
+/// use selfie::package::event::{OperationResult, OperationSuccess};
+///
+/// fn handle_operation_result(result: OperationResult) {
+///     match result {
+///         OperationResult::Success(success) => {
+///             match success {
+///                 OperationSuccess::PackageInstalled {
+///                     package_name,
+///                     was_already_installed: true,
+///                     executable_path: Some(path),
+///                     ..
+///                 } => {
+///                     println!("✅ {} was already installed at {}", package_name, path);
+///                 }
+///                 OperationSuccess::PackageInstalled {
+///                     package_name,
+///                     was_already_installed: false,
+///                     steps_completed,
+///                     ..
+///                 } => {
+///                     println!("✅ {} installed successfully ({}/{} steps)",
+///                             package_name, steps_completed.completed, steps_completed.total);
+///                 }
+///                 OperationSuccess::PackageValidated {
+///                     package_name,
+///                     warning_count: Some(warnings),
+///                     ..
+///                 } => {
+///                     println!("✅ {} validated with {} warnings", package_name, warnings);
+///                 }
+///                 OperationSuccess::PackageListGenerated {
+///                     valid_count,
+///                     invalid_count,
+///                     environment,
+///                     ..
+///                 } => {
+///                     if invalid_count > 0 {
+///                         println!("📦 Found {} valid and {} invalid packages in {}",
+///                                 valid_count, invalid_count, environment);
+///                     } else {
+///                         println!("📦 Found {} packages in {}", valid_count, environment);
+///                     }
+///                 }
+///                 _ => println!("✅ Operation completed successfully"),
+///             }
+///         }
+///         OperationResult::Failure(failure) => {
+///             eprintln!("❌ Operation failed: {}", failure);
+///         }
+///     }
+/// }
+/// ```
+///
 #[derive(Debug, Clone)]
 pub enum OperationResult {
     Success(OperationSuccess),
@@ -392,7 +475,7 @@ pub enum OperationSuccess {
         package_name: String,
         environment: String,
         check_result: CheckResult,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     },
     /// Package installation operation completed
     PackageInstalled {
@@ -400,7 +483,7 @@ pub enum OperationSuccess {
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     },
     /// Package validation operation completed
     PackageValidated {
@@ -408,20 +491,20 @@ pub enum OperationSuccess {
         environment: String,
         status: ValidationStatus,
         warning_count: Option<usize>,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     },
     /// Package info retrieval operation completed
     PackageInfoRetrieved {
         package_name: String,
         environment: String,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     },
     /// Package list generation operation completed
     PackageListGenerated {
         valid_count: usize,
         invalid_count: usize,
         environment: String,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
@@ -605,20 +688,10 @@ impl std::fmt::Display for OperationSuccess {
                 check_result,
                 steps_completed,
                 ..
-            } => {
-                let status = match check_result {
-                    CheckResult::Success => "successfully",
-                    CheckResult::Failed { .. } => "with failures",
-                    CheckResult::CommandNotFound => "but command not found",
-                    CheckResult::NoCheckCommand => "but no check command defined",
-                    CheckResult::Error(_) => "with errors",
-                };
-                write!(
-                    f,
-                    "Package '{}' check completed {} ({}/{} steps)",
-                    package_name, status, steps_completed.0, steps_completed.1
-                )
-            }
+            } => write!(
+                f,
+                "Package '{package_name}' check completed {check_result} {steps_completed}"
+            ),
             OperationSuccess::PackageInstalled {
                 package_name,
                 was_already_installed,
@@ -626,27 +699,15 @@ impl std::fmt::Display for OperationSuccess {
                 steps_completed,
                 ..
             } => {
-                if *was_already_installed {
-                    if let Some(path) = executable_path {
-                        write!(
-                            f,
-                            "Package '{}' was already installed at: {} ({}/{} steps)",
-                            package_name, path, steps_completed.0, steps_completed.1
-                        )
-                    } else {
-                        write!(
-                            f,
-                            "Package '{}' was already installed ({}/{} steps)",
-                            package_name, steps_completed.0, steps_completed.1
-                        )
+                let status = if *was_already_installed {
+                    match executable_path {
+                        Some(path) => format!("was already installed at: {path}"),
+                        None => "was already installed".to_string(),
                     }
                 } else {
-                    write!(
-                        f,
-                        "Package '{}' installation completed successfully ({}/{} steps)",
-                        package_name, steps_completed.0, steps_completed.1
-                    )
-                }
+                    "installation completed successfully".to_string()
+                };
+                write!(f, "Package '{package_name}' {status} {steps_completed}")
             }
             OperationSuccess::PackageValidated {
                 package_name,
@@ -654,34 +715,25 @@ impl std::fmt::Display for OperationSuccess {
                 warning_count,
                 steps_completed,
                 ..
-            } => match status {
-                ValidationStatus::Valid => write!(
+            } => {
+                let status_msg = match status {
+                    ValidationStatus::HasWarnings => {
+                        format!("with {} warning(s)", warning_count.unwrap_or(0))
+                    }
+                    _ => status.to_string(),
+                };
+                write!(
                     f,
-                    "Package '{}' validation completed successfully ({}/{} steps)",
-                    package_name, steps_completed.0, steps_completed.1
-                ),
-                ValidationStatus::HasWarnings => {
-                    let count = warning_count.unwrap_or(0);
-                    write!(
-                        f,
-                        "Package '{}' validation completed with {} warning(s) ({}/{} steps)",
-                        package_name, count, steps_completed.0, steps_completed.1
-                    )
-                }
-                ValidationStatus::HasErrors => write!(
-                    f,
-                    "Package '{}' validation completed with errors ({}/{} steps)",
-                    package_name, steps_completed.0, steps_completed.1
-                ),
-            },
+                    "Package '{package_name}' validation completed {status_msg} {steps_completed}"
+                )
+            }
             OperationSuccess::PackageInfoRetrieved {
                 package_name,
                 steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{}' information retrieved successfully ({}/{} steps)",
-                package_name, steps_completed.0, steps_completed.1
+                "Package '{package_name}' information retrieved successfully {steps_completed}"
             ),
             OperationSuccess::PackageListGenerated {
                 valid_count,
@@ -689,21 +741,16 @@ impl std::fmt::Display for OperationSuccess {
                 steps_completed,
                 ..
             } => {
-                if *invalid_count > 0 {
-                    write!(
-                        f,
-                        "Package listing completed with {} valid package(s) and {} invalid package(s) ({}/{} steps)",
-                        valid_count, invalid_count, steps_completed.0, steps_completed.1
+                let status = if *invalid_count > 0 {
+                    format!(
+                        "with {valid_count} valid package(s) and {invalid_count} invalid package(s)"
                     )
                 } else {
-                    write!(
-                        f,
-                        "Package listing completed with {} valid package(s) ({}/{} steps)",
-                        valid_count, steps_completed.0, steps_completed.1
-                    )
-                }
+                    format!("with {valid_count} valid package(s)")
+                };
+                write!(f, "Package listing completed {status} {steps_completed}")
             }
-            OperationSuccess::Generic(msg) => write!(f, "{}", msg),
+            OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -828,69 +875,14 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
     }
 }
 
-/// Example usage for clients handling typed success results
-///
-/// ```rust
-/// use selfie::package::event::{OperationResult, OperationSuccess};
-///
-/// fn handle_operation_result(result: OperationResult) {
-///     match result {
-///         OperationResult::Success(success) => {
-///             match success {
-///                 OperationSuccess::PackageInstalled {
-///                     package_name,
-///                     was_already_installed: true,
-///                     executable_path: Some(path),
-///                     ..
-///                 } => {
-///                     println!("✅ {} was already installed at {}", package_name, path);
-///                 }
-///                 OperationSuccess::PackageInstalled {
-///                     package_name,
-///                     was_already_installed: false,
-///                     steps_completed: (current, total),
-///                     ..
-///                 } => {
-///                     println!("✅ {} installed successfully ({}/{} steps)",
-///                             package_name, current, total);
-///                 }
-///                 OperationSuccess::PackageValidated {
-///                     package_name,
-///                     warning_count: Some(warnings),
-///                     ..
-///                 } => {
-///                     println!("✅ {} validated with {} warnings", package_name, warnings);
-///                 }
-///                 OperationSuccess::PackageListGenerated {
-///                     valid_count,
-///                     invalid_count,
-///                     environment,
-///                     ..
-///                 } => {
-///                     if invalid_count > 0 {
-///                         println!("📦 Found {} valid and {} invalid packages in {}",
-///                                 valid_count, invalid_count, environment);
-///                     } else {
-///                         println!("📦 Found {} packages in {}", valid_count, environment);
-///                     }
-///                 }
-///                 _ => println!("✅ Operation completed successfully"),
-///             }
-///         }
-///         OperationResult::Failure(failure) => {
-///             eprintln!("❌ Operation failed: {}", failure);
-///         }
-///     }
-/// }
-/// ```
-
 impl OperationSuccess {
     /// Creates a package check success result
+    #[must_use]
     pub fn package_checked(
         package_name: String,
         environment: String,
         check_result: CheckResult,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageChecked {
             package_name,
@@ -900,13 +892,14 @@ impl OperationSuccess {
         }
     }
 
-    /// Creates a package installation success result
+    /// Create a `PackageInstalled` success variant
+    #[must_use]
     pub fn package_installed(
         package_name: String,
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageInstalled {
             package_name,
@@ -917,13 +910,14 @@ impl OperationSuccess {
         }
     }
 
-    /// Creates a package validation success result
+    /// Create a `PackageValidated` success variant
+    #[must_use]
     pub fn package_validated(
         package_name: String,
         environment: String,
         status: ValidationStatus,
         warning_count: Option<usize>,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageValidated {
             package_name,
@@ -934,11 +928,12 @@ impl OperationSuccess {
         }
     }
 
-    /// Creates a package info retrieval success result
+    /// Create a `PackageInfoRetrieved` success variant
+    #[must_use]
     pub fn package_info_retrieved(
         package_name: String,
         environment: String,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageInfoRetrieved {
             package_name,
@@ -947,12 +942,13 @@ impl OperationSuccess {
         }
     }
 
-    /// Creates a package list generation success result
+    /// Create a `PackageListGenerated` success variant
+    #[must_use]
     pub fn package_list_generated(
         valid_count: usize,
         invalid_count: usize,
         environment: String,
-        steps_completed: (usize, usize),
+        steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageListGenerated {
             valid_count,
@@ -963,21 +959,25 @@ impl OperationSuccess {
     }
 
     /// Checks if this is a package check success
+    #[must_use]
     pub fn is_package_check(&self) -> bool {
         matches!(self, OperationSuccess::PackageChecked { .. })
     }
 
     /// Checks if this is a package installation success
+    #[must_use]
     pub fn is_package_install(&self) -> bool {
         matches!(self, OperationSuccess::PackageInstalled { .. })
     }
 
     /// Checks if this is a package validation success
+    #[must_use]
     pub fn is_package_validation(&self) -> bool {
         matches!(self, OperationSuccess::PackageValidated { .. })
     }
 
     /// Gets the package name from the success result if available
+    #[must_use]
     pub fn package_name(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { package_name, .. }
@@ -989,6 +989,7 @@ impl OperationSuccess {
     }
 
     /// Gets the environment from the success result if available
+    #[must_use]
     pub fn environment(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { environment, .. }
@@ -1001,7 +1002,8 @@ impl OperationSuccess {
     }
 
     /// Gets the steps completed from the success result
-    pub fn steps_completed(&self) -> Option<(usize, usize)> {
+    #[must_use]
+    pub fn steps_completed(&self) -> Option<StepCount> {
         match self {
             OperationSuccess::PackageChecked {
                 steps_completed, ..
@@ -1025,6 +1027,7 @@ impl OperationSuccess {
 
 impl OperationFailure {
     /// Creates an environment not found error
+    #[must_use]
     pub fn environment_not_found(
         package_name: String,
         environment: String,
@@ -1040,6 +1043,7 @@ impl OperationFailure {
     }
 
     /// Creates a no check command error
+    #[must_use]
     pub fn no_check_command(
         package_name: String,
         environment: String,
@@ -1055,6 +1059,7 @@ impl OperationFailure {
     }
 
     /// Creates a no install command error
+    #[must_use]
     pub fn no_install_command(
         package_name: String,
         environment: String,
@@ -1070,6 +1075,7 @@ impl OperationFailure {
     }
 
     /// Creates a package not found error
+    #[must_use]
     pub fn package_not_found(
         name: String,
         packages_path: std::path::PathBuf,
@@ -1085,6 +1091,7 @@ impl OperationFailure {
     }
 
     /// Creates a command execution failed error
+    #[must_use]
     pub fn command_failed(
         command: String,
         exit_code: Option<i32>,
@@ -1100,21 +1107,25 @@ impl OperationFailure {
     }
 
     /// Checks if this is an environment-related error
+    #[must_use]
     pub fn is_environment_error(&self) -> bool {
         matches!(self, OperationFailure::EnvironmentError(_))
     }
 
     /// Checks if this is a package-related error
+    #[must_use]
     pub fn is_package_error(&self) -> bool {
         matches!(self, OperationFailure::PackageError(_))
     }
 
     /// Checks if this is a command-related error
+    #[must_use]
     pub fn is_command_error(&self) -> bool {
         matches!(self, OperationFailure::CommandError(_))
     }
 
     /// Gets the environment failure details if this is an environment error
+    #[must_use]
     pub fn environment_failure(&self) -> Option<&EnvironmentFailure> {
         match self {
             OperationFailure::EnvironmentError(env_err) => Some(env_err),
@@ -1149,8 +1160,8 @@ pub enum PackageEvent {
     /// Progress update
     Progress {
         operation_info: OperationInfo,
-        step: u32,
-        total_steps: u32,
+        step: usize,
+        total_steps: usize,
         percent_complete: f32,
         message: String,
     },
@@ -1308,6 +1319,18 @@ pub enum CheckResult {
     Error(String),
 }
 
+impl std::fmt::Display for CheckResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckResult::Success => write!(f, "successfully"),
+            CheckResult::Failed { .. } => write!(f, "with failures"),
+            CheckResult::CommandNotFound => write!(f, "but command not found"),
+            CheckResult::NoCheckCommand => write!(f, "but no check command defined"),
+            CheckResult::Error(_) => write!(f, "with errors"),
+        }
+    }
+}
+
 /// Structured data for validation results
 #[derive(Debug, Clone)]
 pub struct ValidationResultData {
@@ -1323,6 +1346,16 @@ pub enum ValidationStatus {
     Valid,
     HasWarnings,
     HasErrors,
+}
+
+impl std::fmt::Display for ValidationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationStatus::Valid => write!(f, "successfully"),
+            ValidationStatus::HasWarnings => write!(f, "with warnings"),
+            ValidationStatus::HasErrors => write!(f, "with errors"),
+        }
+    }
 }
 
 /// Individual validation issue
@@ -1354,4 +1387,107 @@ pub enum LogLevel {
 pub enum ConsoleOutput {
     Stdout(String),
     Stderr(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_step_count_display() {
+        let step_count = StepCount::new(3, 5);
+        assert_eq!(format!("{step_count}"), "(3/5 steps)");
+    }
+
+    #[test]
+    fn test_step_count_usize_usage() {
+        // Test direct usize construction
+        let step_count = StepCount::new(7usize, 10usize);
+        assert_eq!(step_count.completed, 7);
+        assert_eq!(step_count.total, 10);
+        assert_eq!(format!("{step_count}"), "(7/10 steps)");
+
+        // Test From<(usize, usize)> conversion
+        let step_count_from_usize: StepCount = (3usize, 5usize).into();
+        assert_eq!(step_count_from_usize.completed, 3);
+        assert_eq!(step_count_from_usize.total, 5);
+
+        // Test with large usize values (that would fit in usize but not necessarily u32 on 64-bit)
+        let large_step_count = StepCount::new(1_000_000, 2_000_000);
+        assert_eq!(large_step_count.completed, 1_000_000);
+        assert_eq!(large_step_count.total, 2_000_000);
+    }
+
+    #[test]
+    fn test_check_result_display() {
+        assert_eq!(format!("{}", CheckResult::Success), "successfully");
+        assert_eq!(
+            format!(
+                "{}",
+                CheckResult::Failed {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(1)
+                }
+            ),
+            "with failures"
+        );
+        assert_eq!(
+            format!("{}", CheckResult::CommandNotFound),
+            "but command not found"
+        );
+        assert_eq!(
+            format!("{}", CheckResult::NoCheckCommand),
+            "but no check command defined"
+        );
+        assert_eq!(
+            format!("{}", CheckResult::Error("test".to_string())),
+            "with errors"
+        );
+    }
+
+    #[test]
+    fn test_validation_status_display() {
+        assert_eq!(format!("{}", ValidationStatus::Valid), "successfully");
+        assert_eq!(
+            format!("{}", ValidationStatus::HasWarnings),
+            "with warnings"
+        );
+        assert_eq!(format!("{}", ValidationStatus::HasErrors), "with errors");
+    }
+
+    #[test]
+    fn test_operation_success_display() {
+        let step_count = StepCount::new(2, 3);
+
+        let success = OperationSuccess::PackageChecked {
+            package_name: "test-package".to_string(),
+            environment: "test".to_string(),
+            check_result: CheckResult::Success,
+            steps_completed: step_count,
+        };
+
+        assert_eq!(
+            format!("{success}"),
+            "Package 'test-package' check completed successfully (2/3 steps)"
+        );
+    }
+
+    #[test]
+    fn test_operation_success_package_installed() {
+        let step_count = StepCount::new(1, 1);
+
+        let success = OperationSuccess::PackageInstalled {
+            package_name: "test-package".to_string(),
+            environment: "test".to_string(),
+            was_already_installed: false,
+            executable_path: None,
+            steps_completed: step_count,
+        };
+
+        assert_eq!(
+            format!("{success}"),
+            "Package 'test-package' installation completed successfully (1/1 steps)"
+        );
+    }
 }

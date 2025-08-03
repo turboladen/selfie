@@ -137,9 +137,6 @@ where
         valid_count,
         invalid_packages.len(),
         config.environment().to_string(),
-        (
-            progress.current_step() as usize,
-            progress.total_steps() as usize,
-        ),
+        (progress.current_step(), progress.total_steps()).into(),
     ))
 }

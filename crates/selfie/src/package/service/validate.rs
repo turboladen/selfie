@@ -107,10 +107,7 @@ where
                 config.environment().to_string(),
                 ValidationStatus::Valid,
                 None,
-                (
-                    progress.current_step() as usize,
-                    progress.total_steps() as usize,
-                ),
+                (progress.current_step(), progress.total_steps()).into(),
             ))
         }
         ValidationStatus::HasWarnings => {
@@ -120,10 +117,7 @@ where
                 config.environment().to_string(),
                 ValidationStatus::HasWarnings,
                 Some(warning_count),
-                (
-                    progress.current_step() as usize,
-                    progress.total_steps() as usize,
-                ),
+                (progress.current_step(), progress.total_steps()).into(),
             ))
         }
         ValidationStatus::HasErrors => {

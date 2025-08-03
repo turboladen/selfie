@@ -194,10 +194,7 @@ fn create_operation_result(
             package_name.to_string(),
             check_result.environment.clone(),
             check_result.result.clone(),
-            (
-                progress.current_step() as usize,
-                progress.total_steps() as usize,
-            ),
+            (progress.current_step(), progress.total_steps()).into(),
         )),
         CheckResult::Failed {
             stdout,

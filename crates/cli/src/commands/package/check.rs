@@ -1,7 +1,10 @@
 use selfie::{
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, PackageEvent, error::StreamedError},
+        event::{
+            CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent,
+            error::StreamedError,
+        },
         port::{PackageError, PackageRepoError},
         service::PackageService,
     },
@@ -64,15 +67,15 @@ pub(crate) async fn handle_check(
                 } => {
                     // Skip duplicate error display for environment configuration errors
                     match op_result {
-                        selfie::package::event::OperationResult::Failure(failure) => {
+                        OperationResult::Failure(failure) => {
                             match failure {
-                                selfie::package::event::OperationFailure::EnvironmentError(_) => {
+                                OperationFailure::EnvironmentError(_) => {
                                     true // Handled - we already showed the error message above
                                 }
-                                _ => false, // Use default failure handling for other types of failures
+                                _ => false,
                             }
                         }
-                        _ => false, // Use default handling for success
+                        OperationResult::Success(_) => false,
                     }
                 }
                 _ => false, // Use default handling for other events
