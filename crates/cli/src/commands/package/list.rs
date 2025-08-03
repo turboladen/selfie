@@ -1,7 +1,7 @@
 use console::style;
 use selfie::{
     config::AppConfig,
-    package::{event::PackageEvent, service::PackageService},
+    package::{event, service::PackageService},
 };
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -55,9 +55,9 @@ impl ListCommand<'_> {
     }
 }
 
-fn handle_list_event(event: &PackageEvent, config: &AppConfig, show_all: bool) -> bool {
+fn handle_list_event(event: &event::PackageEvent, config: &AppConfig, show_all: bool) -> bool {
     match event {
-        PackageEvent::PackageListLoaded { package_list, .. } => {
+        event::PackageEvent::PackageListLoaded { package_list, .. } => {
             // Show package directory path
             println!("📁 Package directory: {}", package_list.package_directory);
 
@@ -130,40 +130,37 @@ fn display_packages_table(
     println!("{table}");
 }
 
-fn format_status(
-    status: Option<&selfie::package::event::CheckResult>,
-    config: &AppConfig,
-) -> String {
+fn format_status(status: Option<&event::CheckResult>, config: &AppConfig) -> String {
     match status {
-        Some(selfie::package::event::CheckResult::Success) => {
+        Some(event::CheckResult::Success) => {
             if config.use_colors() {
                 console::style("✅ Installed").green().to_string()
             } else {
                 "✅ Installed".to_string()
             }
         }
-        Some(selfie::package::event::CheckResult::Failed { .. }) => {
+        Some(event::CheckResult::Failed { .. }) => {
             if config.use_colors() {
                 console::style("📦 Not installed").cyan().to_string()
             } else {
                 "📦 Not installed".to_string()
             }
         }
-        Some(selfie::package::event::CheckResult::NoCheckCommand) => {
+        Some(event::CheckResult::NoCheckCommand) => {
             if config.use_colors() {
                 console::style("⚠️ No check").yellow().to_string()
             } else {
                 "⚠️ No check".to_string()
             }
         }
-        Some(selfie::package::event::CheckResult::CommandNotFound) => {
+        Some(event::CheckResult::CommandNotFound) => {
             if config.use_colors() {
                 console::style("🔍 Cmd not found").red().to_string()
             } else {
                 "🔍 Cmd not found".to_string()
             }
         }
-        Some(selfie::package::event::CheckResult::Error(_)) => {
+        Some(event::CheckResult::Error(_)) => {
             if config.use_colors() {
                 console::style("💥 Error").red().to_string()
             } else {
@@ -346,7 +343,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(selfie::package::event::CheckResult::Success),
+            status: Some(event::CheckResult::Success),
         }];
 
         // Should not panic
@@ -361,7 +358,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(selfie::package::event::CheckResult::Success),
+            status: Some(event::CheckResult::Success),
         }];
 
         // Should not panic with colors enabled
@@ -450,7 +447,7 @@ mod tests {
 
         // Test "Not installed" status without colors
         let result = format_status(
-            Some(&selfie::package::event::CheckResult::Failed {
+            Some(&event::CheckResult::Failed {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: Some(1),
@@ -461,7 +458,7 @@ mod tests {
 
         // Test "Not installed" status with colors (should contain the emoji and text)
         let result_colored = format_status(
-            Some(&selfie::package::event::CheckResult::Failed {
+            Some(&event::CheckResult::Failed {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: Some(1),
@@ -477,15 +474,12 @@ mod tests {
         let config_with_colors = test_config_with_colors();
 
         // Test "Cmd not found" status without colors
-        let result = format_status(
-            Some(&selfie::package::event::CheckResult::CommandNotFound),
-            &config,
-        );
+        let result = format_status(Some(&event::CheckResult::CommandNotFound), &config);
         assert_eq!(result, "🔍 Cmd not found");
 
         // Test "Cmd not found" status with colors
         let result_colored = format_status(
-            Some(&selfie::package::event::CheckResult::CommandNotFound),
+            Some(&event::CheckResult::CommandNotFound),
             &config_with_colors,
         );
         assert!(result_colored.contains("🔍 Cmd not found"));
@@ -498,18 +492,14 @@ mod tests {
 
         // Test "Error" status without colors
         let result = format_status(
-            Some(&selfie::package::event::CheckResult::Error(
-                "test error".to_string(),
-            )),
+            Some(&event::CheckResult::Error("test error".to_string())),
             &config,
         );
         assert_eq!(result, "💥 Error");
 
         // Test "Error" status with colors
         let result_colored = format_status(
-            Some(&selfie::package::event::CheckResult::Error(
-                "test error".to_string(),
-            )),
+            Some(&event::CheckResult::Error("test error".to_string())),
             &config_with_colors,
         );
         assert!(result_colored.contains("💥 Error"));
@@ -568,7 +558,7 @@ mod tests {
             environment_stats: std::collections::HashMap::new(),
         };
 
-        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+        let event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_list,
         };
@@ -593,7 +583,7 @@ mod tests {
             environment_stats,
         };
 
-        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+        let event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_list,
         };
@@ -610,7 +600,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(selfie::package::event::CheckResult::Success),
+            status: Some(event::CheckResult::Success),
         };
 
         let mut environment_stats = std::collections::HashMap::new();
@@ -624,7 +614,7 @@ mod tests {
             environment_stats,
         };
 
-        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+        let event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_list,
         };
@@ -650,7 +640,7 @@ mod tests {
             environment_stats: std::collections::HashMap::new(),
         };
 
-        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+        let event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_list,
         };
@@ -667,7 +657,7 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(selfie::package::event::CheckResult::Success),
+            status: Some(event::CheckResult::Success),
         };
 
         let invalid_package = selfie::package::event::InvalidPackageInfo {
@@ -687,7 +677,7 @@ mod tests {
             environment_stats,
         };
 
-        let event = selfie::package::event::PackageEvent::PackageListLoaded {
+        let event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_list,
         };
