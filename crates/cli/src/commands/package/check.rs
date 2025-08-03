@@ -53,7 +53,7 @@ pub(crate) async fn handle_check(
                         )) => {
                             match pkg_error.as_ref() {
                                 PackageError::EnvironmentNotFound { .. } => {
-                                    handle_environment_error(package_name, error, config);
+                                    handle_environment_not_found_error(package_name, error, config);
                                     true // Handled completely - prevent duplicate error display
                                 }
                                 _ => false, // Use default handling for other errors
@@ -63,20 +63,14 @@ pub(crate) async fn handle_check(
                     }
                 }
                 PackageEvent::Completed {
-                    result: op_result, ..
+                    result: OperationResult::Failure(OperationFailure::EnvironmentError(_)),
+                    ..
                 } => {
                     // Skip duplicate error display for environment configuration errors
-                    match op_result {
-                        OperationResult::Failure(failure) => {
-                            match failure {
-                                OperationFailure::EnvironmentError(_) => {
-                                    true // Handled - we already showed the error message above
-                                }
-                                _ => false,
-                            }
-                        }
-                        OperationResult::Success(_) => false,
-                    }
+                    true // Handled - we already showed the error message above
+                }
+                PackageEvent::Completed { .. } => {
+                    false // Use default handling for other completion events
                 }
                 _ => false, // Use default handling for other events
             }
@@ -91,8 +85,12 @@ pub(crate) async fn handle_check(
     }
 }
 
-/// Handle environment configuration errors with helpful suggestions
-fn handle_environment_error(package_name: &str, error: &StreamedError, config: &AppConfig) {
+/// Handle environment not found errors with helpful suggestions
+fn handle_environment_not_found_error(
+    package_name: &str,
+    error: &StreamedError,
+    config: &AppConfig,
+) {
     // Show helpful information about available environments
     println!();
 

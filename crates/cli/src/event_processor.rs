@@ -43,7 +43,7 @@
 use futures::StreamExt;
 use selfie::package::{
     event::{ConsoleOutput, EventStream, OperationResult, PackageEvent, error::StreamedError},
-    port::{PackageListError, PackageRepoError},
+    port::{PackageError, PackageListError, PackageRepoError},
 };
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -104,17 +104,13 @@ impl EventProcessor {
 
         while let Some(event) = stream.next().await {
             // Check for environment errors before custom handling
-            if let PackageEvent::Error { error, .. } = &event {
-                if let selfie::package::event::error::StreamedError::PackageRepoError(
-                    selfie::package::port::PackageRepoError::PackageError(pkg_error),
-                ) = error
-                {
-                    if matches!(
-                        pkg_error.as_ref(),
-                        selfie::package::port::PackageError::EnvironmentNotFound { .. }
-                    ) {
-                        result.environment_error_handled = true;
-                    }
+            if let PackageEvent::Error {
+                error: StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)),
+                ..
+            } = &event
+            {
+                if matches!(pkg_error.as_ref(), PackageError::EnvironmentNotFound { .. }) {
+                    result.environment_error_handled = true;
                 }
             }
 

@@ -199,7 +199,7 @@ pub(crate) async fn handle_install(
                         pkg_error.as_ref(),
                         selfie::package::port::PackageError::EnvironmentNotFound { .. }
                     ) {
-                        handle_environment_error(error, config);
+                        handle_environment_not_found_error(error, config);
                         return true; // Handled completely - prevent duplicate error display
                     }
                 }
@@ -217,8 +217,8 @@ pub(crate) async fn handle_install(
     }
 }
 
-/// Handle environment configuration errors with helpful suggestions
-fn handle_environment_error(error: &StreamedError, config: &AppConfig) {
+/// Handle environment not found errors with helpful suggestions
+fn handle_environment_not_found_error(error: &StreamedError, config: &AppConfig) {
     // Show helpful information about available environments
     println!();
 
