@@ -74,7 +74,11 @@ impl<'a> InstallEventHandler<'a> {
         Self { config, display }
     }
 
-    fn handle_event(&mut self, event: &PackageEvent) -> bool {
+    fn handle_event(
+        &mut self,
+        event: &PackageEvent,
+        tracker: &common::PackageNotFoundTracker,
+    ) -> bool {
         #[allow(clippy::match_same_arms)]
         match event {
             PackageEvent::CheckResultCompleted { check_result, .. } => {
@@ -83,6 +87,11 @@ impl<'a> InstallEventHandler<'a> {
             PackageEvent::Info { output, .. } => self.handle_info_event(output),
             PackageEvent::Progress { message, .. } => self.handle_progress_event(message),
             PackageEvent::Completed { result, .. } => {
+                // Suppress completion errors if we already handled PackageNotFound
+                if tracker.should_suppress_completion_error(result) {
+                    return true; // Handled - suppress duplicate error
+                }
+
                 // Skip duplicate error display for environment configuration errors
                 match result {
                     OperationResult::Failure(failure) => {
@@ -183,6 +192,9 @@ pub(crate) async fn handle_install(
     // Create installation display
     let mut display = InstallationDisplay::new();
 
+    // Create tracker for consistent error handling
+    let mut tracker = common::PackageNotFoundTracker::new();
+
     report_status(&format!("Installing {package_name}..."));
 
     // Process the event stream with custom handling for install-specific events
@@ -190,8 +202,14 @@ pub(crate) async fn handle_install(
     let mut event_handler = InstallEventHandler::new(config, &mut display);
     let result = processor
         .process_events(event_stream, |event| {
-            // Check for environment errors first
+            // Check for PackageNotFound errors first
             if let PackageEvent::Error { error, .. } = event {
+                // Handle PackageNotFound errors consistently
+                if tracker.handle_package_not_found_error(error) {
+                    return true; // Handled - prevent duplicate error display
+                }
+
+                // Check for environment errors
                 if let StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) =
                     error
                 {
@@ -205,7 +223,7 @@ pub(crate) async fn handle_install(
                 }
             }
 
-            event_handler.handle_event(event)
+            event_handler.handle_event(event, &tracker)
         })
         .await;
 

@@ -30,6 +30,9 @@ pub(crate) async fn handle_check(
     // Create the package service
     let service = create_package_service(config);
 
+    // Create tracker for consistent error handling
+    let mut tracker = common::PackageNotFoundTracker::new();
+
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
 
@@ -46,6 +49,11 @@ pub(crate) async fn handle_check(
                     true // Handled
                 }
                 PackageEvent::Error { error, .. } => {
+                    // Handle PackageNotFound errors consistently
+                    if tracker.handle_package_not_found_error(error) {
+                        return true; // Handled - prevent duplicate error display
+                    }
+
                     // Handle environment configuration errors specially
                     match error {
                         StreamedError::PackageRepoError(PackageRepoError::PackageError(
@@ -62,15 +70,19 @@ pub(crate) async fn handle_check(
                         _ => false, // Use default handling for other errors
                     }
                 }
-                PackageEvent::Completed {
-                    result: OperationResult::Failure(OperationFailure::EnvironmentError(_)),
-                    ..
-                } => {
-                    // Skip duplicate error display for environment configuration errors
-                    true // Handled - we already showed the error message above
-                }
-                PackageEvent::Completed { .. } => {
-                    false // Use default handling for other completion events
+                PackageEvent::Completed { result, .. } => {
+                    // Suppress completion errors if we already handled PackageNotFound
+                    if tracker.should_suppress_completion_error(result) {
+                        return true; // Handled - suppress duplicate error
+                    }
+
+                    match result {
+                        OperationResult::Failure(OperationFailure::EnvironmentError(_)) => {
+                            // Skip duplicate error display for environment configuration errors
+                            true // Handled - we already showed the error message above
+                        }
+                        _ => false, // Use default handling for other completion events
+                    }
                 }
                 _ => false, // Use default handling for other events
             }
@@ -139,31 +151,21 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
         println!("{}{}", format_key_fn("Command"), cmd);
     }
 
+    let reporter = TerminalProgressReporter::new(config.use_colors());
+
     // Format status with appropriate icon and color
     let status_line = match &check_result.result {
         CheckResult::Success => {
-            if config.use_colors() {
-                format!(
-                    "{}{}",
-                    format_key_fn("Status"),
-                    console::style("✅ Installed").green().bold()
-                )
-            } else {
-                format!("{}✅ Installed", format_key_fn("Status"))
-            }
+            format!("{}{}", format_key_fn("Status"), reporter.format_installed())
         }
         CheckResult::Failed {
             stderr, exit_code, ..
         } => {
-            let status = if config.use_colors() {
-                format!(
-                    "{}{}",
-                    format_key_fn("Status"),
-                    console::style("❌ Not installed").red().bold()
-                )
-            } else {
-                format!("{}❌ Not installed", format_key_fn("Status"))
-            };
+            let status = format!(
+                "{}{}",
+                format_key_fn("Status"),
+                reporter.format_not_installed()
+            );
 
             if !stderr.is_empty() {
                 format!("{}\n{}{}", status, format_key_fn("Details"), stderr.trim())
@@ -174,39 +176,39 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
             }
         }
         CheckResult::NoCheckCommand => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("⚠️ No check command defined").yellow()
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                "   Status: ⚠️ No check command defined".to_string()
-            }
+                "Status".to_string()
+            };
+            format!("   {}: {}", status_key, reporter.format_no_check())
         }
         CheckResult::CommandNotFound => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("❌ Command not found").red().bold()
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                "   Status: ❌ Command not found".to_string()
-            }
+                "Status".to_string()
+            };
+            format!("   {}: {}", status_key, reporter.format_cmd_not_found())
         }
         CheckResult::Error(error) => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}\n   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("❌ Error").red().bold(),
-                    console::style("Details").cyan().bold(),
-                    error
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                format!("   Status: ❌ Error\n   Details: {error}")
-            }
+                "Status".to_string()
+            };
+            let details_key = if config.use_colors() {
+                console::style("Details").cyan().bold().to_string()
+            } else {
+                "Details".to_string()
+            };
+            format!(
+                "   {}: {}\n   {}: {}",
+                status_key,
+                reporter.format_status_error(),
+                details_key,
+                error
+            )
         }
     };
 

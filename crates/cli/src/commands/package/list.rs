@@ -39,9 +39,11 @@ impl ListCommand<'_> {
                 // Process the event stream with custom handling for structured data
                 let processor = crate::event_processor::EventProcessor::new(self.reporter);
                 let config = self.config;
+                let reporter = self.reporter;
+                let show_all = self.show_all;
                 let result = processor
                     .process_events(event_stream, move |event| {
-                        handle_list_event(event, config, self.show_all)
+                        handle_list_event(event, config, reporter, show_all)
                     })
                     .await;
                 result.exit_code
@@ -55,7 +57,12 @@ impl ListCommand<'_> {
     }
 }
 
-fn handle_list_event(event: &event::PackageEvent, config: &AppConfig, show_all: bool) -> bool {
+fn handle_list_event(
+    event: &event::PackageEvent,
+    config: &AppConfig,
+    reporter: TerminalProgressReporter,
+    show_all: bool,
+) -> bool {
     match event {
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
             // Show package directory path
@@ -70,7 +77,7 @@ fn handle_list_event(event: &event::PackageEvent, config: &AppConfig, show_all: 
                 );
                 display_environment_stats(&package_list.environment_stats, config);
             } else {
-                display_packages_table(&package_list.valid_packages, config, show_all);
+                display_packages_table(&package_list.valid_packages, config, reporter, show_all);
             }
 
             // Always display invalid packages if they exist
@@ -86,6 +93,7 @@ fn handle_list_event(event: &event::PackageEvent, config: &AppConfig, show_all: 
 fn display_packages_table(
     packages: &[selfie::package::event::PackageListItem],
     config: &AppConfig,
+    reporter: TerminalProgressReporter,
     show_all: bool,
 ) {
     if packages.is_empty() {
@@ -113,7 +121,7 @@ fn display_packages_table(
             format!("v{}", package.version)
         };
 
-        let status = format_status(package.status.as_ref(), config);
+        let status = format_status(package.status.as_ref(), reporter);
 
         if show_all {
             let environments = common::format_environment_names(
@@ -130,50 +138,17 @@ fn display_packages_table(
     println!("{table}");
 }
 
-fn format_status(status: Option<&event::CheckResult>, config: &AppConfig) -> String {
+fn format_status(
+    status: Option<&event::CheckResult>,
+    reporter: TerminalProgressReporter,
+) -> String {
     match status {
-        Some(event::CheckResult::Success) => {
-            if config.use_colors() {
-                console::style("✅ Installed").green().to_string()
-            } else {
-                "✅ Installed".to_string()
-            }
-        }
-        Some(event::CheckResult::Failed { .. }) => {
-            if config.use_colors() {
-                console::style("📦 Not installed").cyan().to_string()
-            } else {
-                "📦 Not installed".to_string()
-            }
-        }
-        Some(event::CheckResult::NoCheckCommand) => {
-            if config.use_colors() {
-                console::style("⚠️ No check").yellow().to_string()
-            } else {
-                "⚠️ No check".to_string()
-            }
-        }
-        Some(event::CheckResult::CommandNotFound) => {
-            if config.use_colors() {
-                console::style("🔍 Cmd not found").red().to_string()
-            } else {
-                "🔍 Cmd not found".to_string()
-            }
-        }
-        Some(event::CheckResult::Error(_)) => {
-            if config.use_colors() {
-                console::style("💥 Error").red().to_string()
-            } else {
-                "💥 Error".to_string()
-            }
-        }
-        None => {
-            if config.use_colors() {
-                console::style("⚪ N/A").dim().to_string()
-            } else {
-                "⚪ N/A".to_string()
-            }
-        }
+        Some(event::CheckResult::Success) => reporter.format_installed(),
+        Some(event::CheckResult::Failed { .. }) => reporter.format_not_installed(),
+        Some(event::CheckResult::NoCheckCommand) => reporter.format_no_check(),
+        Some(event::CheckResult::CommandNotFound) => reporter.format_cmd_not_found(),
+        Some(event::CheckResult::Error(_)) => reporter.format_status_error(),
+        None => reporter.format_na(),
     }
 }
 
@@ -332,8 +307,9 @@ mod tests {
         let packages = vec![];
 
         // Should not panic with empty list
-        display_packages_table(&packages, &config, false);
-        display_packages_table(&packages, &config, true);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        display_packages_table(&packages, &config, reporter, false);
+        display_packages_table(&packages, &config, reporter, true);
     }
 
     #[test]
@@ -347,8 +323,9 @@ mod tests {
         }];
 
         // Should not panic
-        display_packages_table(&packages, &config, false);
-        display_packages_table(&packages, &config, true);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        display_packages_table(&packages, &config, reporter, false);
+        display_packages_table(&packages, &config, reporter, true);
     }
 
     #[test]
@@ -362,8 +339,9 @@ mod tests {
         }];
 
         // Should not panic with colors enabled
-        display_packages_table(&packages, &config, false);
-        display_packages_table(&packages, &config, true);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        display_packages_table(&packages, &config, reporter, false);
+        display_packages_table(&packages, &config, reporter, true);
     }
 
     #[test]
@@ -432,12 +410,17 @@ mod tests {
         let config_with_colors = test_config_with_colors();
 
         // Test N/A status without colors
-        let result = format_status(None, &config);
-        assert_eq!(result, "⚪ N/A");
+        let result = format_status(None, TerminalProgressReporter::new(config.use_colors()));
+        assert!(result.contains("⚪") || result.contains("[N/A]"));
+        assert!(result.contains("N/A"));
 
         // Test N/A status with colors
-        let result_colored = format_status(None, &config_with_colors);
-        assert!(result_colored.contains("⚪ N/A"));
+        let result_colored = format_status(
+            None,
+            TerminalProgressReporter::new(config_with_colors.use_colors()),
+        );
+        assert!(result_colored.contains("⚪") || result_colored.contains("[N/A]"));
+        assert!(result_colored.contains("N/A"));
     }
 
     #[test]
@@ -452,9 +435,10 @@ mod tests {
                 stderr: String::new(),
                 exit_code: Some(1),
             }),
-            &config,
+            TerminalProgressReporter::new(config.use_colors()),
         );
-        assert_eq!(result, "📦 Not installed");
+        assert!(result.contains("📦") || result.contains("[×]"));
+        assert!(result.contains("Not installed"));
 
         // Test "Not installed" status with colors (should contain the emoji and text)
         let result_colored = format_status(
@@ -463,9 +447,10 @@ mod tests {
                 stderr: String::new(),
                 exit_code: Some(1),
             }),
-            &config_with_colors,
+            TerminalProgressReporter::new(config_with_colors.use_colors()),
         );
-        assert!(result_colored.contains("📦 Not installed"));
+        assert!(result_colored.contains("📦") || result_colored.contains("[×]"));
+        assert!(result_colored.contains("Not installed"));
     }
 
     #[test]
@@ -474,15 +459,20 @@ mod tests {
         let config_with_colors = test_config_with_colors();
 
         // Test "Cmd not found" status without colors
-        let result = format_status(Some(&event::CheckResult::CommandNotFound), &config);
-        assert_eq!(result, "🔍 Cmd not found");
+        let result = format_status(
+            Some(&event::CheckResult::CommandNotFound),
+            TerminalProgressReporter::new(config.use_colors()),
+        );
+        assert!(result.contains("🔍") || result.contains("[!]"));
+        assert!(result.contains("Cmd not found"));
 
         // Test "Cmd not found" status with colors
         let result_colored = format_status(
             Some(&event::CheckResult::CommandNotFound),
-            &config_with_colors,
+            TerminalProgressReporter::new(config_with_colors.use_colors()),
         );
-        assert!(result_colored.contains("🔍 Cmd not found"));
+        assert!(result_colored.contains("🔍") || result_colored.contains("[!]"));
+        assert!(result_colored.contains("Cmd not found"));
     }
 
     #[test]
@@ -493,16 +483,18 @@ mod tests {
         // Test "Error" status without colors
         let result = format_status(
             Some(&event::CheckResult::Error("test error".to_string())),
-            &config,
+            TerminalProgressReporter::new(config.use_colors()),
         );
-        assert_eq!(result, "💥 Error");
+        assert!(result.contains("💥") || result.contains("[E]"));
+        assert!(result.contains("Error"));
 
         // Test "Error" status with colors
         let result_colored = format_status(
             Some(&event::CheckResult::Error("test error".to_string())),
-            &config_with_colors,
+            TerminalProgressReporter::new(config_with_colors.use_colors()),
         );
-        assert!(result_colored.contains("💥 Error"));
+        assert!(result_colored.contains("💥") || result_colored.contains("[E]"));
+        assert!(result_colored.contains("Error"));
     }
 
     #[test]
@@ -564,7 +556,8 @@ mod tests {
         };
 
         // Should handle empty packages and empty stats (shows "No packages found.")
-        let result = handle_list_event(&event, &config, false);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let result = handle_list_event(&event, &config, reporter, false);
         assert!(result);
     }
 
@@ -589,7 +582,8 @@ mod tests {
         };
 
         // Should handle no packages but with environment stats (shows environment stats)
-        let result = handle_list_event(&event, &config, false);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let result = handle_list_event(&event, &config, reporter, false);
         assert!(result);
     }
 
@@ -619,8 +613,9 @@ mod tests {
             package_list,
         };
 
-        // Should handle valid packages (shows package table)
-        let result = handle_list_event(&event, &config, false);
+        // Should handle valid packages (displays package table)
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let result = handle_list_event(&event, &config, reporter, false);
         assert!(result);
     }
 
@@ -646,7 +641,8 @@ mod tests {
         };
 
         // Should handle invalid packages only (shows "No packages found." + invalid table)
-        let result = handle_list_event(&event, &config, false);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let result = handle_list_event(&event, &config, reporter, false);
         assert!(result);
     }
 
@@ -683,7 +679,8 @@ mod tests {
         };
 
         // Should handle mixed scenario (shows package table + invalid table)
-        let result = handle_list_event(&event, &config, false);
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let result = handle_list_event(&event, &config, reporter, false);
         assert!(result);
     }
 }
