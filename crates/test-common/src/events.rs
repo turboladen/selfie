@@ -1,6 +1,10 @@
 //! Event stream processing helpers to eliminate duplication in async service tests.
 
-use selfie::package::event::{EventStream, OperationResult, PackageEvent};
+use selfie::package::event::{
+    EventStream, OperationContext, OperationInfo, OperationResult, PackageEvent,
+    metadata::OperationType,
+};
+use std::time::Instant;
 
 /// Collects all events from a stream for testing verification.
 /// This is the most common pattern for testing event streams in service tests.
@@ -201,4 +205,42 @@ pub fn assert_no_errors(events: &[PackageEvent]) {
         error_count,
         get_error_messages(events)
     );
+}
+
+/// Creates a test operation info for use in test events.
+/// This is a convenience function to avoid repeating operation info creation in tests.
+///
+/// # Example
+/// ```rust
+/// let operation_info = create_test_operation_info("package_check", "test-package", "test-env");
+/// let event = PackageEvent::Started { operation_info };
+/// ```
+#[must_use]
+pub fn create_test_operation_info(
+    operation_type: &str,
+    package_name: &str,
+    environment: &str,
+) -> OperationInfo {
+    let op_type = match operation_type {
+        "config_validate" => OperationType::ConfigValidate,
+        "package_check" => OperationType::PackageCheck,
+        "package_create" => OperationType::PackageCreate,
+        "package_info" => OperationType::PackageInfo,
+        "package_install" => OperationType::PackageInstall,
+        "package_list" => OperationType::PackageList,
+        "package_validate" => OperationType::PackageValidate,
+        _ => OperationType::PackageCheck, // Default fallback
+    };
+
+    OperationInfo {
+        id: "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
+        operation_type: op_type,
+        package_name: package_name.to_string(),
+        environment: environment.to_string(),
+        context: OperationContext {
+            package_path: None,
+            target_environment: None,
+        },
+        timestamp: Instant::now(),
+    }
 }

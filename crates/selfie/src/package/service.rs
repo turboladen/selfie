@@ -38,9 +38,9 @@ use crate::{commands::runner::CommandRunner, config::AppConfig, package::port::P
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressTracker {
     /// Current step number (0-based internally, 1-based for display)
-    current_step: u32,
+    current_step: usize,
     /// Total number of steps in the operation
-    total_steps: u32,
+    total_steps: usize,
 }
 
 impl ProgressTracker {
@@ -49,7 +49,7 @@ impl ProgressTracker {
     /// # Arguments
     ///
     /// * `total_steps` - Total number of steps in the operation
-    pub(crate) fn new(total_steps: u32) -> Self {
+    pub(crate) fn new(total_steps: usize) -> Self {
         Self {
             current_step: 0,
             total_steps,
@@ -74,12 +74,12 @@ impl ProgressTracker {
     }
 
     /// Get the current step number (1-based for display)
-    pub(crate) fn current_step(&self) -> u32 {
+    pub(crate) fn current_step(&self) -> usize {
         self.current_step
     }
 
     /// Get the total number of steps in the operation
-    pub(crate) fn total_steps(&self) -> u32 {
+    pub(crate) fn total_steps(&self) -> usize {
         self.total_steps
     }
 }
@@ -207,7 +207,7 @@ pub trait PackageService: Send + Sync {
     /// - Package definition files cannot be read due to permissions
     /// - File system access fails during directory traversal
     /// - The package repository encounters critical errors during listing
-    async fn list(&self) -> Result<EventStream, PackageError>;
+    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError>;
 
     /// Create a new package definition file
     ///
@@ -323,7 +323,7 @@ where
         operation_type: OperationType,
         package_name: &str,
         context: OperationContext,
-        total_steps: u32,
+        total_steps: usize,
         handler: F,
     ) -> EventStream
     where
@@ -377,7 +377,7 @@ where
         operation_type: OperationType,
         package_name: &str,
         context: OperationContext,
-        total_steps: u32,
+        total_steps: usize,
         handler: F,
     ) -> EventStream
     where
@@ -544,12 +544,11 @@ where
             package_name,
             context,
             3, // load_package + validate_package + result processing
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, _, config, sender, mut progress| async move {
                 validate::handle_validate(
                     &package_name_owned,
                     &repo,
                     &config,
-                    &command_runner,
                     &sender,
                     &mut progress,
                 )
@@ -579,14 +578,22 @@ where
     /// - The package directory cannot be accessed
     /// - Package definition files cannot be read
     /// - File system operations fail
-    async fn list(&self) -> Result<EventStream, PackageError> {
+    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError> {
         Ok(self.execute_operation_with_deps(
             OperationType::PackageList,
             "", // No specific package for list operation
             OperationContext::default(),
-            3, // Load packages + process + finalize
+            4, // Load packages + process + check status + finalize
             move |repo, command_runner, config, sender, mut progress| async move {
-                list::handle_list(&repo, &config, &command_runner, &sender, &mut progress).await
+                list::handle_list(
+                    &repo,
+                    &config,
+                    &command_runner,
+                    &sender,
+                    &mut progress,
+                    show_all,
+                )
+                .await
             },
         ))
     }
@@ -671,7 +678,9 @@ where
             1, // Just one step for creation
             |_sender, mut _progress| async move {
                 // TODO: Implement actual creation logic
-                OperationResult::Success("Create operation not yet implemented".to_string())
+                OperationResult::Success(crate::package::event::OperationSuccess::Generic(
+                    "Create operation not yet implemented".to_string(),
+                ))
             },
         ))
     }

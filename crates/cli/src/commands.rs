@@ -19,6 +19,7 @@
 //! - 2: Validation/usage error
 //! - Other codes: Command-specific errors
 
+pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod package;
 
@@ -30,6 +31,8 @@ use crate::{
     cli::{ClapCommands, ConfigSubcommands, PackageSubcommands},
     terminal_progress_reporter::TerminalProgressReporter,
 };
+
+use completion::generate_completion;
 
 /// Primary command dispatcher that routes to the appropriate command handler
 ///
@@ -66,6 +69,10 @@ pub(crate) async fn dispatch_command(
         }
         ClapCommands::Config(config_cmd) => {
             dispatch_config_command(&config_cmd.command, &original_config, reporter)
+        }
+        ClapCommands::Completion { shell } => {
+            generate_completion(*shell);
+            0 // Success exit code
         }
     }
 }
@@ -108,7 +115,11 @@ async fn dispatch_package_command(
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(package_name, config, reporter).await
         }
-        PackageSubcommands::List => ListCommand::new(config, reporter).handle_command().await,
+        PackageSubcommands::List { all } => {
+            ListCommand::new(config, reporter, *all)
+                .handle_command()
+                .await
+        }
         PackageSubcommands::Info { package_name } => {
             package::info::handle_info(package_name, config, reporter).await
         }

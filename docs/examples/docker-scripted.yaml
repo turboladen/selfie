@@ -1,0 +1,108 @@
+name: docker-scripted
+version: 1.0.0
+description: Docker container platform (using external scripts for complex installations)
+homepage: https://www.docker.com
+
+# This example demonstrates using external shell scripts for complex package installations.
+# Benefits of this approach:
+# - Better code organization and reusability
+# - Easier testing and debugging of individual scripts
+# - Shared utilities across different environments
+# - Version control friendly (separate files for different concerns)
+# - IDE syntax highlighting and linting for shell scripts
+
+environments:
+  macos:
+    install: |
+      set -e
+
+      # Source common utilities and run macOS-specific installation script
+      source ./docker-scripted/common.sh
+      ./docker-scripted/macos_install.sh
+    check: |
+      ./docker-scripted/check.sh
+    dependencies:
+      - homebrew
+
+  ubuntu:
+    install: |
+      ./docker-scripted/ubuntu_install.sh
+    check: |
+      ./docker-scripted/check.sh
+
+  debian:
+    install: |
+      set -e
+
+      # Debian can reuse the Ubuntu script with minor modifications
+      source ./docker-scripted/common.sh
+
+      log_info "Installing Docker on Debian (using Ubuntu-compatible method)..."
+
+      # Modify the script for Debian-specific repository
+      sed 's/ubuntu/debian/g' ./docker-scripted/ubuntu_install.sh > /tmp/debian_install.sh
+      chmod +x /tmp/debian_install.sh
+      /tmp/debian_install.sh
+      rm /tmp/debian_install.sh
+    check: |
+      ./docker-scripted/check.sh
+
+  arch:
+    install: |
+      set -e
+
+      source ./docker-scripted/common.sh
+
+      print_system_info
+      log_info "Installing Docker on Arch Linux..."
+
+      sudo pacman -S --noconfirm docker docker-compose
+      add_user_to_docker_group
+      start_docker_service
+
+      verify_docker_installation
+    check: |
+      ./docker-scripted/check.sh
+
+  fedora:
+    install: |
+      set -e
+      source ./docker-scripted/common.sh
+
+      log_info "Installing Docker on Fedora..."
+
+      # Remove old versions
+      sudo dnf remove -y docker \
+        docker-client \
+        docker-client-latest \
+        docker-common \
+        docker-latest \
+        docker-latest-logrotate \
+        docker-logrotate \
+        docker-selinux \
+        docker-engine-selinux \
+        docker-engine || true
+
+      # Install prerequisites
+      sudo dnf install -y dnf-plugins-core
+
+      # Add Docker repository
+      sudo dnf config-manager \
+        --add-repo \
+        https://download.docker.com/linux/fedora/docker-ce.repo
+
+      # Install Docker Engine
+      sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      add_user_to_docker_group
+      start_docker_service
+      verify_docker_installation
+    check: |
+      ./docker-scripted/check.sh
+
+  ci:
+    install: |
+      # CI environments get the specialized CI script
+      ./docker-scripted/ci_install.sh
+    check: |
+      ./docker-scripted/check.sh

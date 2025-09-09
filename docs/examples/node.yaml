@@ -1,0 +1,132 @@
+name: node
+version: 1.0.0
+description: Node.js runtime via fnm version manager
+homepage: https://nodejs.org
+
+environments:
+  macos:
+    install: |
+      set -e
+
+      # Install Node.js LTS via fnm (avoids conflicts with system package managers)
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  ubuntu:
+    install: |
+      set -e
+
+      # Install Node.js via fnm for version consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  debian:
+    install: |
+      set -e
+
+      # Install Node.js via fnm for version consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+
+      # Update npm to latest
+      npm install -g npm@latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  arch:
+    install: |
+      set -e
+
+      # Install Node.js via fnm
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  fedora:
+    install: |
+      set -e
+
+      # Install Node.js via fnm
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+
+      # Update npm to latest
+      npm install -g npm@latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  alpine:
+    install: |
+      set -e
+
+      # Install Node.js via fnm for consistency
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm
+
+  ci:
+    install: |
+      set -e
+
+      # Install Node.js via fnm in CI environment
+      fnm install --lts
+      fnm use lts-latest
+      fnm default lts-latest
+
+      # Configure npm for CI
+      npm config set fund false
+      npm config set audit-level moderate
+
+      # Add to PATH for GitHub Actions
+      if [ -n "$GITHUB_PATH" ]; then
+        echo "$(npm bin -g)" >> $GITHUB_PATH
+      fi
+    check: |
+      node --version | grep -q "v20" && \
+        npm --version && \
+        which node && \
+        which npm
+    dependencies:
+      - fnm

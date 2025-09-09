@@ -9,11 +9,10 @@ and operating systems.
 ## Guidelines
 
 When generating code, use Rust's `stdlib` when possible, `tokio` when async makes sense, and common
-third-party libraries. Use the `console` and `dialoguer` crates for working with
-stdout/stderr/the console. Use the `tracing` crate for logging. Use `clap` for CLI and argument
-parsing. Use `anyhow` and `thiserror` for error handling. Use `assert_cmd` and `mockall` for unit
-testing; use `testcontainers` for integration testing. Always use the latest versions of Rust and
-libraries.
+third-party libraries. Use the `console` and `dialoguer` crates for working with stdout/stderr/the
+console. Use the `tracing` crate for logging. Use `clap` for CLI and argument parsing. Use `anyhow`
+and `thiserror` for error handling. Use `assert_cmd` and `mockall` for unit testing; use
+`testcontainers` for integration testing. Always use the latest versions of Rust and libraries.
 
 Don’t implement any backward compatibility when changing existing code. Reuse existing code when
 possible. Keep the codebase DRY and lean toward following the KISS principle. Lean towards using
@@ -31,10 +30,12 @@ There are multiple crates in the repo, all under the `crates/` subdirectory:
 3. `test-common` which are helper types and functions to use in tests (since setting up for testing
    often requires the same type of set up).
 
-Eventually I may want to create a second UI, so I want to keep logic in the `selfie` library, but
+Eventually, I may want to create a second UI, so I want to keep logic in the `selfie` library, but
 allow consumer crates to be able to handle formatting messages to the user; in general, `selfie`
 shouldn't write to stdout/stderr because it doesn't know if it will be called from a GUI, a TUI, a
 CLI app or even from some other language.
+
+Additionally, `assets/branding` contains logos and icons can be used in documentation and such.
 
 ## Design Patterns
 

@@ -86,6 +86,17 @@ pub(crate) enum ClapCommands {
     /// Commands for validating and managing the selfie configuration file.
     /// These operations work with the application settings and validation.
     Config(ConfigCommands),
+
+    /// Generate shell completion scripts
+    ///
+    /// Creates completion scripts for various shells to enable tab completion
+    /// for selfie commands, subcommands, and options.
+    #[clap(hide = true)] // Hide from main help to keep it clean
+    Completion {
+        /// The shell to generate completions for
+        #[clap(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Package command group container
@@ -134,13 +145,21 @@ pub(crate) enum PackageSubcommands {
         package_name: String,
     },
 
-    /// List all available packages in the package directory
+    /// List packages relevant to the current environment
     ///
-    /// Discovers and displays all package definition files, showing basic
-    /// information about each package including name, version, and description.
+    /// By default, displays only packages that support the current environment,
+    /// showing name, version, and installation status. Use --all to see all packages
+    /// regardless of environment relevance.
     ///
     /// Example: `selfie package list`
-    List,
+    List {
+        /// Show all packages regardless of current environment relevance
+        ///
+        /// By default, only packages relevant to the current environment are shown.
+        /// Use this flag to display all packages with their supported environments.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Show detailed information about a package
     ///

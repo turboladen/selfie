@@ -1,7 +1,6 @@
 # Selfie Multi-Distribution Testing
 
-Test the Selfie Rust CLI across multiple Linux distributions using Tilt and
-Docker Compose.
+Test the Selfie Rust CLI across multiple Linux distributions using Tilt and Docker Compose.
 
 ## Quick Start
 

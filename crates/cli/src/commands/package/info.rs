@@ -34,7 +34,7 @@ pub(crate) async fn handle_info(
         Ok(event_stream) => {
             // Process the event stream with custom handling for structured data
             let processor = EventProcessor::new(reporter);
-            processor
+            let result = processor
                 .process_events(event_stream, |event| {
                     match event {
                         PackageEvent::PackageInfoLoaded { package_info, .. } => {
@@ -58,7 +58,8 @@ pub(crate) async fn handle_info(
                         _ => false, // Use default handling for other events
                     }
                 })
-                .await
+                .await;
+            result.exit_code
         }
         Err(e) => {
             reporter.report_error(format!("Failed to get package info: {e}"));
@@ -146,7 +147,8 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConf
     // Add installation status if this is the current environment and we have status
     if env_status.is_current {
         if let Some(status) = &env_status.status {
-            let status_text = format_status(status, config.use_colors());
+            let reporter = TerminalProgressReporter::new(config.use_colors());
+            let status_text = format_status(status, reporter);
             env_table.add_row(vec![format_env_key("Status"), status_text]);
         }
     }
@@ -171,25 +173,13 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConf
     env_table
 }
 
-fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
+fn format_status(status: &EnvironmentStatus, reporter: TerminalProgressReporter) -> String {
     match status {
-        EnvironmentStatus::Installed => {
-            if use_colors {
-                style("Installed ✓").green().bold().to_string()
-            } else {
-                "Installed ✓".to_string()
-            }
-        }
-        EnvironmentStatus::NotInstalled => {
-            if use_colors {
-                style("Not installed ✗").yellow().to_string()
-            } else {
-                "Not installed ✗".to_string()
-            }
-        }
+        EnvironmentStatus::Installed => reporter.format_installed(),
+        EnvironmentStatus::NotInstalled => reporter.format_not_installed(),
         EnvironmentStatus::Unknown(reason) => {
             let msg = format!("Unknown ({reason})");
-            if use_colors {
+            if reporter.use_colors() {
                 style(msg).yellow().italic().to_string()
             } else {
                 msg
@@ -262,12 +252,14 @@ mod tests {
 
     #[test]
     fn test_format_status_functions() {
+        let reporter = TerminalProgressReporter::new(false);
+
         let status = EnvironmentStatus::Installed;
-        let result = format_status(&status, false);
+        let result = format_status(&status, reporter);
         assert!(result.contains("Installed"));
 
         let status = EnvironmentStatus::NotInstalled;
-        let result = format_status(&status, false);
+        let result = format_status(&status, reporter);
         assert!(result.contains("Not installed"));
     }
 

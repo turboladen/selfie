@@ -1,13 +1,17 @@
 use selfie::{
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, PackageEvent},
+        event::{
+            CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent,
+            error::StreamedError,
+        },
+        port::{PackageError, PackageRepoError},
         service::PackageService,
     },
 };
 
 use crate::{
-    commands::package::common::{create_package_service, report_status},
+    commands::package::common::{self, create_package_service, report_status},
     event_processor::EventProcessor,
     formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
@@ -26,14 +30,15 @@ pub(crate) async fn handle_check(
     // Create the package service
     let service = create_package_service(config);
 
+    // Create tracker for consistent error handling
+    let mut tracker = common::PackageNotFoundTracker::new();
+
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(reporter);
-
-    #[allow(clippy::match_same_arms)]
-    processor
+    let result = processor
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::CheckResultCompleted { check_result, .. } => {
@@ -43,13 +48,89 @@ pub(crate) async fn handle_check(
                 PackageEvent::Progress { .. } => {
                     true // Handled
                 }
-                PackageEvent::Completed { .. } => {
-                    false // Use default completion handling
+                PackageEvent::Error { error, .. } => {
+                    // Handle PackageNotFound errors consistently
+                    if tracker.handle_package_not_found_error(error) {
+                        return true; // Handled - prevent duplicate error display
+                    }
+
+                    // Handle environment configuration errors specially
+                    match error {
+                        StreamedError::PackageRepoError(PackageRepoError::PackageError(
+                            pkg_error,
+                        )) => {
+                            match pkg_error.as_ref() {
+                                PackageError::EnvironmentNotFound { .. } => {
+                                    handle_environment_not_found_error(package_name, error, config);
+                                    true // Handled completely - prevent duplicate error display
+                                }
+                                _ => false, // Use default handling for other errors
+                            }
+                        }
+                        _ => false, // Use default handling for other errors
+                    }
+                }
+                PackageEvent::Completed { result, .. } => {
+                    // Suppress completion errors if we already handled PackageNotFound
+                    if tracker.should_suppress_completion_error(result) {
+                        return true; // Handled - suppress duplicate error
+                    }
+
+                    match result {
+                        OperationResult::Failure(OperationFailure::EnvironmentError(_)) => {
+                            // Skip duplicate error display for environment configuration errors
+                            true // Handled - we already showed the error message above
+                        }
+                        _ => false, // Use default handling for other completion events
+                    }
                 }
                 _ => false, // Use default handling for other events
             }
         })
-        .await
+        .await;
+
+    // Return proper exit code - 1 for environment errors, otherwise use result from processor
+    if result.environment_error_handled {
+        1
+    } else {
+        result.exit_code
+    }
+}
+
+/// Handle environment not found errors with helpful suggestions
+fn handle_environment_not_found_error(
+    package_name: &str,
+    error: &StreamedError,
+    config: &AppConfig,
+) {
+    // Show helpful information about available environments
+    println!();
+
+    // Try to extract environment information from the structured error
+    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
+        if let PackageError::EnvironmentNotFound {
+            available_environments,
+            ..
+        } = package_error.as_ref()
+        {
+            common::display_environment_summary(
+                package_name,
+                config.environment(),
+                available_environments,
+                config,
+                "check",
+            );
+            return;
+        }
+    }
+
+    // Fallback to generic suggestion if we can't extract environment info
+    common::display_generic_environment_suggestion(
+        package_name,
+        config.environment(),
+        config,
+        "check",
+    );
 }
 
 fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig) {
@@ -70,31 +151,21 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
         println!("{}{}", format_key_fn("Command"), cmd);
     }
 
+    let reporter = TerminalProgressReporter::new(config.use_colors());
+
     // Format status with appropriate icon and color
     let status_line = match &check_result.result {
         CheckResult::Success => {
-            if config.use_colors() {
-                format!(
-                    "{}{}",
-                    format_key_fn("Status"),
-                    console::style("✅ Installed").green().bold()
-                )
-            } else {
-                format!("{}✅ Installed", format_key_fn("Status"))
-            }
+            format!("{}{}", format_key_fn("Status"), reporter.format_installed())
         }
         CheckResult::Failed {
             stderr, exit_code, ..
         } => {
-            let status = if config.use_colors() {
-                format!(
-                    "{}{}",
-                    format_key_fn("Status"),
-                    console::style("❌ Not installed").red().bold()
-                )
-            } else {
-                format!("{}❌ Not installed", format_key_fn("Status"))
-            };
+            let status = format!(
+                "{}{}",
+                format_key_fn("Status"),
+                reporter.format_not_installed()
+            );
 
             if !stderr.is_empty() {
                 format!("{}\n{}{}", status, format_key_fn("Details"), stderr.trim())
@@ -105,39 +176,39 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
             }
         }
         CheckResult::NoCheckCommand => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("⚠️ No check command defined").yellow()
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                "   Status: ⚠️ No check command defined".to_string()
-            }
+                "Status".to_string()
+            };
+            format!("   {}: {}", status_key, reporter.format_no_check())
         }
         CheckResult::CommandNotFound => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("❌ Command not found").red().bold()
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                "   Status: ❌ Command not found".to_string()
-            }
+                "Status".to_string()
+            };
+            format!("   {}: {}", status_key, reporter.format_cmd_not_found())
         }
         CheckResult::Error(error) => {
-            if config.use_colors() {
-                format!(
-                    "   {}: {}\n   {}: {}",
-                    console::style("Status").cyan().bold(),
-                    console::style("❌ Error").red().bold(),
-                    console::style("Details").cyan().bold(),
-                    error
-                )
+            let status_key = if config.use_colors() {
+                console::style("Status").cyan().bold().to_string()
             } else {
-                format!("   Status: ❌ Error\n   Details: {error}")
-            }
+                "Status".to_string()
+            };
+            let details_key = if config.use_colors() {
+                console::style("Details").cyan().bold().to_string()
+            } else {
+                "Details".to_string()
+            };
+            format!(
+                "   {}: {}\n   {}: {}",
+                status_key,
+                reporter.format_status_error(),
+                details_key,
+                error
+            )
         }
     };
 

@@ -36,6 +36,14 @@ static SUGGESTION_EJOJI: Emoji<'_, '_> = Emoji("✨", "OK ");
 static SUCCESS_EMOJI: Emoji<'_, '_> = Emoji("✅ ", "OK ");
 static WARN_EMOJI: Emoji<'_, '_> = Emoji("⚠️ ", "[W] ");
 
+// Status-specific emojis for package status indicators
+static INSTALLED_EMOJI: Emoji<'_, '_> = Emoji("✅ ", "[✓] ");
+static NOT_INSTALLED_EMOJI: Emoji<'_, '_> = Emoji("📦 ", "[×] ");
+static NO_CHECK_EMOJI: Emoji<'_, '_> = Emoji("⚠️ ", "[?] ");
+static CMD_NOT_FOUND_EMOJI: Emoji<'_, '_> = Emoji("🔍 ", "[!] ");
+static STATUS_ERROR_EMOJI: Emoji<'_, '_> = Emoji("💥 ", "[E] ");
+static NA_EMOJI: Emoji<'_, '_> = Emoji("⚪ ", "[N/A] ");
+
 /// Types of status messages that can be displayed to the user
 ///
 /// Each message type has its own visual styling, emoji/text prefix,
@@ -85,6 +93,16 @@ impl TerminalProgressReporter {
     pub fn new(use_colors: bool) -> Self {
         Self { use_colors }
     }
+
+    /// Check if colors are enabled for this reporter
+    ///
+    /// # Returns
+    ///
+    /// `true` if colored output is enabled, `false` otherwise
+    #[must_use]
+    pub fn use_colors(self) -> bool {
+        self.use_colors
+    }
 }
 
 impl TerminalProgressReporter {
@@ -131,6 +149,37 @@ impl TerminalProgressReporter {
         };
 
         format!("{prefix}{formatted_message}")
+    }
+
+    /// Format a status line with custom emoji and styling
+    ///
+    /// Creates a formatted status line with the provided emoji and custom styling function.
+    ///
+    /// # Arguments
+    ///
+    /// * `emoji` - The emoji/text prefix to use
+    /// * `message` - The message content to display
+    /// * `style_fn` - Function to apply styling when colors are enabled
+    ///
+    /// # Returns
+    ///
+    /// A formatted string ready for display in the terminal
+    fn status_line_with_emoji<F>(
+        self,
+        emoji: Emoji<'_, '_>,
+        message: impl Display,
+        style_fn: F,
+    ) -> String
+    where
+        F: Fn(console::StyledObject<String>) -> console::StyledObject<String>,
+    {
+        let formatted_message = if self.use_colors {
+            style_fn(style(message.to_string())).to_string()
+        } else {
+            message.to_string()
+        };
+
+        format!("{emoji}{formatted_message}")
     }
 
     /// Format a message with the specified indentation
@@ -257,6 +306,56 @@ impl TerminalProgressReporter {
     pub(crate) fn report_error(self, message: impl Display) {
         eprintln!("{}", self.format_error(message));
     }
+
+    // Status-specific formatting methods
+
+    /// Format an "installed" status message
+    ///
+    /// Creates a formatted message indicating a package is installed,
+    /// with green styling and a checkmark indicator.
+    pub(crate) fn format_installed(self) -> String {
+        self.status_line_with_emoji(INSTALLED_EMOJI, "Installed", |style| style.green())
+    }
+
+    /// Format a "not installed" status message
+    ///
+    /// Creates a formatted message indicating a package is not installed,
+    /// with cyan styling and a package indicator.
+    pub(crate) fn format_not_installed(self) -> String {
+        self.status_line_with_emoji(NOT_INSTALLED_EMOJI, "Not installed", |style| style.cyan())
+    }
+
+    /// Format a "no check command" status message
+    ///
+    /// Creates a formatted message indicating no check command is configured,
+    /// with yellow styling and a warning indicator.
+    pub(crate) fn format_no_check(self) -> String {
+        self.status_line_with_emoji(NO_CHECK_EMOJI, "No check", |style| style.yellow())
+    }
+
+    /// Format a "command not found" status message
+    ///
+    /// Creates a formatted message indicating the check command was not found,
+    /// with red styling and a search indicator.
+    pub(crate) fn format_cmd_not_found(self) -> String {
+        self.status_line_with_emoji(CMD_NOT_FOUND_EMOJI, "Cmd not found", |style| style.red())
+    }
+
+    /// Format a status check error message
+    ///
+    /// Creates a formatted message indicating an error occurred during status check,
+    /// with red styling and an error indicator.
+    pub(crate) fn format_status_error(self) -> String {
+        self.status_line_with_emoji(STATUS_ERROR_EMOJI, "Error", |style| style.red())
+    }
+
+    /// Format a "not available" status message
+    ///
+    /// Creates a formatted message indicating status is not available,
+    /// with dim styling and a neutral indicator.
+    pub(crate) fn format_na(self) -> String {
+        self.status_line_with_emoji(NA_EMOJI, "N/A", |style| style.dim())
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +392,47 @@ mod test {
 
         // Message should be plain text without ANSI color codes
         assert!(!success_msg.contains("\x1b["));
+    }
+
+    #[test]
+    fn test_status_formatting_with_colors() {
+        let reporter = TerminalProgressReporter::new(true);
+
+        // Test status-specific formatting methods
+        let installed = reporter.format_installed();
+        let not_installed = reporter.format_not_installed();
+        let no_check = reporter.format_no_check();
+        let cmd_not_found = reporter.format_cmd_not_found();
+        let status_error = reporter.format_status_error();
+        let na = reporter.format_na();
+
+        // Verify text content
+        assert!(installed.contains("Installed"));
+        assert!(not_installed.contains("Not installed"));
+        assert!(no_check.contains("No check"));
+        assert!(cmd_not_found.contains("Cmd not found"));
+        assert!(status_error.contains("Error"));
+        assert!(na.contains("N/A"));
+
+        // Verify emoji fallbacks are present
+        assert!(installed.contains("✅") || installed.contains("[✓]"));
+        assert!(not_installed.contains("📦") || not_installed.contains("[×]"));
+        assert!(no_check.contains("⚠️") || no_check.contains("[?]"));
+        assert!(cmd_not_found.contains("🔍") || cmd_not_found.contains("[!]"));
+        assert!(status_error.contains("💥") || status_error.contains("[E]"));
+        assert!(na.contains("⚪") || na.contains("[N/A]"));
+    }
+
+    #[test]
+    fn test_status_formatting_without_colors() {
+        let reporter = TerminalProgressReporter::new(false);
+
+        let installed = reporter.format_installed();
+
+        // Should not contain ANSI color codes
+        assert!(!installed.contains("\x1b["));
+        // But should still contain the text and emoji/fallback
+        assert!(installed.contains("Installed"));
+        assert!(installed.contains("✅") || installed.contains("[✓]"));
     }
 }

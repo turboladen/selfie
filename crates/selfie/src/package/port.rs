@@ -284,6 +284,18 @@ pub enum PackageError {
         /// Whether other environments have check commands (for suggestions)
         other_envs_with_check: Vec<String>,
     },
+
+    /// Package environment exists but has no install command configured
+    #[error(
+        "No install command defined for package `{package_name}` in environment `{environment}`"
+    )]
+    NoInstallCommand {
+        package_name: String,
+        environment: String,
+        package_file: PathBuf,
+        /// Whether other environments have install commands (for suggestions)
+        other_envs_with_install: Vec<String>,
+    },
 }
 
 /// Output from listing packages in the repository

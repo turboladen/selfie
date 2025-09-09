@@ -1,0 +1,83 @@
+name: fnm
+version: 1.0.0
+description: Fast Node.js version manager
+homepage: https://github.com/Schniz/fnm
+
+environments:
+  macos:
+    install: brew install fnm
+    check: which fnm && fnm --version
+    dependencies:
+      - homebrew
+
+  ubuntu:
+    install: |
+      set -e
+
+      # Install fnm via official installer
+      curl -fsSL https://fnm.vercel.app/install | bash
+
+      # Add to shell profile
+      echo 'eval "$(fnm env --use-on-cd)"' >> ~/.bashrc
+
+      # Source for immediate use
+      eval "$(fnm env --use-on-cd)"
+    check: which fnm && fnm --version
+
+  debian:
+    install: |
+      set -e
+
+      # Install fnm via official installer
+      curl -fsSL https://fnm.vercel.app/install | bash
+
+      # Add to shell profile
+      echo 'eval "$(fnm env --use-on-cd)"' >> ~/.bashrc
+
+      # Source for immediate use
+      eval "$(fnm env --use-on-cd)"
+    check: which fnm && fnm --version
+
+  arch:
+    install: |
+      set -e
+
+      # Install from AUR or via installer
+      if command -v yay &> /dev/null; then
+        yay -S fnm-bin
+      else
+        curl -fsSL https://fnm.vercel.app/install | bash
+        echo 'eval "$(fnm env --use-on-cd)"' >> ~/.bashrc
+      fi
+    check: which fnm && fnm --version
+
+  fedora:
+    install: |
+      set -e
+
+      # Install fnm via official installer
+      curl -fsSL https://fnm.vercel.app/install | bash
+
+      # Add to shell profile
+      echo 'eval "$(fnm env --use-on-cd)"' >> ~/.bashrc
+
+      # Source for immediate use
+      eval "$(fnm env --use-on-cd)"
+    check: which fnm && fnm --version
+
+  ci:
+    install: |
+      set -e
+
+      # Install fnm in CI environment
+      curl -fsSL https://fnm.vercel.app/install | bash
+
+      # Set up environment
+      export PATH="$HOME/.fnm:$PATH"
+      eval "$(fnm env --use-on-cd)"
+
+      # Add to GitHub Actions PATH if in GitHub Actions
+      if [ -n "$GITHUB_PATH" ]; then
+        echo "$HOME/.fnm" >> $GITHUB_PATH
+      fi
+    check: which fnm && fnm --version

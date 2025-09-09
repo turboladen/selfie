@@ -4,8 +4,13 @@ use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, EventSender, OperationResult},
+        GetPackage,
+        event::{
+            CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
+            OperationResult, OperationSuccess,
+        },
         port::{PackageError, PackageRepoError, PackageRepository},
+        service::ProgressTracker,
     },
 };
 
@@ -15,7 +20,7 @@ pub(super) async fn handle_check<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository + Clone,
@@ -61,8 +66,8 @@ async fn load_package<PR>(
     package_name: &str,
     repo: &PR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
-) -> Result<crate::package::GetPackage, OperationResult>
+    progress: &mut ProgressTracker,
+) -> Result<GetPackage, OperationResult>
 where
     PR: PackageRepository,
 {
@@ -77,18 +82,19 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to load package '{package_name}': {err}");
+            let err_for_conversion = err.clone();
             sender.send_error(err, &error_msg).await;
-            Err(OperationResult::Failure(error_msg))
+            Err(OperationResult::Failure(err_for_conversion.into()))
         }
     }
 }
 
 async fn get_check_command(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> Result<Option<String>, OperationResult> {
     progress.next(sender, "Checking package environment").await;
 
@@ -113,7 +119,7 @@ async fn get_check_command(
 
 async fn handle_missing_environment(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
@@ -130,14 +136,14 @@ async fn handle_missing_environment(
     });
     let error_msg = format!("Environment configuration error: {err}");
     sender
-        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
         .await;
-    Err(OperationResult::Failure(error_msg))
+    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn handle_missing_check_command(
     package_name: &str,
-    package_blob: &crate::package::GetPackage,
+    package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
@@ -173,47 +179,54 @@ async fn handle_missing_check_command(
 
     let error_msg = format!("Check command configuration error: {err}");
     sender
-        .send_error(PackageRepoError::PackageError(err), &error_msg)
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
         .await;
-    Err(OperationResult::Failure(error_msg))
+    Err(OperationResult::Failure((*err).into()))
 }
 
 fn create_operation_result(
     check_result: &CheckResultData,
     package_name: &str,
-    progress: &crate::package::service::ProgressTracker,
+    progress: &ProgressTracker,
 ) -> OperationResult {
     match &check_result.result {
-        CheckResult::Success => {
-            let success_msg = format!(
-                "Package '{}' check completed successfully ({}/{} steps)",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Success(success_msg)
+        CheckResult::Success => OperationResult::Success(OperationSuccess::package_checked(
+            package_name.to_string(),
+            check_result.environment.clone(),
+            check_result.result.clone(),
+            (progress.current_step(), progress.total_steps()).into(),
+        )),
+        CheckResult::Failed {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            let command = check_result
+                .check_command
+                .as_deref()
+                .unwrap_or("unknown command");
+            OperationResult::Failure(OperationFailure::command_failed(
+                command.to_string(),
+                *exit_code,
+                stdout.clone(),
+                stderr.clone(),
+            ))
         }
-        CheckResult::Failed { .. } => {
-            let error_msg = format!(
-                "Package '{}' check failed at step {}/{}",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Failure(error_msg)
-        }
-        CheckResult::Error(_) => {
-            let error_msg = format!(
-                "Failed to execute check command for package '{}' at step {}/{}",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Failure(error_msg)
+        CheckResult::Error(error) => {
+            let command = check_result
+                .check_command
+                .as_deref()
+                .unwrap_or("unknown command");
+            OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InvalidCommand {
+                    command: command.to_string(),
+                    reason: error.clone(),
+                },
+            ))
         }
         _ => {
             // This case is already handled above, but included for completeness
-            OperationResult::Failure("Unexpected check result".to_string())
+            OperationResult::Failure("Unexpected check result".into())
         }
     }
 }
@@ -228,7 +241,7 @@ pub(super) async fn execute_check_command<CR>(
     check_command: Option<&str>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
     step_description: &str,
 ) -> CheckResultData
 where
@@ -236,17 +249,26 @@ where
 {
     progress.next(sender, step_description).await;
 
-    if let Some(cmd) = check_command {
-        sender
-            .send_debug(format!("Running check command: {cmd}"))
-            .await;
+    execute_check_command_quiet(package_name, environment, check_command, command_runner).await
+}
 
-        let check_result = match command_runner.execute(cmd).await {
+/// Execute a check command without updating progress
+///
+/// This is useful for bulk operations like package listing where individual
+/// check progress updates would be too noisy.
+pub(super) async fn execute_check_command_quiet<CR>(
+    package_name: &str,
+    environment: &str,
+    check_command: Option<&str>,
+    command_runner: &CR,
+) -> CheckResultData
+where
+    CR: CommandRunner,
+{
+    if let Some(cmd) = check_command {
+        match command_runner.execute(cmd).await {
             Ok(output) => {
                 if output.is_success() {
-                    sender
-                        .send_debug(format!("Check command output: {}", output.stdout_str()))
-                        .await;
                     CheckResultData {
                         package_name: package_name.to_string(),
                         environment: environment.to_string(),
@@ -272,25 +294,13 @@ where
                 check_command: Some(cmd.to_string()),
                 result: CheckResult::Error(err.to_string()),
             },
-        };
-
-        // Send structured check result
-        sender.send_check_result(check_result.clone()).await;
-        check_result
+        }
     } else {
-        sender
-            .send_debug("No check command defined for this environment, skipping")
-            .await;
-
-        let check_result = CheckResultData {
+        CheckResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
             check_command: None,
             result: CheckResult::NoCheckCommand,
-        };
-
-        // Send structured check result
-        sender.send_check_result(check_result.clone()).await;
-        check_result
+        }
     }
 }

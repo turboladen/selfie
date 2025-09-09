@@ -140,7 +140,7 @@ async fn test_service_list_packages() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.list().await.unwrap();
+    let stream = service.list(false).await.unwrap();
     let events = collect_events(stream).await;
 
     // Assert

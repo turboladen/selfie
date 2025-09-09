@@ -1,18 +1,17 @@
 use comfy_table::{ContentArrangement, Table, modifiers, presets};
 use console::style;
 use selfie::{
-    commands::ShellCommandRunner,
     config::AppConfig,
-    fs::real::RealFileSystem,
     package::{
         event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
-        repository::YamlPackageRepository,
-        service::{PackageService, PackageServiceImpl},
+        service::PackageService,
     },
 };
 
 use crate::{
-    event_processor::EventProcessor, formatters::format_key,
+    commands::package::common::{self, create_package_service, report_status},
+    event_processor::EventProcessor,
+    formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
 };
 
@@ -23,36 +22,69 @@ pub(crate) async fn handle_validate(
 ) -> i32 {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    // Create the repository and command runner
-    let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-    let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
+    report_status(&format!("Validating {package_name}..."));
 
-    // Create the package service implementation
-    let service = PackageServiceImpl::new(repo, command_runner, config.clone());
+    // Create the package service
+    let service = create_package_service(config);
+
+    // Create tracker for consistent error handling
+    let mut tracker = common::PackageNotFoundTracker::new();
 
     // Call the service's validate method to get an event stream
     match service.validate(package_name, None).await {
         Ok(event_stream) => {
             // Process the event stream with custom handling for structured data
             let processor = EventProcessor::new(reporter);
-            processor
-                .process_events(event_stream, |event| handle_validate_event(event, config))
-                .await
+            let result = processor
+                .process_events(event_stream, |event| {
+                    handle_validate_event(event, config, &mut tracker)
+                })
+                .await;
+            result.exit_code
         }
         Err(e) => {
-            reporter.report_error(format!("Failed to validate package: {e}"));
-            1
+            // Handle the initial error - likely PackageNotFound
+            let streamed_error = selfie::package::event::error::StreamedError::PackageRepoError(
+                selfie::package::port::PackageRepoError::PackageError(Box::new(e)),
+            );
+            if tracker.handle_package_not_found_error(&streamed_error) {
+                1
+            } else {
+                reporter.report_error(format!("Failed to validate package: {streamed_error}"));
+                1
+            }
         }
     }
 }
 
-fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> bool {
+fn handle_validate_event(
+    event: &PackageEvent,
+    config: &AppConfig,
+    tracker: &mut common::PackageNotFoundTracker,
+) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
             display_validation_result(validation_result, config);
             true // Handled
+        }
+        PackageEvent::Error { error, .. } => {
+            // Handle PackageNotFound errors consistently
+            if tracker.handle_package_not_found_error(error) {
+                return true; // Handled - prevent duplicate error display
+            }
+            false // Use default handling for other errors
+        }
+        PackageEvent::Completed { result, .. } => {
+            // Suppress completion errors if we already handled PackageNotFound
+            if tracker.should_suppress_completion_error(result) {
+                return true; // Handled - suppress duplicate error
+            }
+            false // Use default handling for other completion events
+        }
+        PackageEvent::Progress { .. } => {
+            true // Handled - suppress progress for validate
         }
         _ => false, // Use default handling for other events
     }
@@ -89,15 +121,13 @@ fn display_validation_success_card(validation_result: &ValidationResultData, con
         validation_result.environment
     );
 
-    let status = if config.use_colors() {
-        format!(
-            "   {}: {}",
-            console::style("Status").cyan().bold(),
-            console::style("✅ Valid").green().bold()
-        )
+    let reporter = TerminalProgressReporter::new(config.use_colors());
+    let status_key = if config.use_colors() {
+        console::style("Status").cyan().bold().to_string()
     } else {
-        "   Status: ✅ Valid".to_string()
+        "Status".to_string()
     };
+    let status = format!("   {}: {}", status_key, reporter.format_success("Valid"));
     println!("{status}");
 }
 

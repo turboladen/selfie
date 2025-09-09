@@ -6,8 +6,13 @@ use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
     package::{
-        event::{CheckResult, CheckResultData, EventSender, OperationResult},
-        port::PackageRepository,
+        EnvironmentConfig,
+        event::{
+            CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
+            OperationSuccess,
+        },
+        port::{PackageError, PackageRepoError, PackageRepository},
+        service::ProgressTracker,
     },
 };
 
@@ -19,7 +24,7 @@ pub(super) async fn handle_install<PR, CR>(
     config: &AppConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -29,15 +34,14 @@ where
     let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
         Ok(pkg) => pkg,
         Err(err) => {
-            return OperationResult::Failure(format!(
-                "Failed to fetch package '{package_name}': {err}"
-            ));
+            return OperationResult::Failure(err.into());
         }
     };
 
-    // Step 2: Find environment configuration (reusing shared step)
-    let env_config = match steps::find_environment_config(
-        &package_blob.package,
+    // Step 2: Find environment configuration
+    let env_config = match get_environment_config(
+        package_name,
+        &package_blob,
         config.environment(),
         sender,
         progress,
@@ -45,9 +49,7 @@ where
     .await
     {
         Ok(config) => config,
-        Err(err) => {
-            return OperationResult::Failure(format!("Environment configuration error: {err}"));
-        }
+        Err(result) => return result,
     };
 
     // Step 3: Check if package is already installed
@@ -63,9 +65,15 @@ where
     .await;
 
     // If package is already installed, exit early
-    if let Some(result) =
-        handle_already_installed_package(package_name, &pre_install_check, command_runner, sender)
-            .await
+    if let Some(result) = handle_already_installed_package(
+        package_name,
+        &pre_install_check,
+        command_runner,
+        sender,
+        progress,
+        config,
+    )
+    .await
     {
         return result;
     }
@@ -74,7 +82,7 @@ where
     log_proceeding_with_installation(package_name, &pre_install_check, sender).await;
 
     // Step 4: Get install command (reusing shared step with custom getter function)
-    let install_cmd = match steps::get_command(
+    let Ok(install_cmd) = steps::get_command(
         env_config,
         "install",
         |ec| Some(ec.install()),
@@ -82,9 +90,33 @@ where
         progress,
     )
     .await
-    {
-        Ok(cmd) => cmd,
-        Err(err) => return OperationResult::Failure(format!("Install command error: {err}")),
+    else {
+        // Create typed error for missing install command
+        let other_envs_with_install = package_blob
+            .package
+            .environments()
+            .keys()
+            .filter_map(|env_name| {
+                if package_blob
+                    .package
+                    .environments()
+                    .get(env_name)?
+                    .install()
+                    .is_empty()
+                {
+                    None
+                } else {
+                    Some(env_name.clone())
+                }
+            })
+            .collect();
+
+        return OperationResult::Failure(OperationFailure::no_install_command(
+            package_name.to_string(),
+            config.environment().to_string(),
+            package_blob.package.path().clone(),
+            other_envs_with_install,
+        ));
     };
 
     // Step 5: Execute installation and verification
@@ -104,6 +136,8 @@ async fn handle_already_installed_package<CR>(
     pre_install_check: &CheckResultData,
     command_runner: &CR,
     sender: &EventSender,
+    progress: &ProgressTracker,
+    config: &AppConfig,
 ) -> Option<OperationResult>
 where
     CR: CommandRunner,
@@ -115,13 +149,15 @@ where
 
         let executable_path = find_executable_path(package_name, command_runner, sender).await;
 
-        let message = if let Some(path) = executable_path {
-            format!("Package '{package_name}' is already installed at: {path}")
-        } else {
-            format!("Package '{package_name}' is already installed, skipping installation")
-        };
-
-        return Some(OperationResult::Success(message));
+        return Some(OperationResult::Success(
+            OperationSuccess::package_installed(
+                package_name.to_string(),
+                config.environment().to_string(),
+                true, // was_already_installed
+                executable_path,
+                (progress.current_step(), progress.total_steps()).into(),
+            ),
+        ));
     }
     None
 }
@@ -204,7 +240,7 @@ async fn log_proceeding_with_installation(
 struct InstallationContext<'a> {
     package_name: &'a str,
     install_cmd: &'a str,
-    env_config: &'a crate::package::EnvironmentConfig,
+    env_config: &'a EnvironmentConfig,
     config: &'a AppConfig,
     pre_install_check: &'a CheckResultData,
 }
@@ -213,13 +249,13 @@ async fn execute_installation_and_verification<CR>(
     context: InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     CR: CommandRunner,
 {
     // Execute install command with streaming output
-    let install_success = match steps::execute_command_streaming(
+    let install_output = match steps::execute_command_streaming(
         command_runner,
         context.install_cmd,
         "install",
@@ -229,44 +265,95 @@ where
     )
     .await
     {
-        Ok(success) => success,
-        Err(err) => return OperationResult::Failure(format!("Command execution error: {err}")),
+        Ok(output) => output,
+        Err(err) => return OperationResult::Failure(err.into()),
     };
 
-    if !install_success {
+    if !install_output.is_success() {
         sender
             .send_warning(format!(
                 "Package '{}' installation command failed",
                 context.package_name
             ))
             .await;
-        return OperationResult::Failure(format!(
-            "Installation failed at step {}/{}",
-            progress.current_step(),
-            progress.total_steps()
+        return OperationResult::Failure(OperationFailure::command_failed(
+            context.install_cmd.to_string(),
+            Some(install_output.exit_code()),
+            install_output.stdout_str().to_string(),
+            install_output.stderr_str().to_string(),
         ));
     }
 
     // Verify installation if check command is available
     verify_installation(&context, command_runner, sender, progress).await;
 
+    let executable_path = find_executable_path(context.package_name, command_runner, sender).await;
+
     // Final step: Report success
     progress
         .next(sender, "Package installation completed")
         .await;
 
-    OperationResult::Success(format!(
-        "Installation completed successfully ({}/{} steps)",
-        progress.current_step(),
-        progress.total_steps()
+    OperationResult::Success(OperationSuccess::package_installed(
+        context.package_name.to_string(),
+        context.config.environment().to_string(),
+        false, // was_already_installed
+        executable_path,
+        (progress.current_step(), progress.total_steps()).into(),
     ))
+}
+
+async fn get_environment_config<'a>(
+    package_name: &str,
+    package_blob: &'a crate::package::GetPackage,
+    current_env: &str,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+) -> Result<&'a EnvironmentConfig, OperationResult> {
+    progress.next(sender, "Checking package environment").await;
+
+    // Get environment configuration
+    let Some(env_config) = package_blob.package.environments().get(current_env) else {
+        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+    };
+
+    sender
+        .send_debug(format!(
+            "Found environment configuration for '{current_env}'"
+        ))
+        .await;
+    Ok(env_config)
+}
+
+async fn handle_missing_environment(
+    package_name: &str,
+    package_blob: &crate::package::GetPackage,
+    current_env: &str,
+    sender: &EventSender,
+) -> Result<&'static EnvironmentConfig, OperationResult> {
+    let err = Box::new(PackageError::EnvironmentNotFound {
+        package_name: package_name.to_string(),
+        environment: current_env.to_string(),
+        available_environments: package_blob
+            .package
+            .environments()
+            .keys()
+            .cloned()
+            .collect(),
+        package_file: package_blob.package.path().clone(),
+    });
+    let error_msg = format!("Environment configuration error: {err}");
+    sender
+        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
+        .await;
+    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) where
     CR: CommandRunner,
 {

@@ -3,28 +3,26 @@
 //!
 
 use crate::{
-    commands::runner::CommandRunner,
     config::AppConfig,
     package::{
         event::{
-            EventSender, OperationResult, ValidationIssueData, ValidationLevel,
+            EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
             ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
+        service::ProgressTracker,
     },
 };
 
-pub(super) async fn handle_validate<PR, CR>(
+pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
     config: &AppConfig,
-    _command_runner: &CR,
     sender: &EventSender,
-    progress: &mut crate::package::service::ProgressTracker,
+    progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
-    CR: CommandRunner,
 {
     // Step 1: Fetch package
     progress.next(sender, "Loading package definition").await;
@@ -38,8 +36,9 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to load package '{package_name}': {err}");
+            let err_for_conversion = err.clone();
             sender.send_error(err, &error_msg).await;
-            return OperationResult::Failure(error_msg);
+            return OperationResult::Failure(err_for_conversion.into());
         }
     };
 
@@ -97,27 +96,27 @@ where
     // Return appropriate operation result
     match status {
         ValidationStatus::Valid => {
-            let success_msg = format!(
-                "Package '{}' validation completed successfully ({}/{} steps)",
-                package_name,
-                progress.current_step(),
-                progress.total_steps()
-            );
             sender
                 .send_debug("Package definition is valid for the current environment")
                 .await;
-            OperationResult::Success(success_msg)
+
+            OperationResult::Success(OperationSuccess::package_validated(
+                package_name.to_string(),
+                config.environment().to_string(),
+                ValidationStatus::Valid,
+                None,
+                (progress.current_step(), progress.total_steps()).into(),
+            ))
         }
         ValidationStatus::HasWarnings => {
             let warning_count = issues.warnings().len();
-            let success_msg = format!(
-                "Package '{}' validation completed with {} warning(s) ({}/{} steps)",
-                package_name,
-                warning_count,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Success(success_msg)
+            OperationResult::Success(OperationSuccess::package_validated(
+                package_name.to_string(),
+                config.environment().to_string(),
+                ValidationStatus::HasWarnings,
+                Some(warning_count),
+                (progress.current_step(), progress.total_steps()).into(),
+            ))
         }
         ValidationStatus::HasErrors => {
             let error_count = issues.errors().len();
@@ -130,7 +129,7 @@ where
                 progress.current_step(),
                 progress.total_steps()
             );
-            OperationResult::Failure(error_msg)
+            OperationResult::Failure(error_msg.into())
         }
     }
 }

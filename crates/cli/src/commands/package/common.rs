@@ -153,12 +153,26 @@ pub(super) fn create_formatted_table() -> Table {
 }
 
 /// Format environment names with current environment highlighting
+/// Current environment appears first, followed by others sorted alphabetically
 pub(super) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
     config: &AppConfig,
 ) -> String {
-    environments
+    let mut sorted_envs = environments.to_vec();
+
+    // Sort so current environment comes first, then alphabetically
+    sorted_envs.sort_by(|a, b| {
+        if a == current_environment && b != current_environment {
+            std::cmp::Ordering::Less
+        } else if a != current_environment && b == current_environment {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
+        }
+    });
+
+    sorted_envs
         .iter()
         .map(|env_name| {
             if env_name == current_environment {
@@ -200,6 +214,154 @@ pub(super) fn format_field_value(value: &str, use_colors: bool) -> String {
 /// all package commands that perform subprocess operations.
 pub(super) fn report_status(message: &str) {
     eprintln!("{} {}", console::style("⚡").green(), message);
+}
+
+/// Display environment error with available environments for a specific package
+pub(crate) fn display_environment_summary(
+    package_name: &str,
+    current_environment: &str,
+    available_environments: &[String],
+    config: &AppConfig,
+    context: &str, // "check" or "install"
+) {
+    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
+
+    if available_environments.is_empty() {
+        display_generic_environment_suggestion(package_name, current_environment, config, context);
+    } else {
+        println!("   Available environments for this package:");
+
+        let mut table = create_formatted_table();
+        table.set_header(vec!["Environment"]);
+
+        // Sort environments, highlighting the current one if present
+        let mut sorted_envs = available_environments.to_vec();
+        sorted_envs.sort();
+
+        for env in sorted_envs {
+            let env_display = if config.use_colors() {
+                if env == current_environment {
+                    console::style(&env).green().bold().to_string()
+                } else {
+                    env.clone()
+                }
+            } else {
+                env
+            };
+            table.add_row(vec![env_display]);
+        }
+
+        println!("{table}");
+
+        if config.use_colors() {
+            println!(
+                "   💡 Try: {} with one of the environments above",
+                console::style(format!(
+                    "selfie package {context} --environment <env> <package>"
+                ))
+                .yellow()
+            );
+        } else {
+            println!(
+                "   💡 Try: selfie package {context} --environment <env> <package> with one of the environments above"
+            );
+        }
+    }
+}
+
+/// Display generic environment suggestion when specific environment info is not available
+pub(crate) fn display_generic_environment_suggestion(
+    package_name: &str,
+    current_environment: &str,
+    config: &AppConfig,
+    context: &str, // "check" or "install"
+) {
+    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
+    println!("   Try one of these options:");
+    if config.use_colors() {
+        println!(
+            "   • {} to {} with a different environment",
+            console::style(format!(
+                "selfie package {context} --environment <env> <package>"
+            ))
+            .yellow(),
+            context
+        );
+        println!(
+            "   • {} to see which environments this package supports",
+            console::style("selfie package info <package>").yellow()
+        );
+    } else {
+        println!(
+            "   • selfie package {context} --environment <env> <package> to {context} with a different environment"
+        );
+        println!(
+            "   • selfie package info <package> to see which environments this package supports"
+        );
+    }
+}
+
+/// Shared state for tracking PackageNotFound errors across event handling
+#[derive(Debug, Default)]
+pub(crate) struct PackageNotFoundTracker {
+    handled_package_not_found: bool,
+}
+
+impl PackageNotFoundTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Handle PackageNotFound errors consistently across all package commands
+    /// Returns true if this was a PackageNotFound error that was handled
+    pub(crate) fn handle_package_not_found_error(
+        &mut self,
+        error: &selfie::package::event::error::StreamedError,
+    ) -> bool {
+        use selfie::package::{
+            event::error::StreamedError,
+            port::{PackageError, PackageRepoError},
+        };
+
+        if let StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) = error {
+            if let PackageError::PackageNotFound {
+                name,
+                packages_path,
+                ..
+            } = pkg_error.as_ref()
+            {
+                // Display the error message in the expected format, matching the install command
+                eprintln!(
+                    "❌ Error fetching package from repository: Package `{}` not found in path {}",
+                    name,
+                    packages_path.display()
+                );
+                self.handled_package_not_found = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if we should suppress completion error messages due to already handling PackageNotFound
+    pub(crate) fn should_suppress_completion_error(
+        &self,
+        result: &selfie::package::event::OperationResult,
+    ) -> bool {
+        use selfie::package::event::{OperationFailure, OperationResult, PackageFailure};
+
+        if !self.handled_package_not_found {
+            return false;
+        }
+
+        // Suppress completion errors for PackageNotFound when we've already handled them
+        matches!(
+            result,
+            OperationResult::Failure(OperationFailure::PackageError(
+                PackageFailure::NotFound { .. }
+            ))
+        )
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +498,63 @@ mod tests {
     }
 
     #[test]
+    fn test_format_environment_names_ordering() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        // Test with current environment not first in input list
+        let environments = vec![
+            "arch-home".to_string(),
+            "macos-work".to_string(),
+            "ubuntu-server".to_string(),
+        ];
+
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        // Current environment should come first, marked with *
+        assert!(result.starts_with("*macos-work"));
+
+        // Should contain all environments
+        assert!(result.contains("arch-home"));
+        assert!(result.contains("ubuntu-server"));
+
+        // Split by comma and check order
+        let parts: Vec<&str> = result.split(", ").collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "*macos-work");
+
+        // Remaining should be alphabetically sorted
+        let remaining: Vec<&str> = parts[1..].to_vec();
+        assert_eq!(remaining, vec!["arch-home", "ubuntu-server"]);
+    }
+
+    #[test]
+    fn test_format_environment_names_single_environment() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        let environments = vec!["macos-work".to_string()];
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        assert_eq!(result, "*macos-work");
+    }
+
+    #[test]
+    fn test_format_environment_names_current_not_present() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = test_config_with_dir(&package_dir);
+
+        let environments = vec!["arch-home".to_string(), "ubuntu-server".to_string()];
+        let result = format_environment_names(&environments, "macos-work", &config);
+
+        // Should not contain asterisk since current environment is not in the list
+        assert!(!result.contains('*'));
+
+        // Should be alphabetically sorted
+        assert_eq!(result, "arch-home, ubuntu-server");
+    }
+
+    #[test]
     fn test_format_field_key_and_value() {
         let key = format_field_key("Test Key", false);
         assert_eq!(key, "Test Key");
@@ -429,5 +648,93 @@ mod tests {
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation
+    }
+
+    #[test]
+    fn test_display_environment_summary() {
+        let config = test_common::test_config();
+        let environments = vec![
+            "macos".to_string(),
+            "ubuntu".to_string(),
+            "windows".to_string(),
+        ];
+
+        // Should not panic with valid environments
+        display_environment_summary("test-package", "test-env", &environments, &config, "check");
+    }
+
+    #[test]
+    fn test_display_environment_summary_empty() {
+        let config = test_common::test_config();
+        let environments = vec![];
+
+        // Should not panic with empty environments (falls back to generic suggestion)
+        display_environment_summary("test-package", "test-env", &environments, &config, "check");
+    }
+
+    #[test]
+    fn test_display_generic_environment_suggestion() {
+        let config = test_common::test_config();
+
+        // Should not panic with any inputs
+        display_generic_environment_suggestion("test-package", "test-env", &config, "check");
+    }
+
+    #[test]
+    fn test_display_generic_environment_suggestion_with_colors() {
+        let config = test_common::test_config_with_colors();
+
+        // Should not panic with colors enabled
+        display_generic_environment_suggestion("test-package", "test-env", &config, "install");
+    }
+
+    #[test]
+    fn test_package_not_found_tracker() {
+        use selfie::package::{
+            event::error::StreamedError,
+            event::{OperationFailure, OperationResult, PackageFailure},
+            port::{PackageError, PackageRepoError},
+        };
+        use std::path::PathBuf;
+
+        let mut tracker = PackageNotFoundTracker::new();
+
+        // Create a PackageNotFound error
+        let package_error = PackageError::PackageNotFound {
+            name: "test-package".to_string(),
+            packages_path: PathBuf::from("/test/packages"),
+            files_examined: 0,
+            search_patterns: vec!["test-package.yml".to_string()],
+        };
+
+        let streamed_error = StreamedError::PackageRepoError(PackageRepoError::PackageError(
+            Box::new(package_error),
+        ));
+
+        // Should handle PackageNotFound error and set internal state
+        assert!(tracker.handle_package_not_found_error(&streamed_error));
+
+        // Should now suppress completion errors for PackageNotFound
+        let completion_result =
+            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::NotFound {
+                name: "test-package".to_string(),
+                packages_path: PathBuf::from("/test/packages"),
+                files_examined: 0,
+                search_patterns: vec!["test-package.yml".to_string()],
+            }));
+
+        assert!(tracker.should_suppress_completion_error(&completion_result));
+
+        // Should not suppress other types of completion errors
+        let other_result =
+            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::ParseError {
+                name: "test-package".to_string(),
+                packages_path: PathBuf::from("/test/packages"),
+                failed_file: PathBuf::from("/test/packages/test-package.yml"),
+                file_size_bytes: 0,
+                source_error: "yaml error".to_string(),
+            }));
+
+        assert!(!tracker.should_suppress_completion_error(&other_result));
     }
 }
