@@ -149,12 +149,6 @@ where
 
         let executable_path = find_executable_path(package_name, command_runner, sender).await;
 
-        let _message = if let Some(ref path) = executable_path {
-            format!("Package '{package_name}' is already installed at: {path}")
-        } else {
-            format!("Package '{package_name}' is already installed, skipping installation")
-        };
-
         return Some(OperationResult::Success(
             OperationSuccess::package_installed(
                 package_name.to_string(),
@@ -293,6 +287,8 @@ where
     // Verify installation if check command is available
     verify_installation(&context, command_runner, sender, progress).await;
 
+    let executable_path = find_executable_path(context.package_name, command_runner, sender).await;
+
     // Final step: Report success
     progress
         .next(sender, "Package installation completed")
@@ -302,7 +298,7 @@ where
         context.package_name.to_string(),
         context.config.environment().to_string(),
         false, // was_already_installed
-        None,  // executable_path - could be enhanced to detect this
+        executable_path,
         (progress.current_step(), progress.total_steps()).into(),
     ))
 }

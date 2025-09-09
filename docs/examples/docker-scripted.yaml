@@ -14,6 +14,8 @@ homepage: https://www.docker.com
 environments:
   macos:
     install: |
+      set -e
+
       # Source common utilities and run macOS-specific installation script
       source ./docker-scripted/common.sh
       ./docker-scripted/macos_install.sh

@@ -249,14 +249,7 @@ where
 {
     progress.next(sender, step_description).await;
 
-    execute_check_command_quiet(
-        package_name,
-        environment,
-        check_command,
-        command_runner,
-        sender,
-    )
-    .await
+    execute_check_command_quiet(package_name, environment, check_command, command_runner).await
 }
 
 /// Execute a check command without updating progress
@@ -268,7 +261,6 @@ pub(super) async fn execute_check_command_quiet<CR>(
     environment: &str,
     check_command: Option<&str>,
     command_runner: &CR,
-    _sender: &EventSender,
 ) -> CheckResultData
 where
     CR: CommandRunner,

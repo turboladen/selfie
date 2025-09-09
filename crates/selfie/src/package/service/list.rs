@@ -72,7 +72,6 @@ where
                 config.environment(),
                 check_command.map(std::string::String::as_str),
                 command_runner,
-                sender,
             )
             .await;
 

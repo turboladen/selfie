@@ -544,12 +544,11 @@ where
             package_name,
             context,
             3, // load_package + validate_package + result processing
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, _, config, sender, mut progress| async move {
                 validate::handle_validate(
                     &package_name_owned,
                     &repo,
                     &config,
-                    &command_runner,
                     &sender,
                     &mut progress,
                 )

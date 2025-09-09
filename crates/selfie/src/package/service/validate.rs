@@ -3,7 +3,6 @@
 //!
 
 use crate::{
-    commands::runner::CommandRunner,
     config::AppConfig,
     package::{
         event::{
@@ -15,17 +14,15 @@ use crate::{
     },
 };
 
-pub(super) async fn handle_validate<PR, CR>(
+pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
     config: &AppConfig,
-    _command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
-    CR: CommandRunner,
 {
     // Step 1: Fetch package
     progress.next(sender, "Loading package definition").await;
@@ -102,6 +99,7 @@ where
             sender
                 .send_debug("Package definition is valid for the current environment")
                 .await;
+
             OperationResult::Success(OperationSuccess::package_validated(
                 package_name.to_string(),
                 config.environment().to_string(),
