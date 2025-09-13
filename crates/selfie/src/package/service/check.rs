@@ -58,6 +58,9 @@ where
     )
     .await;
 
+    // Step 4: Send the check result event
+    sender.send_check_result(check_result.clone()).await;
+
     // Return appropriate operation result
     create_operation_result(&check_result, package_name, progress)
 }
@@ -190,7 +193,7 @@ fn create_operation_result(
     progress: &ProgressTracker,
 ) -> OperationResult {
     match &check_result.result {
-        CheckResult::Success => OperationResult::Success(OperationSuccess::package_checked(
+        CheckResult::Success { .. } => OperationResult::Success(OperationSuccess::package_checked(
             package_name.to_string(),
             check_result.environment.clone(),
             check_result.result.clone(),
@@ -273,7 +276,10 @@ where
                         package_name: package_name.to_string(),
                         environment: environment.to_string(),
                         check_command: Some(cmd.to_string()),
-                        result: CheckResult::Success,
+                        result: CheckResult::Success {
+                            stdout: output.stdout_str().to_string(),
+                            stderr: output.stderr_str().to_string(),
+                        },
                     }
                 } else {
                     CheckResultData {

@@ -113,7 +113,7 @@ impl<'a> InstallEventHandler<'a> {
         check_result: &selfie::package::event::CheckResultData,
     ) -> bool {
         match &check_result.result {
-            selfie::package::event::CheckResult::Success => {
+            selfie::package::event::CheckResult::Success { .. } => {
                 InstallationDisplay::set_status("Package is already installed");
             }
             selfie::package::event::CheckResult::Failed { .. } => {
@@ -354,7 +354,10 @@ mod tests {
             package_name: "test-package".to_string(),
             environment: "test".to_string(),
             check_command: Some("which test-package".to_string()),
-            result: selfie::package::event::CheckResult::Success,
+            result: selfie::package::event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         };
 
         let handled = InstallEventHandler::handle_check_result_completed(&check_result);

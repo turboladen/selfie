@@ -42,7 +42,11 @@ pub(crate) async fn handle_check(
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::CheckResultCompleted { check_result, .. } => {
-                    display_check_result_card(check_result, config);
+                    if config.verbose() {
+                        display_check_result_card(check_result, config);
+                    } else {
+                        display_check_output_only(check_result, config);
+                    }
                     true // Handled
                 }
                 PackageEvent::Progress { .. } => {
@@ -133,6 +137,32 @@ fn handle_environment_not_found_error(
     );
 }
 
+fn display_check_output_only(check_result: &CheckResultData, _config: &AppConfig) {
+    match &check_result.result {
+        CheckResult::Success { stdout, stderr } => {
+            // Show stdout output if present
+            if !stdout.trim().is_empty() {
+                println!("📋 Check output: {}", stdout.trim());
+            } else if !stderr.trim().is_empty() {
+                println!("📋 Check output: {}", stderr.trim());
+            }
+        }
+        CheckResult::Failed { stdout, stderr, .. } => {
+            // Show error output
+            if !stderr.is_empty() {
+                println!("⚠️ Check failed: {}", stderr.trim());
+            } else if !stdout.is_empty() {
+                println!("⚠️ Check failed: {}", stdout.trim());
+            } else {
+                println!("⚠️ Check failed with no output");
+            }
+        }
+        _ => {
+            // For other cases, don't show additional output in non-verbose mode
+        }
+    }
+}
+
 fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig) {
     println!();
     println!("📋 Check Results:");
@@ -155,11 +185,23 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
 
     // Format status with appropriate icon and color
     let status_line = match &check_result.result {
-        CheckResult::Success => {
-            format!("{}{}", format_key_fn("Status"), reporter.format_installed())
+        CheckResult::Success { stdout, stderr } => {
+            let status = format!("{}{}", format_key_fn("Status"), reporter.format_installed());
+
+            // Show stdout output if present
+            if !stdout.trim().is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Output"), stdout.trim())
+            } else if !stderr.trim().is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Output"), stderr.trim())
+            } else {
+                status
+            }
         }
         CheckResult::Failed {
-            stderr, exit_code, ..
+            stdout,
+            stderr,
+            exit_code,
+            ..
         } => {
             let status = format!(
                 "{}{}",
@@ -169,6 +211,8 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
 
             if !stderr.is_empty() {
                 format!("{}\n{}{}", status, format_key_fn("Details"), stderr.trim())
+            } else if !stdout.is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Details"), stdout.trim())
             } else if let Some(code) = exit_code {
                 format!("{}\n{}Exit code {}", status, format_key_fn("Details"), code)
             } else {
@@ -228,7 +272,10 @@ mod tests {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
             check_command: Some("which test-command".to_string()),
-            result: CheckResult::Success,
+            result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         };
 
         // Just test that the function doesn't panic
@@ -274,7 +321,10 @@ mod tests {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
             check_command: Some("which test-command".to_string()),
-            result: CheckResult::Success,
+            result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         };
 
         // Just test that the function doesn't panic with colors enabled
