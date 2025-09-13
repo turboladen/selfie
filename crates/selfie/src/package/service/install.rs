@@ -142,7 +142,7 @@ async fn handle_already_installed_package<CR>(
 where
     CR: CommandRunner,
 {
-    if matches!(pre_install_check.result, CheckResult::Success) {
+    if matches!(pre_install_check.result, CheckResult::Success { .. }) {
         sender
             .send_debug(format!("Package '{package_name}' is already installed"))
             .await;
@@ -231,7 +231,7 @@ async fn log_proceeding_with_installation(
                 .send_warning("Check command failed, but proceeding with installation anyway")
                 .await;
         }
-        CheckResult::Success => {
+        CheckResult::Success { .. } => {
             // Already handled in handle_already_installed_package
         }
     }
@@ -370,7 +370,7 @@ async fn verify_installation<CR>(
         .await;
 
         match post_install_check.result {
-            CheckResult::Success => {
+            CheckResult::Success { .. } => {
                 sender
                     .send_debug(format!(
                         "Package '{}' installation verified successfully",

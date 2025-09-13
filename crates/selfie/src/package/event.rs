@@ -1308,7 +1308,10 @@ pub struct CheckResultData {
 /// Result of a check operation
 #[derive(Debug, Clone)]
 pub enum CheckResult {
-    Success,
+    Success {
+        stdout: String,
+        stderr: String,
+    },
     Failed {
         stdout: String,
         stderr: String,
@@ -1322,7 +1325,7 @@ pub enum CheckResult {
 impl std::fmt::Display for CheckResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CheckResult::Success => write!(f, "successfully"),
+            CheckResult::Success { .. } => write!(f, "successfully"),
             CheckResult::Failed { .. } => write!(f, "with failures"),
             CheckResult::CommandNotFound => write!(f, "but command not found"),
             CheckResult::NoCheckCommand => write!(f, "but no check command defined"),
@@ -1420,7 +1423,16 @@ mod tests {
 
     #[test]
     fn test_check_result_display() {
-        assert_eq!(format!("{}", CheckResult::Success), "successfully");
+        assert_eq!(
+            format!(
+                "{}",
+                CheckResult::Success {
+                    stdout: String::new(),
+                    stderr: String::new()
+                }
+            ),
+            "successfully"
+        );
         assert_eq!(
             format!(
                 "{}",
@@ -1463,7 +1475,10 @@ mod tests {
         let success = OperationSuccess::PackageChecked {
             package_name: "test-package".to_string(),
             environment: "test".to_string(),
-            check_result: CheckResult::Success,
+            check_result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
             steps_completed: step_count,
         };
 

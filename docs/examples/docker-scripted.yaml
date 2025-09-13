@@ -21,8 +21,7 @@ environments:
       ./docker-scripted/macos_install.sh
     check: |
       ./docker-scripted/check.sh
-    dependencies:
-      - homebrew
+    dependencies: []
 
   ubuntu:
     install: |

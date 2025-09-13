@@ -143,7 +143,7 @@ fn format_status(
     reporter: TerminalProgressReporter,
 ) -> String {
     match status {
-        Some(event::CheckResult::Success) => reporter.format_installed(),
+        Some(event::CheckResult::Success { .. }) => reporter.format_installed(),
         Some(event::CheckResult::Failed { .. }) => reporter.format_not_installed(),
         Some(event::CheckResult::NoCheckCommand) => reporter.format_no_check(),
         Some(event::CheckResult::CommandNotFound) => reporter.format_cmd_not_found(),
@@ -319,7 +319,10 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         }];
 
         // Should not panic
@@ -335,7 +338,10 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         }];
 
         // Should not panic with colors enabled
@@ -594,7 +600,10 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         };
 
         let mut environment_stats = std::collections::HashMap::new();
@@ -653,7 +662,10 @@ mod tests {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         };
 
         let invalid_package = selfie::package::event::InvalidPackageInfo {
