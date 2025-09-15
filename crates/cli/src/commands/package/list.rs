@@ -41,9 +41,13 @@ impl ListCommand<'_> {
                 let config = self.config;
                 let reporter = self.reporter;
                 let show_all = self.show_all;
+
+                // Collect all package items for ordered display
+                let mut collected_items = Vec::new();
+
                 let result = processor
                     .process_events(event_stream, move |event| {
-                        handle_list_event(event, config, reporter, show_all)
+                        handle_list_event(event, config, reporter, show_all, &mut collected_items)
                     })
                     .await;
                 result.exit_code
@@ -62,12 +66,26 @@ fn handle_list_event(
     config: &AppConfig,
     reporter: TerminalProgressReporter,
     show_all: bool,
+    collected_items: &mut Vec<event::PackageListItem>,
 ) -> bool {
     match event {
+        event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
+            // Collect the item (don't display yet)
+            collected_items.push(package_item.clone());
+            true // Handled
+        }
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Show package directory path
+            // Now display all collected items in alphabetical order
+            collected_items.sort_by(|a, b| a.name.cmp(&b.name));
+
+            if !collected_items.is_empty() {
+                display_packages_table(&collected_items, config, reporter, show_all);
+            }
+
+            // Show package directory path and summary information
             println!("📁 Package directory: {}", package_list.package_directory);
 
+            // Only show summary stats and invalid packages at the end
             if package_list.valid_packages.is_empty() && package_list.environment_stats.is_empty() {
                 println!("No packages found.");
             } else if package_list.valid_packages.is_empty() {
@@ -76,8 +94,6 @@ fn handle_list_event(
                     config.environment()
                 );
                 display_environment_stats(&package_list.environment_stats, config);
-            } else {
-                display_packages_table(&package_list.valid_packages, config, reporter, show_all);
             }
 
             // Always display invalid packages if they exist

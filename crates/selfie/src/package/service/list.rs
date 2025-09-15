@@ -27,7 +27,7 @@ pub(super) async fn handle_list<PR, CR>(
 ) -> OperationResult
 where
     PR: PackageRepository,
-    CR: CommandRunner,
+    CR: CommandRunner + Clone + 'static,
 {
     // Step 1: List all packages
     progress.next(sender, "Loading package list").await;
@@ -53,47 +53,88 @@ where
     let valid_packages: Vec<_> = list_output.valid_packages().collect();
     let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
 
-    // Step 3: Check installation status for each package
+    // Step 3: Sort packages alphabetically first for streaming
     progress
-        .next(sender, "Checking package installation status")
+        .next(sender, "Sorting packages for streaming")
         .await;
 
-    // Convert to structured data with check results
-    let mut valid_package_items: Vec<PackageListItem> = Vec::new();
+    // Sort packages alphabetically by name before processing
+    let mut sorted_packages: Vec<_> = valid_packages.into_iter().collect();
+    sorted_packages.sort_by(|a, b| a.name().cmp(b.name()));
 
-    for package in &valid_packages {
-        // Check if package supports the current environment
-        let status = if let Some(env_config) = package.environments().get(config.environment()) {
-            // Package supports current environment - check for installation
-            let check_command = env_config.check.as_ref();
+    // Filter packages based on show_all flag
+    let packages_to_process: Vec<_> = sorted_packages
+        .into_iter()
+        .filter(|package| show_all || package.environments().contains_key(config.environment()))
+        .collect();
 
-            let check_result = super::check::execute_check_command_quiet(
-                package.name(),
-                config.environment(),
-                check_command.map(std::string::String::as_str),
-                command_runner,
-            )
-            .await;
+    progress
+        .next(sender, "Checking package status in parallel")
+        .await;
 
-            Some(check_result.result)
-        } else {
-            // Package doesn't support current environment - mark as not relevant
-            None
-        };
+    // Create parallel tasks for status checking with order preservation
+    let check_futures: Vec<_> = packages_to_process
+        .iter()
+        .enumerate()
+        .map(|(index, package)| {
+            let package_name = package.name().to_string();
+            let package_version = package.version().to_string();
+            let package_environments: Vec<String> =
+                package.environments().keys().cloned().collect();
+            let current_env = config.environment().to_string();
 
-        // If show_all is false, only include packages relevant to current environment
-        if show_all || package.environments().contains_key(config.environment()) {
-            valid_package_items.push(PackageListItem {
-                name: package.name().to_string(),
-                version: package.version().to_string(),
-                environments: package.environments().keys().cloned().collect(),
-                status,
-            });
+            // Check if package supports the current environment and get check command
+            let check_command = package
+                .environments()
+                .get(config.environment())
+                .and_then(|env_config| env_config.check.as_ref())
+                .cloned();
+
+            let command_runner = command_runner.clone();
+            let sender = sender.clone();
+
+            tokio::spawn(async move {
+                let status = if check_command.is_some() {
+                    let check_result = super::check::execute_check_command_quiet(
+                        &package_name,
+                        &current_env,
+                        check_command.as_deref(),
+                        &command_runner,
+                    )
+                    .await;
+                    Some(check_result.result)
+                } else {
+                    None
+                };
+
+                // Create the package list item
+                let package_item = PackageListItem {
+                    name: package_name,
+                    version: package_version,
+                    environments: package_environments,
+                    status,
+                };
+
+                // Stream the individual result immediately
+                sender.send_package_list_item(package_item.clone()).await;
+
+                (index, package_item)
+            })
+        })
+        .collect();
+
+    // Wait for all tasks and collect results in original order
+    let mut results: Vec<(usize, PackageListItem)> = Vec::new();
+    for handle in check_futures {
+        if let Ok(result) = handle.await {
+            results.push(result);
         }
     }
 
-    // Sort packages alphabetically by name
-    valid_package_items.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sort by original index to maintain alphabetical order for final summary
+    results.sort_by_key(|(index, _)| *index);
+    let valid_package_items: Vec<PackageListItem> =
+        results.into_iter().map(|(_, item)| item).collect();
 
     let invalid_package_items: Vec<InvalidPackageInfo> = invalid_packages
         .iter()
@@ -103,9 +144,9 @@ where
         })
         .collect();
 
-    // Calculate environment statistics from all packages before filtering
+    // Calculate environment statistics from all original valid packages
     let mut environment_stats: HashMap<String, usize> = HashMap::new();
-    for package in &valid_packages {
+    for package in &packages_to_process {
         for env_name in package.environments().keys() {
             *environment_stats.entry(env_name.clone()).or_insert(0) += 1;
         }
@@ -122,7 +163,7 @@ where
         environment_stats,
     };
 
-    // Send structured data event
+    // Send final summary data event (CLI can use this for invalid packages and stats)
     sender.send_package_list(package_list_data).await;
 
     // Step 4: Complete operation
