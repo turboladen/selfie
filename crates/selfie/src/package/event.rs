@@ -349,6 +349,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send individual package list item data (for streaming)
+    pub(crate) async fn send_package_list_item(&self, package_item: PackageListItem) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::PackageListItemCompleted {
+            operation_info,
+            package_item,
+        })
+        .await;
+    }
+
     fn touch_operation_info(&self) -> OperationInfo {
         let mut info = self.operation_info.clone();
         info.timestamp = Instant::now();
@@ -1237,6 +1247,12 @@ pub enum PackageEvent {
     ValidationResultCompleted {
         operation_info: OperationInfo,
         validation_result: ValidationResultData,
+    },
+
+    /// Individual package list item completed (for streaming)
+    PackageListItemCompleted {
+        operation_info: OperationInfo,
+        package_item: PackageListItem,
     },
 }
 

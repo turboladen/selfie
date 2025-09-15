@@ -223,7 +223,8 @@ impl EventProcessor {
             | PackageEvent::EnvironmentStatusChecked { .. }
             | PackageEvent::PackageListLoaded { .. }
             | PackageEvent::CheckResultCompleted { .. }
-            | PackageEvent::ValidationResultCompleted { .. } => {
+            | PackageEvent::ValidationResultCompleted { .. }
+            | PackageEvent::PackageListItemCompleted { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
