@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "selfie",
+  "project_id": "5dde43de-aba3-464e-b792-bbd9f827979f"
+}
