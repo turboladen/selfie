@@ -389,7 +389,7 @@ environments:
     #[test]
     fn test_remove_package_not_found_with_mock_repo() {
         // Test CLI error handling when package doesn't exist using MockPackageRepository
-        use selfie::package::port::{MockPackageRepository, PackageError, PackageRepoError};
+        use selfie::package::port::{MockPackageRepository, PackageError};
 
         let mut mock_repo = MockPackageRepository::new();
 
@@ -399,14 +399,13 @@ environments:
             .with(mockall::predicate::eq("nonexistent"))
             .times(1)
             .returning(|_| {
-                Err(PackageRepoError::PackageError(Box::new(
-                    PackageError::PackageNotFound {
-                        name: "nonexistent".to_string(),
-                        packages_path: PathBuf::from("/test/packages"),
-                        files_examined: 0,
-                        search_patterns: vec!["nonexistent.yml".to_string()],
-                    },
-                )))
+                Err(PackageError::PackageNotFound {
+                    name: "nonexistent".to_string(),
+                    packages_path: PathBuf::from("/test/packages"),
+                    files_examined: 0,
+                    search_patterns: vec!["nonexistent.yml".to_string()],
+                }
+                .into())
             });
 
         // Test CLI error handling

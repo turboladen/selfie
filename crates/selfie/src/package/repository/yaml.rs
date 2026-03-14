@@ -124,23 +124,23 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             .map_err(|e| PackageRepoError::IoError(Arc::new(e)))?;
 
         if package_files.is_empty() {
-            return Err(Box::new(PackageError::PackageNotFound {
+            return Err(PackageError::PackageNotFound {
                 name: name.to_string(),
                 packages_path: self.package_dir.clone(),
                 files_examined,
                 search_patterns,
-            })
+            }
             .into());
         }
 
         if package_files.len() > 1 {
-            return Err(Box::new(PackageError::MultiplePackagesFound {
+            return Err(PackageError::MultiplePackagesFound {
                 name: name.to_string(),
                 packages_path: self.package_dir.clone(),
                 conflicting_paths: package_files,
                 files_examined,
                 search_patterns,
-            })
+            }
             .into());
         }
 
@@ -149,14 +149,12 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| {
-                Box::new(PackageError::ParseError {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    file_size_bytes: file_size,
-                    source,
-                })
+            .map_err(|source| PackageError::ParseError {
+                name: name.to_string(),
+                packages_path: self.package_dir.clone(),
+                failed_file: package_file.clone(),
+                file_size_bytes: file_size,
+                source,
             })?;
 
         Ok(GetPackage::from_existing(package, package_file.clone()))

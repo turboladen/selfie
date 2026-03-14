@@ -466,7 +466,7 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};
-    use selfie::package::port::{MockPackageRepository, PackageRepoError};
+    use selfie::package::port::MockPackageRepository;
     use selfie::package::service::PackageService;
     use std::path::PathBuf;
     use test_common::{test_config_with_dir, test_config_with_dir_and_env};
@@ -728,14 +728,13 @@ mod tests {
             .with(mockall::predicate::eq("new-package"))
             .times(1)
             .returning(|_| {
-                Err(PackageRepoError::PackageError(Box::new(
-                    selfie::package::port::PackageError::PackageNotFound {
-                        name: "new-package".to_string(),
-                        packages_path: std::path::PathBuf::from("/test/packages"),
-                        files_examined: 0,
-                        search_patterns: vec!["new-package.yml".to_string()],
-                    },
-                )))
+                Err(selfie::package::port::PackageError::PackageNotFound {
+                    name: "new-package".to_string(),
+                    packages_path: std::path::PathBuf::from("/test/packages"),
+                    files_examined: 0,
+                    search_patterns: vec!["new-package.yml".to_string()],
+                }
+                .into())
             });
 
         let get_result = mock_repo.get_package("new-package");

@@ -366,14 +366,13 @@ mod tests {
         repo.expect_get_package()
             .withf(|name| name == "nonexistent")
             .returning(|_| {
-                Err(crate::package::port::PackageRepoError::PackageError(
-                    Box::new(crate::package::port::PackageError::PackageNotFound {
-                        name: "nonexistent".to_string(),
-                        packages_path: std::path::PathBuf::from("/tmp"),
-                        files_examined: 0,
-                        search_patterns: vec![],
-                    }),
-                ))
+                Err(crate::package::port::PackageError::PackageNotFound {
+                    name: "nonexistent".to_string(),
+                    packages_path: std::path::PathBuf::from("/tmp"),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
             });
 
         let sender = make_sender();
@@ -397,14 +396,13 @@ mod tests {
         repo.expect_get_package()
             .withf(|name| name == "nonexistent")
             .returning(|_| {
-                Err(crate::package::port::PackageRepoError::PackageError(
-                    Box::new(crate::package::port::PackageError::PackageNotFound {
-                        name: "nonexistent".to_string(),
-                        packages_path: std::path::PathBuf::from("/tmp"),
-                        files_examined: 0,
-                        search_patterns: vec![],
-                    }),
-                ))
+                Err(crate::package::port::PackageError::PackageNotFound {
+                    name: "nonexistent".to_string(),
+                    packages_path: std::path::PathBuf::from("/tmp"),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
             });
 
         let sender = make_sender();
