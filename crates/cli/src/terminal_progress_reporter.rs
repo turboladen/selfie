@@ -44,6 +44,11 @@ static CMD_NOT_FOUND_EMOJI: Emoji<'_, '_> = Emoji("🔍 ", "[!] ");
 static STATUS_ERROR_EMOJI: Emoji<'_, '_> = Emoji("💥 ", "[E] ");
 static NA_EMOJI: Emoji<'_, '_> = Emoji("⚪ ", "[N/A] ");
 
+// Output line emojis for installation display
+static STDOUT_OUTPUT_EMOJI: Emoji<'_, '_> = Emoji("📦 ", "[o] ");
+static STDERR_OUTPUT_EMOJI: Emoji<'_, '_> = Emoji("🔧 ", "[e] ");
+static OUTPUT_HEADER_EMOJI: Emoji<'_, '_> = Emoji("📋 ", ">> ");
+
 /// Types of status messages that can be displayed to the user
 ///
 /// Each message type has its own visual styling, emoji/text prefix,
@@ -356,6 +361,39 @@ impl TerminalProgressReporter {
     pub(crate) fn format_na(self) -> String {
         self.status_line_with_emoji(NA_EMOJI, "N/A", |style| style.dim())
     }
+
+    /// Format a stdout output line with appropriate emoji prefix
+    pub(crate) fn format_stdout_output(self, line: &str) -> String {
+        let trimmed = line.trim();
+        let text = if self.use_colors {
+            style(trimmed).dim().to_string()
+        } else {
+            trimmed.to_string()
+        };
+        format!("    {STDOUT_OUTPUT_EMOJI}{text}")
+    }
+
+    /// Format a stderr output line with appropriate emoji prefix
+    pub(crate) fn format_stderr_output(self, line: &str) -> String {
+        let trimmed = line.trim();
+        let text = if self.use_colors {
+            style(trimmed).dim().to_string()
+        } else {
+            trimmed.to_string()
+        };
+        format!("    {STDERR_OUTPUT_EMOJI}{text}")
+    }
+
+    /// Format an installation output header
+    pub(crate) fn format_output_header(self) -> String {
+        let label = "Installation output:";
+        let text = if self.use_colors {
+            style(label).bold().to_string()
+        } else {
+            label.to_string()
+        };
+        format!("\n{OUTPUT_HEADER_EMOJI}{text}")
+    }
 }
 
 #[cfg(test)]
@@ -434,5 +472,69 @@ mod test {
         // But should still contain the text and emoji/fallback
         assert!(installed.contains("Installed"));
         assert!(installed.contains("✅") || installed.contains("[✓]"));
+    }
+
+    #[test]
+    fn test_format_stdout_output_without_colors() {
+        let reporter = TerminalProgressReporter::new(false);
+        let result = reporter.format_stdout_output("hello world");
+        assert!(result.contains("hello world"));
+        assert!(result.contains("📦") || result.contains("[o]"));
+        assert!(result.starts_with("    ")); // 4-space indent
+        assert!(!result.contains("\x1b[")); // No ANSI codes
+    }
+
+    #[test]
+    fn test_format_stdout_output_with_colors() {
+        let reporter = TerminalProgressReporter::new(true);
+        let result = reporter.format_stdout_output("hello world");
+        assert!(result.contains("hello world"));
+        assert!(result.contains("📦") || result.contains("[o]"));
+        assert!(result.starts_with("    ")); // 4-space indent
+    }
+
+    #[test]
+    fn test_format_stderr_output_without_colors() {
+        let reporter = TerminalProgressReporter::new(false);
+        let result = reporter.format_stderr_output("  some error  ");
+        assert!(result.contains("some error"));
+        assert!(result.contains("🔧") || result.contains("[e]"));
+        assert!(result.starts_with("    ")); // 4-space indent
+        assert!(!result.contains("\x1b[")); // No ANSI codes
+    }
+
+    #[test]
+    fn test_format_stderr_output_with_colors() {
+        let reporter = TerminalProgressReporter::new(true);
+        let result = reporter.format_stderr_output("  some error  ");
+        assert!(result.contains("some error"));
+        assert!(result.contains("🔧") || result.contains("[e]"));
+        assert!(result.starts_with("    ")); // 4-space indent
+    }
+
+    #[test]
+    fn test_format_output_header_without_colors() {
+        let reporter = TerminalProgressReporter::new(false);
+        let result = reporter.format_output_header();
+        assert!(result.contains("Installation output:"));
+        assert!(result.contains("📋") || result.contains(">>"));
+        assert!(!result.contains("\x1b[")); // No ANSI codes
+    }
+
+    #[test]
+    fn test_format_output_header_with_colors() {
+        let reporter = TerminalProgressReporter::new(true);
+        let result = reporter.format_output_header();
+        assert!(result.contains("Installation output:"));
+        assert!(result.contains("📋") || result.contains(">>"));
+    }
+
+    #[test]
+    fn test_format_stdout_output_trims_whitespace() {
+        let reporter = TerminalProgressReporter::new(false);
+        let result = reporter.format_stdout_output("  padded line  ");
+        assert!(result.contains("padded line"));
+        // Should not contain the original leading/trailing spaces around the text
+        assert!(!result.contains("  padded"));
     }
 }

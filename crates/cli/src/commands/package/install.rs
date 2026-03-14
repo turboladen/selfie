@@ -17,14 +17,16 @@ use crate::{
 
 /// Manages a scrolling window of installation output without progress bars
 struct InstallationDisplay {
+    reporter: TerminalProgressReporter,
     output_lines: VecDeque<String>,
     max_lines: usize,
     first_output: bool,
 }
 
 impl InstallationDisplay {
-    fn new() -> Self {
+    fn new(reporter: TerminalProgressReporter) -> Self {
         Self {
+            reporter,
             output_lines: VecDeque::new(),
             max_lines: 5,
             first_output: true,
@@ -33,17 +35,14 @@ impl InstallationDisplay {
 
     fn add_output_line(&mut self, line: &str, is_stderr: bool) {
         let formatted_line = if is_stderr {
-            format!("    🔧 {}", line.trim())
+            self.reporter.format_stderr_output(line)
         } else {
-            format!("    📦 {}", line.trim())
+            self.reporter.format_stdout_output(line)
         };
 
         // Print header only on first output
         if self.first_output {
-            eprintln!(
-                "
-📦 Installation output:"
-            );
+            eprintln!("{}", self.reporter.format_output_header());
             self.first_output = false;
         }
 
@@ -165,7 +164,7 @@ pub(crate) async fn handle_install(
     let event_stream = service.install(package_name).await;
 
     // Create installation display
-    let mut display = InstallationDisplay::new();
+    let mut display = InstallationDisplay::new(reporter);
 
     // Track whether we handled an environment error in the Completed arm
     let mut env_error_handled = false;
@@ -249,7 +248,8 @@ mod tests {
 
     #[test]
     fn test_installation_display() {
-        let mut display = InstallationDisplay::new();
+        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new(reporter);
 
         // Test adding output lines
         display.add_output_line("test output", false);
@@ -265,7 +265,8 @@ mod tests {
     #[test]
     fn test_install_event_handler_progress_verbose() {
         let config = test_config_verbose();
-        let mut display = InstallationDisplay::new();
+        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
 
         // Test progress handling in verbose mode
@@ -276,7 +277,8 @@ mod tests {
     #[test]
     fn test_install_event_handler_progress_non_verbose() {
         let config = test_config();
-        let mut display = InstallationDisplay::new();
+        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
 
         // Test progress handling in non-verbose mode
@@ -287,7 +289,8 @@ mod tests {
     #[test]
     fn test_install_event_handler_info_verbose() {
         let config = test_config_verbose();
-        let mut display = InstallationDisplay::new();
+        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
 
         // Test info handling in verbose mode
@@ -299,7 +302,8 @@ mod tests {
     #[test]
     fn test_install_event_handler_info_non_verbose() {
         let config = test_config();
-        let mut display = InstallationDisplay::new();
+        let reporter = create_mock_reporter();
+        let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
 
         // Test info handling in non-verbose mode
