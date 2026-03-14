@@ -395,10 +395,11 @@ pub enum PackageParseError {
     },
 
     /// File system abstraction error during package file access
-    #[error("File system error reading package file `{}`: {source_message}", package_path.display())]
+    #[error("File system error reading package file `{}`: {source}", package_path.display())]
     FileSystemError {
         package_path: PathBuf,
-        source_message: String,
+        #[source]
+        source: Arc<crate::fs::filesystem::FileSystemError>,
     },
 }
 
