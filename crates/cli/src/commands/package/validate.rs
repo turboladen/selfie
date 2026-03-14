@@ -29,30 +29,16 @@ pub(crate) async fn handle_validate(
     let mut tracker = common::PackageNotFoundTracker::new();
 
     // Call the service's validate method to get an event stream
-    match service.validate(package_name, None).await {
-        Ok(event_stream) => {
-            // Process the event stream with custom handling for structured data
-            let processor = EventProcessor::new(reporter);
-            let result = processor
-                .process_events(event_stream, |event| {
-                    handle_validate_event(event, config, &mut tracker)
-                })
-                .await;
-            result.exit_code
-        }
-        Err(e) => {
-            // Handle the initial error - likely PackageNotFound
-            let streamed_error = selfie::package::event::error::StreamedError::PackageRepoError(
-                selfie::package::port::PackageRepoError::PackageError(Box::new(e)),
-            );
-            if tracker.handle_package_not_found_error(&streamed_error) {
-                1
-            } else {
-                reporter.report_error(format!("Failed to validate package: {streamed_error}"));
-                1
-            }
-        }
-    }
+    let event_stream = service.validate(package_name, None).await;
+
+    // Process the event stream with custom handling for structured data
+    let processor = EventProcessor::new(reporter);
+    let result = processor
+        .process_events(event_stream, |event| {
+            handle_validate_event(event, config, &mut tracker)
+        })
+        .await;
+    result.exit_code
 }
 
 fn handle_validate_event(

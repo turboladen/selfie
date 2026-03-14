@@ -141,7 +141,7 @@ async fn test_service_list_packages() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.list(false).await.unwrap();
+    let stream = service.list(false).await;
     let events = collect_events(stream).await;
 
     // Assert
@@ -189,7 +189,7 @@ async fn test_service_info_package() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.info("info-package").await.unwrap();
+    let stream = service.info("info-package").await;
     let events = collect_events(stream).await;
 
     // Assert
@@ -237,7 +237,7 @@ async fn test_service_validate_package() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.validate("valid-package", None).await.unwrap();
+    let stream = service.validate("valid-package", None).await;
     let events = collect_events(stream).await;
 
     // Assert

@@ -31,30 +31,23 @@ impl<'a> ListCommand<'a> {
 impl ListCommand<'_> {
     pub(crate) async fn handle_command(&self, service: &dyn PackageService) -> i32 {
         // Call the service's list method to get an event stream
-        match service.list(self.show_all).await {
-            Ok(event_stream) => {
-                // Process the event stream with custom handling for structured data
-                let processor = crate::event_processor::EventProcessor::new(self.reporter);
-                let config = self.config;
-                let reporter = self.reporter;
-                let show_all = self.show_all;
+        let event_stream = service.list(self.show_all).await;
 
-                // Collect all package items for ordered display
-                let mut collected_items = Vec::new();
+        // Process the event stream with custom handling for structured data
+        let processor = crate::event_processor::EventProcessor::new(self.reporter);
+        let config = self.config;
+        let reporter = self.reporter;
+        let show_all = self.show_all;
 
-                let result = processor
-                    .process_events(event_stream, move |event| {
-                        handle_list_event(event, config, reporter, show_all, &mut collected_items)
-                    })
-                    .await;
-                result.exit_code
-            }
-            Err(e) => {
-                self.reporter
-                    .report_error(format!("Failed to list packages: {e}"));
-                1
-            }
-        }
+        // Collect all package items for ordered display
+        let mut collected_items = Vec::new();
+
+        let result = processor
+            .process_events(event_stream, move |event| {
+                handle_list_event(event, config, reporter, show_all, &mut collected_items)
+            })
+            .await;
+        result.exit_code
     }
 }
 
