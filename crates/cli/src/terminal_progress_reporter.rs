@@ -105,7 +105,7 @@ impl TerminalProgressReporter {
     ///
     /// `true` if colored output is enabled, `false` otherwise
     #[must_use]
-    pub fn use_colors(self) -> bool {
+    pub fn use_colors(&self) -> bool {
         self.use_colors
     }
 }
@@ -124,7 +124,7 @@ impl TerminalProgressReporter {
     /// # Returns
     ///
     /// A formatted string ready for display in the terminal
-    pub(crate) fn status_line(self, message_type: MessageType, message: impl Display) -> String {
+    pub(crate) fn status_line(&self, message_type: MessageType, message: impl Display) -> String {
         let prefix = match message_type {
             MessageType::Error => ERROR_EMOJI,
             MessageType::Info => INFO_EMOJI,
@@ -170,7 +170,7 @@ impl TerminalProgressReporter {
     ///
     /// A formatted string ready for display in the terminal
     fn status_line_with_emoji<F>(
-        self,
+        &self,
         emoji: Emoji<'_, '_>,
         message: impl Display,
         style_fn: F,
@@ -208,7 +208,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted error message with red coloring (if enabled)
     /// and an error emoji/indicator prefix.
-    pub(crate) fn format_error(self, message: impl Display) -> String {
+    pub(crate) fn format_error(&self, message: impl Display) -> String {
         self.status_line(MessageType::Error, message)
     }
 
@@ -216,7 +216,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted info message with blue coloring (if enabled)
     /// and an info emoji/indicator prefix.
-    pub(crate) fn format_info(self, message: impl Display) -> String {
+    pub(crate) fn format_info(&self, message: impl Display) -> String {
         self.status_line(MessageType::Info, message)
     }
 
@@ -224,7 +224,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted progress message with dim coloring (if enabled)
     /// and a progress emoji/indicator prefix.
-    pub(crate) fn format_progress(self, message: impl Display) -> String {
+    pub(crate) fn format_progress(&self, message: impl Display) -> String {
         self.status_line(MessageType::Progress, message)
     }
 
@@ -232,7 +232,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted suggestion message with yellow coloring (if enabled)
     /// and a suggestion emoji/indicator prefix.
-    pub(crate) fn format_suggestion(self, message: impl Display) -> String {
+    pub(crate) fn format_suggestion(&self, message: impl Display) -> String {
         self.status_line(MessageType::Suggestion, message)
     }
 
@@ -240,7 +240,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted success message with green coloring (if enabled)
     /// and a success emoji/indicator prefix.
-    pub(crate) fn format_success(self, message: impl Display) -> String {
+    pub(crate) fn format_success(&self, message: impl Display) -> String {
         self.status_line(MessageType::Success, message)
     }
 
@@ -248,7 +248,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted warning message with yellow coloring (if enabled)
     /// and a warning emoji/indicator prefix.
-    pub(crate) fn format_warning(self, message: impl Display) -> String {
+    pub(crate) fn format_warning(&self, message: impl Display) -> String {
         self.status_line(MessageType::Warning, message)
     }
 
@@ -268,7 +268,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays a progress message with appropriate styling and prefix.
     /// Useful for showing ongoing operation status to the user.
-    pub(crate) fn report_progress(self, message: impl Display) {
+    pub(crate) fn report_progress(&self, message: impl Display) {
         println!("{}", self.format_progress(message));
     }
 
@@ -276,7 +276,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays a success message with green styling and success indicator.
     /// Used to confirm successful completion of operations.
-    pub(crate) fn report_success(self, message: impl Display) {
+    pub(crate) fn report_success(&self, message: impl Display) {
         println!("{}", self.format_success(message));
     }
 
@@ -284,7 +284,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays a suggestion message with yellow styling and suggestion indicator.
     /// Used to provide helpful recommendations to the user.
-    pub(crate) fn report_suggestion(self, message: impl Display) {
+    pub(crate) fn report_suggestion(&self, message: impl Display) {
         println!("{}", self.format_suggestion(message));
     }
 
@@ -292,7 +292,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays an info message with blue styling and info indicator.
     /// Used for general status updates and non-critical information.
-    pub(crate) fn report_info(self, message: impl Display) {
+    pub(crate) fn report_info(&self, message: impl Display) {
         println!("{}", self.format_info(message));
     }
 
@@ -300,7 +300,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays a warning message with yellow styling and warning indicator.
     /// Used to alert users to potential issues that don't prevent operation.
-    pub(crate) fn report_warning(self, message: impl Display) {
+    pub(crate) fn report_warning(&self, message: impl Display) {
         println!("{}", self.format_warning(message));
     }
 
@@ -308,7 +308,7 @@ impl TerminalProgressReporter {
     ///
     /// Displays an error message with red styling and error indicator.
     /// Uses stderr for proper error stream handling in scripts and pipelines.
-    pub(crate) fn report_error(self, message: impl Display) {
+    pub(crate) fn report_error(&self, message: impl Display) {
         eprintln!("{}", self.format_error(message));
     }
 
@@ -318,7 +318,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating a package is installed,
     /// with green styling and a checkmark indicator.
-    pub(crate) fn format_installed(self) -> String {
+    pub(crate) fn format_installed(&self) -> String {
         self.status_line_with_emoji(INSTALLED_EMOJI, "Installed", |style| style.green())
     }
 
@@ -326,7 +326,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating a package is not installed,
     /// with cyan styling and a package indicator.
-    pub(crate) fn format_not_installed(self) -> String {
+    pub(crate) fn format_not_installed(&self) -> String {
         self.status_line_with_emoji(NOT_INSTALLED_EMOJI, "Not installed", |style| style.cyan())
     }
 
@@ -334,7 +334,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating no check command is configured,
     /// with yellow styling and a warning indicator.
-    pub(crate) fn format_no_check(self) -> String {
+    pub(crate) fn format_no_check(&self) -> String {
         self.status_line_with_emoji(NO_CHECK_EMOJI, "No check", |style| style.yellow())
     }
 
@@ -342,7 +342,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating the check command was not found,
     /// with red styling and a search indicator.
-    pub(crate) fn format_cmd_not_found(self) -> String {
+    pub(crate) fn format_cmd_not_found(&self) -> String {
         self.status_line_with_emoji(CMD_NOT_FOUND_EMOJI, "Cmd not found", |style| style.red())
     }
 
@@ -350,7 +350,7 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating an error occurred during status check,
     /// with red styling and an error indicator.
-    pub(crate) fn format_status_error(self) -> String {
+    pub(crate) fn format_status_error(&self) -> String {
         self.status_line_with_emoji(STATUS_ERROR_EMOJI, "Error", |style| style.red())
     }
 
@@ -358,12 +358,12 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted message indicating status is not available,
     /// with dim styling and a neutral indicator.
-    pub(crate) fn format_na(self) -> String {
+    pub(crate) fn format_na(&self) -> String {
         self.status_line_with_emoji(NA_EMOJI, "N/A", |style| style.dim())
     }
 
     /// Format a stdout output line with appropriate emoji prefix
-    pub(crate) fn format_stdout_output(self, line: &str) -> String {
+    pub(crate) fn format_stdout_output(&self, line: &str) -> String {
         let trimmed = line.trim();
         let text = if self.use_colors {
             style(trimmed).dim().to_string()
@@ -374,7 +374,7 @@ impl TerminalProgressReporter {
     }
 
     /// Format a stderr output line with appropriate emoji prefix
-    pub(crate) fn format_stderr_output(self, line: &str) -> String {
+    pub(crate) fn format_stderr_output(&self, line: &str) -> String {
         let trimmed = line.trim();
         let text = if self.use_colors {
             style(trimmed).dim().to_string()
@@ -385,7 +385,7 @@ impl TerminalProgressReporter {
     }
 
     /// Format an installation output header
-    pub(crate) fn format_output_header(self) -> String {
+    pub(crate) fn format_output_header(&self) -> String {
         let label = "Installation output:";
         let text = if self.use_colors {
             style(label).bold().to_string()
