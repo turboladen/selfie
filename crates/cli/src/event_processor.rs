@@ -319,95 +319,126 @@ mod tests {
         assert!(!handler_called);
     }
 
-    #[tokio::test]
-    async fn test_integration_with_actual_service() {
-        use selfie::{
-            commands::ShellCommandRunner,
-            fs::real::RealFileSystem,
-            package::{
-                repository::YamlPackageRepository,
-                service::{PackageService, PackageServiceImpl},
+    fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {
+        use selfie::package::event::OperationContext;
+        use selfie::package::event::metadata::OperationType;
+
+        selfie::package::event::OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::PackageCheck,
+            package_name: package_name.to_string(),
+            environment: "test".to_string(),
+            context: OperationContext {
+                package_path: None,
+                target_environment: None,
             },
-        };
+            timestamp: std::time::Instant::now(),
+        }
+    }
 
-        // Create a minimal config for testing
-        let config = selfie::config::AppConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp/nonexistent")
-            .command_timeout_unchecked(1)
-            .use_colors(false)
-            .build();
+    #[tokio::test]
+    async fn test_error_event_produces_failure_result() {
+        use selfie::package::event::error::StreamedError;
+        use selfie::package::event::{OperationFailure, OperationResult};
+        use selfie::package::port::PackageRepoError;
 
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-        let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-        let service = PackageServiceImpl::new(repo, command_runner, config);
+        let op = make_operation_info("nonexistent-test-package");
+
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
+            },
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 1,
+                total_steps: 2,
+                percent_complete: 0.5,
+                message: "Loading package file".to_string(),
+            },
+            PackageEvent::Error {
+                operation_info: op.clone(),
+                error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
+                    selfie::fs::filesystem::FileSystemError::IoError(std::sync::Arc::new(
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "package not found"),
+                    )),
+                )),
+                message: "Package not found".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Failure(OperationFailure::Generic(
+                    "Package not found".to_string(),
+                )),
+            },
+        ];
 
         let reporter = TerminalProgressReporter::new(false);
         let processor = EventProcessor::new(reporter);
-
-        // Test with a nonexistent package - should get events but ultimately fail
-        let event_stream = service.check("nonexistent-test-package").await;
+        let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        // Should return error exit code since package doesn't exist
         assert_eq!(result.exit_code, 1);
         assert!(result.had_errors);
     }
 
     #[tokio::test]
-    async fn test_custom_handler_with_real_events() {
-        use selfie::{
-            commands::ShellCommandRunner,
-            fs::real::RealFileSystem,
-            package::{
-                repository::YamlPackageRepository,
-                service::{PackageService, PackageServiceImpl},
+    async fn test_custom_handler_counts_event_types() {
+        use selfie::package::event::{OperationFailure, OperationResult};
+
+        let op = make_operation_info("nonexistent-test-package");
+
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
             },
-        };
-
-        // Create a minimal config for testing
-        let config = selfie::config::AppConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp/nonexistent")
-            .command_timeout_unchecked(1)
-            .use_colors(false)
-            .build();
-
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-        let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-        let service = PackageServiceImpl::new(repo, command_runner, config);
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 1,
+                total_steps: 3,
+                percent_complete: 1.0 / 3.0,
+                message: "Step 1".to_string(),
+            },
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 2,
+                total_steps: 3,
+                percent_complete: 2.0 / 3.0,
+                message: "Step 2".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Failure(OperationFailure::Generic("Failed".to_string())),
+            },
+        ];
 
         let reporter = TerminalProgressReporter::new(false);
         let processor = EventProcessor::new(reporter);
 
-        let mut progress_events_seen = 0;
         let mut started_events_seen = 0;
+        let mut progress_events_seen = 0;
         let mut completed_events_seen = 0;
 
-        let event_stream = service.check("nonexistent-test-package").await;
+        let event_stream = Box::pin(stream::iter(events));
         let result = processor
-            .process_events(event_stream, |event| {
-                match event {
-                    PackageEvent::Started { .. } => {
-                        started_events_seen += 1;
-                        false // Use default handling
-                    }
-                    PackageEvent::Progress { .. } => {
-                        progress_events_seen += 1;
-                        false // Use default handling
-                    }
-                    PackageEvent::Completed { .. } => {
-                        completed_events_seen += 1;
-                        false // Use default handling
-                    }
-                    _ => false,
+            .process_events(event_stream, |event| match event {
+                PackageEvent::Started { .. } => {
+                    started_events_seen += 1;
+                    false
                 }
+                PackageEvent::Progress { .. } => {
+                    progress_events_seen += 1;
+                    false
+                }
+                PackageEvent::Completed { .. } => {
+                    completed_events_seen += 1;
+                    false
+                }
+                _ => false,
             })
             .await;
 
-        // Should have seen some events even though it failed
         assert_eq!(started_events_seen, 1);
-        assert!(progress_events_seen > 0);
+        assert_eq!(progress_events_seen, 2);
         assert_eq!(completed_events_seen, 1);
         assert_eq!(result.exit_code, 1);
         assert!(result.had_errors);
