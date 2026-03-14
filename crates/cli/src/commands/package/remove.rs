@@ -24,7 +24,7 @@ pub(crate) fn handle_remove(
 
     // Show package location
     reporter.report_info(format!("Package '{package_name}' found at:"));
-    reporter.report_info(format!("  {}", package_blob.file_path.display()));
+    reporter.report_info(format!("  {}", package_blob.file_path().display()));
 
     // Check if this package is a dependency of others
     let dependent_packages = match repo.find_dependent_packages(package_name) {
@@ -85,7 +85,7 @@ pub(crate) fn handle_remove(
     reporter.report_success(format!(
         "Package '{}' removed successfully from {}",
         package_name,
-        package_blob.file_path.display()
+        package_blob.file_path().display()
     ));
 
     // Warn about broken dependencies if any exist
@@ -296,7 +296,7 @@ environments:
 
         // Create and save a package
         let package_blob = common::create_new_package("workflow-test", &config);
-        let save_result = mock_repo.save_package(&package_blob.package, &package_blob.file_path);
+        let save_result = mock_repo.save_package(package_blob.package(), package_blob.file_path());
         assert!(save_result.is_ok());
 
         // Remove the package

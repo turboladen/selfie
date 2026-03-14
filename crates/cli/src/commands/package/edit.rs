@@ -19,7 +19,7 @@ pub(crate) fn handle_edit(
     // Check if package exists first for better error messages
     let existing_package = repo.get_package(package_name).ok();
     let package_exists = existing_package.is_some();
-    let package_path = existing_package.as_ref().map(|p| p.file_path.as_path());
+    let package_path = existing_package.as_ref().map(|p| p.file_path());
 
     // Check if EDITOR is available with context-specific error messages
     let Some(_editor) =
@@ -67,17 +67,17 @@ pub(crate) fn handle_edit(
     }
 
     // Open the package file in the editor
-    let action = if package_blob.is_new {
+    let action = if package_blob.is_new() {
         "created"
     } else {
         "updated"
     };
     let success_message = format!(
         "Package '{package_name}' {action} successfully at {}",
-        package_blob.file_path.display()
+        package_blob.file_path().display()
     );
 
-    common::open_editor(&package_blob.file_path, reporter, Some(success_message))
+    common::open_editor(package_blob.file_path(), reporter, Some(success_message))
 }
 
 #[cfg(test)]
@@ -148,11 +148,14 @@ mod tests {
 
         let get_package = common::create_new_package("test-template", &config);
 
-        assert!(get_package.is_new);
-        assert_eq!(get_package.package.name(), "test-template");
-        assert_eq!(get_package.package.version(), "0.1.0");
-        assert_eq!(get_package.file_path, package_dir.join("test-template.yml"));
-        assert!(get_package.package.environments().contains_key("default"));
+        assert!(get_package.is_new());
+        assert_eq!(get_package.package().name(), "test-template");
+        assert_eq!(get_package.package().version(), "0.1.0");
+        assert_eq!(
+            get_package.file_path(),
+            package_dir.join("test-template.yml")
+        );
+        assert!(get_package.package().environments().contains_key("default"));
     }
 
     #[test]
@@ -191,7 +194,7 @@ mod tests {
         let package_dir = std::path::PathBuf::from("/test/packages");
         let get_package = selfie::package::GetPackage::new("version-test", &package_dir);
 
-        assert_eq!(get_package.package.version(), "0.1.0");
+        assert_eq!(get_package.package().version(), "0.1.0");
     }
 
     #[test]
@@ -211,11 +214,11 @@ mod tests {
         let package_blob = common::create_new_package("edit-test", &config);
 
         // Test saving the package using mocked repository
-        let result = mock_repo.save_package(&package_blob.package, &package_blob.file_path);
+        let result = mock_repo.save_package(package_blob.package(), package_blob.file_path());
 
         assert!(result.is_ok());
-        assert_eq!(package_blob.package.name(), "edit-test");
-        assert_eq!(package_blob.file_path, package_dir.join("edit-test.yml"));
+        assert_eq!(package_blob.package().name(), "edit-test");
+        assert_eq!(package_blob.file_path(), package_dir.join("edit-test.yml"));
     }
 
     #[test]
@@ -252,12 +255,12 @@ mod tests {
         assert!(get_result.is_ok());
 
         let existing_package = get_result.unwrap();
-        assert_eq!(existing_package.package.name(), "edit-test");
-        assert_eq!(existing_package.package.version(), "1.0.0");
+        assert_eq!(existing_package.package().name(), "edit-test");
+        assert_eq!(existing_package.package().version(), "1.0.0");
 
         // Test saving edited package
         let save_result =
-            mock_repo.save_package(&existing_package.package, &existing_package.file_path);
+            mock_repo.save_package(existing_package.package(), existing_package.file_path());
         assert!(save_result.is_ok());
 
         // This demonstrates testing CLI edit logic without repository implementation

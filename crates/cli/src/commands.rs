@@ -126,7 +126,7 @@ async fn dispatch_package_command(
         PackageSubcommands::Create {
             package_name,
             interactive,
-        } => package::create::handle_create(package_name, config, reporter, *interactive),
+        } => package::create::handle_create(package_name, config, reporter, *interactive).await,
         PackageSubcommands::Edit { package_name } => {
             package::edit::handle_edit(package_name, config, reporter)
         }

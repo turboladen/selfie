@@ -9,6 +9,7 @@
 //! command execution, and event streaming to provide a complete package management experience.
 
 mod check;
+mod create;
 mod deps;
 mod info;
 mod install;
@@ -220,12 +221,12 @@ pub trait PackageService: Send + Sync {
 
     /// Create a new package definition file
     ///
-    /// Creates a new package definition file with a basic template structure.
-    /// This provides a starting point for users to define their own packages.
+    /// Saves the provided package to the repository if no package with
+    /// the same name already exists.
     ///
     /// # Arguments
     ///
-    /// * `package_name` - Name of the new package to create
+    /// * `package` - The fully constructed package to create
     ///
     /// # Returns
     ///
@@ -236,11 +237,8 @@ pub trait PackageService: Send + Sync {
     /// Returns [`PackageError`] if:
     /// - A package with the same name already exists in the package directory
     /// - The package directory is not writable due to permissions
-    /// - The package directory does not exist and cannot be created
-    /// - File system access fails during template creation or file writing
-    /// - Package name contains invalid characters for file system usage
-    /// - Disk space is insufficient for creating the package file
-    async fn create(&self, package_name: &str) -> Result<EventStream, PackageError>;
+    /// - File system access fails during file writing
+    async fn create(&self, package: super::Package) -> Result<EventStream, PackageError>;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -654,42 +652,15 @@ where
         ))
     }
 
-    /// Create a new package definition file
-    ///
-    /// Creates a new package definition file with a basic template structure
-    /// in the configured package directory. The template includes placeholders
-    /// for common configuration options and environment setups.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the new package to create
-    ///
-    /// # Returns
-    ///
-    /// An event stream with creation progress and result
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PackageError`] if:
-    /// - A package with the same name already exists
-    /// - The package directory is not writable
-    /// - File system operations fail
-    ///
-    /// # Note
-    ///
-    /// This operation is currently not fully implemented and will return
-    /// a placeholder success message.
-    async fn create(&self, package_name: &str) -> Result<EventStream, PackageError> {
-        Ok(self.execute_operation(
+    async fn create(&self, package: super::Package) -> Result<EventStream, PackageError> {
+        let package_name = package.name().to_string();
+        Ok(self.execute_operation_with_deps(
             OperationType::PackageCreate,
-            package_name,
+            &package_name,
             OperationContext::default(),
-            1, // Just one step for creation
-            |_sender, mut _progress| async move {
-                // TODO: Implement actual creation logic
-                OperationResult::Success(crate::package::event::OperationSuccess::Generic(
-                    "Create operation not yet implemented".to_string(),
-                ))
+            2, // Check existence + save
+            move |repo, _, config, sender, mut progress| async move {
+                create::handle_create(package, &repo, &config, &sender, &mut progress).await
             },
         ))
     }

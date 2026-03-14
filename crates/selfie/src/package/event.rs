@@ -516,6 +516,13 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Package creation operation completed
+    PackageCreated {
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -566,6 +573,10 @@ pub enum PackageFailure {
         packages_path: std::path::PathBuf,
         files_examined: usize,
         search_patterns: Vec<String>,
+    },
+    AlreadyExists {
+        name: String,
+        file_path: std::path::PathBuf,
     },
     ParseError {
         name: String,
@@ -667,6 +678,13 @@ impl std::fmt::Display for PackageFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PackageFailure::NotFound { name, .. } => write!(f, "Package `{name}` not found"),
+            PackageFailure::AlreadyExists { name, file_path } => {
+                write!(
+                    f,
+                    "Package `{name}` already exists at {}",
+                    file_path.display()
+                )
+            }
             PackageFailure::ParseError { name, .. } => write!(f, "Parse error in package `{name}`"),
             PackageFailure::MultiplePackagesFound { name, .. } => {
                 write!(f, "Multiple packages found with name `{name}`")
@@ -802,6 +820,16 @@ impl std::fmt::Display for OperationSuccess {
                 };
                 write!(f, "Package listing completed {status} {steps_completed}")
             }
+            OperationSuccess::PackageCreated {
+                package_name,
+                file_path,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' created at {} {steps_completed}",
+                file_path.display()
+            ),
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -894,6 +922,9 @@ impl From<crate::package::port::PackageError> for OperationFailure {
                 files_examined,
                 search_patterns,
             }),
+            crate::package::port::PackageError::PackageAlreadyExists { name, file_path } => {
+                OperationFailure::PackageError(PackageFailure::AlreadyExists { name, file_path })
+            }
         }
     }
 }
@@ -1010,6 +1041,22 @@ impl OperationSuccess {
         }
     }
 
+    /// Create a `PackageCreated` success variant
+    #[must_use]
+    pub fn package_created(
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageCreated {
+            package_name,
+            file_path,
+            environment,
+            steps_completed,
+        }
+    }
+
     /// Checks if this is a package check success
     #[must_use]
     pub fn is_package_check(&self) -> bool {
@@ -1035,7 +1082,8 @@ impl OperationSuccess {
             OperationSuccess::PackageChecked { package_name, .. }
             | OperationSuccess::PackageInstalled { package_name, .. }
             | OperationSuccess::PackageValidated { package_name, .. }
-            | OperationSuccess::PackageInfoRetrieved { package_name, .. } => Some(package_name),
+            | OperationSuccess::PackageInfoRetrieved { package_name, .. }
+            | OperationSuccess::PackageCreated { package_name, .. } => Some(package_name),
             OperationSuccess::PackageListGenerated { .. } | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1048,7 +1096,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::PackageInfoRetrieved { environment, .. }
-            | OperationSuccess::PackageListGenerated { environment, .. } => Some(environment),
+            | OperationSuccess::PackageListGenerated { environment, .. }
+            | OperationSuccess::PackageCreated { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -1070,6 +1119,9 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::PackageListGenerated {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageCreated {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
