@@ -62,7 +62,7 @@ pub enum ConfigLoadError {
 /// This trait allows for layering configuration sources, where CLI arguments
 /// take precedence over file-based configuration. This follows the typical
 /// configuration precedence pattern: CLI args > config file > defaults.
-pub trait ApplyToConfg {
+pub trait ApplyToConfig {
     /// Apply CLI arguments to an existing configuration
     ///
     /// Takes a base configuration (typically loaded from a file) and applies
