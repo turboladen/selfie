@@ -530,68 +530,14 @@ pub enum OperationSuccess {
 /// Typed failure information for operations
 #[derive(Debug, Clone)]
 pub enum OperationFailure {
-    /// Environment configuration issues
-    EnvironmentError(EnvironmentFailure),
-    /// Package loading/parsing issues
-    PackageError(PackageFailure),
+    /// Package-related issues (environment, loading, parsing)
+    Package(crate::package::port::PackageError),
     /// Command execution issues
     CommandError(CommandFailure),
     /// Dependency resolution issues
     DependencyError(DependencyFailure),
     /// Generic failures with just a message (for backward compatibility)
     Generic(String),
-}
-
-/// Environment-related failure details
-#[derive(Debug, Clone)]
-pub enum EnvironmentFailure {
-    NotFound {
-        package_name: String,
-        environment: String,
-        available_environments: Vec<String>,
-        package_file: std::path::PathBuf,
-    },
-    NoCheckCommand {
-        package_name: String,
-        environment: String,
-        package_file: std::path::PathBuf,
-        other_envs_with_check: Vec<String>,
-    },
-    NoInstallCommand {
-        package_name: String,
-        environment: String,
-        package_file: std::path::PathBuf,
-        other_envs_with_install: Vec<String>,
-    },
-}
-
-/// Package-related failure details
-#[derive(Debug, Clone)]
-pub enum PackageFailure {
-    NotFound {
-        name: String,
-        packages_path: std::path::PathBuf,
-        files_examined: usize,
-        search_patterns: Vec<String>,
-    },
-    AlreadyExists {
-        name: String,
-        file_path: std::path::PathBuf,
-    },
-    ParseError {
-        name: String,
-        packages_path: std::path::PathBuf,
-        failed_file: std::path::PathBuf,
-        file_size_bytes: u64,
-        source_error: String,
-    },
-    MultiplePackagesFound {
-        name: String,
-        packages_path: std::path::PathBuf,
-        conflicting_paths: Vec<std::path::PathBuf>,
-        files_examined: usize,
-        search_patterns: Vec<String>,
-    },
 }
 
 /// Command execution failure details
@@ -630,65 +576,12 @@ pub enum DependencyFailure {
 impl std::fmt::Display for OperationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OperationFailure::EnvironmentError(env_err) => {
-                write!(f, "Environment configuration error: {env_err}")
-            }
-            OperationFailure::PackageError(pkg_err) => write!(f, "Package error: {pkg_err}"),
+            OperationFailure::Package(e) => write!(f, "{e}"),
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
             OperationFailure::DependencyError(dep_err) => {
                 write!(f, "Dependency error: {dep_err}")
             }
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::fmt::Display for EnvironmentFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnvironmentFailure::NotFound {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "Environment `{environment}` not found in package `{package_name}`"
-            ),
-            EnvironmentFailure::NoCheckCommand {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "No check command defined for package `{package_name}` in environment `{environment}`"
-            ),
-            EnvironmentFailure::NoInstallCommand {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "No install command defined for package `{package_name}` in environment `{environment}`"
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for PackageFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PackageFailure::NotFound { name, .. } => write!(f, "Package `{name}` not found"),
-            PackageFailure::AlreadyExists { name, file_path } => {
-                write!(
-                    f,
-                    "Package `{name}` already exists at {}",
-                    file_path.display()
-                )
-            }
-            PackageFailure::ParseError { name, .. } => write!(f, "Parse error in package `{name}`"),
-            PackageFailure::MultiplePackagesFound { name, .. } => {
-                write!(f, "Multiple packages found with name `{name}`")
-            }
         }
     }
 }
@@ -851,81 +744,7 @@ impl From<&str> for OperationSuccess {
 // Conversions from existing error types to typed failures
 impl From<crate::package::port::PackageError> for OperationFailure {
     fn from(err: crate::package::port::PackageError) -> Self {
-        match err {
-            crate::package::port::PackageError::EnvironmentNotFound {
-                package_name,
-                environment,
-                available_environments,
-                package_file,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
-                package_name,
-                environment,
-                available_environments,
-                package_file,
-            }),
-            crate::package::port::PackageError::NoCheckCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_check,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_check,
-            }),
-            crate::package::port::PackageError::NoInstallCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_install,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_install,
-            }),
-            crate::package::port::PackageError::PackageNotFound {
-                name,
-                packages_path,
-                files_examined,
-                search_patterns,
-            } => OperationFailure::PackageError(PackageFailure::NotFound {
-                name,
-                packages_path,
-                files_examined,
-                search_patterns,
-            }),
-            crate::package::port::PackageError::ParseError {
-                name,
-                packages_path,
-                failed_file,
-                file_size_bytes,
-                source,
-            } => OperationFailure::PackageError(PackageFailure::ParseError {
-                name,
-                packages_path,
-                failed_file,
-                file_size_bytes,
-                source_error: source.to_string(),
-            }),
-            crate::package::port::PackageError::MultiplePackagesFound {
-                name,
-                packages_path,
-                conflicting_paths,
-                files_examined,
-                search_patterns,
-            } => OperationFailure::PackageError(PackageFailure::MultiplePackagesFound {
-                name,
-                packages_path,
-                conflicting_paths,
-                files_examined,
-                search_patterns,
-            }),
-            crate::package::port::PackageError::PackageAlreadyExists { name, file_path } => {
-                OperationFailure::PackageError(PackageFailure::AlreadyExists { name, file_path })
-            }
-        }
+        OperationFailure::Package(err)
     }
 }
 
@@ -1138,7 +957,7 @@ impl OperationFailure {
         available_environments: Vec<String>,
         package_file: std::path::PathBuf,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
+        OperationFailure::Package(crate::package::port::PackageError::EnvironmentNotFound {
             package_name,
             environment,
             available_environments,
@@ -1154,7 +973,7 @@ impl OperationFailure {
         package_file: std::path::PathBuf,
         other_envs_with_check: Vec<String>,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
+        OperationFailure::Package(crate::package::port::PackageError::NoCheckCommand {
             package_name,
             environment,
             package_file,
@@ -1170,7 +989,7 @@ impl OperationFailure {
         package_file: std::path::PathBuf,
         other_envs_with_install: Vec<String>,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
+        OperationFailure::Package(crate::package::port::PackageError::NoInstallCommand {
             package_name,
             environment,
             package_file,
@@ -1186,7 +1005,7 @@ impl OperationFailure {
         files_examined: usize,
         search_patterns: Vec<String>,
     ) -> Self {
-        OperationFailure::PackageError(PackageFailure::NotFound {
+        OperationFailure::Package(crate::package::port::PackageError::PackageNotFound {
             name,
             packages_path,
             files_examined,
@@ -1213,13 +1032,28 @@ impl OperationFailure {
     /// Checks if this is an environment-related error
     #[must_use]
     pub fn is_environment_error(&self) -> bool {
-        matches!(self, OperationFailure::EnvironmentError(_))
+        matches!(
+            self,
+            OperationFailure::Package(
+                crate::package::port::PackageError::EnvironmentNotFound { .. }
+                    | crate::package::port::PackageError::NoCheckCommand { .. }
+                    | crate::package::port::PackageError::NoInstallCommand { .. }
+            )
+        )
     }
 
     /// Checks if this is a package-related error
     #[must_use]
     pub fn is_package_error(&self) -> bool {
-        matches!(self, OperationFailure::PackageError(_))
+        matches!(
+            self,
+            OperationFailure::Package(
+                crate::package::port::PackageError::PackageNotFound { .. }
+                    | crate::package::port::PackageError::MultiplePackagesFound { .. }
+                    | crate::package::port::PackageError::ParseError { .. }
+                    | crate::package::port::PackageError::PackageAlreadyExists { .. }
+            )
+        )
     }
 
     /// Checks if this is a command-related error
@@ -1234,11 +1068,11 @@ impl OperationFailure {
         matches!(self, OperationFailure::DependencyError(_))
     }
 
-    /// Gets the environment failure details if this is an environment error
+    /// Gets the package error details if this is a package error
     #[must_use]
-    pub fn environment_failure(&self) -> Option<&EnvironmentFailure> {
+    pub fn package_error(&self) -> Option<&crate::package::port::PackageError> {
         match self {
-            OperationFailure::EnvironmentError(env_err) => Some(env_err),
+            OperationFailure::Package(pkg_err) => Some(pkg_err),
             _ => None,
         }
     }
@@ -1274,7 +1108,9 @@ impl OperationFailure {
 impl From<crate::package::port::PackageRepoError> for OperationFailure {
     fn from(err: crate::package::port::PackageRepoError) -> Self {
         match err {
-            crate::package::port::PackageRepoError::PackageError(pkg_err) => (*pkg_err).into(),
+            crate::package::port::PackageRepoError::PackageError(pkg_err) => {
+                OperationFailure::Package(*pkg_err)
+            }
             crate::package::port::PackageRepoError::PackageListError(list_err) => {
                 OperationFailure::Generic(list_err.to_string())
             }
@@ -1647,5 +1483,30 @@ mod tests {
             format!("{success}"),
             "Package 'test-package' installation completed successfully (1/1 steps)"
         );
+    }
+
+    /// Compile-time exhaustiveness guard: if a new `PackageError` variant is added,
+    /// this match will fail to compile, reminding you to update
+    /// `OperationFailure::is_environment_error()` and `is_package_error()`.
+    #[test]
+    fn all_package_error_variants_are_categorized() {
+        use crate::package::port::PackageError;
+
+        fn categorize(err: &PackageError) -> &'static str {
+            match err {
+                // Environment-related (matched by is_environment_error)
+                PackageError::EnvironmentNotFound { .. }
+                | PackageError::NoCheckCommand { .. }
+                | PackageError::NoInstallCommand { .. } => "environment",
+                // Package-related (matched by is_package_error)
+                PackageError::PackageNotFound { .. }
+                | PackageError::MultiplePackagesFound { .. }
+                | PackageError::ParseError { .. }
+                | PackageError::PackageAlreadyExists { .. } => "package",
+            }
+        }
+        // The exhaustive match above is the real test — it forces a compile
+        // error when new variants are added to PackageError.
+        let _ = categorize;
     }
 }
