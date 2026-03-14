@@ -470,39 +470,33 @@ fn prompt_file_name(default_name: &str, reporter: TerminalProgressReporter) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::fs::filesystem::MockFileSystem;
+    use futures::StreamExt;
+    use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};
     use selfie::package::port::{MockPackageRepository, PackageRepoError};
+    use selfie::package::service::PackageService;
     use std::path::PathBuf;
-    use test_common::test_config_with_dir;
+    use test_common::{test_config_with_dir, test_config_with_dir_and_env};
 
-    #[test]
-    fn test_handle_create_basic_non_interactive() {
-        // Test basic package creation using MockPackageRepository for CLI logic testing
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
-
-        // Mock successful save operation
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        // Test the package creation logic without repository implementation details
-        let package = create_basic_package("test-package", &config);
-        let file_path = config.package_directory().join("test-package.yml");
-
-        // Test saving the package using mocked repository
-        let result = mock_repo.save_package(&package, &file_path);
-
-        assert!(result.is_ok());
-        assert_eq!(package.name(), "test-package");
-        assert_eq!(package.version(), "0.1.0");
+    /// Helper: collect the final `OperationResult` from an event stream.
+    async fn collect_result(
+        mut stream: selfie::package::event::EventStream,
+    ) -> Option<OperationResult> {
+        let mut result = None;
+        while let Some(event) = stream.next().await {
+            if let PackageEvent::Completed {
+                result: op_result, ..
+            } = event
+            {
+                result = Some(op_result);
+            }
+        }
+        result
     }
 
+    // ── Package template / structure tests (pure functions, no service needed) ──
+
     #[test]
-    fn test_get_package_new_creates_correct_template() {
-        // Test GetPackage creation without filesystem operations
+    fn test_basic_package_template() {
         let package_dir = PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
@@ -512,16 +506,14 @@ mod tests {
         assert_eq!(package.version(), "0.1.0");
         assert!(package.environments().contains_key("test-env"));
 
-        // Check that the environment has the expected structure
-        let default_env = package.environments().get("test-env").unwrap();
-        assert!(default_env.install().contains("template-test"));
-        assert!(default_env.check().unwrap().contains("template-test"));
-        assert!(default_env.dependencies().is_empty());
+        let env = package.environments().get("test-env").unwrap();
+        assert!(env.install().contains("template-test"));
+        assert!(env.check().unwrap().contains("template-test"));
+        assert!(env.dependencies().is_empty());
     }
 
     #[test]
     fn test_create_package_interactive_components() {
-        // Test that EnvironmentConfig can be created with the new constructor
         let env_config = EnvironmentConfig::new(
             "brew install test".to_string(),
             Some("command -v test".to_string()),
@@ -535,7 +527,6 @@ mod tests {
 
     #[test]
     fn test_vs_code_wait_flag_logic() {
-        // Test that VS Code gets the --wait flag added
         let mut cmd = std::process::Command::new("code");
         cmd.arg("/tmp/test.yml");
 
@@ -553,7 +544,6 @@ mod tests {
 
     #[test]
     fn test_package_template_structure() {
-        // Test that the package template has the expected structure - no filesystem needed
         let package_dir = PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
@@ -576,21 +566,18 @@ mod tests {
 
     #[test]
     fn test_create_basic_package_with_custom_environment() {
-        // Test that --environment flag is respected in basic package creation
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_common::config::test_config_with_dir_and_env(&package_dir, "staging");
+        let config = test_config_with_dir_and_env(&package_dir, "staging");
 
         let package = create_basic_package("test-staging", &config);
 
         assert_eq!(package.name(), "test-staging");
         assert_eq!(package.version(), "0.1.0");
 
-        // Verify it uses the staging environment from config
         let environments = package.environments();
         assert!(environments.contains_key("staging"));
         assert!(!environments.contains_key("default"));
 
-        // Verify the staging environment has correct content
         let staging_env = &environments["staging"];
         assert!(staging_env.install().contains("test-staging"));
         assert!(staging_env.check().unwrap().contains("test-staging"));
@@ -599,9 +586,8 @@ mod tests {
 
     #[test]
     fn test_handle_create_respects_environment_flag() {
-        // Test that package creation respects environment flag
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_common::config::test_config_with_dir_and_env(&package_dir, "production");
+        let config = test_config_with_dir_and_env(&package_dir, "production");
 
         let package = create_basic_package("prod-test", &config);
 
@@ -612,7 +598,6 @@ mod tests {
 
     #[test]
     fn test_package_name_validation_logic() {
-        // Test package name handling without filesystem operations
         let package_dir = PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
@@ -623,7 +608,6 @@ mod tests {
 
     #[test]
     fn test_create_basic_package_structure() {
-        // Test package creation logic without filesystem operations
         let package_dir = PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
@@ -632,16 +616,14 @@ mod tests {
         assert_eq!(package.name(), "structure-test");
         assert_eq!(package.version(), "0.1.0");
 
-        // Verify it has the correct environment from config
         let environments = package.environments();
         assert!(environments.contains_key("test-env"));
     }
 
     #[test]
     fn test_package_creation_respects_config_environment() {
-        // Test that package creation uses the environment from config
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_common::config::test_config_with_dir_and_env(&package_dir, "production");
+        let config = test_config_with_dir_and_env(&package_dir, "production");
 
         let package = create_basic_package("env-test", &config);
 
@@ -650,107 +632,96 @@ mod tests {
         assert!(!environments.contains_key("test-env"));
     }
 
-    #[test]
-    fn test_create_workflow_with_mock_fs() {
-        // Test complete package creation workflow using MockFileSystem
-        let mut mock_fs = MockFileSystem::default();
-        let package_dir = PathBuf::from("/test/packages");
-        let package_path = package_dir.join("complete-test.yml");
+    // ── Service-layer tests (persistence goes through PackageService::create) ──
 
-        mock_fs.mock_write_file(&package_path);
+    #[tokio::test]
+    async fn test_create_via_service_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = test_common::create_test_service(&temp_dir);
+        let config = test_config_with_dir(temp_dir.path());
 
-        let config = test_config_with_dir(&package_dir);
-        let repo = common::create_package_repository_with_fs(&config, mock_fs);
+        let package = create_basic_package("test-package", &config);
 
-        let package = create_basic_package("complete-test", &config);
+        let stream = service.create(package).await.unwrap();
+        let result = collect_result(stream).await.unwrap();
 
-        assert_eq!(package.name(), "complete-test");
-        assert_eq!(package.version(), "0.1.0");
-        assert!(package.environments().contains_key("test-env"));
-
-        // Test the complete save operation
-        let save_result = repo.save_package(&package, &package_path);
-        assert!(save_result.is_ok());
-
-        // Verify environment content
-        let test_env = &package.environments()["test-env"];
-        assert!(test_env.install().contains("complete-test"));
-        assert!(test_env.check().unwrap().contains("complete-test"));
-        assert!(test_env.dependencies().is_empty());
+        match result {
+            OperationResult::Success(OperationSuccess::PackageCreated {
+                package_name,
+                file_path,
+                ..
+            }) => {
+                assert_eq!(package_name, "test-package");
+                assert_eq!(file_path, temp_dir.path().join("test-package.yml"));
+                assert!(file_path.exists(), "Package file should be created on disk");
+            }
+            other => panic!("Expected PackageCreated, got: {other:?}"),
+        }
     }
 
-    #[test]
-    fn test_create_multiple_environments_mock_fs() {
-        // Test creating a package with multiple environments using MockFileSystem
-        let mut mock_fs = MockFileSystem::default();
-        let package_dir = PathBuf::from("/test/packages");
-        let package_path = package_dir.join("multi-env-test.yml");
+    #[tokio::test]
+    async fn test_create_via_service_already_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config_with_dir(temp_dir.path());
 
-        mock_fs.mock_write_file(&package_path);
+        // Pre-create a package file so the service finds it
+        let _ = test_common::create_service_test_package_file(&temp_dir, "existing-pkg", true);
 
-        let prod_config =
-            test_common::config::test_config_with_dir_and_env(&package_dir, "production");
-        let repo = common::create_package_repository_with_fs(&prod_config, mock_fs);
+        let service = test_common::create_test_service(&temp_dir);
+        let package = create_basic_package("existing-pkg", &config);
 
-        let package = create_basic_package("multi-env-test", &prod_config);
+        let stream = service.create(package).await.unwrap();
+        let result = collect_result(stream).await.unwrap();
+
+        assert!(
+            matches!(result, OperationResult::Failure(_)),
+            "Expected failure for existing package"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_via_service_with_custom_environment() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config_with_dir_and_env(temp_dir.path(), "production");
+        let service = test_common::create_test_service_for_env(&temp_dir, "production");
+
+        let package = create_basic_package("prod-pkg", &config);
 
         assert!(package.environments().contains_key("production"));
-        assert!(!package.environments().contains_key("test-env"));
+        assert!(!package.environments().contains_key("default"));
 
-        let save_result = repo.save_package(&package, &package_path);
-        assert!(save_result.is_ok());
+        let stream = service.create(package).await.unwrap();
+        let result = collect_result(stream).await.unwrap();
+
+        match result {
+            OperationResult::Success(OperationSuccess::PackageCreated { environment, .. }) => {
+                assert_eq!(environment, "production");
+            }
+            other => panic!("Expected PackageCreated, got: {other:?}"),
+        }
     }
 
-    #[test]
-    fn test_create_with_mock_config_loading() {
-        // Test package creation with configuration loaded via MockFileSystem
-        let mut mock_fs = MockFileSystem::default();
-        let config_dir = PathBuf::from("/test/.config/selfie");
-        let package_dir = PathBuf::from("/test/packages");
-        let package_path = package_dir.join("config-test.yml");
+    #[tokio::test]
+    async fn test_create_via_service_file_written_correctly() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = test_common::create_test_service(&temp_dir);
+        let config = test_config_with_dir(temp_dir.path());
 
-        let config_yaml = r#"
-environment: "staging"
-package_directory: "/test/packages"
-command_timeout: 60
-"#;
+        let package = create_basic_package("file-check", &config);
 
-        mock_fs.mock_config_file(&config_dir, config_yaml);
-        mock_fs.mock_write_file(&package_path);
+        let stream = service.create(package).await.unwrap();
+        let result = collect_result(stream).await.unwrap();
 
-        let config = test_common::config::test_config_with_dir_and_env(&package_dir, "staging");
-        let repo = common::create_package_repository_with_fs(&config, mock_fs);
+        assert!(matches!(result, OperationResult::Success(_)));
 
-        let package = create_basic_package("config-test", &config);
-
-        assert!(package.environments().contains_key("staging"));
-
-        let save_result = repo.save_package(&package, &package_path);
-        assert!(save_result.is_ok());
+        // Verify the file was actually written with correct content
+        let file_path = temp_dir.path().join("file-check.yml");
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert!(contents.contains("file-check"));
+        assert!(contents.contains("0.1.0"));
     }
 
-    #[test]
-    fn test_create_with_mock_path_operations() {
-        // Test package creation using various mock path helpers
-        let mut mock_fs = MockFileSystem::default();
-        let package_dir = PathBuf::from("/test/packages");
-        let package_path = package_dir.join("path-ops-test.yml");
-
-        mock_fs.mock_path_exists(&package_dir, true);
-
-        let home_packages = PathBuf::from("~/packages");
-        mock_fs.mock_expand_path(&home_packages, &package_dir);
-
-        mock_fs.mock_write_file(&package_path);
-
-        let config = test_config_with_dir(&package_dir);
-        let repo = common::create_package_repository_with_fs(&config, mock_fs);
-
-        let package = create_basic_package("path-ops-test", &config);
-        let save_result = repo.save_package(&package, &package_path);
-
-        assert!(save_result.is_ok());
-    }
+    // ── UI-concern tests (name validation uses repo directly for interactive flow) ──
 
     #[test]
     fn test_create_package_name_validation_with_mock_repo() {
@@ -758,7 +729,6 @@ command_timeout: 60
         let package_dir = PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
-        // Mock package doesn't exist (should allow creation)
         mock_repo
             .expect_get_package()
             .with(mockall::predicate::eq("new-package"))
@@ -782,24 +752,6 @@ command_timeout: 60
     }
 
     #[test]
-    fn test_save_package_with_mock_repo() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
-
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        let package = create_basic_package("save-test", &config);
-        let file_path = config.package_directory().join("save-test.yml");
-
-        let result = mock_repo.save_package(&package, &file_path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_create_with_dependency_selection_mock_repo() {
         let mut mock_repo = MockPackageRepository::new();
 
@@ -819,24 +771,5 @@ command_timeout: 60
         assert!(available.contains(&"database".to_string()));
         assert!(available.contains(&"web-server".to_string()));
         assert!(available.contains(&"cache".to_string()));
-    }
-
-    #[test]
-    fn test_create_package_error_handling_with_mock_repo() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
-
-        mock_repo.expect_save_package().times(1).returning(|_, _| {
-            Err(PackageRepoError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-            )))
-        });
-
-        let package = create_basic_package("error-test", &config);
-        let file_path = config.package_directory().join("error-test.yml");
-
-        let result = mock_repo.save_package(&package, &file_path);
-        assert!(result.is_err());
     }
 }
