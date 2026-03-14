@@ -9,6 +9,7 @@
 //! command execution, and event streaming to provide a complete package management experience.
 
 mod check;
+mod deps;
 mod info;
 mod install;
 mod list;
@@ -81,6 +82,14 @@ impl ProgressTracker {
     /// Get the total number of steps in the operation
     pub(crate) fn total_steps(&self) -> usize {
         self.total_steps
+    }
+
+    /// Update the total number of steps after initial creation
+    ///
+    /// This is useful when the total step count isn't known until after
+    /// dependency resolution determines how many packages need installing.
+    pub(crate) fn set_total_steps(&mut self, total: usize) {
+        self.total_steps = total;
     }
 }
 
@@ -487,7 +496,7 @@ where
             OperationType::PackageInstall,
             package_name,
             OperationContext::default(),
-            7, // fetch_package + find_env + pre_check + get_command + execute_command + post_check + completion
+            1, // Initial step (dependency resolution); total is adjusted dynamically
             move |repo, command_runner, config, sender, mut progress| async move {
                 install::handle_install(
                     &package_name_owned,

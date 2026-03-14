@@ -15,8 +15,9 @@
 use tempfile::TempDir;
 use test_common::{
     assert_failed_operation, assert_successful_operation, collect_events,
-    create_service_install_test_package_file, create_service_invalid_package_file,
-    create_service_test_package_file, create_service_test_service, get_operation_result,
+    create_circular_dependency, create_dependency_chain, create_service_install_test_package_file,
+    create_service_invalid_package_file, create_service_test_package_file,
+    create_service_test_package_file_with_deps, create_service_test_service, get_operation_result,
 };
 
 use selfie::package::{
@@ -125,8 +126,8 @@ async fn test_service_install_success() {
         .collect();
     assert_eq!(
         progress_events.len(),
-        7,
-        "Should have 7 progress events for install operation"
+        8,
+        "Should have 8 progress events for install operation (1 dep resolve + 7 install steps)"
     );
 }
 
@@ -327,4 +328,109 @@ async fn test_service_error_handling() {
         1,
         "Should have completed event even for failures"
     );
+}
+
+// === Dependency chain integration tests ===
+
+/// Test installing a package with a single dependency.
+/// Both packages should be installed in the correct order.
+#[tokio::test]
+async fn test_service_install_single_dependency() {
+    let temp_dir = TempDir::new().unwrap();
+    // B has no deps, A depends on B
+    let _ = create_service_test_package_file_with_deps(&temp_dir, "dep-b", &[]);
+    let _ = create_service_test_package_file_with_deps(&temp_dir, "dep-a", &["dep-b"]);
+    let service = create_service_test_service(&temp_dir);
+
+    let stream = service.install("dep-a").await;
+    let events = collect_events(stream).await;
+
+    assert_successful_operation(&events);
+}
+
+/// Test installing a package with a chain of dependencies (A->B->C).
+/// All three packages should be installed in dependency order.
+#[tokio::test]
+async fn test_service_install_chain_dependencies() {
+    let temp_dir = TempDir::new().unwrap();
+    create_dependency_chain(&temp_dir, &["chain-a", "chain-b", "chain-c"]);
+    let service = create_service_test_service(&temp_dir);
+
+    let stream = service.install("chain-a").await;
+    let events = collect_events(stream).await;
+
+    assert_successful_operation(&events);
+}
+
+/// Test that installing a package with a missing dependency fails
+/// with a DependencyError::MissingDependency.
+#[tokio::test]
+async fn test_service_install_missing_dependency() {
+    let temp_dir = TempDir::new().unwrap();
+    // A depends on "nonexistent" which doesn't exist
+    let _ =
+        create_service_test_package_file_with_deps(&temp_dir, "missing-dep-a", &["nonexistent"]);
+    let service = create_service_test_service(&temp_dir);
+
+    let stream = service.install("missing-dep-a").await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have an operation result");
+    match result {
+        OperationResult::Failure(failure) => {
+            assert!(
+                failure.is_dependency_error(),
+                "Expected dependency error, got: {failure}"
+            );
+        }
+        _ => panic!("Expected failure result"),
+    }
+}
+
+/// Test that circular dependencies are detected and produce a clear error.
+#[tokio::test]
+async fn test_service_install_circular_dependency() {
+    let temp_dir = TempDir::new().unwrap();
+    create_circular_dependency(&temp_dir, &["cycle-a", "cycle-b"]);
+    let service = create_service_test_service(&temp_dir);
+
+    let stream = service.install("cycle-a").await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have an operation result");
+    match result {
+        OperationResult::Failure(failure) => {
+            assert!(
+                failure.is_dependency_error(),
+                "Expected dependency error, got: {failure}"
+            );
+            match failure.dependency_failure().unwrap() {
+                selfie::package::event::DependencyFailure::CircularDependency { cycle, .. } => {
+                    assert!(cycle.len() >= 2, "Cycle should have at least 2 entries");
+                }
+                _ => panic!("Expected CircularDependency"),
+            }
+        }
+        _ => panic!("Expected failure result"),
+    }
+}
+
+/// Test that already-installed dependencies are skipped gracefully.
+#[tokio::test]
+async fn test_service_install_already_installed_dependency() {
+    let temp_dir = TempDir::new().unwrap();
+    // Create B and A where A depends on B
+    let _ = create_service_test_package_file_with_deps(&temp_dir, "installed-b", &[]);
+    let _ = create_service_test_package_file_with_deps(&temp_dir, "installed-a", &["installed-b"]);
+    let service = create_service_test_service(&temp_dir);
+
+    // Install B first
+    let stream = service.install("installed-b").await;
+    let events = collect_events(stream).await;
+    assert_successful_operation(&events);
+
+    // Now install A — B should be detected as already installed
+    let stream = service.install("installed-a").await;
+    let events = collect_events(stream).await;
+    assert_successful_operation(&events);
 }

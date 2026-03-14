@@ -175,7 +175,10 @@ mod tests {
             .collect();
 
         assert_eq!(env_issues.len(), 1);
-        assert_eq!(env_issues[0].category, ValidationErrorCategory::RequiredField);
+        assert_eq!(
+            env_issues[0].category,
+            ValidationErrorCategory::RequiredField
+        );
     }
 
     // --- validate_package_directory tests ---
@@ -234,8 +237,7 @@ mod tests {
             .all_issues()
             .iter()
             .filter(|i| {
-                i.field == "package_directory"
-                    && i.category == ValidationErrorCategory::PathFormat
+                i.field == "package_directory" && i.category == ValidationErrorCategory::PathFormat
             })
             .collect();
 
@@ -314,8 +316,7 @@ mod tests {
         let empty = ConfigValidationError::EmptyField("environment".to_string());
         assert_eq!(empty.to_string(), "Empty field: environment");
 
-        let invalid =
-            ConfigValidationError::InvalidPackageDirectory("not absolute".to_string());
+        let invalid = ConfigValidationError::InvalidPackageDirectory("not absolute".to_string());
         assert_eq!(
             invalid.to_string(),
             "Invalid package directory: not absolute"

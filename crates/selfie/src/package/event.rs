@@ -529,6 +529,8 @@ pub enum OperationFailure {
     PackageError(PackageFailure),
     /// Command execution issues
     CommandError(CommandFailure),
+    /// Dependency resolution issues
+    DependencyError(DependencyFailure),
     /// Generic failures with just a message (for backward compatibility)
     Generic(String),
 }
@@ -599,6 +601,21 @@ pub enum CommandFailure {
     },
 }
 
+/// Dependency resolution failure details
+#[derive(Debug, Clone)]
+pub enum DependencyFailure {
+    /// A circular dependency was detected in the dependency graph
+    CircularDependency {
+        package_name: String,
+        cycle: Vec<String>,
+    },
+    /// A required dependency was not found in the repository
+    MissingDependency {
+        package_name: String,
+        dependency_name: String,
+    },
+}
+
 impl std::fmt::Display for OperationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -607,6 +624,9 @@ impl std::fmt::Display for OperationFailure {
             }
             OperationFailure::PackageError(pkg_err) => write!(f, "Package error: {pkg_err}"),
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
+            OperationFailure::DependencyError(dep_err) => {
+                write!(f, "Dependency error: {dep_err}")
+            }
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -673,6 +693,28 @@ impl std::fmt::Display for CommandFailure {
             CommandFailure::InvalidCommand { command, reason } => {
                 write!(f, "Invalid command `{command}`: {reason}")
             }
+        }
+    }
+}
+
+impl std::fmt::Display for DependencyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencyFailure::CircularDependency {
+                package_name,
+                cycle,
+            } => write!(
+                f,
+                "Circular dependency detected for package `{package_name}`: {}",
+                cycle.join(" -> ")
+            ),
+            DependencyFailure::MissingDependency {
+                package_name,
+                dependency_name,
+            } => write!(
+                f,
+                "Package `{package_name}` depends on `{dependency_name}`, which was not found"
+            ),
         }
     }
 }
@@ -1134,6 +1176,12 @@ impl OperationFailure {
         matches!(self, OperationFailure::CommandError(_))
     }
 
+    /// Checks if this is a dependency-related error
+    #[must_use]
+    pub fn is_dependency_error(&self) -> bool {
+        matches!(self, OperationFailure::DependencyError(_))
+    }
+
     /// Gets the environment failure details if this is an environment error
     #[must_use]
     pub fn environment_failure(&self) -> Option<&EnvironmentFailure> {
@@ -1141,6 +1189,33 @@ impl OperationFailure {
             OperationFailure::EnvironmentError(env_err) => Some(env_err),
             _ => None,
         }
+    }
+
+    /// Gets the dependency failure details if this is a dependency error
+    #[must_use]
+    pub fn dependency_failure(&self) -> Option<&DependencyFailure> {
+        match self {
+            OperationFailure::DependencyError(dep_err) => Some(dep_err),
+            _ => None,
+        }
+    }
+
+    /// Creates a circular dependency error
+    #[must_use]
+    pub fn circular_dependency(package_name: String, cycle: Vec<String>) -> Self {
+        OperationFailure::DependencyError(DependencyFailure::CircularDependency {
+            package_name,
+            cycle,
+        })
+    }
+
+    /// Creates a missing dependency error
+    #[must_use]
+    pub fn missing_dependency(package_name: String, dependency_name: String) -> Self {
+        OperationFailure::DependencyError(DependencyFailure::MissingDependency {
+            package_name,
+            dependency_name,
+        })
     }
 }
 

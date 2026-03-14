@@ -21,10 +21,11 @@ pub use events::{
     create_test_operation_info, get_operation_result,
 };
 pub use fixtures::{
-    TestPackageBehavior, create_invalid_package_file, create_package_file_with_check,
+    TestPackageBehavior, create_circular_dependency, create_dependency_chain,
+    create_invalid_package_file, create_package_file_with_check,
     create_service_install_test_package_file, create_service_invalid_package_file,
     create_service_test_package_file, create_service_test_package_file_with_behavior,
-    create_test_package_file,
+    create_service_test_package_file_with_deps, create_test_package_file,
 };
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use service::{
