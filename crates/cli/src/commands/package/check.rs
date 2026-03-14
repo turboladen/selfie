@@ -2,8 +2,7 @@ use selfie::{
     config::AppConfig,
     package::{
         event::{
-            CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent,
-            error::StreamedError,
+            CheckResult, CheckResultData, OperationResult, PackageEvent, error::StreamedError,
         },
         port::{PackageError, PackageRepoError},
         service::PackageService,
@@ -81,7 +80,7 @@ pub(crate) async fn handle_check(
                     }
 
                     match result {
-                        OperationResult::Failure(OperationFailure::EnvironmentError(_)) => {
+                        OperationResult::Failure(failure) if failure.is_environment_error() => {
                             // Skip duplicate error display for environment configuration errors
                             true // Handled - we already showed the error message above
                         }

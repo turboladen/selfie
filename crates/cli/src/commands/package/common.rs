@@ -348,7 +348,10 @@ impl PackageNotFoundTracker {
         &self,
         result: &selfie::package::event::OperationResult,
     ) -> bool {
-        use selfie::package::event::{OperationFailure, OperationResult, PackageFailure};
+        use selfie::package::{
+            event::{OperationFailure, OperationResult},
+            port::PackageError,
+        };
 
         if !self.handled_package_not_found {
             return false;
@@ -357,8 +360,8 @@ impl PackageNotFoundTracker {
         // Suppress completion errors for PackageNotFound when we've already handled them
         matches!(
             result,
-            OperationResult::Failure(OperationFailure::PackageError(
-                PackageFailure::NotFound { .. }
+            OperationResult::Failure(OperationFailure::Package(
+                PackageError::PackageNotFound { .. }
             ))
         )
     }
@@ -700,10 +703,11 @@ mod tests {
     fn test_package_not_found_tracker() {
         use selfie::package::{
             event::error::StreamedError,
-            event::{OperationFailure, OperationResult, PackageFailure},
-            port::{PackageError, PackageRepoError},
+            event::{OperationFailure, OperationResult},
+            port::{PackageError, PackageParseError, PackageRepoError},
         };
         use std::path::PathBuf;
+        use std::sync::Arc;
 
         let mut tracker = PackageNotFoundTracker::new();
 
@@ -724,7 +728,7 @@ mod tests {
 
         // Should now suppress completion errors for PackageNotFound
         let completion_result =
-            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::NotFound {
+            OperationResult::Failure(OperationFailure::Package(PackageError::PackageNotFound {
                 name: "test-package".to_string(),
                 packages_path: PathBuf::from("/test/packages"),
                 files_examined: 0,
@@ -735,12 +739,15 @@ mod tests {
 
         // Should not suppress other types of completion errors
         let other_result =
-            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::ParseError {
+            OperationResult::Failure(OperationFailure::Package(PackageError::ParseError {
                 name: "test-package".to_string(),
                 packages_path: PathBuf::from("/test/packages"),
                 failed_file: PathBuf::from("/test/packages/test-package.yml"),
                 file_size_bytes: 0,
-                source_error: "yaml error".to_string(),
+                source: PackageParseError::YamlParse {
+                    package_path: PathBuf::from("/test/packages/test-package.yml"),
+                    source: Arc::new(serde_yaml::from_str::<String>("{{invalid").unwrap_err()),
+                },
             }));
 
         assert!(!tracker.should_suppress_completion_error(&other_result));

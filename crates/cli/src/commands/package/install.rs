@@ -94,15 +94,10 @@ impl<'a> InstallEventHandler<'a> {
 
                 // Skip duplicate error display for environment configuration errors
                 match result {
-                    OperationResult::Failure(failure) => {
-                        match failure {
-                            selfie::package::event::OperationFailure::EnvironmentError(_) => {
-                                true // Handled - we already showed the error message above
-                            }
-                            _ => false, // Use default failure handling for other types of failures
-                        }
+                    OperationResult::Failure(failure) if failure.is_environment_error() => {
+                        true // Handled - we already showed the error message above
                     }
-                    OperationResult::Success(_) => false,
+                    _ => false,
                 }
             }
             _ => false, // Use default handling for other events
