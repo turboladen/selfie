@@ -30,12 +30,7 @@ where
             sender.send_trace("Package found").await;
             Ok(package)
         }
-        Err(e) => {
-            sender
-                .send_error(e.clone(), "Error fetching package from repository")
-                .await;
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -157,19 +152,7 @@ where
             }
             Ok(output)
         }
-        Err(error) => {
-            sender
-                .send_error(
-                    error.clone(),
-                    format!(
-                        "Failed to execute {command_type} command at step {}/{}",
-                        progress.current_step(),
-                        progress.total_steps()
-                    ),
-                )
-                .await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 

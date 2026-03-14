@@ -9,10 +9,8 @@ use selfie::{
 };
 
 use crate::{
-    commands::package::common::{self, report_status},
-    event_processor::EventProcessor,
-    formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
+    commands::package::common::report_status, event_processor::EventProcessor,
+    formatters::format_key, terminal_progress_reporter::TerminalProgressReporter,
 };
 
 pub(crate) async fn handle_validate(
@@ -25,47 +23,24 @@ pub(crate) async fn handle_validate(
 
     report_status(&format!("Validating {package_name}..."));
 
-    // Create tracker for consistent error handling
-    let mut tracker = common::PackageNotFoundTracker::new();
-
     // Call the service's validate method to get an event stream
     let event_stream = service.validate(package_name, None).await;
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(reporter);
     let result = processor
-        .process_events(event_stream, |event| {
-            handle_validate_event(event, config, &mut tracker)
-        })
+        .process_events(event_stream, |event| handle_validate_event(event, config))
         .await;
     result.exit_code
 }
 
-fn handle_validate_event(
-    event: &PackageEvent,
-    config: &AppConfig,
-    tracker: &mut common::PackageNotFoundTracker,
-) -> bool {
+fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
             display_validation_result(validation_result, config);
             true // Handled
-        }
-        PackageEvent::Error { error, .. } => {
-            // Handle PackageNotFound errors consistently
-            if tracker.handle_package_not_found_error(error) {
-                return true; // Handled - prevent duplicate error display
-            }
-            false // Use default handling for other errors
-        }
-        PackageEvent::Completed { result, .. } => {
-            // Suppress completion errors if we already handled PackageNotFound
-            if tracker.should_suppress_completion_error(result) {
-                return true; // Handled - suppress duplicate error
-            }
-            false // Use default handling for other completion events
         }
         PackageEvent::Progress { .. } => {
             true // Handled - suppress progress for validate

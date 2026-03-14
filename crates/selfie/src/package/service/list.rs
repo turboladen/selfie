@@ -12,7 +12,7 @@ use crate::{
             EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, PackageListData,
             PackageListItem,
         },
-        port::{PackageRepoError, PackageRepository},
+        port::PackageRepository,
         service::ProgressTracker,
     },
 };
@@ -39,8 +39,6 @@ where
         }
         Err(err) => {
             let error_msg = format!("Failed to list packages: {err}");
-            let repo_error = PackageRepoError::PackageListError(err);
-            sender.send_error(repo_error, &error_msg).await;
             return OperationResult::Failure(error_msg.into());
         }
     };
@@ -93,9 +91,7 @@ where
 
             // Determine status based on environment support and check command
             let env_config = package.environments().get(config.environment());
-            let check_command = env_config
-                .and_then(|ec| ec.check.as_ref())
-                .cloned();
+            let check_command = env_config.and_then(|ec| ec.check.as_ref()).cloned();
             let supports_current_env = env_config.is_some();
 
             let command_runner = command_runner.clone();

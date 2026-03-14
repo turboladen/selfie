@@ -42,8 +42,8 @@
 
 use futures::StreamExt;
 use selfie::package::{
-    event::{ConsoleOutput, EventStream, OperationResult, PackageEvent, error::StreamedError},
-    port::{PackageError, PackageListError, PackageRepoError},
+    event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
+    port::PackageError,
 };
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -53,8 +53,6 @@ use crate::terminal_progress_reporter::TerminalProgressReporter;
 pub struct EventProcessingResult {
     /// The exit code for the operation
     pub exit_code: i32,
-    /// Whether an environment configuration error was encountered and handled
-    pub environment_error_handled: bool,
     /// Whether any errors were encountered during processing
     pub had_errors: bool,
 }
@@ -63,7 +61,6 @@ impl EventProcessingResult {
     fn new() -> Self {
         Self {
             exit_code: 0,
-            environment_error_handled: false,
             had_errors: false,
         }
     }
@@ -103,17 +100,6 @@ impl EventProcessor {
         let mut result = EventProcessingResult::new();
 
         while let Some(event) = stream.next().await {
-            // Check for environment errors before custom handling
-            if let PackageEvent::Error {
-                error: StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)),
-                ..
-            } = &event
-            {
-                if matches!(pkg_error.as_ref(), PackageError::EnvironmentNotFound { .. }) {
-                    result.environment_error_handled = true;
-                }
-            }
-
             // Try custom handler first
             if custom_handler(&event) {
                 // Custom handler handled the event, continue to next event
@@ -175,25 +161,7 @@ impl EventProcessor {
             }
 
             PackageEvent::Error { message, error, .. } => {
-                // Check for specific error types that need special handling
-                match &error {
-                    StreamedError::PackageRepoError(PackageRepoError::PackageListError(
-                        PackageListError::PackageDirectoryNotFound(path),
-                    )) => {
-                        // Handle this specific error case directly since it needs special formatting
-                        self.reporter.report_error(format!(
-                            "Package directory not found: {}",
-                            path.display()
-                        ));
-                        self.reporter.report_suggestion(format!(
-                            "Run 'selfie config --package-directory <path>' to set a different directory, or create the directory with 'mkdir -p {}'",
-                            path.display()
-                        ));
-                    }
-                    _ => {
-                        self.reporter.report_error(format!("{message}: {error}"));
-                    }
-                }
+                self.reporter.report_error(format!("{message}: {error}"));
                 result.exit_code = 1;
                 result.had_errors = true;
             }
@@ -205,7 +173,23 @@ impl EventProcessor {
                     self.reporter.report_success(success.to_string());
                 }
                 OperationResult::Failure(err) => {
-                    self.reporter.report_error(err.to_string());
+                    use selfie::package::event::OperationFailure;
+
+                    match err {
+                        OperationFailure::Package(PackageError::PackageNotFound {
+                            name,
+                            packages_path,
+                            ..
+                        }) => {
+                            self.reporter.report_error(format!(
+                                "Package `{name}` not found in path {}",
+                                packages_path.display()
+                            ));
+                        }
+                        _ => {
+                            self.reporter.report_error(err.to_string());
+                        }
+                    }
                     result.exit_code = 1;
                     result.had_errors = true;
                 }
@@ -298,7 +282,6 @@ mod tests {
 
         // Empty stream should return success
         assert_eq!(result.exit_code, 0);
-        assert!(!result.environment_error_handled);
         assert!(!result.had_errors);
     }
 

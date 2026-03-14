@@ -1,8 +1,8 @@
 use selfie::{
     config::AppConfig,
     package::{
-        event::{OperationResult, PackageEvent, error::StreamedError},
-        port::{PackageError, PackageRepoError},
+        event::{OperationFailure, OperationResult, PackageEvent},
+        port::PackageError,
         service::PackageService,
     },
 };
@@ -74,11 +74,7 @@ impl<'a> InstallEventHandler<'a> {
         Self { config, display }
     }
 
-    fn handle_event(
-        &mut self,
-        event: &PackageEvent,
-        tracker: &common::PackageNotFoundTracker,
-    ) -> bool {
+    fn handle_event(&mut self, event: &PackageEvent) -> bool {
         #[allow(clippy::match_same_arms)]
         match event {
             PackageEvent::CheckResultCompleted { check_result, .. } => {
@@ -86,20 +82,6 @@ impl<'a> InstallEventHandler<'a> {
             }
             PackageEvent::Info { output, .. } => self.handle_info_event(output),
             PackageEvent::Progress { message, .. } => self.handle_progress_event(message),
-            PackageEvent::Completed { result, .. } => {
-                // Suppress completion errors if we already handled PackageNotFound
-                if tracker.should_suppress_completion_error(result) {
-                    return true; // Handled - suppress duplicate error
-                }
-
-                // Skip duplicate error display for environment configuration errors
-                match result {
-                    OperationResult::Failure(failure) if failure.is_environment_error() => {
-                        true // Handled - we already showed the error message above
-                    }
-                    _ => false,
-                }
-            }
             _ => false, // Use default handling for other events
         }
     }
@@ -185,8 +167,8 @@ pub(crate) async fn handle_install(
     // Create installation display
     let mut display = InstallationDisplay::new();
 
-    // Create tracker for consistent error handling
-    let mut tracker = common::PackageNotFoundTracker::new();
+    // Track whether we handled an environment error in the Completed arm
+    let mut env_error_handled = false;
 
     report_status(&format!("Installing {package_name}..."));
 
@@ -195,70 +177,54 @@ pub(crate) async fn handle_install(
     let mut event_handler = InstallEventHandler::new(config, &mut display);
     let result = processor
         .process_events(event_stream, |event| {
-            // Check for PackageNotFound errors first
-            if let PackageEvent::Error { error, .. } = event {
-                // Handle PackageNotFound errors consistently
-                if tracker.handle_package_not_found_error(error) {
-                    return true; // Handled - prevent duplicate error display
-                }
-
-                // Check for environment errors
-                if let StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) =
-                    error
-                {
-                    if matches!(
-                        pkg_error.as_ref(),
-                        selfie::package::port::PackageError::EnvironmentNotFound { .. }
-                    ) {
-                        handle_environment_not_found_error(error, config);
-                        return true; // Handled completely - prevent duplicate error display
-                    }
-                }
+            // Check for environment errors in Completed events
+            if let PackageEvent::Completed {
+                result: OperationResult::Failure(failure),
+                ..
+            } = event
+                && failure.is_environment_error()
+            {
+                display_environment_error(failure, config);
+                env_error_handled = true;
+                return true; // Handled
             }
 
-            event_handler.handle_event(event, &tracker)
+            event_handler.handle_event(event)
         })
         .await;
 
-    // Return proper exit code - 1 for environment errors, otherwise use result from processor
-    if result.environment_error_handled {
+    if env_error_handled {
         1
     } else {
         result.exit_code
     }
 }
 
-/// Handle environment not found errors with helpful suggestions
-fn handle_environment_not_found_error(error: &StreamedError, config: &AppConfig) {
-    // Show helpful information about available environments
+/// Display environment error with helpful suggestions from the typed failure data
+fn display_environment_error(failure: &OperationFailure, config: &AppConfig) {
     println!();
 
-    // Try to extract environment information from the structured error
-    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
-        if let PackageError::EnvironmentNotFound {
+    if let OperationFailure::Package(PackageError::EnvironmentNotFound {
+        package_name,
+        available_environments,
+        ..
+    }) = failure
+    {
+        common::display_environment_summary(
             package_name,
+            config.environment(),
             available_environments,
-            ..
-        } = package_error.as_ref()
-        {
-            common::display_environment_summary(
-                package_name,
-                config.environment(),
-                available_environments,
-                config,
-                "install",
-            );
-            return;
-        }
+            config,
+            "install",
+        );
+    } else {
+        common::display_generic_environment_suggestion(
+            "package",
+            config.environment(),
+            config,
+            "install",
+        );
     }
-
-    // Fallback to generic suggestion if we can't extract environment info
-    common::display_generic_environment_suggestion(
-        "package",
-        config.environment(),
-        config,
-        "install",
-    );
 }
 
 #[cfg(test)]
