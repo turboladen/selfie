@@ -579,7 +579,7 @@ mod tests {
 
         // Should handle empty packages and empty stats (shows "No packages found.")
         let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = handle_list_event(&event, &config, reporter, false, &mut Vec::new());
         assert!(result);
     }
 
@@ -605,7 +605,7 @@ mod tests {
 
         // Should handle no packages but with environment stats (shows environment stats)
         let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = handle_list_event(&event, &config, reporter, false, &mut Vec::new());
         assert!(result);
     }
 
@@ -640,7 +640,7 @@ mod tests {
 
         // Should handle valid packages (displays package table)
         let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = handle_list_event(&event, &config, reporter, false, &mut Vec::new());
         assert!(result);
     }
 
@@ -667,7 +667,7 @@ mod tests {
 
         // Should handle invalid packages only (shows "No packages found." + invalid table)
         let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = handle_list_event(&event, &config, reporter, false, &mut Vec::new());
         assert!(result);
     }
 
@@ -708,7 +708,7 @@ mod tests {
 
         // Should handle mixed scenario (shows package table + invalid table)
         let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = handle_list_event(&event, &config, reporter, false, &mut Vec::new());
         assert!(result);
     }
 }

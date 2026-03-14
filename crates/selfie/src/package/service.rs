@@ -103,7 +103,7 @@ impl ProgressTracker {
 /// All operations return an `EventStream` that allows real-time monitoring of
 /// progress, errors, and results. This enables different UI implementations
 /// (CLI, GUI, etc.) to provide appropriate user feedback.
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait PackageService: Send + Sync {
     /// Check if a package is already installed

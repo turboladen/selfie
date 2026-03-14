@@ -78,7 +78,9 @@ decide how to display information about that event to the user in the current UI
 - The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
 - `AppConfig` lives in the library but contains `verbose`/`use_colors` fields that are UI concerns
   (known issue, tracked in beads).
-- CLI commands should call `PackageService` methods, not use `PackageRepository` directly.
+- CLI commands should call `PackageService` methods, not use `PackageRepository` directly. This
+  applies to both production code and tests — CLI tests should exercise the same service interface
+  that production code uses, with mocked repositories injected into `PackageServiceImpl`.
 
 ## Gotchas
 
