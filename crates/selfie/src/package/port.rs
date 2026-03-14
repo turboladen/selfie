@@ -193,7 +193,7 @@ pub trait PackageRepository: Send + Sync {
 pub enum PackageRepoError {
     /// Package-specific error (not found, parse error, etc.)
     #[error(transparent)]
-    PackageError(#[from] Box<PackageError>),
+    PackageError(Box<PackageError>),
 
     /// Package listing operation failed
     #[error(transparent)]
@@ -206,6 +206,12 @@ pub enum PackageRepoError {
     /// File system error during repository operation
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+}
+
+impl From<PackageError> for PackageRepoError {
+    fn from(err: PackageError) -> Self {
+        Self::PackageError(Box::new(err))
+    }
 }
 
 /// Errors that can occur when listing packages

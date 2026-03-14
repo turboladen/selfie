@@ -85,7 +85,7 @@ mod tests {
     use super::*;
     use selfie::package::{
         GetPackage, Package,
-        port::{MockPackageRepository, PackageError, PackageRepoError},
+        port::{MockPackageRepository, PackageError},
     };
     use std::collections::HashMap;
     use std::{fs, path::PathBuf};
@@ -276,14 +276,13 @@ mod tests {
             .with(mockall::predicate::eq("nonexistent"))
             .times(1)
             .returning(|_| {
-                Err(PackageRepoError::PackageError(Box::new(
-                    PackageError::PackageNotFound {
-                        name: "nonexistent".to_string(),
-                        packages_path: PathBuf::from("/test/packages"),
-                        files_examined: 0,
-                        search_patterns: vec!["nonexistent.yml".to_string()],
-                    },
-                )))
+                Err(PackageError::PackageNotFound {
+                    name: "nonexistent".to_string(),
+                    packages_path: PathBuf::from("/test/packages"),
+                    files_examined: 0,
+                    search_patterns: vec!["nonexistent.yml".to_string()],
+                }
+                .into())
             });
 
         // Test CLI error handling for non-existent package
