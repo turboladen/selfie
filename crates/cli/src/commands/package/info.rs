@@ -136,12 +136,12 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConf
         |value: &str| -> String { common::format_field_value(value, config.use_colors()) };
 
     // Add installation status if this is the current environment and we have status
-    if env_status.is_current {
-        if let Some(status) = &env_status.status {
-            let reporter = TerminalProgressReporter::new(config.use_colors());
-            let status_text = format_status(status, reporter);
-            env_table.add_row(vec![format_env_key("Status"), status_text]);
-        }
+    if env_status.is_current
+        && let Some(status) = &env_status.status
+    {
+        let reporter = TerminalProgressReporter::new(config.use_colors());
+        let status_text = format_status(status, reporter);
+        env_table.add_row(vec![format_env_key("Status"), status_text]);
     }
 
     // Add environment detail rows

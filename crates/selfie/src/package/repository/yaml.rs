@@ -64,10 +64,10 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         for path in entries {
             *files_examined += 1;
 
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name == format!("{name}.yml") || file_name == format!("{name}.yaml") {
-                    matching_files.push(path);
-                }
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                && (file_name == format!("{name}.yml") || file_name == format!("{name}.yaml"))
+            {
+                matching_files.push(path);
             }
         }
 
@@ -605,7 +605,7 @@ mod tests {
         // Mock invalid YAML content
         let invalid_yaml = "invalid: yaml: content: [";
 
-        fs.mock_list_directory(package_dir.clone(), &[package_path.clone()]);
+        fs.mock_list_directory(package_dir.clone(), std::slice::from_ref(&package_path));
         fs.mock_read_file(package_path.clone(), invalid_yaml);
 
         let repo = YamlPackageRepository::new(fs, package_dir.clone());

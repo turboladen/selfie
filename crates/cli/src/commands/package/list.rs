@@ -69,7 +69,7 @@ fn handle_list_event(
             collected_items.sort_by(|a, b| a.name.cmp(&b.name));
 
             if !collected_items.is_empty() {
-                display_packages_table(&collected_items, config, reporter, show_all);
+                display_packages_table(collected_items, config, reporter, show_all);
             }
 
             // Show package directory path and summary information
