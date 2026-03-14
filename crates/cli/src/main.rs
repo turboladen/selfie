@@ -37,7 +37,7 @@ use clap::Parser;
 use selfie::{
     config::{
         YamlLoader,
-        loader::{ApplyToConfg, ConfigLoader},
+        loader::{ApplyToConfig, ConfigLoader},
     },
     fs::real::RealFileSystem,
 };

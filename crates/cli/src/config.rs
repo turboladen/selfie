@@ -1,7 +1,7 @@
 //! CLI configuration integration and command-line argument processing
 //!
 //! This module provides the integration between command-line arguments and the
-//! application configuration system. It implements the `ApplyToConfg` trait to
+//! application configuration system. It implements the `ApplyToConfig` trait to
 //! allow CLI arguments to override configuration file settings.
 //!
 //! # Configuration Precedence
@@ -21,11 +21,11 @@
 //! selfie --package-directory=/custom/path --verbose package list
 //! ```
 
-use selfie::config::{AppConfig, loader::ApplyToConfg};
+use selfie::config::{AppConfig, loader::ApplyToConfig};
 
 use crate::cli::ClapCli;
 
-impl ApplyToConfg for ClapCli {
+impl ApplyToConfig for ClapCli {
     /// Apply command-line arguments to the base configuration
     ///
     /// Takes a base configuration (typically loaded from a file) and applies

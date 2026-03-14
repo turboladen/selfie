@@ -32,7 +32,7 @@ use console::{Emoji, style};
 static ERROR_EMOJI: Emoji<'_, '_> = Emoji("❌ ", "[E] ");
 static INFO_EMOJI: Emoji<'_, '_> = Emoji("ℹ️ ", "[I] ");
 static PROGRESS_EMOJI: Emoji<'_, '_> = Emoji("• ", " • ");
-static SUGGESTION_EJOJI: Emoji<'_, '_> = Emoji("✨", "OK ");
+static SUGGESTION_EMOJI: Emoji<'_, '_> = Emoji("✨", "OK ");
 static SUCCESS_EMOJI: Emoji<'_, '_> = Emoji("✅ ", "OK ");
 static WARN_EMOJI: Emoji<'_, '_> = Emoji("⚠️ ", "[W] ");
 
@@ -130,7 +130,7 @@ impl TerminalProgressReporter {
             MessageType::Info => INFO_EMOJI,
             MessageType::Progress => PROGRESS_EMOJI,
             MessageType::Success => SUCCESS_EMOJI,
-            MessageType::Suggestion => SUGGESTION_EJOJI,
+            MessageType::Suggestion => SUGGESTION_EMOJI,
             MessageType::Warning => WARN_EMOJI,
         };
 
