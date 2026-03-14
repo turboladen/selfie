@@ -98,7 +98,7 @@ async fn get_check_command(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+        return handle_missing_environment(package_name, package_blob, current_env).await;
     };
 
     // Get check command from environment
@@ -119,7 +119,6 @@ async fn handle_missing_environment(
     package_name: &str,
     package_blob: &GetPackage,
     current_env: &str,
-    _sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
     let err = Box::new(PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),

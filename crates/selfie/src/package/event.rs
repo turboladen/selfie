@@ -262,6 +262,9 @@ impl EventSender {
     }
 
     /// Send an error event
+    ///
+    /// Currently unused — terminal errors flow through `OperationResult::Failure`
+    /// via `send_completed`. Retained for future non-terminal error events.
     #[allow(dead_code)]
     pub(crate) async fn send_error<SE>(&self, error: SE, message: impl fmt::Display)
     where
@@ -537,6 +540,8 @@ pub enum OperationFailure {
     CommandError(CommandFailure),
     /// Dependency resolution issues
     DependencyError(DependencyFailure),
+    /// Package listing/directory issues
+    PackageList(crate::package::port::PackageListError),
     /// Generic failures with just a message (for backward compatibility)
     Generic(String),
 }
@@ -582,6 +587,7 @@ impl std::fmt::Display for OperationFailure {
             OperationFailure::DependencyError(dep_err) => {
                 write!(f, "Dependency error: {dep_err}")
             }
+            OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -1113,7 +1119,7 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
                 OperationFailure::Package(*pkg_err)
             }
             crate::package::port::PackageRepoError::PackageListError(list_err) => {
-                OperationFailure::Generic(list_err.to_string())
+                OperationFailure::PackageList(list_err)
             }
             crate::package::port::PackageRepoError::IoError(io_err) => {
                 OperationFailure::Generic(format!("IO error: {io_err}"))
@@ -1122,6 +1128,12 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
                 OperationFailure::Generic(format!("File system error: {fs_err}"))
             }
         }
+    }
+}
+
+impl From<crate::package::port::PackageListError> for OperationFailure {
+    fn from(err: crate::package::port::PackageListError) -> Self {
+        OperationFailure::PackageList(err)
     }
 }
 

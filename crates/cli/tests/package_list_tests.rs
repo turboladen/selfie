@@ -256,7 +256,7 @@ fn test_package_list_non_existent_directory() {
     // Should fail with appropriate error about missing directory
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Directory does not exist"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 #[test]

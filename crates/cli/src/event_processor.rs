@@ -43,7 +43,7 @@
 use futures::StreamExt;
 use selfie::package::{
     event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
-    port::PackageError,
+    port::{PackageError, PackageListError},
 };
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -184,6 +184,18 @@ impl EventProcessor {
                             self.reporter.report_error(format!(
                                 "Package `{name}` not found in path {}",
                                 packages_path.display()
+                            ));
+                        }
+                        OperationFailure::PackageList(
+                            PackageListError::PackageDirectoryNotFound(path),
+                        ) => {
+                            self.reporter.report_error(format!(
+                                "Package directory not found: {}",
+                                path.display()
+                            ));
+                            self.reporter.report_suggestion(format!(
+                                "Create the directory with 'mkdir -p {}' or set a different path with 'selfie config --package-directory <path>'",
+                                path.display()
                             ));
                         }
                         _ => {
