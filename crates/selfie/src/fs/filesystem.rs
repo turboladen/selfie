@@ -19,7 +19,6 @@ use thiserror::Error;
 /// through mocking. All file system interactions in the selfie library go through
 /// this abstraction.
 #[cfg_attr(feature = "with_mocks", mockall::automock)]
-#[async_trait::async_trait]
 pub trait FileSystem: Send + Sync {
     /// Read a file and return its contents as a string
     ///
