@@ -29,10 +29,7 @@ impl<'a> ListCommand<'a> {
 }
 
 impl ListCommand<'_> {
-    pub(crate) async fn handle_command(&self) -> i32 {
-        // Create the package service implementation
-        let service = common::create_package_service(self.config);
-
+    pub(crate) async fn handle_command(&self, service: &dyn PackageService) -> i32 {
         // Call the service's list method to get an event stream
         match service.list(self.show_all).await {
             Ok(event_stream) => {

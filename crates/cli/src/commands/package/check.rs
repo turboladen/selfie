@@ -10,13 +10,14 @@ use selfie::{
 };
 
 use crate::{
-    commands::package::common::{self, create_package_service, report_status},
+    commands::package::common::{self, report_status},
     event_processor::EventProcessor,
     formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
 };
 
 pub(crate) async fn handle_check(
+    service: &dyn PackageService,
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
@@ -25,9 +26,6 @@ pub(crate) async fn handle_check(
 
     // Create animated spinner for check operation
     report_status(&format!("Checking {package_name}..."));
-
-    // Create the package service
-    let service = create_package_service(config);
 
     // Create tracker for consistent error handling
     let mut tracker = common::PackageNotFoundTracker::new();

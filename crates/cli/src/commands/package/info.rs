@@ -16,6 +16,7 @@ use crate::{
 use super::common;
 
 pub(crate) async fn handle_info(
+    service: &dyn PackageService,
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
@@ -24,9 +25,6 @@ pub(crate) async fn handle_info(
 
     // Status message:
     common::report_status(&format!("Getting info for {package_name}..."));
-
-    // Create the package service implementation
-    let service = common::create_package_service(config);
 
     // Call the service's info method to get an event stream
     #[allow(clippy::match_same_arms)]

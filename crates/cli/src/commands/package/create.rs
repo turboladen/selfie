@@ -25,6 +25,7 @@ enum PackageNameResult {
 }
 
 pub(crate) async fn handle_create(
+    service: &dyn PackageService,
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
@@ -64,7 +65,6 @@ pub(crate) async fn handle_create(
     };
 
     // Use PackageService::create to persist (hexagonal pattern)
-    let service = common::create_package_service(config);
     let mut stream = match service.create(package).await {
         Ok(stream) => stream,
         Err(e) => {

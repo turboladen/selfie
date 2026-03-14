@@ -11,8 +11,10 @@ use selfie::{
     config::AppConfig,
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
-        GetPackage, port::PackageRepository, repository::yaml::YamlPackageRepository,
-        service::PackageServiceImpl,
+        GetPackage,
+        port::PackageRepository,
+        repository::yaml::YamlPackageRepository,
+        service::{PackageService, PackageServiceImpl},
     },
 };
 use std::{path::Path, process::Command};
@@ -134,12 +136,14 @@ pub(super) fn create_new_package(package_name: &str, config: &AppConfig) -> GetP
 }
 
 /// Create a package service with repository and command runner
-pub(super) fn create_package_service(
-    config: &AppConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+pub(crate) fn create_package_service(config: &AppConfig) -> Box<dyn PackageService> {
     let repo = create_package_repository(config);
     let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-    PackageServiceImpl::new(repo, command_runner, config.clone())
+    Box::new(PackageServiceImpl::new(
+        repo,
+        command_runner,
+        config.clone(),
+    ))
 }
 
 /// Create a formatted table with consistent styling
