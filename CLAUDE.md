@@ -89,9 +89,15 @@ decide how to display information about that event to the user in the current UI
 - CLI commands should call `PackageService` methods, not use `PackageRepository` directly. This
   applies to both production code and tests — CLI tests should exercise the same service interface
   that production code uses, with mocked repositories injected into `PackageServiceImpl`.
+- **Event consumer tests** (e.g., `EventProcessor`) should construct `EventStream` directly via
+  `stream::iter(vec![...])`, not spin up a real service. This avoids adapter dependencies.
 
 ## Gotchas
 
+- **`selfie-cli` is a binary crate**: No lib target, so `cargo test -p selfie-cli --lib` won't
+  work. Use `cargo test -p selfie-cli` instead.
+- **`uuid` is not a workspace dep**: It's declared directly in `crates/selfie/Cargo.toml`. If CLI
+  tests need to construct `OperationInfo`, add `uuid` as a dev-dep to the CLI crate.
 - **Rust 2024 edition**: All crates use `edition = "2024"`. This affects import syntax and some
   trait behavior.
 - **`with_mocks` feature flag**: The `selfie` crate exposes `mockall`-generated mocks behind
