@@ -93,7 +93,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             .read_file(path)
             .map_err(|e| PackageParseError::FileSystemError {
                 package_path: path.to_path_buf(),
-                source_message: e.to_string(),
+                source: Arc::new(e),
             })?;
 
         let mut package: Package =
