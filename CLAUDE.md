@@ -18,6 +18,14 @@ cargo clippy --all-targets     # Lint
 cargo fmt --check              # Check formatting
 ```
 
+### Pre-commit checklist
+
+Before every commit (unless instructed otherwise), run all three and fix any issues:
+
+1. `cargo fmt` — auto-fix formatting
+2. `cargo clippy --all-targets` — fix all warnings (zero warnings policy)
+3. `cargo test` — all tests must pass
+
 When testing the CLI crate, enable mocks: the `selfie` dev-dependency already uses
 `features = ["with_mocks"]`.
 
