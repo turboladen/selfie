@@ -355,6 +355,77 @@ pub fn create_service_install_test_package_file(dir: &TempDir, name: &str) -> Pa
     )
 }
 
+/// Creates a service test package file with specified dependencies.
+///
+/// Uses `InstallFlow` behavior (check fails before install, succeeds after).
+///
+/// # Arguments
+/// * `dir` - Temporary directory to create the package file in
+/// * `name` - Name of the package
+/// * `deps` - List of dependency package names
+#[must_use]
+pub fn create_service_test_package_file_with_deps(
+    dir: &TempDir,
+    name: &str,
+    deps: &[&str],
+) -> PathBuf {
+    let unique_id = std::process::id();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let unique_file = format!("/tmp/{name}-{unique_id}-{timestamp}-installed");
+    let deps_yaml: Vec<String> = deps.iter().map(|d| format!("\"{d}\"")).collect();
+    let deps_str = deps_yaml.join(", ");
+
+    let content = format!(
+        r#"name: "{name}"
+version: "{TEST_VERSION}"
+description: "Test package with dependencies"
+homepage: "https://example.com/{name}"
+
+environments:
+  {SERVICE_TEST_ENV}:
+    install: "echo 'installing {name}' && touch {unique_file}"
+    check: "test -f {unique_file}"
+    dependencies: [{deps_str}]
+"#
+    );
+
+    let file_path = dir.path().join(format!("{name}.yml"));
+    fs::write(&file_path, content).unwrap();
+    file_path
+}
+
+/// Creates a chain of packages where each depends on the next.
+///
+/// For example, `create_dependency_chain(dir, &["A", "B", "C"])` creates:
+/// - A depends on B
+/// - B depends on C
+/// - C has no dependencies
+pub fn create_dependency_chain(dir: &TempDir, chain: &[&str]) {
+    for (i, name) in chain.iter().enumerate() {
+        let deps: Vec<&str> = if i + 1 < chain.len() {
+            vec![chain[i + 1]]
+        } else {
+            vec![]
+        };
+        let _ = create_service_test_package_file_with_deps(dir, name, &deps);
+    }
+}
+
+/// Creates a circular dependency among the given packages.
+///
+/// For example, `create_circular_dependency(dir, &["A", "B"])` creates:
+/// - A depends on B
+/// - B depends on A
+pub fn create_circular_dependency(dir: &TempDir, cycle: &[&str]) {
+    for (i, name) in cycle.iter().enumerate() {
+        let next = cycle[(i + 1) % cycle.len()];
+        let _ = create_service_test_package_file_with_deps(dir, name, &[next]);
+    }
+}
+
 /// Creates an invalid package file for service tests using the correct "test" environment.
 ///
 /// # Panics

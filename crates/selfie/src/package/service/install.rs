@@ -16,9 +16,60 @@ use crate::{
     },
 };
 
-use super::{check, steps};
+use super::{check, deps, steps};
 
 pub(super) async fn handle_install<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &AppConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+) -> OperationResult
+where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    // Step 1: Resolve dependencies (includes cycle detection)
+    progress
+        .next(sender, "Resolving package dependencies")
+        .await;
+
+    let dep_graph =
+        match deps::resolve_dependencies(package_name, repo, config.environment(), sender).await {
+            Ok(graph) => graph,
+            Err(failure) => return OperationResult::Failure(failure),
+        };
+
+    // Update total steps: 1 (resolve) + 7 per package (fetch, env, check, get_cmd, execute, verify, complete)
+    let num_packages = dep_graph.install_order.len();
+    let total_steps = 1 + (7 * num_packages);
+    progress.set_total_steps(total_steps);
+
+    // Install each package in dependency order
+    for pkg_name in &dep_graph.install_order {
+        let result =
+            install_single_package(pkg_name, repo, config, command_runner, sender, progress).await;
+
+        match result {
+            OperationResult::Success(_) => {
+                // Continue to next package
+            }
+            OperationResult::Failure(_) => return result,
+        }
+    }
+
+    OperationResult::Success(OperationSuccess::package_installed(
+        package_name.to_string(),
+        config.environment().to_string(),
+        false,
+        None,
+        (progress.current_step(), progress.total_steps()).into(),
+    ))
+}
+
+/// Install a single package (without dependency resolution).
+async fn install_single_package<PR, CR>(
     package_name: &str,
     repo: &PR,
     config: &AppConfig,
@@ -30,7 +81,7 @@ where
     PR: PackageRepository,
     CR: CommandRunner,
 {
-    // Step 1: Fetch package (reusing shared step)
+    // Fetch package
     let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
         Ok(pkg) => pkg,
         Err(err) => {
@@ -38,7 +89,7 @@ where
         }
     };
 
-    // Step 2: Find environment configuration
+    // Find environment configuration
     let env_config = match get_environment_config(
         package_name,
         &package_blob,
@@ -52,7 +103,7 @@ where
         Err(result) => return result,
     };
 
-    // Step 3: Check if package is already installed
+    // Check if package is already installed
     let pre_install_check = check::execute_check_command(
         package_name,
         config.environment(),
@@ -60,7 +111,7 @@ where
         command_runner,
         sender,
         progress,
-        "Checking if package is already installed",
+        &format!("Checking if '{package_name}' is already installed"),
     )
     .await;
 
@@ -81,7 +132,7 @@ where
     // Log that we're proceeding with installation
     log_proceeding_with_installation(package_name, &pre_install_check, sender).await;
 
-    // Step 4: Get install command (reusing shared step with custom getter function)
+    // Get install command
     let Ok(install_cmd) = steps::get_command(
         env_config,
         "install",
@@ -91,7 +142,6 @@ where
     )
     .await
     else {
-        // Create typed error for missing install command
         let other_envs_with_install = package_blob
             .package
             .environments()
@@ -119,7 +169,7 @@ where
         ));
     };
 
-    // Step 5: Execute installation and verification
+    // Execute installation and verification
     let context = InstallationContext {
         package_name,
         install_cmd,
