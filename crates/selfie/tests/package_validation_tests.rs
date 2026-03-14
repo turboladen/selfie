@@ -34,7 +34,7 @@ environments:
     let repo = YamlPackageRepository::new(fs, repo_path.clone());
 
     let package = repo.get_package("test-package").unwrap();
-    let validation = package.package.validate("test-env");
+    let validation = package.package().validate("test-env");
 
     // Should find at least one error with command syntax
     assert!(validation.issues().has_errors());
@@ -43,7 +43,7 @@ environments:
         .issues()
         .all_issues()
         .iter()
-        .filter(|issue| {
+        .filter(|issue: &&selfie::validation::ValidationIssue| {
             issue.category() == selfie::validation::ValidationErrorCategory::CommandSyntax
         })
         .collect::<Vec<_>>();
@@ -74,14 +74,16 @@ environments:
     let repo = YamlPackageRepository::new(fs, repo_path.clone());
 
     let package = repo.get_package("test-package").unwrap();
-    let validation = package.package.validate("test-env");
+    let validation = package.package().validate("test-env");
 
     // Should find URL format error
     let url_errors = validation
         .issues()
         .all_issues()
         .iter()
-        .filter(|issue| issue.category() == selfie::validation::ValidationErrorCategory::UrlFormat)
+        .filter(|issue: &&selfie::validation::ValidationIssue| {
+            issue.category() == selfie::validation::ValidationErrorCategory::UrlFormat
+        })
         .collect::<Vec<_>>();
 
     assert!(!url_errors.is_empty());

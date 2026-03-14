@@ -285,6 +285,10 @@ pub enum PackageError {
         other_envs_with_check: Vec<String>,
     },
 
+    /// A package with the specified name already exists
+    #[error("Package `{name}` already exists at {}", file_path.display())]
+    PackageAlreadyExists { name: String, file_path: PathBuf },
+
     /// Package environment exists but has no install command configured
     #[error(
         "No install command defined for package `{package_name}` in environment `{environment}`"
