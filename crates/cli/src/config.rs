@@ -21,7 +21,7 @@
 //! selfie --package-directory=/custom/path --verbose package list
 //! ```
 
-use selfie::config::{AppConfig, loader::ApplyToConfig};
+use selfie::config::{AppConfig, ApplyToConfig};
 
 use crate::cli::ClapCli;
 

@@ -3,10 +3,9 @@ use futures::StreamExt;
 use selfie::{
     config::AppConfig,
     package::{
-        EnvironmentConfig,
+        EnvironmentConfig, PackageService,
         event::{OperationResult, OperationSuccess, PackageEvent},
         port::PackageRepository,
-        service::PackageService,
     },
 };
 use std::{collections::HashMap, path::PathBuf};
@@ -465,9 +464,9 @@ fn prompt_file_name(default_name: &str, reporter: TerminalProgressReporter) -> R
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use selfie::package::PackageService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};
     use selfie::package::port::MockPackageRepository;
-    use selfie::package::service::PackageService;
     use std::path::PathBuf;
     use test_common::{test_config_with_dir, test_config_with_dir_and_env};
 

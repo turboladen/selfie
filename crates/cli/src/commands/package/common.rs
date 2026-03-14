@@ -415,7 +415,7 @@ mod tests {
         let package_dir = std::path::PathBuf::from("/test/packages");
         let config = test_config_with_dir(&package_dir);
 
-        let repo = create_package_repository_with_fs(&config, selfie::fs::real::RealFileSystem);
+        let repo = create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
         // Just verify we can create it without panicking
         drop(repo);
     }

@@ -321,7 +321,7 @@ mod tests {
 
     fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {
         use selfie::package::event::OperationContext;
-        use selfie::package::event::metadata::OperationType;
+        use selfie::package::event::OperationType;
 
         selfie::package::event::OperationInfo {
             id: uuid::Uuid::new_v4(),
@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_event_produces_failure_result() {
-        use selfie::package::event::error::StreamedError;
+        use selfie::package::event::StreamedError;
         use selfie::package::event::{OperationFailure, OperationResult};
         use selfie::package::port::PackageRepoError;
 
@@ -358,9 +358,10 @@ mod tests {
             PackageEvent::Error {
                 operation_info: op.clone(),
                 error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
-                    selfie::fs::filesystem::FileSystemError::IoError(std::sync::Arc::new(
-                        std::io::Error::new(std::io::ErrorKind::NotFound, "package not found"),
-                    )),
+                    selfie::fs::FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "package not found",
+                    ))),
                 )),
                 message: "Package not found".to_string(),
             },

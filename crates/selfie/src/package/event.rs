@@ -27,6 +27,9 @@
 pub mod error;
 pub mod metadata;
 
+pub use self::error::StreamedError;
+pub use self::metadata::OperationType;
+
 /// Represents the completion status of steps in an operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepCount {
@@ -62,8 +65,6 @@ use std::{
 use futures::Stream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-
-use self::{error::StreamedError, metadata::OperationType};
 
 /// Type alias for a stream of package events
 ///

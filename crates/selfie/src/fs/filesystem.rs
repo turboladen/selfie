@@ -185,7 +185,7 @@ impl MockFileSystem {
     /// in the CLI layer while avoiding real filesystem operations:
     ///
     /// ```rust
-    /// use selfie::fs::filesystem::MockFileSystem;
+    /// use selfie::fs::MockFileSystem;
     /// use selfie::package::repository::yaml::YamlPackageRepository;
     /// use std::path::PathBuf;
     ///

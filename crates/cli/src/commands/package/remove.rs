@@ -103,7 +103,7 @@ pub(crate) fn handle_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::fs::filesystem::MockFileSystem;
+    use selfie::fs::MockFileSystem;
     use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::test_config_with_dir;
@@ -197,8 +197,7 @@ mod tests {
         let config = test_config_with_dir(&package_dir);
 
         // Test with RealFileSystem
-        let repo =
-            common::create_package_repository_with_fs(&config, selfie::fs::real::RealFileSystem);
+        let repo = common::create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
         drop(repo);
 
         // Test with MockFileSystem

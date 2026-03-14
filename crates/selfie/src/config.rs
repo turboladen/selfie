@@ -2,6 +2,7 @@ pub mod loader;
 pub mod validate;
 pub mod yaml;
 
+pub use self::loader::{ApplyToConfig, ConfigLoadError};
 pub use self::yaml::YamlLoader;
 
 use std::{
