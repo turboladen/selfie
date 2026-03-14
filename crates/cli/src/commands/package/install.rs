@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use tracing::info;
 
 use crate::{
-    commands::package::common::{self, create_package_service, report_status},
+    commands::package::common::{self, report_status},
     event_processor::EventProcessor,
     terminal_progress_reporter::TerminalProgressReporter,
 };
@@ -172,14 +172,12 @@ impl<'a> InstallEventHandler<'a> {
 }
 
 pub(crate) async fn handle_install(
+    service: &dyn PackageService,
     package_name: &str,
     config: &AppConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     info!("Installing package: {}", package_name);
-
-    // Create the package service
-    let service = create_package_service(config);
 
     // Call the service's install method to get an event stream
     let event_stream = service.install(package_name).await;
@@ -274,11 +272,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_install_basic() {
-        let config = test_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_common::test_config_with_dir(temp_dir.path());
+        let service = test_common::create_test_service(&temp_dir);
         let reporter = create_mock_reporter();
 
         // This will fail without proper setup, but tests that the function can be called
-        let _result = handle_install("test-package", &config, reporter).await;
+        let _result = handle_install(&service, "test-package", &config, reporter).await;
     }
 
     #[test]

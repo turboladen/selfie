@@ -23,7 +23,7 @@ pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod package;
 
-use package::list::ListCommand;
+use package::{common::create_package_service, list::ListCommand};
 use selfie::config::AppConfig;
 use tracing::debug;
 
@@ -108,25 +108,36 @@ async fn dispatch_package_command(
 ) -> i32 {
     debug!("Handling package command: {:?}", command);
 
+    let service = create_package_service(config);
+
     match command {
         PackageSubcommands::Install { package_name } => {
-            package::install::handle_install(package_name, config, reporter).await
+            package::install::handle_install(service.as_ref(), package_name, config, reporter).await
         }
         PackageSubcommands::Check { package_name } => {
-            package::check::handle_check(package_name, config, reporter).await
+            package::check::handle_check(service.as_ref(), package_name, config, reporter).await
         }
         PackageSubcommands::List { all } => {
             ListCommand::new(config, reporter, *all)
-                .handle_command()
+                .handle_command(service.as_ref())
                 .await
         }
         PackageSubcommands::Info { package_name } => {
-            package::info::handle_info(package_name, config, reporter).await
+            package::info::handle_info(service.as_ref(), package_name, config, reporter).await
         }
         PackageSubcommands::Create {
             package_name,
             interactive,
-        } => package::create::handle_create(package_name, config, reporter, *interactive).await,
+        } => {
+            package::create::handle_create(
+                service.as_ref(),
+                package_name,
+                config,
+                reporter,
+                *interactive,
+            )
+            .await
+        }
         PackageSubcommands::Edit { package_name } => {
             package::edit::handle_edit(package_name, config, reporter)
         }
@@ -134,7 +145,8 @@ async fn dispatch_package_command(
             package::remove::handle_remove(package_name, config, reporter)
         }
         PackageSubcommands::Validate { package_name } => {
-            package::validate::handle_validate(package_name, config, reporter).await
+            package::validate::handle_validate(service.as_ref(), package_name, config, reporter)
+                .await
         }
     }
 }
