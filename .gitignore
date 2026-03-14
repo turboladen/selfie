@@ -42,3 +42,6 @@ docker-compose.override.yaml
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Claude
+.claude/settings.local.json
