@@ -342,7 +342,6 @@ where
             sender.send_completed(result).await;
         })
     }
-
 }
 
 #[async_trait::async_trait]

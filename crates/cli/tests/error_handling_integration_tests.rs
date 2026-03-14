@@ -98,7 +98,7 @@ fn test_package_directory_not_found_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains("Directory does not exist"));
 }
 
 #[test]
@@ -119,7 +119,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains("Directory does not exist"));
 }
 
 // =============================================================================
@@ -172,7 +172,7 @@ fn test_package_not_found_error() {
     cmd.args(["package", "info", "nonexistent-package"]);
 
     cmd.assert().failure().stderr(predicate::str::contains(
-        "Failed to load package 'nonexistent-package'",
+        "Package `nonexistent-package` not found in path",
     ));
 }
 
@@ -198,7 +198,7 @@ environments:
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("Parse error in package"));
 }
 
 // =============================================================================
@@ -341,7 +341,7 @@ fn test_invalid_package_directory_override_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains("Directory does not exist"));
 }
 
 // =============================================================================
@@ -378,7 +378,7 @@ fn test_duplicate_package_names_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 // =============================================================================
@@ -424,7 +424,7 @@ fn test_empty_package_name_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn test_package_name_with_special_characters() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn test_very_long_package_name_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 // =============================================================================

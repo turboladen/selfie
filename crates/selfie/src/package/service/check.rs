@@ -9,7 +9,7 @@ use crate::{
             CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
             OperationResult, OperationSuccess,
         },
-        port::{PackageError, PackageRepoError, PackageRepository},
+        port::{PackageError, PackageRepository},
         service::ProgressTracker,
     },
 };
@@ -83,12 +83,7 @@ where
                 .await;
             Ok(pkg)
         }
-        Err(err) => {
-            let error_msg = format!("Failed to load package '{package_name}': {err}");
-            let err_for_conversion = err.clone();
-            sender.send_error(err, &error_msg).await;
-            Err(OperationResult::Failure(err_for_conversion.into()))
-        }
+        Err(err) => Err(OperationResult::Failure(err.into())),
     }
 }
 
@@ -124,7 +119,7 @@ async fn handle_missing_environment(
     package_name: &str,
     package_blob: &GetPackage,
     current_env: &str,
-    sender: &EventSender,
+    _sender: &EventSender,
 ) -> Result<Option<String>, OperationResult> {
     let err = Box::new(PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),
@@ -137,10 +132,6 @@ async fn handle_missing_environment(
             .collect(),
         package_file: package_blob.package.path().clone(),
     });
-    let error_msg = format!("Environment configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
     Err(OperationResult::Failure((*err).into()))
 }
 
@@ -180,10 +171,6 @@ async fn handle_missing_check_command(
     };
     sender.send_check_result(check_result).await;
 
-    let error_msg = format!("Check command configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
     Err(OperationResult::Failure((*err).into()))
 }
 

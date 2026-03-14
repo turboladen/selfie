@@ -262,6 +262,7 @@ impl EventSender {
     }
 
     /// Send an error event
+    #[allow(dead_code)]
     pub(crate) async fn send_error<SE>(&self, error: SE, message: impl fmt::Display)
     where
         StreamedError: From<SE>,

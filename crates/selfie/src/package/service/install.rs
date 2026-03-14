@@ -11,7 +11,7 @@ use crate::{
             CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
             OperationSuccess,
         },
-        port::{PackageError, PackageRepoError, PackageRepository},
+        port::{PackageError, PackageRepository},
         service::ProgressTracker,
     },
 };
@@ -379,7 +379,7 @@ async fn handle_missing_environment(
     package_name: &str,
     package_blob: &crate::package::GetPackage,
     current_env: &str,
-    sender: &EventSender,
+    _sender: &EventSender,
 ) -> Result<&'static EnvironmentConfig, OperationResult> {
     let err = Box::new(PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),
@@ -392,10 +392,6 @@ async fn handle_missing_environment(
             .collect(),
         package_file: package_blob.package.path().clone(),
     });
-    let error_msg = format!("Environment configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
     Err(OperationResult::Failure((*err).into()))
 }
 

@@ -47,8 +47,6 @@ where
     let file_path = package.path().to_path_buf();
 
     if let Err(err) = repo.save_package(&package, &file_path) {
-        let error_msg = format!("Failed to save package '{package_name}': {err}");
-        sender.send_error(err.clone(), &error_msg).await;
         return OperationResult::Failure(err.into());
     }
 

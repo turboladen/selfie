@@ -1,18 +1,14 @@
 use selfie::{
     config::AppConfig,
     package::{
-        event::{
-            CheckResult, CheckResultData, OperationResult, PackageEvent, error::StreamedError,
-        },
-        port::{PackageError, PackageRepoError},
+        event::{CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent},
+        port::PackageError,
         service::PackageService,
     },
 };
 
 use crate::{
-    commands::package::common::{self, report_status},
-    event_processor::EventProcessor,
-    formatters::format_key,
+    commands::package::common, event_processor::EventProcessor, formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
 };
 
@@ -25,13 +21,13 @@ pub(crate) async fn handle_check(
     tracing::debug!("Running check command for package: {}", package_name);
 
     // Create animated spinner for check operation
-    report_status(&format!("Checking {package_name}..."));
-
-    // Create tracker for consistent error handling
-    let mut tracker = common::PackageNotFoundTracker::new();
+    common::report_status(&format!("Checking {package_name}..."));
 
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
+
+    // Track whether we handled an environment error in the Completed arm
+    let mut env_error_handled = false;
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(reporter);
@@ -49,89 +45,52 @@ pub(crate) async fn handle_check(
                 PackageEvent::Progress { .. } => {
                     true // Handled
                 }
-                PackageEvent::Error { error, .. } => {
-                    // Handle PackageNotFound errors consistently
-                    if tracker.handle_package_not_found_error(error) {
-                        return true; // Handled - prevent duplicate error display
-                    }
-
-                    // Handle environment configuration errors specially
-                    match error {
-                        StreamedError::PackageRepoError(PackageRepoError::PackageError(
-                            pkg_error,
-                        )) => {
-                            match pkg_error.as_ref() {
-                                PackageError::EnvironmentNotFound { .. } => {
-                                    handle_environment_not_found_error(package_name, error, config);
-                                    true // Handled completely - prevent duplicate error display
-                                }
-                                _ => false, // Use default handling for other errors
-                            }
-                        }
-                        _ => false, // Use default handling for other errors
-                    }
-                }
                 PackageEvent::Completed { result, .. } => {
-                    // Suppress completion errors if we already handled PackageNotFound
-                    if tracker.should_suppress_completion_error(result) {
-                        return true; // Handled - suppress duplicate error
+                    if let OperationResult::Failure(failure) = result
+                        && failure.is_environment_error()
+                    {
+                        display_environment_error(package_name, failure, config);
+                        env_error_handled = true;
+                        return true; // Handled
                     }
-
-                    match result {
-                        OperationResult::Failure(failure) if failure.is_environment_error() => {
-                            // Skip duplicate error display for environment configuration errors
-                            true // Handled - we already showed the error message above
-                        }
-                        _ => false, // Use default handling for other completion events
-                    }
+                    false // Use default handling for other completion events
                 }
                 _ => false, // Use default handling for other events
             }
         })
         .await;
 
-    // Return proper exit code - 1 for environment errors, otherwise use result from processor
-    if result.environment_error_handled {
+    if env_error_handled {
         1
     } else {
         result.exit_code
     }
 }
 
-/// Handle environment not found errors with helpful suggestions
-fn handle_environment_not_found_error(
-    package_name: &str,
-    error: &StreamedError,
-    config: &AppConfig,
-) {
-    // Show helpful information about available environments
+/// Display environment error with helpful suggestions from the typed failure data
+fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &AppConfig) {
     println!();
 
-    // Try to extract environment information from the structured error
-    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
-        if let PackageError::EnvironmentNotFound {
+    if let OperationFailure::Package(PackageError::EnvironmentNotFound {
+        available_environments,
+        ..
+    }) = failure
+    {
+        common::display_environment_summary(
+            package_name,
+            config.environment(),
             available_environments,
-            ..
-        } = package_error.as_ref()
-        {
-            common::display_environment_summary(
-                package_name,
-                config.environment(),
-                available_environments,
-                config,
-                "check",
-            );
-            return;
-        }
+            config,
+            "check",
+        );
+    } else {
+        common::display_generic_environment_suggestion(
+            package_name,
+            config.environment(),
+            config,
+            "check",
+        );
     }
-
-    // Fallback to generic suggestion if we can't extract environment info
-    common::display_generic_environment_suggestion(
-        package_name,
-        config.environment(),
-        config,
-        "check",
-    );
 }
 
 fn display_check_output_only(check_result: &CheckResultData, _config: &AppConfig) {
