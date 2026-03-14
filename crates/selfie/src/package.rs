@@ -6,6 +6,7 @@ pub mod service;
 pub mod validate;
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
+pub use self::service::PackageService;
 
 // Core package entity and related types
 use std::{collections::HashMap, path::PathBuf};
