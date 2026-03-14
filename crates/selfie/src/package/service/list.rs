@@ -38,8 +38,7 @@ where
             output
         }
         Err(err) => {
-            let error_msg = format!("Failed to list packages: {err}");
-            return OperationResult::Failure(error_msg.into());
+            return OperationResult::Failure(err.into());
         }
     };
 

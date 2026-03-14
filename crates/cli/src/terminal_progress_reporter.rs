@@ -60,7 +60,6 @@ pub(crate) enum MessageType {
     /// Success messages for completed operations
     Success,
     /// Helpful suggestions and recommendations
-    #[allow(dead_code)]
     Suggestion,
     /// Warning messages for potential issues
     Warning,
@@ -228,7 +227,6 @@ impl TerminalProgressReporter {
     ///
     /// Creates a formatted suggestion message with yellow coloring (if enabled)
     /// and a suggestion emoji/indicator prefix.
-    #[allow(dead_code)]
     pub(crate) fn format_suggestion(self, message: impl Display) -> String {
         self.status_line(MessageType::Suggestion, message)
     }
@@ -281,7 +279,6 @@ impl TerminalProgressReporter {
     ///
     /// Displays a suggestion message with yellow styling and suggestion indicator.
     /// Used to provide helpful recommendations to the user.
-    #[allow(dead_code)]
     pub(crate) fn report_suggestion(self, message: impl Display) {
         println!("{}", self.format_suggestion(message));
     }

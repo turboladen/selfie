@@ -364,7 +364,7 @@ async fn get_environment_config<'a>(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+        return handle_missing_environment(package_name, package_blob, current_env).await;
     };
 
     sender
@@ -379,7 +379,6 @@ async fn handle_missing_environment(
     package_name: &str,
     package_blob: &crate::package::GetPackage,
     current_env: &str,
-    _sender: &EventSender,
 ) -> Result<&'static EnvironmentConfig, OperationResult> {
     let err = Box::new(PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),

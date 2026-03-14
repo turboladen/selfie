@@ -98,7 +98,7 @@ fn test_package_directory_not_found_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Directory does not exist"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 #[test]
@@ -119,7 +119,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Directory does not exist"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 // =============================================================================
@@ -341,7 +341,7 @@ fn test_invalid_package_directory_override_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Directory does not exist"));
+        .stderr(predicate::str::contains("Package directory not found"));
 }
 
 // =============================================================================
