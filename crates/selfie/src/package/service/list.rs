@@ -62,6 +62,14 @@ where
     let mut sorted_packages: Vec<_> = valid_packages.into_iter().collect();
     sorted_packages.sort_by(|a, b| a.name().cmp(b.name()));
 
+    // Calculate environment statistics from all valid packages (before filtering)
+    let mut environment_stats: HashMap<String, usize> = HashMap::new();
+    for package in &sorted_packages {
+        for env_name in package.environments().keys() {
+            *environment_stats.entry(env_name.clone()).or_insert(0) += 1;
+        }
+    }
+
     // Filter packages based on show_all flag
     let packages_to_process: Vec<_> = sorted_packages
         .into_iter()
@@ -83,26 +91,28 @@ where
                 package.environments().keys().cloned().collect();
             let current_env = config.environment().to_string();
 
-            // Check if package supports the current environment and get check command
-            let check_command = package
-                .environments()
-                .get(config.environment())
-                .and_then(|env_config| env_config.check.as_ref())
+            // Determine status based on environment support and check command
+            let env_config = package.environments().get(config.environment());
+            let check_command = env_config
+                .and_then(|ec| ec.check.as_ref())
                 .cloned();
+            let supports_current_env = env_config.is_some();
 
             let command_runner = command_runner.clone();
             let sender = sender.clone();
 
             tokio::spawn(async move {
-                let status = if check_command.is_some() {
+                let status = if let Some(ref cmd) = check_command {
                     let check_result = super::check::execute_check_command_quiet(
                         &package_name,
                         &current_env,
-                        check_command.as_deref(),
+                        Some(cmd.as_str()),
                         &command_runner,
                     )
                     .await;
                     Some(check_result.result)
+                } else if supports_current_env {
+                    Some(crate::package::event::CheckResult::NoCheckCommand)
                 } else {
                     None
                 };
@@ -143,14 +153,6 @@ where
             error: invalid_package.to_string(),
         })
         .collect();
-
-    // Calculate environment statistics from all original valid packages
-    let mut environment_stats: HashMap<String, usize> = HashMap::new();
-    for package in &packages_to_process {
-        for env_name in package.environments().keys() {
-            *environment_stats.entry(env_name.clone()).or_insert(0) += 1;
-        }
-    }
 
     // Calculate the count before moving the vector
     let valid_count = valid_package_items.len();
