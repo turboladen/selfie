@@ -1,5 +1,6 @@
 //! Helps break down the pieces of running the `package check` command.
 
+use super::steps;
 use crate::{
     commands::runner::CommandRunner,
     config::AppConfig,
@@ -98,7 +99,7 @@ async fn get_check_command(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env).await;
+        return steps::handle_missing_environment(package_name, package_blob, current_env);
     };
 
     // Get check command from environment
@@ -113,25 +114,6 @@ async fn get_check_command(
         }
         None => handle_missing_check_command(package_name, package_blob, current_env, sender).await,
     }
-}
-
-async fn handle_missing_environment(
-    package_name: &str,
-    package_blob: &GetPackage,
-    current_env: &str,
-) -> Result<Option<String>, OperationResult> {
-    let err = Box::new(PackageError::EnvironmentNotFound {
-        package_name: package_name.to_string(),
-        environment: current_env.to_string(),
-        available_environments: package_blob
-            .package
-            .environments()
-            .keys()
-            .cloned()
-            .collect(),
-        package_file: package_blob.package.path().clone(),
-    });
-    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn handle_missing_check_command(
@@ -154,12 +136,12 @@ async fn handle_missing_check_command(
         })
         .collect();
 
-    let err = Box::new(PackageError::NoCheckCommand {
+    let err = PackageError::NoCheckCommand {
         package_name: package_name.to_string(),
         environment: current_env.to_string(),
         package_file: package_blob.package.path().clone(),
         other_envs_with_check,
-    });
+    };
 
     // Send structured result for no check command
     let check_result = CheckResultData {
@@ -170,7 +152,7 @@ async fn handle_missing_check_command(
     };
     sender.send_check_result(check_result).await;
 
-    Err(OperationResult::Failure((*err).into()))
+    Err(OperationResult::Failure(err.into()))
 }
 
 fn create_operation_result(

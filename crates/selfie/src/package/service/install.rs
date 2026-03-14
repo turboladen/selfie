@@ -11,7 +11,7 @@ use crate::{
             CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
             OperationSuccess,
         },
-        port::{PackageError, PackageRepository},
+        port::PackageRepository,
         service::ProgressTracker,
     },
 };
@@ -364,7 +364,7 @@ async fn get_environment_config<'a>(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env).await;
+        return steps::handle_missing_environment(package_name, package_blob, current_env);
     };
 
     sender
@@ -373,25 +373,6 @@ async fn get_environment_config<'a>(
         ))
         .await;
     Ok(env_config)
-}
-
-async fn handle_missing_environment(
-    package_name: &str,
-    package_blob: &crate::package::GetPackage,
-    current_env: &str,
-) -> Result<&'static EnvironmentConfig, OperationResult> {
-    let err = Box::new(PackageError::EnvironmentNotFound {
-        package_name: package_name.to_string(),
-        environment: current_env.to_string(),
-        available_environments: package_blob
-            .package
-            .environments()
-            .keys()
-            .cloned()
-            .collect(),
-        package_file: package_blob.package.path().clone(),
-    });
-    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn verify_installation<CR>(
