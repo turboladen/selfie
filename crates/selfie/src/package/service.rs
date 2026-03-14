@@ -30,7 +30,7 @@ use super::{
     port::PackageRepository,
 };
 
-use crate::{commands::runner::CommandRunner, config::AppConfig, package::port::PackageError};
+use crate::{commands::runner::CommandRunner, config::AppConfig};
 
 /// Helper for tracking progress through operation steps
 ///
@@ -158,17 +158,13 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with package information, or an error if the package cannot be found
+    /// An event stream that will emit package information events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - Multiple packages with the same name are found
-    /// - The package definition file is malformed
-    /// - File system access fails during package loading
-    /// - The package repository is inaccessible
-    async fn info(&self, package_name: &str) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn info(&self, package_name: &str) -> EventStream;
 
     /// Validate a package definition file
     ///
@@ -183,22 +179,13 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with validation results, or an error if validation cannot proceed
+    /// An event stream that will emit validation results and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found when path not specified
-    /// - Multiple packages with the same name are found
-    /// - The specified package path does not exist or is not accessible
-    /// - The package definition file cannot be read due to permissions
-    /// - File system access fails during validation setup
-    /// - The package repository is inaccessible
-    async fn validate(
-        &self,
-        package_name: &str,
-        package_path: Option<PathBuf>,
-    ) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream;
 
     /// List all available packages in the package directory
     ///
@@ -207,17 +194,13 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with the list of available packages, or an error if listing fails
+    /// An event stream that will emit package list events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package directory cannot be accessed due to permissions or path issues
-    /// - The package directory does not exist
-    /// - Package definition files cannot be read due to permissions
-    /// - File system access fails during directory traversal
-    /// - The package repository encounters critical errors during listing
-    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn list(&self, show_all: bool) -> EventStream;
 
     /// Create a new package definition file
     ///
@@ -230,15 +213,13 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with creation progress, or an error if creation fails
+    /// An event stream that will emit creation progress events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - A package with the same name already exists in the package directory
-    /// - The package directory is not writable due to permissions
-    /// - File system access fails during file writing
-    async fn create(&self, package: super::Package) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn create(&self, package: super::Package) -> EventStream;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -362,57 +343,6 @@ where
         })
     }
 
-    /// Execute an operation with simplified event handling
-    ///
-    /// A simpler version of operation execution that doesn't require full dependency
-    /// injection. This is useful for operations that don't need access to the
-    /// repository or command runner.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation_type` - Type of operation being performed
-    /// * `package_name` - Name of the package being operated on
-    /// * `context` - Additional operation context
-    /// * `total_steps` - Total number of steps for progress tracking
-    /// * `handler` - Async function that performs the actual operation
-    ///
-    /// # Returns
-    ///
-    /// An event stream that emits operation progress and results
-    fn execute_operation<F, Fut>(
-        &self,
-        operation_type: OperationType,
-        package_name: &str,
-        context: OperationContext,
-        total_steps: usize,
-        handler: F,
-    ) -> EventStream
-    where
-        F: FnOnce(EventSender, ProgressTracker) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = OperationResult> + Send,
-    {
-        let config = self.config.clone();
-        let package_name = package_name.to_string();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                operation_type,
-                package_name,
-                config.environment().to_string(),
-                context,
-            );
-
-            sender.send_started().await;
-            sender
-                .send_trace(format!("Current environment: {}", config.environment()))
-                .await;
-
-            let progress = ProgressTracker::new(total_steps);
-            let result = handler(sender.clone(), progress).await;
-            sender.send_completed(result).await;
-        })
-    }
 }
 
 #[async_trait::async_trait]
@@ -531,22 +461,16 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - The package definition file cannot be read
-    /// - Critical validation setup fails
-    async fn validate(
-        &self,
-        package_name: &str,
-        package_path: Option<PathBuf>,
-    ) -> Result<EventStream, PackageError> {
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream {
         let context = OperationContext {
             package_path,
             target_environment: None,
         };
 
         let package_name_owned = package_name.to_string();
-        Ok(self.execute_operation_with_deps(
+        self.execute_operation_with_deps(
             OperationType::PackageValidate,
             package_name,
             context,
@@ -561,7 +485,7 @@ where
                 )
                 .await
             },
-        ))
+        )
     }
 
     /// List all available packages in the package directory
@@ -577,16 +501,14 @@ where
     ///
     /// # Returns
     ///
-    /// An event stream with the list of available packages and their details
+    /// An event stream that will emit package list events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package directory cannot be accessed
-    /// - Package definition files cannot be read
-    /// - File system operations fail
-    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError> {
-        Ok(self.execute_operation_with_deps(
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn list(&self, show_all: bool) -> EventStream {
+        self.execute_operation_with_deps(
             OperationType::PackageList,
             "", // No specific package for list operation
             OperationContext::default(),
@@ -602,7 +524,7 @@ where
                 )
                 .await
             },
-        ))
+        )
     }
 
     /// Get detailed information about a package
@@ -623,17 +545,15 @@ where
     ///
     /// # Returns
     ///
-    /// An event stream with detailed package information
+    /// An event stream that will emit package information events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - The package definition file is malformed
-    /// - File system access fails
-    async fn info(&self, package_name: &str) -> Result<EventStream, PackageError> {
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn info(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
-        Ok(self.execute_operation_with_deps(
+        self.execute_operation_with_deps(
             OperationType::PackageInfo,
             package_name,
             OperationContext::default(),
@@ -649,13 +569,35 @@ where
                 )
                 .await
             },
-        ))
+        )
     }
 
+    /// Create a new package definition file
+    ///
+    /// Saves the provided package to the repository if no package with
+    /// the same name already exists. The operation checks for existing
+    /// packages and writes the new definition file.
+    ///
+    /// The create operation consists of:
+    /// 1. Checking if a package with the same name already exists
+    /// 2. Saving the package definition to the repository
+    ///
+    /// # Arguments
+    ///
+    /// * `package` - The fully constructed package to create
+    ///
+    /// # Returns
+    ///
+    /// An event stream that will emit creation progress events and the final result
+    ///
+    /// # Errors
+    ///
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
     #[instrument]
-    async fn create(&self, package: super::Package) -> Result<EventStream, PackageError> {
+    async fn create(&self, package: super::Package) -> EventStream {
         let package_name = package.name().to_string();
-        Ok(self.execute_operation_with_deps(
+        self.execute_operation_with_deps(
             OperationType::PackageCreate,
             &package_name,
             OperationContext::default(),
@@ -663,6 +605,6 @@ where
             move |repo, _, config, sender, mut progress| async move {
                 create::handle_create(package, &repo, &config, &sender, &mut progress).await
             },
-        ))
+        )
     }
 }

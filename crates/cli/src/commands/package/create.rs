@@ -65,13 +65,7 @@ pub(crate) async fn handle_create(
     };
 
     // Use PackageService::create to persist (hexagonal pattern)
-    let mut stream = match service.create(package).await {
-        Ok(stream) => stream,
-        Err(e) => {
-            reporter.report_error(format!("Failed to create package: {e}"));
-            return 1;
-        }
-    };
+    let mut stream = service.create(package).await;
 
     // Process the event stream
     let mut created_file_path: Option<PathBuf> = None;
@@ -642,7 +636,7 @@ mod tests {
 
         let package = create_basic_package("test-package", &config);
 
-        let stream = service.create(package).await.unwrap();
+        let stream = service.create(package).await;
         let result = collect_result(stream).await.unwrap();
 
         match result {
@@ -670,7 +664,7 @@ mod tests {
         let service = test_common::create_test_service(&temp_dir);
         let package = create_basic_package("existing-pkg", &config);
 
-        let stream = service.create(package).await.unwrap();
+        let stream = service.create(package).await;
         let result = collect_result(stream).await.unwrap();
 
         assert!(
@@ -690,7 +684,7 @@ mod tests {
         assert!(package.environments().contains_key("production"));
         assert!(!package.environments().contains_key("default"));
 
-        let stream = service.create(package).await.unwrap();
+        let stream = service.create(package).await;
         let result = collect_result(stream).await.unwrap();
 
         match result {
@@ -709,7 +703,7 @@ mod tests {
 
         let package = create_basic_package("file-check", &config);
 
-        let stream = service.create(package).await.unwrap();
+        let stream = service.create(package).await;
         let result = collect_result(stream).await.unwrap();
 
         assert!(matches!(result, OperationResult::Success(_)));

@@ -27,43 +27,36 @@ pub(crate) async fn handle_info(
     common::report_status(&format!("Getting info for {package_name}..."));
 
     // Call the service's info method to get an event stream
-    #[allow(clippy::match_same_arms)]
-    match service.info(package_name).await {
-        Ok(event_stream) => {
-            // Process the event stream with custom handling for structured data
-            let processor = EventProcessor::new(reporter);
-            let result = processor
-                .process_events(event_stream, |event| {
-                    match event {
-                        PackageEvent::PackageInfoLoaded { package_info, .. } => {
-                            let table = create_package_info_table(package_info, config);
-                            println!("{table}");
-                            true // Handled
-                        }
-                        PackageEvent::EnvironmentStatusChecked {
-                            environment_status, ..
-                        } => {
-                            let table = create_environment_table(environment_status, config);
-                            println!("\n{table}");
-                            true // Handled
-                        }
-                        PackageEvent::Progress { .. } => {
-                            true // Handled
-                        }
-                        PackageEvent::Completed { .. } => {
-                            false // Use default completion handling
-                        }
-                        _ => false, // Use default handling for other events
-                    }
-                })
-                .await;
-            result.exit_code
-        }
-        Err(e) => {
-            reporter.report_error(format!("Failed to get package info: {e}"));
-            1
-        }
-    }
+    let event_stream = service.info(package_name).await;
+
+    // Process the event stream with custom handling for structured data
+    let processor = EventProcessor::new(reporter);
+    let result = processor
+        .process_events(event_stream, |event| {
+            match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => {
+                    let table = create_package_info_table(package_info, config);
+                    println!("{table}");
+                    true // Handled
+                }
+                PackageEvent::EnvironmentStatusChecked {
+                    environment_status, ..
+                } => {
+                    let table = create_environment_table(environment_status, config);
+                    println!("\n{table}");
+                    true // Handled
+                }
+                PackageEvent::Progress { .. } => {
+                    true // Handled
+                }
+                PackageEvent::Completed { .. } => {
+                    false // Use default completion handling
+                }
+                _ => false, // Use default handling for other events
+            }
+        })
+        .await;
+    result.exit_code
 }
 
 fn create_package_info_table(package_info: &PackageInfoData, config: &AppConfig) -> Table {
