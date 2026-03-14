@@ -44,14 +44,12 @@ where
     // Step 2: Save the package
     progress.next(sender, "Saving package file").await;
 
-    let file_path = config
-        .package_directory()
-        .join(format!("{package_name}.yml"));
+    let file_path = package.path().to_path_buf();
 
     if let Err(err) = repo.save_package(&package, &file_path) {
         let error_msg = format!("Failed to save package '{package_name}': {err}");
-        sender.send_error(err, &error_msg).await;
-        return OperationResult::Failure(error_msg.into());
+        sender.send_error(err.clone(), &error_msg).await;
+        return OperationResult::Failure(err.into());
     }
 
     sender
