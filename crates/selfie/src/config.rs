@@ -42,26 +42,18 @@ pub struct AppConfig {
     pub(crate) max_parallel_installations: NonZeroUsize,
 }
 
-/// # Panics
-///
-/// This function uses `unsafe` code but cannot panic because it is called with
-/// the constant value 60, which is guaranteed to be non-zero.
+/// Returns the default command timeout of 60 seconds.
 fn default_command_timeout() -> NonZeroU64 {
-    unsafe { NonZeroU64::new_unchecked(60) }
+    const { NonZeroU64::new(60).unwrap() }
 }
 
 fn default_stop_on_error() -> bool {
     true
 }
 
-/// # Panics
-///
-/// This function uses `unsafe` code in the fallback case but cannot panic because
-/// it is called with the constant value 4, which is guaranteed to be non-zero.
-/// The `num_cpus::get()` call may return 0 on some systems, which is handled
-/// safely by the `unwrap_or_else` fallback.
+/// Returns the default max parallel installations, using the CPU count or falling back to 4.
 fn default_max_parallel() -> NonZeroUsize {
-    NonZeroUsize::new(num_cpus::get()).unwrap_or_else(|| unsafe { NonZeroUsize::new_unchecked(4) })
+    NonZeroUsize::new(num_cpus::get()).unwrap_or(const { NonZeroUsize::new(4).unwrap() })
 }
 
 fn default_use_colors() -> bool {
