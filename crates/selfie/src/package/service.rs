@@ -652,6 +652,7 @@ where
         ))
     }
 
+    #[instrument]
     async fn create(&self, package: super::Package) -> Result<EventStream, PackageError> {
         let package_name = package.name().to_string();
         Ok(self.execute_operation_with_deps(

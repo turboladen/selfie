@@ -88,10 +88,6 @@ decide how to display information about that event to the user in the current UI
   `features = ["with_mocks"]`. The CLI's dev-dependencies already enable this.
 - **Workspace dependencies**: Common deps (`tokio`, `console`, `tracing`, etc.) are defined in the
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
-- **`GetPackage` public fields**: `GetPackage` has `pub` fields (`package`, `file_path`, `is_new`)
-  — this is a known encapsulation issue tracked in beads.
-- **`PackageService::create` unimplemented**: Returns a placeholder. CLI `create.rs` bypasses the
-  service and uses the repository directly. Tracked in beads.
 - **No circular dependency detection**: Install follows deps linearly without cycle detection.
   Tracked in beads.
 
