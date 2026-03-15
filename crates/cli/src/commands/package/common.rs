@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::CliConfig;
 use std::{path::Path, process::Command};
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 /// Create a package repository instance with the configured package directory
 pub(super) fn create_package_repository(
@@ -43,10 +43,10 @@ pub(super) fn create_package_repository_with_fs<F: FileSystem>(
 pub(super) fn save_package(
     repo: &impl PackageRepository,
     package_blob: &GetPackage,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<(), i32> {
     if let Err(e) = repo.save_package(package_blob.package(), package_blob.file_path()) {
-        reporter.report_error(format!("Failed to save package file: {e}"));
+        display.print_error(format!("Failed to save package file: {e}"));
         return Err(1);
     }
     Ok(())
@@ -61,12 +61,12 @@ pub(super) fn save_package(
 /// - Providing appropriate success/failure messages
 pub(super) fn open_editor(
     file_path: &Path,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
     success_message: Option<String>,
 ) -> i32 {
     let Ok(editor) = std::env::var("EDITOR") else {
-        reporter.report_error("EDITOR environment variable is not set.");
-        reporter.report_info("Please set EDITOR and try again.");
+        display.print_error("EDITOR environment variable is not set.");
+        display.print_info("Please set EDITOR and try again.");
         return 1;
     };
 
@@ -81,16 +81,16 @@ pub(super) fn open_editor(
     match cmd.status() {
         Ok(status) if status.success() => {
             if let Some(message) = success_message {
-                reporter.report_success(message);
+                display.print_success(message);
             }
             0
         }
         Ok(_) => {
-            reporter.report_warning("Editor exited with non-zero status.");
+            display.print_warning("Editor exited with non-zero status.");
             1
         }
         Err(e) => {
-            reporter.report_error(format!("Failed to start editor '{editor}': {e}"));
+            display.print_error(format!("Failed to start editor '{editor}': {e}"));
             1
         }
     }
@@ -101,7 +101,7 @@ pub(super) fn open_editor(
 /// Returns the editor command if available, or reports an error and returns None.
 /// Provides context-specific error messages for different scenarios.
 pub(super) fn check_editor_available(
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
     package_name: &str,
     package_exists: bool,
     package_path: Option<&Path>,
@@ -109,22 +109,22 @@ pub(super) fn check_editor_available(
     if let Ok(editor) = std::env::var("EDITOR") {
         Some(editor)
     } else {
-        reporter.report_error("EDITOR environment variable is not set.");
+        display.print_error("EDITOR environment variable is not set.");
 
         if package_exists {
             if let Some(path) = package_path {
-                reporter.report_info(format!(
+                display.print_info(format!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
                     package_name,
                     path.display()
                 ));
             } else {
-                reporter.report_info(format!(
+                display.print_info(format!(
                     "Package '{package_name}' exists. Set EDITOR to edit it automatically."
                 ));
             }
         } else {
-            reporter.report_info(format!(
+            display.print_info(format!(
                 "Package '{package_name}' doesn't exist yet. Set EDITOR and try again to create it."
             ));
         }
@@ -221,12 +221,6 @@ pub(super) fn format_field_value(value: &str, use_colors: bool) -> String {
     } else {
         value.to_string()
     }
-}
-
-/// Creates a consistent animated spinner with the same styling used across
-/// all package commands that perform subprocess operations.
-pub(super) fn report_status(message: &str) {
-    eprintln!("{} {}", console::style("⚡").green(), message);
 }
 
 /// Display environment error with available environments for a specific package
@@ -521,12 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn test_report_status() {
-        // This test just ensures the function doesn't panic
-        report_status("Test message");
-    }
-
-    #[test]
     fn test_save_package_with_mock_repository() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
@@ -539,10 +527,10 @@ mod tests {
             .returning(|_, _| Ok(()));
 
         let package_blob = create_new_package("mock-repo-test", &config);
-        let reporter = TerminalProgressReporter::new(false);
+        let display = DisplayManager::new(false);
 
         // Test saving using mocked repository - tests CLI logic, not repository implementation
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_ok());
 
         // This demonstrates testing CLI logic without repository implementation details
@@ -565,10 +553,10 @@ mod tests {
         });
 
         let package_blob = create_new_package("error-test", &config);
-        let reporter = TerminalProgressReporter::new(false);
+        let display = DisplayManager::new(false);
 
         // Test error handling in CLI layer
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), 1); // Should return error code 1
 
@@ -601,8 +589,8 @@ mod tests {
         );
 
         // Test saving through CLI layer
-        let reporter = TerminalProgressReporter::new(false);
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let display = DisplayManager::new(false);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation

@@ -4,14 +4,14 @@ use selfie::package::port::PackageRepository;
 use crate::config::CliConfig;
 use tracing::info;
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 use super::common;
 
 pub(crate) fn handle_remove(
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> i32 {
     info!("Removing package: {}", package_name);
 
@@ -20,35 +20,35 @@ pub(crate) fn handle_remove(
 
     // First, verify the package exists and get its details
     let Ok(package_blob) = repo.get_package(package_name) else {
-        reporter.report_error(format!("Package '{package_name}' not found."));
+        display.print_error(format!("Package '{package_name}' not found."));
         return 1;
     };
 
     // Show package location
-    reporter.report_info(format!("Package '{package_name}' found at:"));
-    reporter.report_info(format!("  {}", package_blob.file_path().display()));
+    display.print_info(format!("Package '{package_name}' found at:"));
+    display.print_info(format!("  {}", package_blob.file_path().display()));
 
     // Check if this package is a dependency of others
     let dependent_packages = match repo.find_dependent_packages(package_name) {
         Ok(deps) => deps,
         Err(e) => {
-            reporter.report_warning(format!("Could not check for dependent packages: {e}"));
+            display.print_warning(format!("Could not check for dependent packages: {e}"));
             Vec::new()
         }
     };
 
     // Build confirmation prompt based on dependencies
     let (prompt, default_answer) = if dependent_packages.is_empty() {
-        reporter.report_info(format!(
+        display.print_info(format!(
             "✓ Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
     } else {
-        reporter.report_warning(format!(
+        display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"
         ));
         for dep in &dependent_packages {
-            reporter.report_warning(format!("  - {}", dep.name()));
+            display.print_warning(format!("  - {}", dep.name()));
         }
         (
             "Are you sure you want to remove this package?".to_string(),
@@ -65,11 +65,11 @@ pub(crate) fn handle_remove(
     let proceed = match confirm_removal {
         Ok(true) => true,
         Ok(false) => {
-            reporter.report_info("Package removal cancelled.");
+            display.print_info("Package removal cancelled.");
             return 0;
         }
         Err(_) => {
-            reporter.report_error("Failed to read user input.");
+            display.print_error("Failed to read user input.");
             return 1;
         }
     };
@@ -80,11 +80,11 @@ pub(crate) fn handle_remove(
 
     // Perform the actual removal
     if let Err(e) = repo.remove_package(package_name) {
-        reporter.report_error(format!("Failed to remove package '{package_name}': {e}"));
+        display.print_error(format!("Failed to remove package '{package_name}': {e}"));
         return 1;
     }
 
-    reporter.report_success(format!(
+    display.print_success(format!(
         "Package '{}' removed successfully from {}",
         package_name,
         package_blob.file_path().display()
@@ -92,11 +92,11 @@ pub(crate) fn handle_remove(
 
     // Warn about broken dependencies if any exist
     if !dependent_packages.is_empty() {
-        reporter.report_warning("Note: The following packages may have broken dependencies:");
+        display.print_warning("Note: The following packages may have broken dependencies:");
         for dep in &dependent_packages {
-            reporter.report_warning(format!("  - {}", dep.name()));
+            display.print_warning(format!("  - {}", dep.name()));
         }
-        reporter.report_info("You may need to update these packages to remove the dependency.");
+        display.print_info("You may need to update these packages to remove the dependency.");
     }
 
     0
