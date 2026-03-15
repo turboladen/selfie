@@ -11,6 +11,7 @@ use selfie::{
 };
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 /// Creates a test service with real filesystem and default settings.
 /// This is the most commonly used service setup for integration tests.
@@ -32,7 +33,7 @@ pub fn create_test_service_with_config(
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner =
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-    PackageServiceImpl::new(repo, runner, config)
+    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
 }
 
 /// Creates a test service with custom command timeout.
@@ -46,7 +47,7 @@ pub fn create_test_service_with_timeout(
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
-    PackageServiceImpl::new(repo, runner, config)
+    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
 }
 
 /// Creates a test service for a specific environment.
@@ -71,7 +72,12 @@ pub fn create_cli_service(
         ShellCommandRunner::default_shell(),
         config.command_timeout(),
     );
-    PackageServiceImpl::new(repo, command_runner, config.clone())
+    PackageServiceImpl::new(
+        repo,
+        command_runner,
+        config.clone(),
+        CancellationToken::new(),
+    )
 }
 
 /// Creates a test service specifically for service layer integration tests.

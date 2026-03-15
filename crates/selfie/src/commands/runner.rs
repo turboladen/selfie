@@ -10,6 +10,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// A chunk of output from a running command
 ///
@@ -74,6 +75,7 @@ pub trait CommandRunner: Send + Sync {
     fn execute(
         &self,
         command: &str,
+        token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
     /// Execute a command with a specific timeout
@@ -96,6 +98,7 @@ pub trait CommandRunner: Send + Sync {
         &self,
         command: &str,
         timeout: Duration,
+        token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
     /// Execute a command with streaming output
@@ -122,6 +125,7 @@ pub trait CommandRunner: Send + Sync {
         command: &str,
         timeout: Duration,
         output_sender: mpsc::Sender<OutputChunk>,
+        token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 }
 
@@ -225,6 +229,13 @@ pub enum CommandError {
         stderr: String,
         working_directory: PathBuf,
         execution_duration: Duration,
+    },
+
+    /// Command was cancelled via a cancellation token
+    #[error("Command cancelled: {command}")]
+    Cancelled {
+        command: String,
+        working_directory: PathBuf,
     },
 
     /// Failed to capture stdout during streaming execution

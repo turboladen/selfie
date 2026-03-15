@@ -39,6 +39,7 @@ use selfie::{
     fs::real::RealFileSystem,
 };
 use terminal_progress_reporter::TerminalProgressReporter;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::{cli::ClapCli, commands::dispatch_command};
@@ -115,8 +116,22 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Maybe don't need to build this until it's needed?
     let reporter = TerminalProgressReporter::new(config.use_colors());
 
+    // Set up graceful shutdown: first Ctrl+C cancels in-flight operations,
+    // second Ctrl+C forces immediate exit.
+    let cancellation_token = CancellationToken::new();
+    let token_clone = cancellation_token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            token_clone.cancel();
+            // Wait for a second Ctrl+C and force-exit
+            if tokio::signal::ctrl_c().await.is_ok() {
+                process::exit(130);
+            }
+        }
+    });
+
     // Dispatch and execute the requested command
-    let exit_code = dispatch_command(&args.command, &config, reporter).await;
+    let exit_code = dispatch_command(&args.command, &config, reporter, cancellation_token).await;
 
     process::exit(exit_code)
 }

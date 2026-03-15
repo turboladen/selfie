@@ -304,6 +304,16 @@ impl EventSender {
         self.send_log(LogLevel::Warning, message).await;
     }
 
+    /// Send a cancellation event
+    pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::Canceled {
+            operation_info,
+            reason: reason.to_string(),
+        })
+        .await;
+    }
+
     /// Send package information data
     pub(crate) async fn send_package_info(&self, package_info: PackageInfoData) {
         let operation_info = self.touch_operation_info();

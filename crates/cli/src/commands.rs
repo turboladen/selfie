@@ -24,6 +24,7 @@ pub(crate) mod config;
 pub(crate) mod package;
 
 use package::{common::create_package_service, list::ListCommand};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::config::CliConfig;
@@ -59,12 +60,14 @@ pub(crate) async fn dispatch_command(
     command: &ClapCommands,
     config: &CliConfig,
     reporter: TerminalProgressReporter,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Dispatching command: {:?}", command);
 
     match command {
         ClapCommands::Package(package_cmd) => {
-            dispatch_package_command(&package_cmd.command, config, reporter).await
+            dispatch_package_command(&package_cmd.command, config, reporter, cancellation_token)
+                .await
         }
         ClapCommands::Config(config_cmd) => {
             dispatch_config_command(&config_cmd.command, config, reporter)
@@ -104,10 +107,11 @@ async fn dispatch_package_command(
     command: &PackageSubcommands,
     config: &CliConfig,
     reporter: TerminalProgressReporter,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Handling package command: {:?}", command);
 
-    let service = create_package_service(config);
+    let service = create_package_service(config, cancellation_token);
 
     match command {
         PackageSubcommands::Install { package_name } => {

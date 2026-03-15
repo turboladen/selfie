@@ -16,6 +16,7 @@ use selfie::{
         service::{PackageService, PackageServiceImpl},
     },
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::config::CliConfig;
 use std::{path::Path, process::Command};
@@ -137,13 +138,21 @@ pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetP
 }
 
 /// Create a package service with repository and command runner
-pub(crate) fn create_package_service(config: &CliConfig) -> impl PackageService {
+pub(crate) fn create_package_service(
+    config: &CliConfig,
+    cancellation_token: CancellationToken,
+) -> impl PackageService {
     let repo = create_package_repository(config);
     let command_runner = ShellCommandRunner::new(
         ShellCommandRunner::default_shell(),
         config.command_timeout(),
     );
-    PackageServiceImpl::new(repo, command_runner, config.selfie_config().clone())
+    PackageServiceImpl::new(
+        repo,
+        command_runner,
+        config.selfie_config().clone(),
+        cancellation_token,
+    )
 }
 
 /// Create a formatted table with consistent styling
@@ -404,7 +413,7 @@ mod tests {
         let package_dir = std::path::PathBuf::from("/test/packages");
         let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
-        let service = create_package_service(&config);
+        let service = create_package_service(&config, CancellationToken::new());
         // Just verify we can create it without panicking
         drop(service);
     }

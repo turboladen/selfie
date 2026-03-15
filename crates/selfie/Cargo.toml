@@ -17,6 +17,7 @@ serde_yaml.workspace = true
 shellexpand = "3.1"
 strum.workspace = true
 thiserror = "2.0"
+tokio-util.workspace = true
 tokio = { workspace = true, features = [
   "io-std",
   "io-util",

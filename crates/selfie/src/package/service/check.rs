@@ -14,6 +14,7 @@ use crate::{
         service::ProgressTracker,
     },
 };
+use tokio_util::sync::CancellationToken;
 
 pub(super) async fn handle_check<PR, CR>(
     package_name: &str,
@@ -22,6 +23,7 @@ pub(super) async fn handle_check<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository + Clone,
@@ -56,6 +58,7 @@ where
         sender,
         progress,
         "Running package check command",
+        token,
     )
     .await;
 
@@ -206,6 +209,7 @@ fn create_operation_result(
 ///
 /// This function can be reused by other services that need to run check commands
 /// without duplicating the package loading and environment validation logic.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_check_command<CR>(
     package_name: &str,
     environment: &str,
@@ -214,13 +218,21 @@ pub(super) async fn execute_check_command<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     step_description: &str,
+    token: &CancellationToken,
 ) -> CheckResultData
 where
     CR: CommandRunner,
 {
     progress.next(sender, step_description).await;
 
-    execute_check_command_quiet(package_name, environment, check_command, command_runner).await
+    execute_check_command_quiet(
+        package_name,
+        environment,
+        check_command,
+        command_runner,
+        token,
+    )
+    .await
 }
 
 /// Execute a check command without updating progress
@@ -232,12 +244,13 @@ pub(super) async fn execute_check_command_quiet<CR>(
     environment: &str,
     check_command: Option<&str>,
     command_runner: &CR,
+    token: &CancellationToken,
 ) -> CheckResultData
 where
     CR: CommandRunner,
 {
     if let Some(cmd) = check_command {
-        match command_runner.execute(cmd).await {
+        match command_runner.execute(cmd, token).await {
             Ok(output) => {
                 if output.is_success() {
                     CheckResultData {
