@@ -30,7 +30,7 @@ use super::{
     port::PackageRepository,
 };
 
-use crate::{commands::runner::CommandRunner, config::AppConfig};
+use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 
 /// Helper for tracking progress through operation steps
 ///
@@ -237,7 +237,7 @@ pub struct PackageServiceImpl<R, CR> {
     /// Command runner for executing system commands
     command_runner: CR,
     /// Application configuration including environment and settings
-    config: AppConfig,
+    config: SelfieConfig,
 }
 
 impl<R, CR> PackageServiceImpl<R, CR>
@@ -252,7 +252,7 @@ where
     /// * `package_repository` - Repository implementation for package storage
     /// * `command_runner` - Command runner implementation for executing system commands
     /// * `config` - Application configuration
-    pub fn new(package_repository: R, command_runner: CR, config: AppConfig) -> Self {
+    pub fn new(package_repository: R, command_runner: CR, config: SelfieConfig) -> Self {
         Self {
             package_repository,
             command_runner,
@@ -315,7 +315,7 @@ where
         handler: F,
     ) -> EventStream
     where
-        F: FnOnce(R, CR, AppConfig, EventSender, ProgressTracker) -> Fut + Send + 'static,
+        F: FnOnce(R, CR, SelfieConfig, EventSender, ProgressTracker) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = OperationResult> + Send,
     {
         let repo = self.package_repository.clone();

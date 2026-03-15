@@ -3,7 +3,7 @@
 //!
 
 use crate::{
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         Package,
         event::{EventSender, OperationResult, OperationSuccess},
@@ -15,7 +15,7 @@ use crate::{
 pub(super) async fn handle_create<PR>(
     package: Package,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> OperationResult

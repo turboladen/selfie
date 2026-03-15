@@ -1,5 +1,7 @@
 use dialoguer::{Confirm, theme::SimpleTheme};
-use selfie::{config::AppConfig, package::port::PackageRepository};
+use selfie::package::port::PackageRepository;
+
+use crate::config::CliConfig;
 use tracing::info;
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -8,7 +10,7 @@ use super::common;
 
 pub(crate) fn handle_edit(
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     info!("Editing package: {}", package_name);
@@ -109,7 +111,7 @@ mod tests {
             std::env::remove_var("EDITOR");
         }
 
-        let config = test_config_with_dir(package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(package_dir));
         let reporter = create_mock_reporter();
 
         // This test will exit early because there's no EDITOR
@@ -144,7 +146,7 @@ mod tests {
     fn test_get_package_new_creates_template() {
         // Test package template creation without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let get_package = common::create_new_package("test-template", &config);
 
@@ -202,7 +204,7 @@ mod tests {
         // Test package saving logic using MockPackageRepository for CLI logic testing
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save operation
         mock_repo

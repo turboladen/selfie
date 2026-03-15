@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         event::{
             EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, PackageListData,
@@ -19,7 +19,7 @@ use crate::{
 
 pub(super) async fn handle_list<PR, CR>(
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,

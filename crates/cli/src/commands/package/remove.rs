@@ -1,5 +1,7 @@
 use dialoguer::{Confirm, theme::SimpleTheme};
-use selfie::{config::AppConfig, package::port::PackageRepository};
+use selfie::package::port::PackageRepository;
+
+use crate::config::CliConfig;
 use tracing::info;
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
@@ -8,7 +10,7 @@ use super::common;
 
 pub(crate) fn handle_remove(
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     info!("Removing package: {}", package_name);
@@ -112,7 +114,7 @@ mod tests {
     fn test_handle_remove_package_not_found() {
         // Test behavior when trying to remove a non-existent package - no filesystem needed
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test removing a package that doesn't exist by checking the repository directly
         let repo = common::create_package_repository(&config);
@@ -194,7 +196,7 @@ mod tests {
     fn test_repository_creation_with_different_filesystems() {
         // Test that we can create repositories with different filesystem implementations
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test with RealFileSystem
         let repo = common::create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
@@ -218,7 +220,7 @@ mod tests {
         mock_fs.mock_path_exists(&package_dir, true);
         mock_fs.mock_list_directory(&package_dir, &[]);
 
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let repo = common::create_package_repository_with_fs(&config, mock_fs);
 
         // Test removing non-existent package - should return error
@@ -261,7 +263,7 @@ environments:
         mock_fs.mock_read_file(&target_path, target_yaml);
         mock_fs.mock_read_file(&dependent_path, dependent_yaml);
 
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let repo = common::create_package_repository_with_fs(&config, mock_fs);
 
         // Test finding dependents - should find dependent-package
@@ -278,7 +280,7 @@ environments:
         // Test complete save and remove workflow using MockPackageRepository for pure CLI logic
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save operation
         mock_repo

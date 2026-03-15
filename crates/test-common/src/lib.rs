@@ -12,8 +12,7 @@ pub mod service;
 
 // Re-export the most commonly used items for convenience
 pub use config::{
-    test_config, test_config_for_env, test_config_verbose, test_config_with_colors,
-    test_config_with_dir, test_config_with_dir_and_env,
+    test_config, test_config_for_env, test_config_with_dir, test_config_with_dir_and_env,
 };
 pub use constants::*;
 pub use events::{
@@ -35,7 +34,7 @@ pub use service::{
 
 // Re-export commonly used external dependencies for convenience
 pub use selfie::{
-    config::AppConfigBuilder,
+    config::SelfieConfigBuilder,
     package::{Package, PackageBuilder},
 };
 pub use tempfile::TempDir;

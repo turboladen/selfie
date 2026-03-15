@@ -1,16 +1,14 @@
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{OperationFailure, OperationResult, PackageEvent},
-        port::PackageError,
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{OperationFailure, OperationResult, PackageEvent},
+    port::PackageError,
+    service::PackageService,
 };
 use std::collections::VecDeque;
 use tracing::info;
 
 use crate::{
     commands::package::common::{self, report_status},
+    config::CliConfig,
     event_processor::EventProcessor,
     terminal_progress_reporter::TerminalProgressReporter,
 };
@@ -64,12 +62,12 @@ impl InstallationDisplay {
 
 /// Handles events specifically for the install command
 struct InstallEventHandler<'a> {
-    config: &'a AppConfig,
+    config: &'a CliConfig,
     display: &'a mut InstallationDisplay,
 }
 
 impl<'a> InstallEventHandler<'a> {
-    fn new(config: &'a AppConfig, display: &'a mut InstallationDisplay) -> Self {
+    fn new(config: &'a CliConfig, display: &'a mut InstallationDisplay) -> Self {
         Self { config, display }
     }
 
@@ -155,7 +153,7 @@ impl<'a> InstallEventHandler<'a> {
 pub(crate) async fn handle_install(
     service: &dyn PackageService,
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     info!("Installing package: {}", package_name);
@@ -200,7 +198,7 @@ pub(crate) async fn handle_install(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
-fn display_environment_error(failure: &OperationFailure, config: &AppConfig) {
+fn display_environment_error(failure: &OperationFailure, config: &CliConfig) {
     println!();
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
@@ -229,16 +227,31 @@ fn display_environment_error(failure: &OperationFailure, config: &AppConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_common::{test_config, test_config_verbose};
+    use crate::config::CliSection;
+    use test_common::test_config;
 
     fn create_mock_reporter() -> TerminalProgressReporter {
         TerminalProgressReporter::new(false)
     }
 
+    fn cli_config_verbose() -> CliConfig {
+        CliConfig::new(
+            test_config(),
+            CliSection {
+                verbose: true,
+                use_colors: false,
+            },
+        )
+    }
+
+    fn cli_config_default() -> CliConfig {
+        CliConfig::new(test_config(), CliSection::default())
+    }
+
     #[tokio::test]
     async fn test_handle_install_basic() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = test_common::test_config_with_dir(temp_dir.path());
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(temp_dir.path()));
         let service = test_common::create_test_service(&temp_dir);
         let reporter = create_mock_reporter();
 
@@ -264,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_install_event_handler_progress_verbose() {
-        let config = test_config_verbose();
+        let config = cli_config_verbose();
         let reporter = create_mock_reporter();
         let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
@@ -276,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_install_event_handler_progress_non_verbose() {
-        let config = test_config();
+        let config = cli_config_default();
         let reporter = create_mock_reporter();
         let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
@@ -288,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_install_event_handler_info_verbose() {
-        let config = test_config_verbose();
+        let config = cli_config_verbose();
         let reporter = create_mock_reporter();
         let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);
@@ -301,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_install_event_handler_info_non_verbose() {
-        let config = test_config();
+        let config = cli_config_default();
         let reporter = create_mock_reporter();
         let mut display = InstallationDisplay::new(reporter);
         let mut handler = InstallEventHandler::new(&config, &mut display);

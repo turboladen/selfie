@@ -4,7 +4,7 @@
 
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         event::{
             EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult,
@@ -18,7 +18,7 @@ use crate::{
 pub(super) async fn handle_info<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,

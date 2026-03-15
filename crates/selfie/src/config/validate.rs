@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::AppConfig;
+use super::SelfieConfig;
 
 /// Result of configuration validation
 ///
@@ -38,7 +38,7 @@ impl ValidationResult {
     }
 }
 
-impl AppConfig {
+impl SelfieConfig {
     /// Perform comprehensive validation of the application configuration
     ///
     /// Validates all configuration fields including environment name,
@@ -134,7 +134,7 @@ fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> 
 
 #[cfg(test)]
 mod tests {
-    use crate::config::AppConfigBuilder;
+    use crate::config::SelfieConfigBuilder;
     use crate::validation::ValidationErrorCategory;
 
     use super::ConfigValidationError;
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn valid_environment_passes() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("/tmp/packages")
             .build();
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn empty_environment_produces_error() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("")
             .package_directory("/tmp/packages")
             .build();
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn valid_absolute_directory_passes() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/home/user/packages")
             .build();
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn empty_package_directory_produces_error() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("")
             .build();
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn relative_package_directory_produces_error() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("packages")
             .build();
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn tilde_package_directory_passes() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("~/packages")
             .build();
@@ -262,11 +262,11 @@ mod tests {
         assert!(dir_issues.is_empty());
     }
 
-    // --- AppConfig::validate() integration tests ---
+    // --- SelfieConfig::validate() integration tests ---
 
     #[test]
     fn valid_config_has_no_issues() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("/usr/local/packages")
             .build();
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn invalid_config_collects_all_issues() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("")
             .package_directory("")
             .build();
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn validation_result_accessors_work() {
-        let config = AppConfigBuilder::default()
+        let config = SelfieConfigBuilder::default()
             .environment("test")
             .package_directory("/test/path")
             .build();

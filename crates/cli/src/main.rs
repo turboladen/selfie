@@ -35,10 +35,7 @@ use std::process;
 
 use clap::Parser;
 use selfie::{
-    config::{
-        YamlLoader,
-        loader::{ApplyToConfig, ConfigLoader},
-    },
+    config::{YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
 use terminal_progress_reporter::TerminalProgressReporter;
@@ -106,15 +103,11 @@ async fn main() -> anyhow::Result<()> {
 
     let fs = RealFileSystem;
 
-    // Load and process configuration:
-    // - `config`: Used for most operations (includes CLI argument overrides)
-    // - `original_config`: Used for config commands that need the raw file content
-    let (config, original_config) = {
-        // 1. Load config.yaml
-        let config = YamlLoader::new(&fs).load_config()?;
-
-        // 2. Apply CLI args to config (overriding)
-        (args.apply_to_config(config.clone()), config)
+    // Load and process configuration
+    let config = {
+        let selfie_config = YamlLoader::new(&fs).load_config()?;
+        let cli_section = crate::config::load_cli_section(&fs);
+        args.build_cli_config(selfie_config, cli_section)
     };
 
     debug!("Final config: {:#?}", &config);
@@ -122,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Maybe don't need to build this until it's needed?
     let reporter = TerminalProgressReporter::new(config.use_colors());
 
-    // 3. Dispatch and execute the requested command
-    let exit_code = dispatch_command(&args.command, &config, original_config, reporter).await;
+    // Dispatch and execute the requested command
+    let exit_code = dispatch_command(&args.command, &config, reporter).await;
 
     process::exit(exit_code)
 }

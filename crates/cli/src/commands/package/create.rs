@@ -1,17 +1,14 @@
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use futures::StreamExt;
-use selfie::{
-    config::AppConfig,
-    package::{
-        EnvironmentConfig, PackageService,
-        event::{OperationResult, OperationSuccess, PackageEvent},
-        port::PackageRepository,
-    },
+use selfie::package::{
+    EnvironmentConfig, PackageService,
+    event::{OperationResult, OperationSuccess, PackageEvent},
+    port::PackageRepository,
 };
 use std::{collections::HashMap, path::PathBuf};
 use tracing::info;
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::{config::CliConfig, terminal_progress_reporter::TerminalProgressReporter};
 
 use super::common;
 
@@ -26,7 +23,7 @@ enum PackageNameResult {
 pub(crate) async fn handle_create(
     service: &dyn PackageService,
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
     interactive: bool,
 ) -> i32 {
@@ -214,7 +211,7 @@ fn get_valid_package_name(
     }
 }
 
-fn create_basic_package(package_name: &str, config: &AppConfig) -> selfie::package::Package {
+fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::package::Package {
     let mut environments = HashMap::new();
 
     // Use the environment from config (which may be overridden by --environment)
@@ -241,7 +238,7 @@ fn create_basic_package(package_name: &str, config: &AppConfig) -> selfie::packa
 
 fn create_package_interactive(
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> Result<selfie::package::Package, i32> {
     reporter.report_info("Creating package interactively...");
@@ -324,7 +321,7 @@ fn prompt_package_description(reporter: TerminalProgressReporter) -> Result<Opti
 
 fn prompt_environments(
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> Result<HashMap<String, EnvironmentConfig>, i32> {
     let mut environments = HashMap::new();
@@ -350,7 +347,7 @@ fn prompt_environments(
 
 fn prompt_environment_name(
     existing_environments: &HashMap<String, EnvironmentConfig>,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> Result<String, i32> {
     let default_env = if existing_environments.is_empty() {
@@ -410,7 +407,7 @@ fn prompt_check_command(
 }
 
 fn prompt_dependencies(
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> Result<Vec<String>, i32> {
     let repo = common::create_package_repository(config);
@@ -491,7 +488,7 @@ mod tests {
     #[test]
     fn test_basic_package_template() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package = create_basic_package("template-test", &config);
 
@@ -538,7 +535,7 @@ mod tests {
     #[test]
     fn test_package_template_structure() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package = create_basic_package("structure-test", &config);
 
@@ -560,7 +557,8 @@ mod tests {
     #[test]
     fn test_create_basic_package_with_custom_environment() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir_and_env(&package_dir, "staging");
+        let config =
+            CliConfig::wrap_for_test(test_config_with_dir_and_env(&package_dir, "staging"));
 
         let package = create_basic_package("test-staging", &config);
 
@@ -580,7 +578,8 @@ mod tests {
     #[test]
     fn test_handle_create_respects_environment_flag() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir_and_env(&package_dir, "production");
+        let config =
+            CliConfig::wrap_for_test(test_config_with_dir_and_env(&package_dir, "production"));
 
         let package = create_basic_package("prod-test", &config);
 
@@ -592,7 +591,7 @@ mod tests {
     #[test]
     fn test_package_name_validation_logic() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package = create_basic_package("new-unique-name", &config);
 
@@ -602,7 +601,7 @@ mod tests {
     #[test]
     fn test_create_basic_package_structure() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package = create_basic_package("structure-test", &config);
 
@@ -616,7 +615,8 @@ mod tests {
     #[test]
     fn test_package_creation_respects_config_environment() {
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir_and_env(&package_dir, "production");
+        let config =
+            CliConfig::wrap_for_test(test_config_with_dir_and_env(&package_dir, "production"));
 
         let package = create_basic_package("env-test", &config);
 
@@ -631,7 +631,7 @@ mod tests {
     async fn test_create_via_service_success() {
         let temp_dir = tempfile::tempdir().unwrap();
         let service = test_common::create_test_service(&temp_dir);
-        let config = test_config_with_dir(temp_dir.path());
+        let config = CliConfig::wrap_for_test(test_config_with_dir(temp_dir.path()));
 
         let package = create_basic_package("test-package", &config);
 
@@ -655,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_via_service_already_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = test_config_with_dir(temp_dir.path());
+        let config = CliConfig::wrap_for_test(test_config_with_dir(temp_dir.path()));
 
         // Pre-create a package file so the service finds it
         let _ = test_common::create_service_test_package_file(&temp_dir, "existing-pkg", true);
@@ -675,7 +675,8 @@ mod tests {
     #[tokio::test]
     async fn test_create_via_service_with_custom_environment() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = test_config_with_dir_and_env(temp_dir.path(), "production");
+        let config =
+            CliConfig::wrap_for_test(test_config_with_dir_and_env(temp_dir.path(), "production"));
         let service = test_common::create_test_service_for_env(&temp_dir, "production");
 
         let package = create_basic_package("prod-pkg", &config);
@@ -698,7 +699,7 @@ mod tests {
     async fn test_create_via_service_file_written_correctly() {
         let temp_dir = tempfile::tempdir().unwrap();
         let service = test_common::create_test_service(&temp_dir);
-        let config = test_config_with_dir(temp_dir.path());
+        let config = CliConfig::wrap_for_test(test_config_with_dir(temp_dir.path()));
 
         let package = create_basic_package("file-check", &config);
 
@@ -720,7 +721,7 @@ mod tests {
     fn test_create_package_name_validation_with_mock_repo() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         mock_repo
             .expect_get_package()
