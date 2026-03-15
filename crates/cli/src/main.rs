@@ -26,22 +26,21 @@
 mod cli;
 mod commands;
 mod config;
+mod display_manager;
 mod event_processor;
 mod formatters;
+mod status_style;
 mod tables;
-mod terminal_progress_reporter;
 
 use std::process;
 
 use clap::Parser;
+use display_manager::DisplayManager;
 use selfie::{
-    config::{
-        YamlLoader,
-        loader::{ApplyToConfg, ConfigLoader},
-    },
+    config::{YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
-use terminal_progress_reporter::TerminalProgressReporter;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::{cli::ClapCli, commands::dispatch_command};
@@ -98,6 +97,8 @@ fn init_tracing(verbose: bool) {
 /// program to exit with usage information rather than returning an error.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    human_panic::setup_panic!();
+
     let args = ClapCli::parse();
 
     // Initialize tracing based on verbose flag
@@ -106,24 +107,33 @@ async fn main() -> anyhow::Result<()> {
 
     let fs = RealFileSystem;
 
-    // Load and process configuration:
-    // - `config`: Used for most operations (includes CLI argument overrides)
-    // - `original_config`: Used for config commands that need the raw file content
-    let (config, original_config) = {
-        // 1. Load config.yaml
-        let config = YamlLoader::new(&fs).load_config()?;
-
-        // 2. Apply CLI args to config (overriding)
-        (args.apply_to_config(config.clone()), config)
+    // Load and process configuration
+    let config = {
+        let selfie_config = YamlLoader::new(&fs).load_config()?;
+        let cli_section = crate::config::load_cli_section(&fs);
+        args.build_cli_config(selfie_config, cli_section)
     };
 
     debug!("Final config: {:#?}", &config);
 
-    // TODO: Maybe don't need to build this until it's needed?
-    let reporter = TerminalProgressReporter::new(config.use_colors());
+    let display = DisplayManager::new(config.use_colors());
 
-    // 3. Dispatch and execute the requested command
-    let exit_code = dispatch_command(&args.command, &config, original_config, reporter).await;
+    // Set up graceful shutdown: first Ctrl+C cancels in-flight operations,
+    // second Ctrl+C forces immediate exit.
+    let cancellation_token = CancellationToken::new();
+    let token_clone = cancellation_token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            token_clone.cancel();
+            // Wait for a second Ctrl+C and force-exit
+            if tokio::signal::ctrl_c().await.is_ok() {
+                process::exit(130);
+            }
+        }
+    });
+
+    // Dispatch and execute the requested command
+    let exit_code = dispatch_command(&args.command, &config, display, cancellation_token).await;
 
     process::exit(exit_code)
 }

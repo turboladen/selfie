@@ -1,197 +1,262 @@
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{event, service::PackageService},
-};
+use selfie::package::{event, service::PackageService};
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::{
+    config::CliConfig,
+    display_manager::{DisplayManager, OperationHandle},
+    status_style,
+};
 
 use super::common;
 
 pub(crate) struct ListCommand<'a> {
-    config: &'a AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &'a CliConfig,
+    display: DisplayManager,
     show_all: bool,
 }
 
 impl<'a> ListCommand<'a> {
-    pub(crate) fn new(
-        config: &'a AppConfig,
-        reporter: TerminalProgressReporter,
-        show_all: bool,
-    ) -> Self {
+    pub(crate) fn new(config: &'a CliConfig, display: DisplayManager, show_all: bool) -> Self {
         Self {
             config,
-            reporter,
+            display,
             show_all,
         }
     }
 }
 
 impl ListCommand<'_> {
-    pub(crate) async fn handle_command(&self) -> i32 {
-        // Create the package service implementation
-        let service = common::create_package_service(self.config);
+    pub(crate) async fn handle_command(&self, service: &impl PackageService) -> i32 {
+        let event_stream = service.list(self.show_all).await;
 
-        // Call the service's list method to get an event stream
-        match service.list(self.show_all).await {
-            Ok(event_stream) => {
-                // Process the event stream with custom handling for structured data
-                let processor = crate::event_processor::EventProcessor::new(self.reporter);
-                let config = self.config;
-                let reporter = self.reporter;
-                let show_all = self.show_all;
-                let result = processor
-                    .process_events(event_stream, move |event| {
-                        handle_list_event(event, config, reporter, show_all)
-                    })
-                    .await;
-                result.exit_code
-            }
-            Err(e) => {
-                self.reporter
-                    .report_error(format!("Failed to list packages: {e}"));
-                1
-            }
-        }
+        let processor = crate::event_processor::EventProcessor::new(self.display.clone());
+        let config = self.config;
+        let display = &self.display;
+        let show_all = self.show_all;
+        let use_colors = config.use_colors();
+        let is_tty = display.is_tty();
+
+        // Single spinner for the check phase + streaming result lines
+        let mut spinner: Option<OperationHandle> = None;
+        let mut max_name_len: usize = 0;
+        let mut total_packages: usize = 0;
+        let mut checked_count: usize = 0;
+
+        let result = processor
+            .process_events(event_stream, |event| {
+                handle_list_event(
+                    event,
+                    config,
+                    display,
+                    use_colors,
+                    show_all,
+                    is_tty,
+                    &mut spinner,
+                    &mut max_name_len,
+                    &mut total_packages,
+                    &mut checked_count,
+                )
+            })
+            .await;
+        result.exit_code
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_list_event(
     event: &event::PackageEvent,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: &DisplayManager,
+    use_colors: bool,
     show_all: bool,
+    is_tty: bool,
+    spinner: &mut Option<OperationHandle>,
+    max_name_len: &mut usize,
+    total_packages: &mut usize,
+    checked_count: &mut usize,
 ) -> bool {
     match event {
-        event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Show package directory path
-            println!("📁 Package directory: {}", package_list.package_directory);
+        event::PackageEvent::PackageListReady { packages, .. } => {
+            *max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
+            *total_packages = packages.len();
+            *checked_count = 0;
 
-            if package_list.valid_packages.is_empty() && package_list.environment_stats.is_empty() {
+            if is_tty && !packages.is_empty() {
+                *spinner = Some(
+                    display
+                        .start_list_spinner(format!("Checking packages (0/{})...", total_packages)),
+                );
+            }
+            true
+        }
+
+        event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
+            *checked_count += 1;
+            let status_text =
+                status_style::format_check_result(package_item.status.as_ref(), use_colors);
+            let version = format!("v{}", package_item.version);
+
+            // Format the result line
+            let prefix = match &package_item.status {
+                Some(event::CheckResult::Success { .. }) => {
+                    if use_colors {
+                        style("✓").green().bold().to_string()
+                    } else {
+                        "✓".to_string()
+                    }
+                }
+                Some(event::CheckResult::Failed { .. })
+                | Some(event::CheckResult::CommandNotFound)
+                | Some(event::CheckResult::Error(_)) => {
+                    if use_colors {
+                        style("✗").red().bold().to_string()
+                    } else {
+                        "✗".to_string()
+                    }
+                }
+                Some(event::CheckResult::NoCheckCommand) | None => {
+                    if use_colors {
+                        style("⚠").yellow().bold().to_string()
+                    } else {
+                        "⚠".to_string()
+                    }
+                }
+            };
+
+            let line = if show_all {
+                let envs = common::format_environment_names(
+                    &package_item.environments,
+                    config.environment(),
+                    config,
+                );
+                format!(
+                    "{prefix} {:<width$}  {:<10}  {status_text}  ({envs})",
+                    package_item.name,
+                    version,
+                    width = *max_name_len
+                )
+            } else {
+                format!(
+                    "{prefix} {:<width$}  {:<10}  {status_text}",
+                    package_item.name,
+                    version,
+                    width = *max_name_len
+                )
+            };
+
+            if let Some(handle) = spinner.as_ref() {
+                // Print result line above the spinner
+                handle.println(&line);
+                // Update spinner with progress count
+                handle.set_message(format!(
+                    "Checking packages ({}/{})...",
+                    checked_count, total_packages
+                ));
+            } else {
+                // Non-TTY or no spinner: print directly
+                println!("{line}");
+            }
+            true
+        }
+
+        event::PackageEvent::PackageListLoaded { package_list, .. } => {
+            // Print invalid packages inline with error status,
+            // filtered to the current environment (unless --all)
+            if !package_list.invalid_packages.is_empty() {
+                let current_env = config.environment();
+                for invalid in &package_list.invalid_packages {
+                    let clean_error = clean_error_message(&invalid.error, &invalid.path);
+
+                    // Filter: only show errors relevant to the current environment
+                    // (or all errors when --all). Since invalid packages failed to
+                    // parse, we can't inspect their environments — but the error
+                    // message often contains the environment name.
+                    if !show_all && !error_matches_environment(&clean_error, current_env) {
+                        continue;
+                    }
+
+                    let filename = std::path::Path::new(&invalid.path)
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&invalid.path);
+
+                    let error_text = if use_colors {
+                        style(clean_error).red().to_string()
+                    } else {
+                        clean_error
+                    };
+
+                    let prefix = if use_colors {
+                        style("✗").red().bold().to_string()
+                    } else {
+                        "✗".to_string()
+                    };
+
+                    let line = format!(
+                        "{prefix} {:<width$}  {:<10}  {error_text}",
+                        filename,
+                        "",
+                        width = *max_name_len
+                    );
+
+                    if let Some(handle) = spinner.as_ref() {
+                        handle.println(&line);
+                    } else {
+                        println!("{line}");
+                    }
+                }
+            }
+
+            // Clear the spinner before printing summary
+            if let Some(handle) = spinner.take() {
+                handle.finish_clear();
+            }
+
+            println!();
+            println!("Package directory: {}", package_list.package_directory);
+
+            let valid = package_list.valid_packages.len();
+            let invalid = package_list.invalid_packages.len();
+            let total = valid + invalid;
+
+            if total == 0 && package_list.environment_stats.is_empty() {
                 println!("No packages found.");
-            } else if package_list.valid_packages.is_empty() {
+            } else if valid == 0 && invalid == 0 {
                 println!(
                     "No packages found for environment '{}'.",
                     config.environment()
                 );
                 display_environment_stats(&package_list.environment_stats, config);
+            } else if invalid > 0 {
+                println!("{valid} valid, {invalid} invalid");
             } else {
-                display_packages_table(&package_list.valid_packages, config, reporter, show_all);
+                println!("{valid} packages");
             }
-
-            // Always display invalid packages if they exist
-            if !package_list.invalid_packages.is_empty() {
-                display_invalid_packages_table(&package_list.invalid_packages, config);
-            }
-            true // Handled
+            true
         }
-        _ => false, // Use default handling for other events
+
+        event::PackageEvent::Progress { .. } => {
+            true // Suppress — spinner is the progress indicator
+        }
+
+        _ => false,
     }
 }
 
-fn display_packages_table(
-    packages: &[selfie::package::event::PackageListItem],
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
-    show_all: bool,
-) {
-    if packages.is_empty() {
-        return;
-    }
-
-    let mut table = common::create_formatted_table();
-
-    if show_all {
-        table.set_header(vec!["Name", "Version", "Environments", "Status"]);
+/// Check if an error message is relevant to a specific environment.
+///
+/// Since invalid packages failed to parse, we can't inspect their environment
+/// list directly. Instead, check if the error mentions the environment name
+/// (e.g., "environments.macos-home: missing field"). Errors that don't mention
+/// any environment are shown regardless (they affect all environments).
+fn error_matches_environment(error: &str, environment: &str) -> bool {
+    if error.contains("environments.") {
+        // Error is environment-specific — only show if it matches
+        error.contains(&format!("environments.{environment}"))
     } else {
-        table.set_header(vec!["Name", "Version", "Status"]);
+        // Error is not environment-specific (e.g., missing `name` field) — always show
+        true
     }
-
-    for package in packages {
-        let package_name = if config.use_colors() {
-            style(&package.name).magenta().bold().to_string()
-        } else {
-            package.name.clone()
-        };
-
-        let version = if config.use_colors() {
-            style(format!("v{}", package.version)).dim().to_string()
-        } else {
-            format!("v{}", package.version)
-        };
-
-        let status = format_status(package.status.as_ref(), reporter);
-
-        if show_all {
-            let environments = common::format_environment_names(
-                &package.environments,
-                config.environment(),
-                config,
-            );
-            table.add_row(vec![package_name, version, environments, status]);
-        } else {
-            table.add_row(vec![package_name, version, status]);
-        }
-    }
-
-    println!("{table}");
-}
-
-fn format_status(
-    status: Option<&event::CheckResult>,
-    reporter: TerminalProgressReporter,
-) -> String {
-    match status {
-        Some(event::CheckResult::Success) => reporter.format_installed(),
-        Some(event::CheckResult::Failed { .. }) => reporter.format_not_installed(),
-        Some(event::CheckResult::NoCheckCommand) => reporter.format_no_check(),
-        Some(event::CheckResult::CommandNotFound) => reporter.format_cmd_not_found(),
-        Some(event::CheckResult::Error(_)) => reporter.format_status_error(),
-        None => reporter.format_na(),
-    }
-}
-
-fn display_invalid_packages_table(
-    invalid_packages: &[selfie::package::event::InvalidPackageInfo],
-    config: &AppConfig,
-) {
-    if invalid_packages.is_empty() {
-        return;
-    }
-
-    eprintln!();
-    eprintln!("⚠️ Invalid Package Files:");
-
-    let mut table = common::create_formatted_table();
-    table.set_header(vec!["Package File", "Issue"]);
-
-    for invalid_package in invalid_packages {
-        // Extract just the filename from the full path
-        let filename = std::path::Path::new(&invalid_package.path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&invalid_package.path);
-
-        let filename_styled = if config.use_colors() {
-            console::style(filename).red().to_string()
-        } else {
-            filename.to_string()
-        };
-
-        // Clean up the error message by removing redundant file path information
-        let clean_error = clean_error_message(&invalid_package.error, &invalid_package.path);
-
-        let error_styled = if config.use_colors() {
-            console::style(clean_error).dim().to_string()
-        } else {
-            clean_error
-        };
-
-        table.add_row(vec![filename_styled, error_styled]);
-    }
-
-    eprintln!("{table}");
 }
 
 fn clean_error_message(error: &str, file_path: &str) -> String {
@@ -223,14 +288,14 @@ fn clean_error_message(error: &str, file_path: &str) -> String {
 
 fn display_environment_stats(
     environment_stats: &std::collections::HashMap<String, usize>,
-    config: &AppConfig,
+    config: &CliConfig,
 ) {
     if environment_stats.is_empty() {
         return;
     }
 
     println!();
-    println!("📊 Packages by environment in this directory:");
+    println!("Packages by environment in this directory:");
 
     // Sort environments by package count (descending), then by name
     let mut env_counts: Vec<(String, usize)> = environment_stats
@@ -267,7 +332,7 @@ fn display_environment_stats(
 
     if config.use_colors() {
         println!(
-            "💡 Try: {} to see packages for a different environment",
+            "Try: {} to see packages for a different environment",
             console::style("--environment <env>").yellow()
         );
         println!(
@@ -275,7 +340,7 @@ fn display_environment_stats(
             console::style("--all").yellow()
         );
     } else {
-        println!("💡 Try: --environment <env> to see packages for a different environment");
+        println!("Try: --environment <env> to see packages for a different environment");
         println!("   or: --all to see all packages regardless of environment");
     }
 }
@@ -284,64 +349,39 @@ fn display_environment_stats(
 mod tests {
     use super::*;
     use selfie::package::event::PackageListItem;
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION, test_config, test_config_with_colors};
+    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
 
-    fn create_mock_reporter() -> TerminalProgressReporter {
-        TerminalProgressReporter::new(false)
+    /// Helper to call handle_list_event with test defaults (non-TTY, no spinners)
+    fn test_handle_event(event: &event::PackageEvent, config: &CliConfig, show_all: bool) -> bool {
+        let display = DisplayManager::new(false);
+        let use_colors = config.use_colors();
+        let mut spinner = None;
+        let mut max_name_len = 0;
+        let mut total_packages = 0;
+        let mut checked_count = 0;
+        handle_list_event(
+            event,
+            config,
+            &display,
+            use_colors,
+            show_all,
+            false,
+            &mut spinner,
+            &mut max_name_len,
+            &mut total_packages,
+            &mut checked_count,
+        )
     }
 
     #[test]
     fn test_list_command_new() {
-        let config = test_config();
-        let reporter = create_mock_reporter();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let display = DisplayManager::new(false);
 
-        let command = ListCommand::new(&config, reporter, false);
+        let command = ListCommand::new(&config, display, false);
         // Just test that construction doesn't panic
         assert_eq!(command.config.environment(), "test-env");
         assert!(!command.show_all);
-    }
-
-    #[test]
-    fn test_display_packages_table_empty() {
-        let config = test_config();
-        let packages = vec![];
-
-        // Should not panic with empty list
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        display_packages_table(&packages, &config, reporter, false);
-        display_packages_table(&packages, &config, reporter, true);
-    }
-
-    #[test]
-    fn test_display_packages_table_single_package() {
-        let config = test_config();
-        let packages = vec![PackageListItem {
-            name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
-            environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
-        }];
-
-        // Should not panic
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        display_packages_table(&packages, &config, reporter, false);
-        display_packages_table(&packages, &config, reporter, true);
-    }
-
-    #[test]
-    fn test_display_packages_table_with_colors() {
-        let config = test_config_with_colors();
-        let packages = vec![PackageListItem {
-            name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
-            environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
-        }];
-
-        // Should not panic with colors enabled
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        display_packages_table(&packages, &config, reporter, false);
-        display_packages_table(&packages, &config, reporter, true);
     }
 
     #[test]
@@ -353,34 +393,13 @@ mod tests {
 
     #[test]
     fn test_format_environments() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
 
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
 
         // Just test that it doesn't panic and returns something
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_display_invalid_packages_table_empty() {
-        let config = test_config();
-        let invalid_packages = vec![];
-
-        // Should not panic with empty list
-        display_invalid_packages_table(&invalid_packages, &config);
-    }
-
-    #[test]
-    fn test_display_invalid_packages_table_with_items() {
-        let config = test_config();
-        let invalid_packages = vec![selfie::package::event::InvalidPackageInfo {
-            path: "/path/to/test-package.yml".to_string(),
-            error: "missing field `name`".to_string(),
-        }];
-
-        // Should not panic
-        display_invalid_packages_table(&invalid_packages, &config);
     }
 
     #[test]
@@ -405,101 +424,78 @@ mod tests {
     }
 
     #[test]
-    fn test_format_status_n_a() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
+    fn test_format_check_status_installed() {
+        let result = status_style::format_check_result(
+            Some(&event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            false,
+        );
+        assert_eq!(result, "Installed");
+    }
 
-        // Test N/A status without colors
-        let result = format_status(None, TerminalProgressReporter::new(config.use_colors()));
-        assert!(result.contains("⚪") || result.contains("[N/A]"));
+    #[test]
+    fn test_format_check_status_not_installed() {
+        let result = status_style::format_check_result(
+            Some(&event::CheckResult::Failed {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(1),
+            }),
+            false,
+        );
+        assert_eq!(result, "Not installed");
+    }
+
+    #[test]
+    fn test_format_check_status_no_check() {
+        let result =
+            status_style::format_check_result(Some(&event::CheckResult::NoCheckCommand), false);
+        assert_eq!(result, "No check");
+    }
+
+    #[test]
+    fn test_format_check_status_cmd_not_found() {
+        let result =
+            status_style::format_check_result(Some(&event::CheckResult::CommandNotFound), false);
+        assert_eq!(result, "Cmd not found");
+    }
+
+    #[test]
+    fn test_format_check_status_error() {
+        let result = status_style::format_check_result(
+            Some(&event::CheckResult::Error("test error".to_string())),
+            false,
+        );
+        assert_eq!(result, "Error: test error");
+    }
+
+    #[test]
+    fn test_format_check_status_na() {
+        let result = status_style::format_check_result(None, false);
+        assert_eq!(result, "N/A");
+    }
+
+    #[test]
+    fn test_format_check_status_with_colors() {
+        // Just verify these don't panic and return non-empty strings
+        let result = status_style::format_check_result(
+            Some(&event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            true,
+        );
+        assert!(result.contains("Installed"));
+
+        let result = status_style::format_check_result(None, true);
         assert!(result.contains("N/A"));
-
-        // Test N/A status with colors
-        let result_colored = format_status(
-            None,
-            TerminalProgressReporter::new(config_with_colors.use_colors()),
-        );
-        assert!(result_colored.contains("⚪") || result_colored.contains("[N/A]"));
-        assert!(result_colored.contains("N/A"));
-    }
-
-    #[test]
-    fn test_format_status_not_installed() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
-
-        // Test "Not installed" status without colors
-        let result = format_status(
-            Some(&event::CheckResult::Failed {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: Some(1),
-            }),
-            TerminalProgressReporter::new(config.use_colors()),
-        );
-        assert!(result.contains("📦") || result.contains("[×]"));
-        assert!(result.contains("Not installed"));
-
-        // Test "Not installed" status with colors (should contain the emoji and text)
-        let result_colored = format_status(
-            Some(&event::CheckResult::Failed {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: Some(1),
-            }),
-            TerminalProgressReporter::new(config_with_colors.use_colors()),
-        );
-        assert!(result_colored.contains("📦") || result_colored.contains("[×]"));
-        assert!(result_colored.contains("Not installed"));
-    }
-
-    #[test]
-    fn test_format_status_command_not_found() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
-
-        // Test "Cmd not found" status without colors
-        let result = format_status(
-            Some(&event::CheckResult::CommandNotFound),
-            TerminalProgressReporter::new(config.use_colors()),
-        );
-        assert!(result.contains("🔍") || result.contains("[!]"));
-        assert!(result.contains("Cmd not found"));
-
-        // Test "Cmd not found" status with colors
-        let result_colored = format_status(
-            Some(&event::CheckResult::CommandNotFound),
-            TerminalProgressReporter::new(config_with_colors.use_colors()),
-        );
-        assert!(result_colored.contains("🔍") || result_colored.contains("[!]"));
-        assert!(result_colored.contains("Cmd not found"));
-    }
-
-    #[test]
-    fn test_format_status_error() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
-
-        // Test "Error" status without colors
-        let result = format_status(
-            Some(&event::CheckResult::Error("test error".to_string())),
-            TerminalProgressReporter::new(config.use_colors()),
-        );
-        assert!(result.contains("💥") || result.contains("[E]"));
-        assert!(result.contains("Error"));
-
-        // Test "Error" status with colors
-        let result_colored = format_status(
-            Some(&event::CheckResult::Error("test error".to_string())),
-            TerminalProgressReporter::new(config_with_colors.use_colors()),
-        );
-        assert!(result_colored.contains("💥") || result_colored.contains("[E]"));
-        assert!(result_colored.contains("Error"));
     }
 
     #[test]
     fn test_display_environment_stats_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environment_stats = std::collections::HashMap::new();
 
         // Should not panic with empty stats
@@ -508,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_single_environment() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
 
@@ -518,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_multiple_environments() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
         environment_stats.insert("ubuntu".to_string(), 2);
@@ -530,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert(TEST_ENV.to_string(), 2);
         environment_stats.insert("other-env".to_string(), 1);
@@ -541,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_empty_packages_and_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
             invalid_packages: vec![],
@@ -556,14 +552,13 @@ mod tests {
         };
 
         // Should handle empty packages and empty stats (shows "No packages found.")
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
 
     #[test]
     fn test_handle_list_event_no_packages_but_has_environment_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
         environment_stats.insert("ubuntu".to_string(), 2);
@@ -582,19 +577,21 @@ mod tests {
         };
 
         // Should handle no packages but with environment stats (shows environment stats)
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
 
     #[test]
     fn test_handle_list_event_with_valid_packages() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         };
 
         let mut environment_stats = std::collections::HashMap::new();
@@ -613,15 +610,14 @@ mod tests {
             package_list,
         };
 
-        // Should handle valid packages (displays package table)
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        // Should handle valid packages (displays summary)
+        let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
 
     #[test]
     fn test_handle_list_event_with_invalid_packages_only() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let invalid_package = selfie::package::event::InvalidPackageInfo {
             path: "/test/invalid.yml".to_string(),
             error: "missing field `name`".to_string(),
@@ -640,20 +636,22 @@ mod tests {
             package_list,
         };
 
-        // Should handle invalid packages only (shows "No packages found." + invalid table)
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        // Should handle invalid packages only (shows "No packages found." + invalid list)
+        let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
 
     #[test]
     fn test_handle_list_event_mixed_packages_and_environment_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success),
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         };
 
         let invalid_package = selfie::package::event::InvalidPackageInfo {
@@ -678,9 +676,76 @@ mod tests {
             package_list,
         };
 
-        // Should handle mixed scenario (shows package table + invalid table)
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let result = handle_list_event(&event, &config, reporter, false);
+        // Should handle mixed scenario (shows summary + invalid list)
+        let result = test_handle_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_package_list_ready() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let packages = vec![
+            PackageListItem {
+                name: "alpha".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+            PackageListItem {
+                name: "beta".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+        ];
+
+        let event = event::PackageEvent::PackageListReady {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            packages,
+        };
+
+        // In non-TTY mode, PackageListReady should be handled but not create spinners
+        let result = test_handle_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_package_item_completed() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let package_item = PackageListItem {
+            name: "test-package".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        };
+
+        let event = event::PackageEvent::PackageListItemCompleted {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_item,
+        };
+
+        // In non-TTY mode, should print the result line directly
+        let result = test_handle_event(&event, &config, false);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_handle_list_event_progress_suppressed() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+
+        let event = event::PackageEvent::Progress {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            message: "Checking packages...".to_string(),
+            step: 1,
+            total_steps: 5,
+            percent_complete: 0.2,
+        };
+
+        // Progress events should be suppressed (return true = handled)
+        let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
 }

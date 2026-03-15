@@ -8,20 +8,24 @@ use console::style;
 
 use selfie::{
     commands::ShellCommandRunner,
-    config::AppConfig,
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
-        GetPackage, port::PackageRepository, repository::yaml::YamlPackageRepository,
-        service::PackageServiceImpl,
+        GetPackage,
+        port::PackageRepository,
+        repository::yaml::YamlPackageRepository,
+        service::{PackageService, PackageServiceImpl},
     },
 };
+use tokio_util::sync::CancellationToken;
+
+use crate::config::CliConfig;
 use std::{path::Path, process::Command};
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 /// Create a package repository instance with the configured package directory
 pub(super) fn create_package_repository(
-    config: &AppConfig,
+    config: &CliConfig,
 ) -> YamlPackageRepository<RealFileSystem> {
     create_package_repository_with_fs(config, RealFileSystem)
 }
@@ -29,7 +33,7 @@ pub(super) fn create_package_repository(
 /// Create a package repository with a specific filesystem implementation
 /// This is useful for testing with `MockFileSystem`
 pub(super) fn create_package_repository_with_fs<F: FileSystem>(
-    config: &AppConfig,
+    config: &CliConfig,
     fs: F,
 ) -> YamlPackageRepository<F> {
     YamlPackageRepository::new(fs, config.package_directory().clone())
@@ -39,10 +43,10 @@ pub(super) fn create_package_repository_with_fs<F: FileSystem>(
 pub(super) fn save_package(
     repo: &impl PackageRepository,
     package_blob: &GetPackage,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<(), i32> {
-    if let Err(e) = repo.save_package(&package_blob.package, &package_blob.file_path) {
-        reporter.report_error(format!("Failed to save package file: {e}"));
+    if let Err(e) = repo.save_package(package_blob.package(), package_blob.file_path()) {
+        display.print_error(format!("Failed to save package file: {e}"));
         return Err(1);
     }
     Ok(())
@@ -57,12 +61,12 @@ pub(super) fn save_package(
 /// - Providing appropriate success/failure messages
 pub(super) fn open_editor(
     file_path: &Path,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
     success_message: Option<String>,
 ) -> i32 {
     let Ok(editor) = std::env::var("EDITOR") else {
-        reporter.report_error("EDITOR environment variable is not set.");
-        reporter.report_info("Please set EDITOR and try again.");
+        display.print_error("EDITOR environment variable is not set.");
+        display.print_info("Please set EDITOR and try again.");
         return 1;
     };
 
@@ -77,16 +81,16 @@ pub(super) fn open_editor(
     match cmd.status() {
         Ok(status) if status.success() => {
             if let Some(message) = success_message {
-                reporter.report_success(message);
+                display.print_success(message);
             }
             0
         }
         Ok(_) => {
-            reporter.report_warning("Editor exited with non-zero status.");
+            display.print_warning("Editor exited with non-zero status.");
             1
         }
         Err(e) => {
-            reporter.report_error(format!("Failed to start editor '{editor}': {e}"));
+            display.print_error(format!("Failed to start editor '{editor}': {e}"));
             1
         }
     }
@@ -97,7 +101,7 @@ pub(super) fn open_editor(
 /// Returns the editor command if available, or reports an error and returns None.
 /// Provides context-specific error messages for different scenarios.
 pub(super) fn check_editor_available(
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
     package_name: &str,
     package_exists: bool,
     package_path: Option<&Path>,
@@ -105,22 +109,22 @@ pub(super) fn check_editor_available(
     if let Ok(editor) = std::env::var("EDITOR") {
         Some(editor)
     } else {
-        reporter.report_error("EDITOR environment variable is not set.");
+        display.print_error("EDITOR environment variable is not set.");
 
         if package_exists {
             if let Some(path) = package_path {
-                reporter.report_info(format!(
+                display.print_info(format!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
                     package_name,
                     path.display()
                 ));
             } else {
-                reporter.report_info(format!(
+                display.print_info(format!(
                     "Package '{package_name}' exists. Set EDITOR to edit it automatically."
                 ));
             }
         } else {
-            reporter.report_info(format!(
+            display.print_info(format!(
                 "Package '{package_name}' doesn't exist yet. Set EDITOR and try again to create it."
             ));
         }
@@ -129,17 +133,26 @@ pub(super) fn check_editor_available(
 }
 
 /// Create a new package template
-pub(super) fn create_new_package(package_name: &str, config: &AppConfig) -> GetPackage {
+pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
     GetPackage::new(package_name, config.package_directory())
 }
 
 /// Create a package service with repository and command runner
-pub(super) fn create_package_service(
-    config: &AppConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+pub(crate) fn create_package_service(
+    config: &CliConfig,
+    cancellation_token: CancellationToken,
+) -> impl PackageService {
     let repo = create_package_repository(config);
-    let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-    PackageServiceImpl::new(repo, command_runner, config.clone())
+    let command_runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.command_timeout(),
+    );
+    PackageServiceImpl::new(
+        repo,
+        command_runner,
+        config.selfie_config().clone(),
+        cancellation_token,
+    )
 }
 
 /// Create a formatted table with consistent styling
@@ -157,7 +170,7 @@ pub(super) fn create_formatted_table() -> Table {
 pub(super) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
-    config: &AppConfig,
+    config: &CliConfig,
 ) -> String {
     let mut sorted_envs = environments.to_vec();
 
@@ -210,18 +223,12 @@ pub(super) fn format_field_value(value: &str, use_colors: bool) -> String {
     }
 }
 
-/// Creates a consistent animated spinner with the same styling used across
-/// all package commands that perform subprocess operations.
-pub(super) fn report_status(message: &str) {
-    eprintln!("{} {}", console::style("⚡").green(), message);
-}
-
 /// Display environment error with available environments for a specific package
 pub(crate) fn display_environment_summary(
     package_name: &str,
     current_environment: &str,
     available_environments: &[String],
-    config: &AppConfig,
+    config: &CliConfig,
     context: &str, // "check" or "install"
 ) {
     println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
@@ -273,7 +280,7 @@ pub(crate) fn display_environment_summary(
 pub(crate) fn display_generic_environment_suggestion(
     package_name: &str,
     current_environment: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     context: &str, // "check" or "install"
 ) {
     println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
@@ -301,69 +308,6 @@ pub(crate) fn display_generic_environment_suggestion(
     }
 }
 
-/// Shared state for tracking PackageNotFound errors across event handling
-#[derive(Debug, Default)]
-pub(crate) struct PackageNotFoundTracker {
-    handled_package_not_found: bool,
-}
-
-impl PackageNotFoundTracker {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Handle PackageNotFound errors consistently across all package commands
-    /// Returns true if this was a PackageNotFound error that was handled
-    pub(crate) fn handle_package_not_found_error(
-        &mut self,
-        error: &selfie::package::event::error::StreamedError,
-    ) -> bool {
-        use selfie::package::{
-            event::error::StreamedError,
-            port::{PackageError, PackageRepoError},
-        };
-
-        if let StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)) = error {
-            if let PackageError::PackageNotFound {
-                name,
-                packages_path,
-                ..
-            } = pkg_error.as_ref()
-            {
-                // Display the error message in the expected format, matching the install command
-                eprintln!(
-                    "❌ Error fetching package from repository: Package `{}` not found in path {}",
-                    name,
-                    packages_path.display()
-                );
-                self.handled_package_not_found = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if we should suppress completion error messages due to already handling PackageNotFound
-    pub(crate) fn should_suppress_completion_error(
-        &self,
-        result: &selfie::package::event::OperationResult,
-    ) -> bool {
-        use selfie::package::event::{OperationFailure, OperationResult, PackageFailure};
-
-        if !self.handled_package_not_found {
-            return false;
-        }
-
-        // Suppress completion errors for PackageNotFound when we've already handled them
-        matches!(
-            result,
-            OperationResult::Failure(OperationFailure::PackageError(
-                PackageFailure::NotFound { .. }
-            ))
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,7 +318,7 @@ mod tests {
     fn test_create_package_repository() {
         // Test repository creation without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let repo = create_package_repository(&config);
         // Just verify we can create it without panicking
@@ -385,14 +329,17 @@ mod tests {
     fn test_create_new_package() {
         // Test package creation logic without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("test-package", &config);
 
-        assert!(package_blob.is_new);
-        assert_eq!(package_blob.package.name(), "test-package");
-        assert_eq!(package_blob.package.version(), "0.1.0");
-        assert_eq!(package_blob.file_path, package_dir.join("test-package.yml"));
+        assert!(package_blob.is_new());
+        assert_eq!(package_blob.package().name(), "test-package");
+        assert_eq!(package_blob.package().version(), "0.1.0");
+        assert_eq!(
+            package_blob.file_path(),
+            package_dir.join("test-package.yml")
+        );
     }
 
     #[test]
@@ -417,18 +364,18 @@ mod tests {
     fn test_save_package_logic() {
         // Test save package logic without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("save-test", &config);
 
         // Verify package structure is correct before saving
-        assert!(package_blob.is_new);
-        assert_eq!(package_blob.package.name(), "save-test");
-        assert_eq!(package_blob.package.version(), "0.1.0");
-        assert_eq!(package_blob.file_path, package_dir.join("save-test.yml"));
+        assert!(package_blob.is_new());
+        assert_eq!(package_blob.package().name(), "save-test");
+        assert_eq!(package_blob.package().version(), "0.1.0");
+        assert_eq!(package_blob.file_path(), package_dir.join("save-test.yml"));
 
         // Verify it has default environment (since create_new_package uses GetPackage::new)
-        let environments = package_blob.package.environments();
+        let environments = package_blob.package().environments();
         assert!(environments.contains_key("default"));
     }
 
@@ -437,20 +384,20 @@ mod tests {
         // Test package creation logic without filesystem operations
         // Note: create_new_package uses GetPackage::new which creates a "default" environment
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("structure-test", &config);
 
-        assert!(package_blob.is_new);
-        assert_eq!(package_blob.package.name(), "structure-test");
-        assert_eq!(package_blob.package.version(), "0.1.0");
+        assert!(package_blob.is_new());
+        assert_eq!(package_blob.package().name(), "structure-test");
+        assert_eq!(package_blob.package().version(), "0.1.0");
         assert_eq!(
-            package_blob.file_path,
+            package_blob.file_path(),
             package_dir.join("structure-test.yml")
         );
 
         // create_new_package uses GetPackage::new which creates "default" environment
-        let environments = package_blob.package.environments();
+        let environments = package_blob.package().environments();
         assert!(environments.contains_key("default"));
     }
 
@@ -458,9 +405,9 @@ mod tests {
     fn test_create_package_service() {
         // Test service creation without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
-        let service = create_package_service(&config);
+        let service = create_package_service(&config, CancellationToken::new());
         // Just verify we can create it without panicking
         drop(service);
     }
@@ -469,9 +416,9 @@ mod tests {
     fn test_create_package_repository_generic() {
         // Test that the generic repository creation function works
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
-        let repo = create_package_repository_with_fs(&config, selfie::fs::real::RealFileSystem);
+        let repo = create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
         // Just verify we can create it without panicking
         drop(repo);
     }
@@ -487,7 +434,7 @@ mod tests {
     fn test_format_environment_names() {
         // Test environment name formatting without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let environments = vec!["test".to_string(), "production".to_string()];
 
         let result = format_environment_names(&environments, "test", &config);
@@ -500,7 +447,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_ordering() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test with current environment not first in input list
         let environments = vec![
@@ -531,7 +478,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_single_environment() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let environments = vec!["macos-work".to_string()];
         let result = format_environment_names(&environments, "macos-work", &config);
@@ -542,7 +489,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_current_not_present() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let environments = vec!["arch-home".to_string(), "ubuntu-server".to_string()];
         let result = format_environment_names(&environments, "macos-work", &config);
@@ -568,16 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn test_report_status() {
-        // This test just ensures the function doesn't panic
-        report_status("Test message");
-    }
-
-    #[test]
     fn test_save_package_with_mock_repository() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save operation
         mock_repo
@@ -586,10 +527,10 @@ mod tests {
             .returning(|_, _| Ok(()));
 
         let package_blob = create_new_package("mock-repo-test", &config);
-        let reporter = TerminalProgressReporter::new(false);
+        let display = DisplayManager::new(false);
 
         // Test saving using mocked repository - tests CLI logic, not repository implementation
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_ok());
 
         // This demonstrates testing CLI logic without repository implementation details
@@ -599,7 +540,7 @@ mod tests {
     fn test_save_package_repository_error_handling() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock repository error
         mock_repo.expect_save_package().times(1).returning(|_, _| {
@@ -612,10 +553,10 @@ mod tests {
         });
 
         let package_blob = create_new_package("error-test", &config);
-        let reporter = TerminalProgressReporter::new(false);
+        let display = DisplayManager::new(false);
 
         // Test error handling in CLI layer
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), 1); // Should return error code 1
 
@@ -626,7 +567,7 @@ mod tests {
     fn test_package_workflow_with_mock_repository() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save
         mock_repo
@@ -638,13 +579,18 @@ mod tests {
         let package_blob = create_new_package("workflow-test", &config);
 
         // Verify package structure before saving
-        assert_eq!(package_blob.package.name(), "workflow-test");
-        assert_eq!(package_blob.package.version(), "0.1.0");
-        assert!(package_blob.package.environments().contains_key("default"));
+        assert_eq!(package_blob.package().name(), "workflow-test");
+        assert_eq!(package_blob.package().version(), "0.1.0");
+        assert!(
+            package_blob
+                .package()
+                .environments()
+                .contains_key("default")
+        );
 
         // Test saving through CLI layer
-        let reporter = TerminalProgressReporter::new(false);
-        let result = save_package(&mock_repo, &package_blob, reporter);
+        let display = DisplayManager::new(false);
+        let result = save_package(&mock_repo, &package_blob, &display);
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation
@@ -652,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_summary() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![
             "macos".to_string(),
             "ubuntu".to_string(),
@@ -665,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_summary_empty() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![];
 
         // Should not panic with empty environments (falls back to generic suggestion)
@@ -674,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_display_generic_environment_suggestion() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
 
         // Should not panic with any inputs
         display_generic_environment_suggestion("test-package", "test-env", &config, "check");
@@ -682,59 +628,9 @@ mod tests {
 
     #[test]
     fn test_display_generic_environment_suggestion_with_colors() {
-        let config = test_common::test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Should not panic with colors enabled
         display_generic_environment_suggestion("test-package", "test-env", &config, "install");
-    }
-
-    #[test]
-    fn test_package_not_found_tracker() {
-        use selfie::package::{
-            event::error::StreamedError,
-            event::{OperationFailure, OperationResult, PackageFailure},
-            port::{PackageError, PackageRepoError},
-        };
-        use std::path::PathBuf;
-
-        let mut tracker = PackageNotFoundTracker::new();
-
-        // Create a PackageNotFound error
-        let package_error = PackageError::PackageNotFound {
-            name: "test-package".to_string(),
-            packages_path: PathBuf::from("/test/packages"),
-            files_examined: 0,
-            search_patterns: vec!["test-package.yml".to_string()],
-        };
-
-        let streamed_error = StreamedError::PackageRepoError(PackageRepoError::PackageError(
-            Box::new(package_error),
-        ));
-
-        // Should handle PackageNotFound error and set internal state
-        assert!(tracker.handle_package_not_found_error(&streamed_error));
-
-        // Should now suppress completion errors for PackageNotFound
-        let completion_result =
-            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::NotFound {
-                name: "test-package".to_string(),
-                packages_path: PathBuf::from("/test/packages"),
-                files_examined: 0,
-                search_patterns: vec!["test-package.yml".to_string()],
-            }));
-
-        assert!(tracker.should_suppress_completion_error(&completion_result));
-
-        // Should not suppress other types of completion errors
-        let other_result =
-            OperationResult::Failure(OperationFailure::PackageError(PackageFailure::ParseError {
-                name: "test-package".to_string(),
-                packages_path: PathBuf::from("/test/packages"),
-                failed_file: PathBuf::from("/test/packages/test-package.yml"),
-                file_size_bytes: 0,
-                source_error: "yaml error".to_string(),
-            }));
-
-        assert!(!tracker.should_suppress_completion_error(&other_result));
     }
 }

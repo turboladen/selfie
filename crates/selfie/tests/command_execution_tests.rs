@@ -6,15 +6,21 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
+
+fn token() -> CancellationToken {
+    CancellationToken::new()
+}
 
 #[tokio::test]
 async fn test_command_execution_with_long_output() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
     // Generate a command that produces a lot of output
     let command = "for i in $(seq 1 1000); do echo \"Line $i\"; done";
 
-    let output = runner.execute(command).await.unwrap();
+    let output = runner.execute(command, &token()).await.unwrap();
 
     // Should capture all output lines
     let output_lines = output.stdout_str().lines().count();
@@ -23,7 +29,8 @@ async fn test_command_execution_with_long_output() {
 
 #[tokio::test]
 async fn test_command_streaming_captures_all_output() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
 
     // Command that produces output line by line - simpler and more reliable
     let command = r#"for i in $(seq 1 5); do echo "Line $i"; done"#;
@@ -42,7 +49,7 @@ async fn test_command_streaming_captures_all_output() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx)
+        .execute_streaming(command, Duration::from_secs(10), tx, &token())
         .await
         .unwrap();
 
@@ -96,12 +103,13 @@ async fn test_command_streaming_captures_all_output() {
 
 #[tokio::test]
 async fn test_command_timeout() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(1));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(1));
 
     // Command that runs longer than the timeout
     let command = "sleep 5";
 
-    let result = runner.execute(command).await;
+    let result = runner.execute(command, &token()).await;
 
     // Should timeout
     assert!(matches!(
@@ -112,7 +120,10 @@ async fn test_command_timeout() {
 
 #[tokio::test]
 async fn test_command_streaming_timeout() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_millis(100));
+    let runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        Duration::from_millis(100),
+    );
 
     // Command that runs longer than the timeout
     let command = "sleep 1";
@@ -131,7 +142,7 @@ async fn test_command_streaming_timeout() {
     });
 
     let result = runner
-        .execute_streaming(command, Duration::from_millis(100), tx)
+        .execute_streaming(command, Duration::from_millis(100), tx, &token())
         .await;
 
     let _ = collect_task.await;
@@ -145,7 +156,8 @@ async fn test_command_streaming_timeout() {
 
 #[tokio::test]
 async fn test_command_streaming_stderr_capture() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
     let command = "echo 'stdout message' && echo 'stderr message' >&2";
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
@@ -169,7 +181,7 @@ async fn test_command_streaming_stderr_capture() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(5), tx)
+        .execute_streaming(command, Duration::from_secs(5), tx, &token())
         .await
         .unwrap();
 
@@ -195,7 +207,8 @@ async fn test_command_streaming_stderr_capture() {
 
 #[tokio::test]
 async fn test_command_streaming_preserves_order() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
 
     // Command that outputs sequential numbers
     let command = r#"for i in $(seq 1 10); do echo "Number $i"; done"#;
@@ -214,7 +227,7 @@ async fn test_command_streaming_preserves_order() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx)
+        .execute_streaming(command, Duration::from_secs(10), tx, &token())
         .await
         .unwrap();
 
@@ -269,7 +282,8 @@ async fn test_command_streaming_preserves_order() {
 
 #[tokio::test]
 async fn test_command_streaming_stdout_stderr_interleaving() {
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
 
     // Simplified command that outputs to both stdout and stderr
     let command = r#"echo "stdout-line" && echo "stderr-line" >&2"#;
@@ -286,7 +300,7 @@ async fn test_command_streaming_stdout_stderr_interleaving() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx)
+        .execute_streaming(command, Duration::from_secs(10), tx, &token())
         .await
         .unwrap();
 

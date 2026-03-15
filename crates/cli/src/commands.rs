@@ -23,13 +23,15 @@ pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod package;
 
-use package::list::ListCommand;
-use selfie::config::AppConfig;
+use package::{common::create_package_service, list::ListCommand};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
+
+use crate::config::CliConfig;
 
 use crate::{
     cli::{ClapCommands, ConfigSubcommands, PackageSubcommands},
-    terminal_progress_reporter::TerminalProgressReporter,
+    display_manager::DisplayManager,
 };
 
 use completion::generate_completion;
@@ -43,9 +45,8 @@ use completion::generate_completion;
 /// # Arguments
 ///
 /// * `command` - The parsed command to execute
-/// * `config` - Application configuration with CLI overrides applied
-/// * `original_config` - Original configuration from file (for config commands)
-/// * `reporter` - Terminal progress reporter for user feedback
+/// * `config` - CLI configuration with overrides applied
+/// * `display` - Display manager for user feedback
 ///
 /// # Returns
 ///
@@ -57,18 +58,19 @@ use completion::generate_completion;
 /// - **Config commands**: Validate configuration files and settings
 pub(crate) async fn dispatch_command(
     command: &ClapCommands,
-    config: &AppConfig,
-    original_config: AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Dispatching command: {:?}", command);
 
     match command {
         ClapCommands::Package(package_cmd) => {
-            dispatch_package_command(&package_cmd.command, config, reporter).await
+            dispatch_package_command(&package_cmd.command, config, display, cancellation_token)
+                .await
         }
         ClapCommands::Config(config_cmd) => {
-            dispatch_config_command(&config_cmd.command, &original_config, reporter)
+            dispatch_config_command(&config_cmd.command, config, display)
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
@@ -87,7 +89,7 @@ pub(crate) async fn dispatch_command(
 ///
 /// * `command` - The specific package subcommand to execute
 /// * `config` - Application configuration with CLI overrides applied
-/// * `reporter` - Terminal progress reporter for user feedback
+/// * `display` - Display manager for user feedback
 ///
 /// # Returns
 ///
@@ -103,38 +105,44 @@ pub(crate) async fn dispatch_command(
 /// - `validate`: Validate package definition files
 async fn dispatch_package_command(
     command: &PackageSubcommands,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Handling package command: {:?}", command);
 
+    let service = create_package_service(config, cancellation_token);
+
     match command {
         PackageSubcommands::Install { package_name } => {
-            package::install::handle_install(package_name, config, reporter).await
+            package::install::handle_install(&service, package_name, config, &display).await
         }
         PackageSubcommands::Check { package_name } => {
-            package::check::handle_check(package_name, config, reporter).await
+            package::check::handle_check(&service, package_name, config, &display).await
         }
         PackageSubcommands::List { all } => {
-            ListCommand::new(config, reporter, *all)
-                .handle_command()
+            ListCommand::new(config, display, *all)
+                .handle_command(&service)
                 .await
         }
         PackageSubcommands::Info { package_name } => {
-            package::info::handle_info(package_name, config, reporter).await
+            package::info::handle_info(&service, package_name, config, &display).await
         }
         PackageSubcommands::Create {
             package_name,
             interactive,
-        } => package::create::handle_create(package_name, config, reporter, *interactive),
+        } => {
+            package::create::handle_create(&service, package_name, config, &display, *interactive)
+                .await
+        }
         PackageSubcommands::Edit { package_name } => {
-            package::edit::handle_edit(package_name, config, reporter)
+            package::edit::handle_edit(package_name, config, &display)
         }
         PackageSubcommands::Remove { package_name } => {
-            package::remove::handle_remove(package_name, config, reporter)
+            package::remove::handle_remove(package_name, config, &display)
         }
         PackageSubcommands::Validate { package_name } => {
-            package::validate::handle_validate(package_name, config, reporter).await
+            package::validate::handle_validate(&service, package_name, config, &display).await
         }
     }
 }
@@ -142,14 +150,12 @@ async fn dispatch_package_command(
 /// Handle configuration management commands
 ///
 /// Routes configuration-related subcommands to their specific handlers.
-/// Config operations use the original configuration (without CLI overrides)
-/// to validate the actual configuration file contents.
 ///
 /// # Arguments
 ///
 /// * `command` - The specific config subcommand to execute
-/// * `original_config` - Original configuration from file (no CLI overrides)
-/// * `reporter` - Terminal progress reporter for user feedback
+/// * `config` - CLI configuration with overrides applied
+/// * `display` - Display manager for user feedback
 ///
 /// # Returns
 ///
@@ -160,40 +166,38 @@ async fn dispatch_package_command(
 /// - `validate`: Validate the configuration file structure and values
 fn dispatch_config_command(
     command: &ConfigSubcommands,
-    original_config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: DisplayManager,
 ) -> i32 {
     debug!("Handling config command: {:?}", command);
 
     match command {
-        ConfigSubcommands::Validate => config::handle_validate(original_config, reporter),
+        ConfigSubcommands::Validate => config::handle_validate(config, &display),
     }
 }
 
-/// Report a styled message to the terminal
+/// Report a styled key-value pair to the terminal
 ///
 /// Provides a consistent way to display formatted messages with visual styling.
-/// The first parameter is displayed in italic/dim style, and the second parameter
-/// is displayed in bold style.
+/// Delegates to `DisplayManager::print_field()` which displays the first parameter
+/// in italic/dim style and the second parameter in bold style.
 ///
 /// # Arguments
 ///
-/// * `param1` - First part of the message (displayed italic/dim)
-/// * `param2` - Second part of the message (displayed bold)
+/// * `display` - Display manager for output
+/// * `param1` - First part of the message (key, displayed italic/dim)
+/// * `param2` - Second part of the message (value, displayed bold)
 ///
 /// # Example
 ///
 /// ```
-/// report_with_style("Installing", "package-name");
-/// // Displays: Installing package-name (with appropriate styling)
+/// report_with_style(&display, "Installing", "package-name");
+/// // Displays:   Installing package-name (with appropriate styling)
 /// ```
-fn report_with_style(param1: impl std::fmt::Display, param2: impl std::fmt::Display) {
-    TerminalProgressReporter::report(
-        2,
-        format!(
-            "{} {}",
-            console::style(param1).italic().dim(),
-            console::style(param2).bold()
-        ),
-    );
+fn report_with_style(
+    display: &DisplayManager,
+    param1: impl std::fmt::Display,
+    param2: impl std::fmt::Display,
+) {
+    display.print_field(param1, param2);
 }

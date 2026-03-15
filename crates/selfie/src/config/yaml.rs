@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use config::FileFormat;
 
-use crate::{config::AppConfig, fs::FileSystem};
+use crate::{config::SelfieConfig, fs::FileSystem};
 
 use super::loader::{ConfigLoadError, ConfigLoader};
 
@@ -45,7 +45,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// - YAML content is malformed or invalid
     /// - Required configuration fields are missing
     /// - Configuration field types are incorrect
-    fn load_config(&self) -> Result<AppConfig, ConfigLoadError> {
+    fn load_config(&self) -> Result<SelfieConfig, ConfigLoadError> {
         let config_paths = match self.find_config_file_paths() {
             Ok(paths) => paths,
             Err(searched) => {
@@ -83,14 +83,14 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         let config = builder.build()?;
 
         // Convert to our type
-        let mut app_config: AppConfig = config.try_deserialize()?;
+        let mut selfie_config: SelfieConfig = config.try_deserialize()?;
 
         // Special handling for package_directory ~ expansion
-        if let Ok(expanded) = self.fs.expand_path(app_config.package_directory()) {
-            app_config.package_directory = expanded;
+        if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
+            selfie_config.package_directory = expanded;
         }
 
-        Ok(app_config)
+        Ok(selfie_config)
     }
 
     /// Find configuration file paths in standard locations
@@ -411,8 +411,6 @@ mod tests {
             // Check defaults were properly applied
             assert_eq!(config.environment, "test-env");
             assert_eq!(config.package_directory, Path::new("/test/packages"));
-            assert!(!config.verbose); // Default
-            assert!(config.use_colors); // Default
             assert!(config.stop_on_error); // Default
 
             // Check command_timeout has default value (60)

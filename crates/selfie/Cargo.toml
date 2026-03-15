@@ -4,20 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = "0.1.87"
 config = { version = "0.15.9", features = ["yaml"] }
-console.workspace = true
 etcetera = "0.10.0"
 futures.workspace = true
 mockall = { workspace = true, optional = true }
 num_cpus = "1.16.0"
 pretty_assertions = "1.4.1"
-regex = "1.11.1"
+semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml.workspace = true
 shellexpand = "3.1"
+strum.workspace = true
 thiserror = "2.0"
+tokio-util.workspace = true
 tokio = { workspace = true, features = [
   "io-std",
   "io-util",
@@ -30,6 +30,7 @@ tokio = { workspace = true, features = [
 tracing.workspace = true
 url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.16.0", features = ["serde", "v4"] }
+which = "7.0"
 
 [dev-dependencies]
 mockall.workspace = true

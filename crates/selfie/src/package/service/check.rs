@@ -1,26 +1,29 @@
 //! Helps break down the pieces of running the `package check` command.
 
+use super::steps;
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         GetPackage,
         event::{
             CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
             OperationResult, OperationSuccess,
         },
-        port::{PackageError, PackageRepoError, PackageRepository},
+        port::{PackageError, PackageRepository},
         service::ProgressTracker,
     },
 };
+use tokio_util::sync::CancellationToken;
 
 pub(super) async fn handle_check<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository + Clone,
@@ -55,8 +58,12 @@ where
         sender,
         progress,
         "Running package check command",
+        token,
     )
     .await;
+
+    // Step 4: Send the check result event
+    sender.send_check_result(check_result.clone()).await;
 
     // Return appropriate operation result
     create_operation_result(&check_result, package_name, progress)
@@ -80,12 +87,7 @@ where
                 .await;
             Ok(pkg)
         }
-        Err(err) => {
-            let error_msg = format!("Failed to load package '{package_name}': {err}");
-            let err_for_conversion = err.clone();
-            sender.send_error(err, &error_msg).await;
-            Err(OperationResult::Failure(err_for_conversion.into()))
-        }
+        Err(err) => Err(OperationResult::Failure(err.into())),
     }
 }
 
@@ -100,7 +102,7 @@ async fn get_check_command(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+        return steps::handle_missing_environment(package_name, package_blob, current_env);
     };
 
     // Get check command from environment
@@ -115,30 +117,6 @@ async fn get_check_command(
         }
         None => handle_missing_check_command(package_name, package_blob, current_env, sender).await,
     }
-}
-
-async fn handle_missing_environment(
-    package_name: &str,
-    package_blob: &GetPackage,
-    current_env: &str,
-    sender: &EventSender,
-) -> Result<Option<String>, OperationResult> {
-    let err = Box::new(PackageError::EnvironmentNotFound {
-        package_name: package_name.to_string(),
-        environment: current_env.to_string(),
-        available_environments: package_blob
-            .package
-            .environments()
-            .keys()
-            .cloned()
-            .collect(),
-        package_file: package_blob.package.path().clone(),
-    });
-    let error_msg = format!("Environment configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
-    Err(OperationResult::Failure((*err).into()))
 }
 
 async fn handle_missing_check_command(
@@ -161,12 +139,12 @@ async fn handle_missing_check_command(
         })
         .collect();
 
-    let err = Box::new(PackageError::NoCheckCommand {
+    let err = PackageError::NoCheckCommand {
         package_name: package_name.to_string(),
         environment: current_env.to_string(),
         package_file: package_blob.package.path().clone(),
         other_envs_with_check,
-    });
+    };
 
     // Send structured result for no check command
     let check_result = CheckResultData {
@@ -177,11 +155,7 @@ async fn handle_missing_check_command(
     };
     sender.send_check_result(check_result).await;
 
-    let error_msg = format!("Check command configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
-    Err(OperationResult::Failure((*err).into()))
+    Err(OperationResult::Failure(err.into()))
 }
 
 fn create_operation_result(
@@ -190,7 +164,7 @@ fn create_operation_result(
     progress: &ProgressTracker,
 ) -> OperationResult {
     match &check_result.result {
-        CheckResult::Success => OperationResult::Success(OperationSuccess::package_checked(
+        CheckResult::Success { .. } => OperationResult::Success(OperationSuccess::package_checked(
             package_name.to_string(),
             check_result.environment.clone(),
             check_result.result.clone(),
@@ -235,6 +209,7 @@ fn create_operation_result(
 ///
 /// This function can be reused by other services that need to run check commands
 /// without duplicating the package loading and environment validation logic.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_check_command<CR>(
     package_name: &str,
     environment: &str,
@@ -243,13 +218,21 @@ pub(super) async fn execute_check_command<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     step_description: &str,
+    token: &CancellationToken,
 ) -> CheckResultData
 where
     CR: CommandRunner,
 {
     progress.next(sender, step_description).await;
 
-    execute_check_command_quiet(package_name, environment, check_command, command_runner).await
+    execute_check_command_quiet(
+        package_name,
+        environment,
+        check_command,
+        command_runner,
+        token,
+    )
+    .await
 }
 
 /// Execute a check command without updating progress
@@ -261,19 +244,23 @@ pub(super) async fn execute_check_command_quiet<CR>(
     environment: &str,
     check_command: Option<&str>,
     command_runner: &CR,
+    token: &CancellationToken,
 ) -> CheckResultData
 where
     CR: CommandRunner,
 {
     if let Some(cmd) = check_command {
-        match command_runner.execute(cmd).await {
+        match command_runner.execute(cmd, token).await {
             Ok(output) => {
                 if output.is_success() {
                     CheckResultData {
                         package_name: package_name.to_string(),
                         environment: environment.to_string(),
                         check_command: Some(cmd.to_string()),
-                        result: CheckResult::Success,
+                        result: CheckResult::Success {
+                            stdout: output.stdout_str().to_string(),
+                            stderr: output.stderr_str().to_string(),
+                        },
                     }
                 } else {
                     CheckResultData {

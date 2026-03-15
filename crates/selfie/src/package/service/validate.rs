@@ -3,7 +3,7 @@
 //!
 
 use crate::{
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         event::{
             EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
@@ -17,7 +17,7 @@ use crate::{
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> OperationResult
@@ -35,10 +35,7 @@ where
             pkg
         }
         Err(err) => {
-            let error_msg = format!("Failed to load package '{package_name}': {err}");
-            let err_for_conversion = err.clone();
-            sender.send_error(err, &error_msg).await;
-            return OperationResult::Failure(err_for_conversion.into());
+            return OperationResult::Failure(err.into());
         }
     };
 

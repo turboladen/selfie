@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     commands::runner::{CommandError, CommandOutput, CommandRunner},
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
-        event::{ConsoleOutput, EventSender},
-        port::{PackageRepoError, PackageRepository},
+        event::{ConsoleOutput, EventSender, OperationResult},
+        port::{PackageError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
 };
@@ -30,13 +32,30 @@ where
             sender.send_trace("Package found").await;
             Ok(package)
         }
-        Err(e) => {
-            sender
-                .send_error(e.clone(), "Error fetching package from repository")
-                .await;
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
+}
+
+/// Shared step: build an `EnvironmentNotFound` error when the current
+/// environment isn't defined in the package file.
+#[allow(clippy::result_large_err)] // OperationResult is the standard error type across the service layer
+pub(super) fn handle_missing_environment<T>(
+    package_name: &str,
+    package_blob: &GetPackage,
+    current_env: &str,
+) -> Result<T, OperationResult> {
+    let err = PackageError::EnvironmentNotFound {
+        package_name: package_name.to_string(),
+        environment: current_env.to_string(),
+        available_environments: package_blob
+            .package
+            .environments()
+            .keys()
+            .cloned()
+            .collect(),
+        package_file: package_blob.package.path().clone(),
+    };
+    Err(OperationResult::Failure(err.into()))
 }
 
 /// Step to get a specific command from environment config
@@ -75,9 +94,10 @@ pub async fn execute_command_streaming<CR>(
     command_runner: &CR,
     cmd: &str,
     command_type: &str,
-    config: &AppConfig,
+    config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> Result<CommandOutput, CommandError>
 where
     CR: CommandRunner,
@@ -123,7 +143,7 @@ where
 
     // Execute the wrapped command with streaming channel
     let result = command_runner
-        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx)
+        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx, token)
         .await;
 
     // Wait for the output task to finish and handle any task errors
@@ -157,19 +177,7 @@ where
             }
             Ok(output)
         }
-        Err(error) => {
-            sender
-                .send_error(
-                    error.clone(),
-                    format!(
-                        "Failed to execute {command_type} command at step {}/{}",
-                        progress.current_step(),
-                        progress.total_steps()
-                    ),
-                )
-                .await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 

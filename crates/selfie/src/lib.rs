@@ -21,8 +21,8 @@
 //! # Examples
 //!
 //! ```no_run
-//! use selfie::package::service::PackageService;
-//! use selfie::config::AppConfig;
+//! use selfie::package::PackageService;
+//! use selfie::config::SelfieConfig;
 //!
 //! // Example usage would go here once the API is more stable
 //! ```

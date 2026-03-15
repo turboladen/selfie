@@ -1,87 +1,43 @@
 use comfy_table::{ContentArrangement, Table, modifiers, presets};
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
+    service::PackageService,
 };
 
 use crate::{
-    commands::package::common::{self, create_package_service, report_status},
-    event_processor::EventProcessor,
+    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
     formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
 };
 
 pub(crate) async fn handle_validate(
+    service: &impl PackageService,
     package_name: &str,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    report_status(&format!("Validating {package_name}..."));
-
-    // Create the package service
-    let service = create_package_service(config);
-
-    // Create tracker for consistent error handling
-    let mut tracker = common::PackageNotFoundTracker::new();
+    display.print_progress(format!("Validating {package_name}..."));
 
     // Call the service's validate method to get an event stream
-    match service.validate(package_name, None).await {
-        Ok(event_stream) => {
-            // Process the event stream with custom handling for structured data
-            let processor = EventProcessor::new(reporter);
-            let result = processor
-                .process_events(event_stream, |event| {
-                    handle_validate_event(event, config, &mut tracker)
-                })
-                .await;
-            result.exit_code
-        }
-        Err(e) => {
-            // Handle the initial error - likely PackageNotFound
-            let streamed_error = selfie::package::event::error::StreamedError::PackageRepoError(
-                selfie::package::port::PackageRepoError::PackageError(Box::new(e)),
-            );
-            if tracker.handle_package_not_found_error(&streamed_error) {
-                1
-            } else {
-                reporter.report_error(format!("Failed to validate package: {streamed_error}"));
-                1
-            }
-        }
-    }
+    let event_stream = service.validate(package_name, None).await;
+
+    // Process the event stream with custom handling for structured data
+    let processor = EventProcessor::new(display.clone());
+    let result = processor
+        .process_events(event_stream, |event| handle_validate_event(event, config))
+        .await;
+    result.exit_code
 }
 
-fn handle_validate_event(
-    event: &PackageEvent,
-    config: &AppConfig,
-    tracker: &mut common::PackageNotFoundTracker,
-) -> bool {
+fn handle_validate_event(event: &PackageEvent, config: &CliConfig) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
             display_validation_result(validation_result, config);
             true // Handled
-        }
-        PackageEvent::Error { error, .. } => {
-            // Handle PackageNotFound errors consistently
-            if tracker.handle_package_not_found_error(error) {
-                return true; // Handled - prevent duplicate error display
-            }
-            false // Use default handling for other errors
-        }
-        PackageEvent::Completed { result, .. } => {
-            // Suppress completion errors if we already handled PackageNotFound
-            if tracker.should_suppress_completion_error(result) {
-                return true; // Handled - suppress duplicate error
-            }
-            false // Use default handling for other completion events
         }
         PackageEvent::Progress { .. } => {
             true // Handled - suppress progress for validate
@@ -90,7 +46,7 @@ fn handle_validate_event(
     }
 }
 
-fn display_validation_result(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_result(validation_result: &ValidationResultData, config: &CliConfig) {
     match validation_result.status {
         ValidationStatus::Valid => {
             // Show success card for valid packages
@@ -103,7 +59,7 @@ fn display_validation_result(validation_result: &ValidationResultData, config: &
     }
 }
 
-fn display_validation_success_card(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_success_card(validation_result: &ValidationResultData, config: &CliConfig) {
     println!();
     println!("📋 Validation Results:");
 
@@ -121,17 +77,21 @@ fn display_validation_success_card(validation_result: &ValidationResultData, con
         validation_result.environment
     );
 
-    let reporter = TerminalProgressReporter::new(config.use_colors());
     let status_key = if config.use_colors() {
-        console::style("Status").cyan().bold().to_string()
+        style("Status").cyan().bold().to_string()
     } else {
         "Status".to_string()
     };
-    let status = format!("   {}: {}", status_key, reporter.format_success("Valid"));
+    let status_text = if config.use_colors() {
+        style("✓ Valid").green().to_string()
+    } else {
+        "✓ Valid".to_string()
+    };
+    let status = format!("   {}: {}", status_key, status_text);
     println!("{status}");
 }
 
-fn display_validation_issues_table(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_issues_table(validation_result: &ValidationResultData, config: &CliConfig) {
     if validation_result.issues.is_empty() {
         return;
     }
@@ -222,7 +182,7 @@ mod tests {
     use selfie::package::event::{
         ValidationIssueData, ValidationLevel, ValidationResultData, ValidationStatus,
     };
-    use test_common::{TEST_ENV, test_config, test_config_with_colors};
+    use test_common::TEST_ENV;
 
     fn create_test_validation_result(status: ValidationStatus) -> ValidationResultData {
         ValidationResultData {
@@ -235,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_success() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic
@@ -244,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_success_card() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic
@@ -253,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic with colors enabled
@@ -262,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_issues_table_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not display anything for empty issues
@@ -271,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_with_issues() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut validation_result = create_test_validation_result(ValidationStatus::HasErrors);
         validation_result.issues = vec![ValidationIssueData {
             level: ValidationLevel::Error,

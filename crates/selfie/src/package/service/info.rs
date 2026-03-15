@@ -2,9 +2,11 @@
 //! Helps break down the pieces of running the `package info` command.
 //!
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         event::{
             EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult,
@@ -18,10 +20,11 @@ use crate::{
 pub(super) async fn handle_info<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -38,10 +41,7 @@ where
             pkg
         }
         Err(err) => {
-            let error_msg = format!("Failed to load package '{package_name}': {err}");
-            let err_for_conversion = err.clone();
-            sender.send_error(err, &error_msg).await;
-            return OperationResult::Failure(err_for_conversion.into());
+            return OperationResult::Failure(err.into());
         }
     };
 
@@ -91,7 +91,7 @@ where
     for (env_name, env_config) in environments {
         let is_current = env_name == config.environment();
         let status = if is_current {
-            get_installation_status(env_config, command_runner).await
+            get_installation_status(env_config, command_runner, token).await
         } else {
             None
         };
@@ -123,11 +123,12 @@ where
 async fn get_installation_status(
     env_config: &crate::package::EnvironmentConfig,
     command_runner: &impl CommandRunner,
+    token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
     // Only run check for current environment
     if let Some(check_cmd) = env_config.check() {
         // Run the check command asynchronously
-        if let Ok(output) = command_runner.execute(check_cmd).await {
+        if let Ok(output) = command_runner.execute(check_cmd, token).await {
             if output.is_success() {
                 Some(EnvironmentStatus::Installed)
             } else {

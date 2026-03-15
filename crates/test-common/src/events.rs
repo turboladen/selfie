@@ -100,7 +100,7 @@ pub fn assert_successful_operation(events: &[PackageEvent]) {
 }
 
 /// Helper to verify standard event sequence for failed operations.
-/// Checks for at least one error event and that the final result (if present) is a failure.
+/// Checks that the operation completed with a failure result.
 ///
 /// # Panics
 /// Panics if the event sequence doesn't match expected failed operation pattern.
@@ -111,19 +111,12 @@ pub fn assert_successful_operation(events: &[PackageEvent]) {
 /// assert_failed_operation(&events);
 /// ```
 pub fn assert_failed_operation(events: &[PackageEvent]) {
-    // Should have at least one error event
+    // Should have a completion result that is a failure
+    let result = get_operation_result(events).expect("Should have an operation result");
     assert!(
-        count_events_of_type(events, |e| matches!(e, PackageEvent::Error { .. })) > 0,
-        "Should have at least one error event for failed operation"
+        matches!(result, OperationResult::Failure(_)),
+        "Operation result should be failure, got: {result:?}"
     );
-
-    // If there's a completion result, it should be a failure
-    if let Some(result) = get_operation_result(events) {
-        assert!(
-            matches!(result, OperationResult::Failure(_)),
-            "Operation result should be failure, got: {result:?}"
-        );
-    }
 }
 
 /// Helper to verify that events contain specific progress steps.

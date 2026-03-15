@@ -145,8 +145,8 @@ impl Package {
 
     /// Validate the package version format
     ///
-    /// Checks that the version follows semantic versioning format (major.minor.patch).
-    /// Uses a basic regex pattern to validate the format.
+    /// Checks that the version follows the SemVer 2.0.0 spec (major.minor.patch,
+    /// with optional pre-release and build metadata). Uses the `semver` crate.
     ///
     /// # Errors
     ///
@@ -154,19 +154,6 @@ impl Package {
     /// - Version is empty (error)
     /// - Version doesn't follow semantic versioning format (warning)
     fn validate_version(&self) -> Result<(), ValidationIssue> {
-        /// Check if a version string follows semantic versioning format
-        ///
-        /// # Panics
-        ///
-        /// This function contains a call to `unwrap()` on regex compilation, but this
-        /// cannot panic because the regex pattern is a compile-time constant that has
-        /// been verified to be valid.
-        fn is_valid_version(version: &str) -> bool {
-            // Simple check for semver format: major.minor.patch
-            let semver_regex = regex::Regex::new(r"^\d+\.\d+\.\d+").unwrap();
-            semver_regex.is_match(version)
-        }
-
         if self.version.is_empty() {
             return Err(ValidationIssue::error(
                 ValidationErrorCategory::RequiredField,
@@ -174,7 +161,7 @@ impl Package {
                 "Package version is required",
                 Some("Add 'version: \"0.1.0\"' to the package file."),
             ));
-        } else if !is_valid_version(&self.version) {
+        } else if semver::Version::parse(&self.version).is_err() {
             return Err(ValidationIssue::warning(
                 ValidationErrorCategory::InvalidValue,
                 "version",
@@ -521,6 +508,59 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
         assert!(issues[0].message.contains("backticks"));
+    }
+
+    #[test]
+    fn test_validate_version_valid_semver() {
+        for version in ["1.0.0", "0.1.0", "1.2.3-beta", "1.0.0+build.123"] {
+            let package = PackageBuilder::default()
+                .name("test-package")
+                .version(version)
+                .environment("test-env", |b| b.install("echo test"))
+                .build();
+
+            let issues = package.validate_required_fields();
+            let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
+            assert!(
+                version_issues.is_empty(),
+                "Expected no issues for valid version '{version}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_version_invalid_warns() {
+        for version in ["1.0", "1", "abc", "1.2.3.4"] {
+            let package = PackageBuilder::default()
+                .name("test-package")
+                .version(version)
+                .environment("test-env", |b| b.install("echo test"))
+                .build();
+
+            let issues = package.validate_required_fields();
+            let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
+            assert_eq!(
+                version_issues.len(),
+                1,
+                "Expected one warning for invalid version '{version}'"
+            );
+            assert_eq!(version_issues[0].level(), ValidationLevel::Warning);
+        }
+    }
+
+    #[test]
+    fn test_validate_version_empty_errors() {
+        let package = PackageBuilder::default()
+            .name("test-package")
+            .version("")
+            .environment("test-env", |b| b.install("echo test"))
+            .build();
+
+        let issues = package.validate_required_fields();
+        let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
+        assert_eq!(version_issues.len(), 1);
+        assert_eq!(version_issues[0].level(), ValidationLevel::Error);
+        assert!(version_issues[0].message.contains("required"));
     }
 
     #[test]

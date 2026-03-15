@@ -1,74 +1,62 @@
 use comfy_table::Table;
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
+    service::PackageService,
 };
 
 use crate::{
-    event_processor::EventProcessor, formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
+    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
+    formatters::format_key, status_style,
 };
 
 use super::common;
 
 pub(crate) async fn handle_info(
+    service: &impl PackageService,
     package_name: &str,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Finding package info for: {package_name}");
 
     // Status message:
-    common::report_status(&format!("Getting info for {package_name}..."));
-
-    // Create the package service implementation
-    let service = common::create_package_service(config);
+    display.print_progress(format!("Getting info for {package_name}..."));
 
     // Call the service's info method to get an event stream
-    #[allow(clippy::match_same_arms)]
-    match service.info(package_name).await {
-        Ok(event_stream) => {
-            // Process the event stream with custom handling for structured data
-            let processor = EventProcessor::new(reporter);
-            let result = processor
-                .process_events(event_stream, |event| {
-                    match event {
-                        PackageEvent::PackageInfoLoaded { package_info, .. } => {
-                            let table = create_package_info_table(package_info, config);
-                            println!("{table}");
-                            true // Handled
-                        }
-                        PackageEvent::EnvironmentStatusChecked {
-                            environment_status, ..
-                        } => {
-                            let table = create_environment_table(environment_status, config);
-                            println!("\n{table}");
-                            true // Handled
-                        }
-                        PackageEvent::Progress { .. } => {
-                            true // Handled
-                        }
-                        PackageEvent::Completed { .. } => {
-                            false // Use default completion handling
-                        }
-                        _ => false, // Use default handling for other events
-                    }
-                })
-                .await;
-            result.exit_code
-        }
-        Err(e) => {
-            reporter.report_error(format!("Failed to get package info: {e}"));
-            1
-        }
-    }
+    let event_stream = service.info(package_name).await;
+
+    // Process the event stream with custom handling for structured data
+    let processor = EventProcessor::new(display.clone());
+    let result = processor
+        .process_events(event_stream, |event| {
+            match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => {
+                    let table = create_package_info_table(package_info, config);
+                    println!("{table}");
+                    true // Handled
+                }
+                PackageEvent::EnvironmentStatusChecked {
+                    environment_status, ..
+                } => {
+                    let table = create_environment_table(environment_status, config);
+                    println!("\n{table}");
+                    true // Handled
+                }
+                PackageEvent::Progress { .. } => {
+                    true // Handled
+                }
+                PackageEvent::Completed { .. } => {
+                    false // Use default completion handling
+                }
+                _ => false, // Use default handling for other events
+            }
+        })
+        .await;
+    result.exit_code
 }
 
-fn create_package_info_table(package_info: &PackageInfoData, config: &AppConfig) -> Table {
+fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> Table {
     let mut table = common::create_formatted_table();
 
     // Helper functions for formatting
@@ -114,7 +102,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &AppConfig)
     table
 }
 
-fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConfig) -> Table {
+fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConfig) -> Table {
     let mut env_table = common::create_formatted_table();
 
     // Create a header for the environment table
@@ -145,12 +133,11 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConf
         |value: &str| -> String { common::format_field_value(value, config.use_colors()) };
 
     // Add installation status if this is the current environment and we have status
-    if env_status.is_current {
-        if let Some(status) = &env_status.status {
-            let reporter = TerminalProgressReporter::new(config.use_colors());
-            let status_text = format_status(status, reporter);
-            env_table.add_row(vec![format_env_key("Status"), status_text]);
-        }
+    if env_status.is_current
+        && let Some(status) = &env_status.status
+    {
+        let status_text = format_status(status, config.use_colors());
+        env_table.add_row(vec![format_env_key("Status"), status_text]);
     }
 
     // Add environment detail rows
@@ -173,13 +160,13 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConf
     env_table
 }
 
-fn format_status(status: &EnvironmentStatus, reporter: TerminalProgressReporter) -> String {
+fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
     match status {
-        EnvironmentStatus::Installed => reporter.format_installed(),
-        EnvironmentStatus::NotInstalled => reporter.format_not_installed(),
+        EnvironmentStatus::Installed => status_style::format_installed(use_colors),
+        EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => {
             let msg = format!("Unknown ({reason})");
-            if reporter.use_colors() {
+            if use_colors {
                 style(msg).yellow().italic().to_string()
             } else {
                 msg
@@ -192,7 +179,7 @@ fn format_status(status: &EnvironmentStatus, reporter: TerminalProgressReporter)
 mod tests {
     use super::*;
     use selfie::package::event::{EnvironmentStatus, EnvironmentStatusData, PackageInfoData};
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION, test_config, test_config_with_colors};
+    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
 
     fn create_test_package_info() -> PackageInfoData {
         PackageInfoData {
@@ -222,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_create_package_info_table() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_info = create_test_package_info();
 
         let table = create_package_info_table(&package_info, &config);
@@ -232,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_create_package_info_table_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let package_info = create_test_package_info();
 
         let table = create_package_info_table(&package_info, &config);
@@ -242,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_create_environment_table() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let env_status = create_test_environment_status(true);
 
         let table = create_environment_table(&env_status, &config);
@@ -252,20 +239,20 @@ mod tests {
 
     #[test]
     fn test_format_status_functions() {
-        let reporter = TerminalProgressReporter::new(false);
+        let use_colors = false;
 
         let status = EnvironmentStatus::Installed;
-        let result = format_status(&status, reporter);
+        let result = format_status(&status, use_colors);
         assert!(result.contains("Installed"));
 
         let status = EnvironmentStatus::NotInstalled;
-        let result = format_status(&status, reporter);
+        let result = format_status(&status, use_colors);
         assert!(result.contains("Not installed"));
     }
 
     #[test]
     fn test_format_environment_names() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
         // Just test that it doesn't panic

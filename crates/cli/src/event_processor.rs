@@ -12,10 +12,10 @@
 //!
 //! ```rust,ignore
 //! async fn handle_command_with_custom_progress(
-//!     reporter: TerminalProgressReporter,
+//!     display: DisplayManager,
 //!     event_stream: EventStream
 //! ) -> i32 {
-//!     let processor = EventProcessor::new(reporter);
+//!     let processor = EventProcessor::new(display);
 //!
 //!     processor.process_events(event_stream, |event| {
 //!         match event {
@@ -42,19 +42,17 @@
 
 use futures::StreamExt;
 use selfie::package::{
-    event::{ConsoleOutput, EventStream, OperationResult, PackageEvent, error::StreamedError},
-    port::{PackageError, PackageListError, PackageRepoError},
+    event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
+    port::{PackageError, PackageListError},
 };
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 /// Result of processing events, including metadata about what was encountered
 #[derive(Debug, Clone)]
 pub struct EventProcessingResult {
     /// The exit code for the operation
     pub exit_code: i32,
-    /// Whether an environment configuration error was encountered and handled
-    pub environment_error_handled: bool,
     /// Whether any errors were encountered during processing
     pub had_errors: bool,
 }
@@ -63,7 +61,6 @@ impl EventProcessingResult {
     fn new() -> Self {
         Self {
             exit_code: 0,
-            environment_error_handled: false,
             had_errors: false,
         }
     }
@@ -75,13 +72,19 @@ impl EventProcessingResult {
 /// and displayed in the CLI, reducing boilerplate across different commands.
 #[derive(Debug)]
 pub struct EventProcessor {
-    reporter: TerminalProgressReporter,
+    display: DisplayManager,
 }
 
 impl EventProcessor {
-    /// Create a new event processor with the given reporter
-    pub fn new(reporter: TerminalProgressReporter) -> Self {
-        Self { reporter }
+    /// Create a new event processor with the given display manager
+    pub fn new(display: DisplayManager) -> Self {
+        Self { display }
+    }
+
+    /// Get a reference to the display manager
+    #[allow(dead_code)]
+    pub(crate) fn display(&self) -> &DisplayManager {
+        &self.display
     }
 
     /// Process events from the stream with a custom event handler
@@ -103,17 +106,6 @@ impl EventProcessor {
         let mut result = EventProcessingResult::new();
 
         while let Some(event) = stream.next().await {
-            // Check for environment errors before custom handling
-            if let PackageEvent::Error {
-                error: StreamedError::PackageRepoError(PackageRepoError::PackageError(pkg_error)),
-                ..
-            } = &event
-            {
-                if matches!(pkg_error.as_ref(), PackageError::EnvironmentNotFound { .. }) {
-                    result.environment_error_handled = true;
-                }
-            }
-
             // Try custom handler first
             if custom_handler(&event) {
                 // Custom handler handled the event, continue to next event
@@ -125,6 +117,8 @@ impl EventProcessor {
                 break;
             }
         }
+
+        self.display.finish();
 
         result
     }
@@ -150,11 +144,11 @@ impl EventProcessor {
                         operation_info.environment
                     )
                 };
-                self.reporter.report_info(message);
+                self.display.print_info(message);
             }
 
             PackageEvent::Progress { message, .. } => {
-                self.reporter.report_progress(message);
+                self.display.print_progress(message);
             }
 
             PackageEvent::Info { output, .. } => {
@@ -170,30 +164,12 @@ impl EventProcessor {
             }
 
             PackageEvent::Warning { message, .. } => {
-                self.reporter.report_warning(message);
+                self.display.print_warning(message);
                 // Warnings don't set failure exit code by default
             }
 
             PackageEvent::Error { message, error, .. } => {
-                // Check for specific error types that need special handling
-                match &error {
-                    StreamedError::PackageRepoError(PackageRepoError::PackageListError(
-                        PackageListError::PackageDirectoryNotFound(path),
-                    )) => {
-                        // Handle this specific error case directly since it needs special formatting
-                        self.reporter.report_error(format!(
-                            "Package directory not found: {}",
-                            path.display()
-                        ));
-                        self.reporter.report_suggestion(format!(
-                            "Run 'selfie config --package-directory <path>' to set a different directory, or create the directory with 'mkdir -p {}'",
-                            path.display()
-                        ));
-                    }
-                    _ => {
-                        self.reporter.report_error(format!("{message}: {error}"));
-                    }
-                }
+                self.display.print_error(format!("{message}: {error}"));
                 result.exit_code = 1;
                 result.had_errors = true;
             }
@@ -202,28 +178,59 @@ impl EventProcessor {
                 result: op_result, ..
             } => match op_result {
                 OperationResult::Success(success) => {
-                    self.reporter.report_success(success.to_string());
+                    self.display.print_success(success.to_string());
                 }
                 OperationResult::Failure(err) => {
-                    self.reporter.report_error(err.to_string());
+                    use selfie::package::event::OperationFailure;
+
+                    match err {
+                        OperationFailure::Package(PackageError::PackageNotFound {
+                            name,
+                            packages_path,
+                            ..
+                        }) => {
+                            self.display.print_error(format!(
+                                "Package `{name}` not found in path {}",
+                                packages_path.display()
+                            ));
+                        }
+                        OperationFailure::PackageList(
+                            PackageListError::PackageDirectoryNotFound(path),
+                        ) => {
+                            self.display.print_error(format!(
+                                "Package directory not found: {}",
+                                path.display()
+                            ));
+                            self.display.print_suggestion(format!(
+                                "Create the directory with 'mkdir -p {}' or set a different path with 'selfie config --package-directory <path>'",
+                                path.display()
+                            ));
+                        }
+                        _ => {
+                            self.display.print_error(err.to_string());
+                        }
+                    }
                     result.exit_code = 1;
                     result.had_errors = true;
                 }
             },
 
             PackageEvent::Canceled { reason, .. } => {
-                self.reporter
-                    .report_warning(format!("Operation canceled: {reason}"));
-                result.exit_code = 1;
+                self.display
+                    .print_warning(format!("Operation canceled: {reason}"));
+                // 128 + 2 (SIGINT) is the Unix convention for Ctrl+C termination
+                result.exit_code = 130;
                 result.had_errors = true;
                 return true; // Stop processing after cancellation
             }
 
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
+            | PackageEvent::PackageListReady { .. }
             | PackageEvent::PackageListLoaded { .. }
             | PackageEvent::CheckResultCompleted { .. }
-            | PackageEvent::ValidationResultCompleted { .. } => {
+            | PackageEvent::ValidationResultCompleted { .. }
+            | PackageEvent::PackageListItemCompleted { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
@@ -279,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_event_processor_creation() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         // Just verify it can be created
         assert!(std::mem::size_of_val(&processor) > 0);
@@ -288,8 +295,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_empty_stream() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
@@ -297,14 +304,13 @@ mod tests {
 
         // Empty stream should return success
         assert_eq!(result.exit_code, 0);
-        assert!(!result.environment_error_handled);
         assert!(!result.had_errors);
     }
 
     #[tokio::test]
     async fn test_custom_handler_behavior() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
@@ -323,98 +329,177 @@ mod tests {
         assert!(!handler_called);
     }
 
-    #[tokio::test]
-    async fn test_integration_with_actual_service() {
-        use selfie::{
-            commands::ShellCommandRunner,
-            fs::real::RealFileSystem,
-            package::{
-                repository::YamlPackageRepository,
-                service::{PackageService, PackageServiceImpl},
+    fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {
+        use selfie::package::event::OperationContext;
+        use selfie::package::event::OperationType;
+
+        selfie::package::event::OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::PackageCheck,
+            package_name: package_name.to_string(),
+            environment: "test".to_string(),
+            context: OperationContext {
+                package_path: None,
+                target_environment: None,
             },
-        };
+            timestamp: std::time::Instant::now(),
+        }
+    }
 
-        // Create a minimal config for testing
-        let config = selfie::config::AppConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp/nonexistent")
-            .command_timeout_unchecked(1)
-            .use_colors(false)
-            .build();
+    #[tokio::test]
+    async fn test_error_event_produces_failure_result() {
+        use selfie::package::event::StreamedError;
+        use selfie::package::event::{OperationFailure, OperationResult};
+        use selfie::package::port::PackageRepoError;
 
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-        let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-        let service = PackageServiceImpl::new(repo, command_runner, config);
+        let op = make_operation_info("nonexistent-test-package");
 
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
+            },
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 1,
+                total_steps: 2,
+                percent_complete: 0.5,
+                message: "Loading package file".to_string(),
+            },
+            PackageEvent::Error {
+                operation_info: op.clone(),
+                error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
+                    selfie::fs::FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "package not found",
+                    ))),
+                )),
+                message: "Package not found".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Failure(OperationFailure::Generic(
+                    "Package not found".to_string(),
+                )),
+            },
+        ];
 
-        // Test with a nonexistent package - should get events but ultimately fail
-        let event_stream = service.check("nonexistent-test-package").await;
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        // Should return error exit code since package doesn't exist
         assert_eq!(result.exit_code, 1);
         assert!(result.had_errors);
     }
 
     #[tokio::test]
-    async fn test_custom_handler_with_real_events() {
-        use selfie::{
-            commands::ShellCommandRunner,
-            fs::real::RealFileSystem,
-            package::{
-                repository::YamlPackageRepository,
-                service::{PackageService, PackageServiceImpl},
+    async fn test_custom_handler_counts_event_types() {
+        use selfie::package::event::{OperationFailure, OperationResult};
+
+        let op = make_operation_info("nonexistent-test-package");
+
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
             },
-        };
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 1,
+                total_steps: 3,
+                percent_complete: 1.0 / 3.0,
+                message: "Step 1".to_string(),
+            },
+            PackageEvent::Progress {
+                operation_info: op.clone(),
+                step: 2,
+                total_steps: 3,
+                percent_complete: 2.0 / 3.0,
+                message: "Step 2".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Failure(OperationFailure::Generic("Failed".to_string())),
+            },
+        ];
 
-        // Create a minimal config for testing
-        let config = selfie::config::AppConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp/nonexistent")
-            .command_timeout_unchecked(1)
-            .use_colors(false)
-            .build();
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-        let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-        let service = PackageServiceImpl::new(repo, command_runner, config);
-
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
-
-        let mut progress_events_seen = 0;
         let mut started_events_seen = 0;
+        let mut progress_events_seen = 0;
         let mut completed_events_seen = 0;
 
-        let event_stream = service.check("nonexistent-test-package").await;
+        let event_stream = Box::pin(stream::iter(events));
         let result = processor
-            .process_events(event_stream, |event| {
-                match event {
-                    PackageEvent::Started { .. } => {
-                        started_events_seen += 1;
-                        false // Use default handling
-                    }
-                    PackageEvent::Progress { .. } => {
-                        progress_events_seen += 1;
-                        false // Use default handling
-                    }
-                    PackageEvent::Completed { .. } => {
-                        completed_events_seen += 1;
-                        false // Use default handling
-                    }
-                    _ => false,
+            .process_events(event_stream, |event| match event {
+                PackageEvent::Started { .. } => {
+                    started_events_seen += 1;
+                    false
                 }
+                PackageEvent::Progress { .. } => {
+                    progress_events_seen += 1;
+                    false
+                }
+                PackageEvent::Completed { .. } => {
+                    completed_events_seen += 1;
+                    false
+                }
+                _ => false,
             })
             .await;
 
-        // Should have seen some events even though it failed
         assert_eq!(started_events_seen, 1);
-        assert!(progress_events_seen > 0);
+        assert_eq!(progress_events_seen, 2);
         assert_eq!(completed_events_seen, 1);
         assert_eq!(result.exit_code, 1);
         assert!(result.had_errors);
+    }
+
+    #[tokio::test]
+    async fn test_canceled_event_stops_processing_with_exit_130() {
+        use selfie::package::event::{OperationResult, OperationSuccess};
+
+        let op = make_operation_info("cancel-test-package");
+
+        // Canceled followed by Completed — the Completed should never be processed
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
+            },
+            PackageEvent::Canceled {
+                operation_info: op.clone(),
+                reason: "User pressed Ctrl+C".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Success(OperationSuccess::package_checked(
+                    "cancel-test-package".to_string(),
+                    "test".to_string(),
+                    selfie::package::event::CheckResult::NoCheckCommand,
+                    (1, 1).into(),
+                )),
+            },
+        ];
+
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+
+        let mut events_after_cancel = 0;
+        let result = processor
+            .process_events(event_stream, |event| {
+                if matches!(event, PackageEvent::Completed { .. }) {
+                    events_after_cancel += 1;
+                }
+                false
+            })
+            .await;
+
+        // Should use exit code 130 (128 + SIGINT)
+        assert_eq!(result.exit_code, 130);
+        assert!(result.had_errors);
+        // Completed event after Canceled should not have been processed
+        assert_eq!(events_after_cancel, 0);
     }
 
     #[test]

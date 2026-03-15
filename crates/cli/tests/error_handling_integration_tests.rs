@@ -139,8 +139,8 @@ fn test_package_file_invalid_yaml_error() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success() // List continues but reports errors
-        .stderr(predicate::str::contains("invalid-package.yaml"));
+        .success() // List continues but reports errors inline
+        .stdout(predicate::str::contains("invalid-package"));
 }
 
 #[test]
@@ -160,8 +160,8 @@ name: "incomplete-package"
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success() // List continues but reports errors
-        .stderr(predicate::str::contains("incomplete-package.yaml"));
+        .success() // List continues but reports errors inline
+        .stdout(predicate::str::contains("incomplete-package"));
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn test_package_not_found_error() {
     cmd.args(["package", "info", "nonexistent-package"]);
 
     cmd.assert().failure().stderr(predicate::str::contains(
-        "Failed to load package 'nonexistent-package'",
+        "Package `nonexistent-package` not found in path",
     ));
 }
 
@@ -198,7 +198,7 @@ environments:
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("Parse error in package"));
 }
 
 // =============================================================================
@@ -378,7 +378,7 @@ fn test_duplicate_package_names_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 // =============================================================================
@@ -424,7 +424,7 @@ fn test_empty_package_name_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn test_package_name_with_special_characters() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn test_very_long_package_name_error() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Failed to load package"));
+        .stderr(predicate::str::contains("not found in path"));
 }
 
 // =============================================================================
@@ -474,7 +474,7 @@ fn test_large_number_of_invalid_packages() {
     // Should handle all invalid packages gracefully
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("invalid-"));
+        .stdout(predicate::str::contains("invalid-"));
 }
 
 // =============================================================================
@@ -546,7 +546,7 @@ fn test_partial_package_directory_corruption() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("valid-package"))
-        .stderr(predicate::str::contains("corrupted"));
+        .stdout(predicate::str::contains("corrupted"));
 }
 
 #[test]

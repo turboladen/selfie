@@ -2,14 +2,13 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::{config::AppConfig, fs::filesystem::FileSystemError};
+use crate::{config::SelfieConfig, fs::filesystem::FileSystemError};
 
 /// Port for loading configuration from disk
 ///
 /// This trait abstracts configuration loading to allow for different implementations
 /// (e.g., YAML files, TOML files, environment variables) and to enable mocking in tests.
-#[cfg_attr(test, mockall::automock)]
-#[async_trait::async_trait]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait ConfigLoader: Send + Sync {
     /// Load configuration from standard locations
     ///
@@ -23,7 +22,7 @@ pub trait ConfigLoader: Send + Sync {
     /// - Multiple configuration files are found (ambiguous)
     /// - File system access fails
     /// - Configuration file content is invalid
-    fn load_config(&self) -> Result<AppConfig, ConfigLoadError>;
+    fn load_config(&self) -> Result<SelfieConfig, ConfigLoadError>;
 
     /// Find possible configuration file paths
     ///
@@ -55,26 +54,4 @@ pub enum ConfigLoadError {
     /// Configuration file content is invalid or malformed
     #[error(transparent)]
     ConfigError(#[from] ::config::ConfigError),
-}
-
-/// Trait for applying runtime CLI arguments on top of file-based configuration
-///
-/// This trait allows for layering configuration sources, where CLI arguments
-/// take precedence over file-based configuration. This follows the typical
-/// configuration precedence pattern: CLI args > config file > defaults.
-pub trait ApplyToConfg {
-    /// Apply CLI arguments to an existing configuration
-    ///
-    /// Takes a base configuration (typically loaded from a file) and applies
-    /// any CLI arguments that were provided at runtime. CLI arguments should
-    /// override corresponding values in the base configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The base configuration to modify
-    ///
-    /// # Returns
-    ///
-    /// A new [`AppConfig`] with CLI arguments applied on top of the base configuration
-    fn apply_to_config(&self, config: AppConfig) -> AppConfig;
 }

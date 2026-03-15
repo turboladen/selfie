@@ -193,7 +193,7 @@ pub trait PackageRepository: Send + Sync {
 pub enum PackageRepoError {
     /// Package-specific error (not found, parse error, etc.)
     #[error(transparent)]
-    PackageError(#[from] Box<PackageError>),
+    PackageError(Box<PackageError>),
 
     /// Package listing operation failed
     #[error(transparent)]
@@ -206,6 +206,12 @@ pub enum PackageRepoError {
     /// File system error during repository operation
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+}
+
+impl From<PackageError> for PackageRepoError {
+    fn from(err: PackageError) -> Self {
+        Self::PackageError(Box::new(err))
+    }
 }
 
 /// Errors that can occur when listing packages
@@ -253,7 +259,7 @@ pub enum PackageError {
     },
 
     /// Package definition file exists but could not be parsed
-    #[error("Parse error in package `{name}` from {}", packages_path.display())]
+    #[error("Parse error in package `{name}` from {}: {source}", packages_path.display())]
     ParseError {
         name: String,
         packages_path: PathBuf,
@@ -284,6 +290,10 @@ pub enum PackageError {
         /// Whether other environments have check commands (for suggestions)
         other_envs_with_check: Vec<String>,
     },
+
+    /// A package with the specified name already exists
+    #[error("Package `{name}` already exists at {}", file_path.display())]
+    PackageAlreadyExists { name: String, file_path: PathBuf },
 
     /// Package environment exists but has no install command configured
     #[error(
@@ -391,10 +401,11 @@ pub enum PackageParseError {
     },
 
     /// File system abstraction error during package file access
-    #[error("File system error reading package file `{}`: {source_message}", package_path.display())]
+    #[error("File system error reading package file `{}`: {source}", package_path.display())]
     FileSystemError {
         package_path: PathBuf,
-        source_message: String,
+        #[source]
+        source: Arc<crate::fs::filesystem::FileSystemError>,
     },
 }
 

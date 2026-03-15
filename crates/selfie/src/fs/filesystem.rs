@@ -19,7 +19,6 @@ use thiserror::Error;
 /// through mocking. All file system interactions in the selfie library go through
 /// this abstraction.
 #[cfg_attr(feature = "with_mocks", mockall::automock)]
-#[async_trait::async_trait]
 pub trait FileSystem: Send + Sync {
     /// Read a file and return its contents as a string
     ///
@@ -186,7 +185,7 @@ impl MockFileSystem {
     /// in the CLI layer while avoiding real filesystem operations:
     ///
     /// ```rust
-    /// use selfie::fs::filesystem::MockFileSystem;
+    /// use selfie::fs::MockFileSystem;
     /// use selfie::package::repository::yaml::YamlPackageRepository;
     /// use std::path::PathBuf;
     ///

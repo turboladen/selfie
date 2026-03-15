@@ -4,33 +4,101 @@
 
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         EnvironmentConfig,
         event::{
             CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
             OperationSuccess,
         },
-        port::{PackageError, PackageRepoError, PackageRepository},
+        port::PackageRepository,
         service::ProgressTracker,
     },
 };
 
-use super::{check, steps};
+use tokio_util::sync::CancellationToken;
+
+use super::{check, deps, steps};
 
 pub(super) async fn handle_install<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
+) -> OperationResult
+where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    // Step 1: Resolve dependencies (includes cycle detection)
+    progress
+        .next(sender, "Resolving package dependencies")
+        .await;
+
+    let dep_graph =
+        match deps::resolve_dependencies(package_name, repo, config.environment(), sender).await {
+            Ok(graph) => graph,
+            Err(failure) => return OperationResult::Failure(failure),
+        };
+
+    // Update total steps: 1 (resolve) + 7 per package (fetch, env, check, get_cmd, execute, verify, complete)
+    let num_packages = dep_graph.install_order.len();
+    let total_steps = 1 + (7 * num_packages);
+    progress.set_total_steps(total_steps);
+
+    // Install each package in dependency order
+    for pkg_name in &dep_graph.install_order {
+        // Check for cancellation between packages
+        if token.is_cancelled() {
+            return OperationResult::Failure("Installation cancelled".into());
+        }
+
+        let result = install_single_package(
+            pkg_name,
+            repo,
+            config,
+            command_runner,
+            sender,
+            progress,
+            token,
+        )
+        .await;
+
+        match result {
+            OperationResult::Success(_) => {
+                // Continue to next package
+            }
+            OperationResult::Failure(_) => return result,
+        }
+    }
+
+    OperationResult::Success(OperationSuccess::package_installed(
+        package_name.to_string(),
+        config.environment().to_string(),
+        false,
+        None,
+        (progress.current_step(), progress.total_steps()).into(),
+    ))
+}
+
+/// Install a single package (without dependency resolution).
+async fn install_single_package<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
     CR: CommandRunner,
 {
-    // Step 1: Fetch package (reusing shared step)
+    // Fetch package
     let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
         Ok(pkg) => pkg,
         Err(err) => {
@@ -38,7 +106,7 @@ where
         }
     };
 
-    // Step 2: Find environment configuration
+    // Find environment configuration
     let env_config = match get_environment_config(
         package_name,
         &package_blob,
@@ -52,7 +120,7 @@ where
         Err(result) => return result,
     };
 
-    // Step 3: Check if package is already installed
+    // Check if package is already installed
     let pre_install_check = check::execute_check_command(
         package_name,
         config.environment(),
@@ -60,7 +128,8 @@ where
         command_runner,
         sender,
         progress,
-        "Checking if package is already installed",
+        &format!("Checking if '{package_name}' is already installed"),
+        token,
     )
     .await;
 
@@ -72,6 +141,7 @@ where
         sender,
         progress,
         config,
+        token,
     )
     .await
     {
@@ -81,7 +151,7 @@ where
     // Log that we're proceeding with installation
     log_proceeding_with_installation(package_name, &pre_install_check, sender).await;
 
-    // Step 4: Get install command (reusing shared step with custom getter function)
+    // Get install command
     let Ok(install_cmd) = steps::get_command(
         env_config,
         "install",
@@ -91,7 +161,6 @@ where
     )
     .await
     else {
-        // Create typed error for missing install command
         let other_envs_with_install = package_blob
             .package
             .environments()
@@ -119,7 +188,7 @@ where
         ));
     };
 
-    // Step 5: Execute installation and verification
+    // Execute installation and verification
     let context = InstallationContext {
         package_name,
         install_cmd,
@@ -128,7 +197,7 @@ where
         pre_install_check: &pre_install_check,
     };
 
-    execute_installation_and_verification(context, command_runner, sender, progress).await
+    execute_installation_and_verification(context, command_runner, sender, progress, token).await
 }
 
 async fn handle_already_installed_package<CR>(
@@ -137,17 +206,19 @@ async fn handle_already_installed_package<CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &ProgressTracker,
-    config: &AppConfig,
+    config: &SelfieConfig,
+    token: &CancellationToken,
 ) -> Option<OperationResult>
 where
     CR: CommandRunner,
 {
-    if matches!(pre_install_check.result, CheckResult::Success) {
+    if matches!(pre_install_check.result, CheckResult::Success { .. }) {
         sender
             .send_debug(format!("Package '{package_name}' is already installed"))
             .await;
 
-        let executable_path = find_executable_path(package_name, command_runner, sender).await;
+        let executable_path =
+            find_executable_path(package_name, command_runner, sender, token).await;
 
         return Some(OperationResult::Success(
             OperationSuccess::package_installed(
@@ -166,6 +237,7 @@ async fn find_executable_path<CR>(
     package_name: &str,
     command_runner: &CR,
     sender: &EventSender,
+    token: &CancellationToken,
 ) -> Option<String>
 where
     CR: CommandRunner,
@@ -176,7 +248,7 @@ where
         format!("which {package_name}")
     };
 
-    match command_runner.execute(&finder_command).await {
+    match command_runner.execute(&finder_command, token).await {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {
             let executable_path = output.stdout_str().trim().to_string();
             sender
@@ -231,7 +303,7 @@ async fn log_proceeding_with_installation(
                 .send_warning("Check command failed, but proceeding with installation anyway")
                 .await;
         }
-        CheckResult::Success => {
+        CheckResult::Success { .. } => {
             // Already handled in handle_already_installed_package
         }
     }
@@ -241,7 +313,7 @@ struct InstallationContext<'a> {
     package_name: &'a str,
     install_cmd: &'a str,
     env_config: &'a EnvironmentConfig,
-    config: &'a AppConfig,
+    config: &'a SelfieConfig,
     pre_install_check: &'a CheckResultData,
 }
 
@@ -250,6 +322,7 @@ async fn execute_installation_and_verification<CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     CR: CommandRunner,
@@ -262,6 +335,7 @@ where
         context.config,
         sender,
         progress,
+        token,
     )
     .await
     {
@@ -285,9 +359,10 @@ where
     }
 
     // Verify installation if check command is available
-    verify_installation(&context, command_runner, sender, progress).await;
+    verify_installation(&context, command_runner, sender, progress, token).await;
 
-    let executable_path = find_executable_path(context.package_name, command_runner, sender).await;
+    let executable_path =
+        find_executable_path(context.package_name, command_runner, sender, token).await;
 
     // Final step: Report success
     progress
@@ -314,7 +389,7 @@ async fn get_environment_config<'a>(
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return handle_missing_environment(package_name, package_blob, current_env, sender).await;
+        return steps::handle_missing_environment(package_name, package_blob, current_env);
     };
 
     sender
@@ -325,35 +400,12 @@ async fn get_environment_config<'a>(
     Ok(env_config)
 }
 
-async fn handle_missing_environment(
-    package_name: &str,
-    package_blob: &crate::package::GetPackage,
-    current_env: &str,
-    sender: &EventSender,
-) -> Result<&'static EnvironmentConfig, OperationResult> {
-    let err = Box::new(PackageError::EnvironmentNotFound {
-        package_name: package_name.to_string(),
-        environment: current_env.to_string(),
-        available_environments: package_blob
-            .package
-            .environments()
-            .keys()
-            .cloned()
-            .collect(),
-        package_file: package_blob.package.path().clone(),
-    });
-    let error_msg = format!("Environment configuration error: {err}");
-    sender
-        .send_error(PackageRepoError::PackageError(err.clone()), &error_msg)
-        .await;
-    Err(OperationResult::Failure((*err).into()))
-}
-
 async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) where
     CR: CommandRunner,
 {
@@ -366,11 +418,12 @@ async fn verify_installation<CR>(
             sender,
             progress,
             "Verifying package installation",
+            token,
         )
         .await;
 
         match post_install_check.result {
-            CheckResult::Success => {
+            CheckResult::Success { .. } => {
                 sender
                     .send_debug(format!(
                         "Package '{}' installation verified successfully",

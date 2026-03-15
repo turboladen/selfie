@@ -9,15 +9,18 @@
 //! command execution, and event streaming to provide a complete package management experience.
 
 mod check;
+mod create;
+mod deps;
 mod info;
 mod install;
 mod list;
 mod steps;
 mod validate;
 
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::{
@@ -28,7 +31,7 @@ use super::{
     port::PackageRepository,
 };
 
-use crate::{commands::runner::CommandRunner, config::AppConfig, package::port::PackageError};
+use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 
 /// Helper for tracking progress through operation steps
 ///
@@ -82,6 +85,14 @@ impl ProgressTracker {
     pub(crate) fn total_steps(&self) -> usize {
         self.total_steps
     }
+
+    /// Update the total number of steps after initial creation
+    ///
+    /// This is useful when the total step count isn't known until after
+    /// dependency resolution determines how many packages need installing.
+    pub(crate) fn set_total_steps(&mut self, total: usize) {
+        self.total_steps = total;
+    }
 }
 
 /// Primary port for package operations (Hexagonal Architecture)
@@ -93,8 +104,7 @@ impl ProgressTracker {
 /// All operations return an `EventStream` that allows real-time monitoring of
 /// progress, errors, and results. This enables different UI implementations
 /// (CLI, GUI, etc.) to provide appropriate user feedback.
-#[cfg_attr(test, mockall::automock)]
-#[async_trait::async_trait]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait PackageService: Send + Sync {
     /// Check if a package is already installed
     ///
@@ -114,7 +124,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn check(&self, package_name: &str) -> EventStream;
+    fn check(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Install a package using its configured installation method
     ///
@@ -134,7 +144,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site,
     /// however, errors may be emitted through the event stream.
-    async fn install(&self, package_name: &str) -> EventStream;
+    fn install(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Get detailed information about a package
     ///
@@ -148,17 +158,13 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with package information, or an error if the package cannot be found
+    /// An event stream that will emit package information events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - Multiple packages with the same name are found
-    /// - The package definition file is malformed
-    /// - File system access fails during package loading
-    /// - The package repository is inaccessible
-    async fn info(&self, package_name: &str) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    fn info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Validate a package definition file
     ///
@@ -173,22 +179,17 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with validation results, or an error if validation cannot proceed
+    /// An event stream that will emit validation results and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found when path not specified
-    /// - Multiple packages with the same name are found
-    /// - The specified package path does not exist or is not accessible
-    /// - The package definition file cannot be read due to permissions
-    /// - File system access fails during validation setup
-    /// - The package repository is inaccessible
-    async fn validate(
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    fn validate(
         &self,
         package_name: &str,
         package_path: Option<PathBuf>,
-    ) -> Result<EventStream, PackageError>;
+    ) -> impl Future<Output = EventStream> + Send;
 
     /// List all available packages in the package directory
     ///
@@ -197,41 +198,32 @@ pub trait PackageService: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An event stream with the list of available packages, or an error if listing fails
+    /// An event stream that will emit package list events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package directory cannot be accessed due to permissions or path issues
-    /// - The package directory does not exist
-    /// - Package definition files cannot be read due to permissions
-    /// - File system access fails during directory traversal
-    /// - The package repository encounters critical errors during listing
-    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
 
     /// Create a new package definition file
     ///
-    /// Creates a new package definition file with a basic template structure.
-    /// This provides a starting point for users to define their own packages.
+    /// Saves the provided package to the repository if no package with
+    /// the same name already exists.
     ///
     /// # Arguments
     ///
-    /// * `package_name` - Name of the new package to create
+    /// * `package` - The fully constructed package to create
     ///
     /// # Returns
     ///
-    /// An event stream with creation progress, or an error if creation fails
+    /// An event stream that will emit creation progress events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - A package with the same name already exists in the package directory
-    /// - The package directory is not writable due to permissions
-    /// - The package directory does not exist and cannot be created
-    /// - File system access fails during template creation or file writing
-    /// - Package name contains invalid characters for file system usage
-    /// - Disk space is insufficient for creating the package file
-    async fn create(&self, package_name: &str) -> Result<EventStream, PackageError>;
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -249,7 +241,9 @@ pub struct PackageServiceImpl<R, CR> {
     /// Command runner for executing system commands
     command_runner: CR,
     /// Application configuration including environment and settings
-    config: AppConfig,
+    config: SelfieConfig,
+    /// Token used to signal graceful cancellation of in-flight operations
+    cancellation_token: CancellationToken,
 }
 
 impl<R, CR> PackageServiceImpl<R, CR>
@@ -264,11 +258,17 @@ where
     /// * `package_repository` - Repository implementation for package storage
     /// * `command_runner` - Command runner implementation for executing system commands
     /// * `config` - Application configuration
-    pub fn new(package_repository: R, command_runner: CR, config: AppConfig) -> Self {
+    pub fn new(
+        package_repository: R,
+        command_runner: CR,
+        config: SelfieConfig,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             package_repository,
             command_runner,
             config,
+            cancellation_token,
         }
     }
 
@@ -327,13 +327,16 @@ where
         handler: F,
     ) -> EventStream
     where
-        F: FnOnce(R, CR, AppConfig, EventSender, ProgressTracker) -> Fut + Send + 'static,
+        F: FnOnce(R, CR, SelfieConfig, EventSender, ProgressTracker, CancellationToken) -> Fut
+            + Send
+            + 'static,
         Fut: std::future::Future<Output = OperationResult> + Send,
     {
         let repo = self.package_repository.clone();
         let command_runner = self.command_runner.clone();
         let config = self.config.clone();
         let package_name = package_name.to_string();
+        let token = self.cancellation_token.clone();
 
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
@@ -344,57 +347,13 @@ where
                 context,
             );
 
-            sender.send_started().await;
-            sender
-                .send_trace(format!("Current environment: {}", config.environment()))
-                .await;
-
-            let progress = ProgressTracker::new(total_steps);
-            let result = handler(repo, command_runner, config, sender.clone(), progress).await;
-            sender.send_completed(result).await;
-        })
-    }
-
-    /// Execute an operation with simplified event handling
-    ///
-    /// A simpler version of operation execution that doesn't require full dependency
-    /// injection. This is useful for operations that don't need access to the
-    /// repository or command runner.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation_type` - Type of operation being performed
-    /// * `package_name` - Name of the package being operated on
-    /// * `context` - Additional operation context
-    /// * `total_steps` - Total number of steps for progress tracking
-    /// * `handler` - Async function that performs the actual operation
-    ///
-    /// # Returns
-    ///
-    /// An event stream that emits operation progress and results
-    fn execute_operation<F, Fut>(
-        &self,
-        operation_type: OperationType,
-        package_name: &str,
-        context: OperationContext,
-        total_steps: usize,
-        handler: F,
-    ) -> EventStream
-    where
-        F: FnOnce(EventSender, ProgressTracker) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = OperationResult> + Send,
-    {
-        let config = self.config.clone();
-        let package_name = package_name.to_string();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                operation_type,
-                package_name,
-                config.environment().to_string(),
-                context,
-            );
+            // Check for cancellation before starting
+            if token.is_cancelled() {
+                sender
+                    .send_canceled("Operation cancelled before start")
+                    .await;
+                return;
+            }
 
             sender.send_started().await;
             sender
@@ -402,13 +361,26 @@ where
                 .await;
 
             let progress = ProgressTracker::new(total_steps);
-            let result = handler(sender.clone(), progress).await;
-            sender.send_completed(result).await;
+            let result = handler(
+                repo,
+                command_runner,
+                config,
+                sender.clone(),
+                progress,
+                token.clone(),
+            )
+            .await;
+
+            // If cancelled during execution, emit Canceled instead of Completed
+            if token.is_cancelled() {
+                sender.send_canceled("Operation cancelled").await;
+            } else {
+                sender.send_completed(result).await;
+            }
         })
     }
 }
 
-#[async_trait::async_trait]
 impl<R, CR> PackageService for PackageServiceImpl<R, CR>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -443,7 +415,7 @@ where
             package_name,
             OperationContext::default(),
             3, // Load package + check environment + run check command
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 check::handle_check(
                     &package_name_owned,
                     &repo,
@@ -451,6 +423,7 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
@@ -487,8 +460,8 @@ where
             OperationType::PackageInstall,
             package_name,
             OperationContext::default(),
-            7, // fetch_package + find_env + pre_check + get_command + execute_command + post_check + completion
-            move |repo, command_runner, config, sender, mut progress| async move {
+            1, // Initial step (dependency resolution); total is adjusted dynamically
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 install::handle_install(
                     &package_name_owned,
                     &repo,
@@ -496,6 +469,7 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
@@ -524,27 +498,21 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - The package definition file cannot be read
-    /// - Critical validation setup fails
-    async fn validate(
-        &self,
-        package_name: &str,
-        package_path: Option<PathBuf>,
-    ) -> Result<EventStream, PackageError> {
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream {
         let context = OperationContext {
             package_path,
             target_environment: None,
         };
 
         let package_name_owned = package_name.to_string();
-        Ok(self.execute_operation_with_deps(
+        self.execute_operation_with_deps(
             OperationType::PackageValidate,
             package_name,
             context,
             3, // load_package + validate_package + result processing
-            move |repo, _, config, sender, mut progress| async move {
+            move |repo, _, config, sender, mut progress, _token| async move {
                 validate::handle_validate(
                     &package_name_owned,
                     &repo,
@@ -554,7 +522,7 @@ where
                 )
                 .await
             },
-        ))
+        )
     }
 
     /// List all available packages in the package directory
@@ -570,21 +538,19 @@ where
     ///
     /// # Returns
     ///
-    /// An event stream with the list of available packages and their details
+    /// An event stream that will emit package list events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package directory cannot be accessed
-    /// - Package definition files cannot be read
-    /// - File system operations fail
-    async fn list(&self, show_all: bool) -> Result<EventStream, PackageError> {
-        Ok(self.execute_operation_with_deps(
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn list(&self, show_all: bool) -> EventStream {
+        self.execute_operation_with_deps(
             OperationType::PackageList,
             "", // No specific package for list operation
             OperationContext::default(),
-            4, // Load packages + process + check status + finalize
-            move |repo, command_runner, config, sender, mut progress| async move {
+            2, // Load packages + check status
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 list::handle_list(
                     &repo,
                     &config,
@@ -592,10 +558,11 @@ where
                     &sender,
                     &mut progress,
                     show_all,
+                    &token,
                 )
                 .await
             },
-        ))
+        )
     }
 
     /// Get detailed information about a package
@@ -616,22 +583,20 @@ where
     ///
     /// # Returns
     ///
-    /// An event stream with detailed package information
+    /// An event stream that will emit package information events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - The package definition file cannot be found
-    /// - The package definition file is malformed
-    /// - File system access fails
-    async fn info(&self, package_name: &str) -> Result<EventStream, PackageError> {
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    async fn info(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
-        Ok(self.execute_operation_with_deps(
+        self.execute_operation_with_deps(
             OperationType::PackageInfo,
             package_name,
             OperationContext::default(),
             3, // Load package + gather info + check status
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 info::handle_info(
                     &package_name_owned,
                     &repo,
@@ -639,49 +604,46 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
-        ))
+        )
     }
 
     /// Create a new package definition file
     ///
-    /// Creates a new package definition file with a basic template structure
-    /// in the configured package directory. The template includes placeholders
-    /// for common configuration options and environment setups.
+    /// Saves the provided package to the repository if no package with
+    /// the same name already exists. The operation checks for existing
+    /// packages and writes the new definition file.
+    ///
+    /// The create operation consists of:
+    /// 1. Checking if a package with the same name already exists
+    /// 2. Saving the package definition to the repository
     ///
     /// # Arguments
     ///
-    /// * `package_name` - Name of the new package to create
+    /// * `package` - The fully constructed package to create
     ///
     /// # Returns
     ///
-    /// An event stream with creation progress and result
+    /// An event stream that will emit creation progress events and the final result
     ///
     /// # Errors
     ///
-    /// Returns [`PackageError`] if:
-    /// - A package with the same name already exists
-    /// - The package directory is not writable
-    /// - File system operations fail
-    ///
-    /// # Note
-    ///
-    /// This operation is currently not fully implemented and will return
-    /// a placeholder success message.
-    async fn create(&self, package_name: &str) -> Result<EventStream, PackageError> {
-        Ok(self.execute_operation(
+    /// This method returns an `EventStream` directly and cannot fail at the call site.
+    /// However, errors may be emitted through the event stream.
+    #[instrument]
+    async fn create(&self, package: super::Package) -> EventStream {
+        let package_name = package.name().to_string();
+        self.execute_operation_with_deps(
             OperationType::PackageCreate,
-            package_name,
+            &package_name,
             OperationContext::default(),
-            1, // Just one step for creation
-            |_sender, mut _progress| async move {
-                // TODO: Implement actual creation logic
-                OperationResult::Success(crate::package::event::OperationSuccess::Generic(
-                    "Create operation not yet implemented".to_string(),
-                ))
+            2, // Check existence + save
+            move |repo, _, config, sender, mut progress, _token| async move {
+                create::handle_create(package, &repo, &config, &sender, &mut progress).await
             },
-        ))
+        )
     }
 }

@@ -6,6 +6,7 @@ pub mod service;
 pub mod validate;
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
+pub use self::service::PackageService;
 
 // Core package entity and related types
 use std::{collections::HashMap, path::PathBuf};
@@ -20,11 +21,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct GetPackage {
     /// The package content (either loaded or template)
-    pub package: Package,
+    pub(crate) package: Package,
     /// The file path where the package is/should be stored
-    pub file_path: PathBuf,
+    pub(crate) file_path: PathBuf,
     /// Whether this is a new package (true) or existing (false)
-    pub is_new: bool,
+    pub(crate) is_new: bool,
 }
 
 impl GetPackage {
@@ -64,6 +65,30 @@ impl GetPackage {
             file_path,
             is_new: false,
         }
+    }
+
+    /// Get a reference to the package content
+    #[must_use]
+    pub fn package(&self) -> &Package {
+        &self.package
+    }
+
+    /// Get the file path where the package is/should be stored
+    #[must_use]
+    pub fn file_path(&self) -> &std::path::Path {
+        &self.file_path
+    }
+
+    /// Whether this is a new package (true) or existing (false)
+    #[must_use]
+    pub fn is_new(&self) -> bool {
+        self.is_new
+    }
+
+    /// Consume the `GetPackage` and return the inner `Package`
+    #[must_use]
+    pub fn into_package(self) -> Package {
+        self.package
     }
 }
 

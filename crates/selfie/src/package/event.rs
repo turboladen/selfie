@@ -27,6 +27,9 @@
 pub mod error;
 pub mod metadata;
 
+pub use self::error::StreamedError;
+pub use self::metadata::OperationType;
+
 /// Represents the completion status of steps in an operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepCount {
@@ -62,8 +65,6 @@ use std::{
 use futures::Stream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-
-use self::{error::StreamedError, metadata::OperationType};
 
 /// Type alias for a stream of package events
 ///
@@ -262,6 +263,10 @@ impl EventSender {
     }
 
     /// Send an error event
+    ///
+    /// Currently unused — terminal errors flow through `OperationResult::Failure`
+    /// via `send_completed`. Retained for future non-terminal error events.
+    #[allow(dead_code)]
     pub(crate) async fn send_error<SE>(&self, error: SE, message: impl fmt::Display)
     where
         StreamedError: From<SE>,
@@ -299,6 +304,16 @@ impl EventSender {
         self.send_log(LogLevel::Warning, message).await;
     }
 
+    /// Send a cancellation event
+    pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::Canceled {
+            operation_info,
+            reason: reason.to_string(),
+        })
+        .await;
+    }
+
     /// Send package information data
     pub(crate) async fn send_package_info(&self, package_info: PackageInfoData) {
         let operation_info = self.touch_operation_info();
@@ -329,6 +344,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send sorted filtered package list ready for display
+    pub(crate) async fn send_package_list_ready(&self, packages: Vec<PackageListItem>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::PackageListReady {
+            operation_info,
+            packages,
+        })
+        .await;
+    }
+
     /// Send check result data
     pub(crate) async fn send_check_result(&self, check_result: CheckResultData) {
         let operation_info = self.touch_operation_info();
@@ -345,6 +370,16 @@ impl EventSender {
         self.send(PackageEvent::ValidationResultCompleted {
             operation_info,
             validation_result,
+        })
+        .await;
+    }
+
+    /// Send individual package list item data (for streaming)
+    pub(crate) async fn send_package_list_item(&self, package_item: PackageListItem) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::PackageListItemCompleted {
+            operation_info,
+            package_item,
         })
         .await;
     }
@@ -506,6 +541,13 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Package creation operation completed
+    PackageCreated {
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -513,62 +555,16 @@ pub enum OperationSuccess {
 /// Typed failure information for operations
 #[derive(Debug, Clone)]
 pub enum OperationFailure {
-    /// Environment configuration issues
-    EnvironmentError(EnvironmentFailure),
-    /// Package loading/parsing issues
-    PackageError(PackageFailure),
+    /// Package-related issues (environment, loading, parsing)
+    Package(crate::package::port::PackageError),
     /// Command execution issues
     CommandError(CommandFailure),
+    /// Dependency resolution issues
+    DependencyError(DependencyFailure),
+    /// Package listing/directory issues
+    PackageList(crate::package::port::PackageListError),
     /// Generic failures with just a message (for backward compatibility)
     Generic(String),
-}
-
-/// Environment-related failure details
-#[derive(Debug, Clone)]
-pub enum EnvironmentFailure {
-    NotFound {
-        package_name: String,
-        environment: String,
-        available_environments: Vec<String>,
-        package_file: std::path::PathBuf,
-    },
-    NoCheckCommand {
-        package_name: String,
-        environment: String,
-        package_file: std::path::PathBuf,
-        other_envs_with_check: Vec<String>,
-    },
-    NoInstallCommand {
-        package_name: String,
-        environment: String,
-        package_file: std::path::PathBuf,
-        other_envs_with_install: Vec<String>,
-    },
-}
-
-/// Package-related failure details
-#[derive(Debug, Clone)]
-pub enum PackageFailure {
-    NotFound {
-        name: String,
-        packages_path: std::path::PathBuf,
-        files_examined: usize,
-        search_patterns: Vec<String>,
-    },
-    ParseError {
-        name: String,
-        packages_path: std::path::PathBuf,
-        failed_file: std::path::PathBuf,
-        file_size_bytes: u64,
-        source_error: String,
-    },
-    MultiplePackagesFound {
-        name: String,
-        packages_path: std::path::PathBuf,
-        conflicting_paths: Vec<std::path::PathBuf>,
-        files_examined: usize,
-        search_patterns: Vec<String>,
-    },
 }
 
 /// Command execution failure details
@@ -589,58 +585,31 @@ pub enum CommandFailure {
     },
 }
 
+/// Dependency resolution failure details
+#[derive(Debug, Clone)]
+pub enum DependencyFailure {
+    /// A circular dependency was detected in the dependency graph
+    CircularDependency {
+        package_name: String,
+        cycle: Vec<String>,
+    },
+    /// A required dependency was not found in the repository
+    MissingDependency {
+        package_name: String,
+        dependency_name: String,
+    },
+}
+
 impl std::fmt::Display for OperationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OperationFailure::EnvironmentError(env_err) => {
-                write!(f, "Environment configuration error: {env_err}")
-            }
-            OperationFailure::PackageError(pkg_err) => write!(f, "Package error: {pkg_err}"),
+            OperationFailure::Package(e) => write!(f, "{e}"),
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
-            OperationFailure::Generic(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::fmt::Display for EnvironmentFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnvironmentFailure::NotFound {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "Environment `{environment}` not found in package `{package_name}`"
-            ),
-            EnvironmentFailure::NoCheckCommand {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "No check command defined for package `{package_name}` in environment `{environment}`"
-            ),
-            EnvironmentFailure::NoInstallCommand {
-                package_name,
-                environment,
-                ..
-            } => write!(
-                f,
-                "No install command defined for package `{package_name}` in environment `{environment}`"
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for PackageFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PackageFailure::NotFound { name, .. } => write!(f, "Package `{name}` not found"),
-            PackageFailure::ParseError { name, .. } => write!(f, "Parse error in package `{name}`"),
-            PackageFailure::MultiplePackagesFound { name, .. } => {
-                write!(f, "Multiple packages found with name `{name}`")
+            OperationFailure::DependencyError(dep_err) => {
+                write!(f, "Dependency error: {dep_err}")
             }
+            OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
+            OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -663,6 +632,28 @@ impl std::fmt::Display for CommandFailure {
             CommandFailure::InvalidCommand { command, reason } => {
                 write!(f, "Invalid command `{command}`: {reason}")
             }
+        }
+    }
+}
+
+impl std::fmt::Display for DependencyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencyFailure::CircularDependency {
+                package_name,
+                cycle,
+            } => write!(
+                f,
+                "Circular dependency detected for package `{package_name}`: {}",
+                cycle.join(" -> ")
+            ),
+            DependencyFailure::MissingDependency {
+                package_name,
+                dependency_name,
+            } => write!(
+                f,
+                "Package `{package_name}` depends on `{dependency_name}`, which was not found"
+            ),
         }
     }
 }
@@ -750,6 +741,16 @@ impl std::fmt::Display for OperationSuccess {
                 };
                 write!(f, "Package listing completed {status} {steps_completed}")
             }
+            OperationSuccess::PackageCreated {
+                package_name,
+                file_path,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' created at {} {steps_completed}",
+                file_path.display()
+            ),
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -771,78 +772,7 @@ impl From<&str> for OperationSuccess {
 // Conversions from existing error types to typed failures
 impl From<crate::package::port::PackageError> for OperationFailure {
     fn from(err: crate::package::port::PackageError) -> Self {
-        match err {
-            crate::package::port::PackageError::EnvironmentNotFound {
-                package_name,
-                environment,
-                available_environments,
-                package_file,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
-                package_name,
-                environment,
-                available_environments,
-                package_file,
-            }),
-            crate::package::port::PackageError::NoCheckCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_check,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_check,
-            }),
-            crate::package::port::PackageError::NoInstallCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_install,
-            } => OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
-                package_name,
-                environment,
-                package_file,
-                other_envs_with_install,
-            }),
-            crate::package::port::PackageError::PackageNotFound {
-                name,
-                packages_path,
-                files_examined,
-                search_patterns,
-            } => OperationFailure::PackageError(PackageFailure::NotFound {
-                name,
-                packages_path,
-                files_examined,
-                search_patterns,
-            }),
-            crate::package::port::PackageError::ParseError {
-                name,
-                packages_path,
-                failed_file,
-                file_size_bytes,
-                source,
-            } => OperationFailure::PackageError(PackageFailure::ParseError {
-                name,
-                packages_path,
-                failed_file,
-                file_size_bytes,
-                source_error: source.to_string(),
-            }),
-            crate::package::port::PackageError::MultiplePackagesFound {
-                name,
-                packages_path,
-                conflicting_paths,
-                files_examined,
-                search_patterns,
-            } => OperationFailure::PackageError(PackageFailure::MultiplePackagesFound {
-                name,
-                packages_path,
-                conflicting_paths,
-                files_examined,
-                search_patterns,
-            }),
-        }
+        OperationFailure::Package(err)
     }
 }
 
@@ -958,6 +888,22 @@ impl OperationSuccess {
         }
     }
 
+    /// Create a `PackageCreated` success variant
+    #[must_use]
+    pub fn package_created(
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageCreated {
+            package_name,
+            file_path,
+            environment,
+            steps_completed,
+        }
+    }
+
     /// Checks if this is a package check success
     #[must_use]
     pub fn is_package_check(&self) -> bool {
@@ -983,7 +929,8 @@ impl OperationSuccess {
             OperationSuccess::PackageChecked { package_name, .. }
             | OperationSuccess::PackageInstalled { package_name, .. }
             | OperationSuccess::PackageValidated { package_name, .. }
-            | OperationSuccess::PackageInfoRetrieved { package_name, .. } => Some(package_name),
+            | OperationSuccess::PackageInfoRetrieved { package_name, .. }
+            | OperationSuccess::PackageCreated { package_name, .. } => Some(package_name),
             OperationSuccess::PackageListGenerated { .. } | OperationSuccess::Generic(_) => None,
         }
     }
@@ -996,7 +943,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::PackageInfoRetrieved { environment, .. }
-            | OperationSuccess::PackageListGenerated { environment, .. } => Some(environment),
+            | OperationSuccess::PackageListGenerated { environment, .. }
+            | OperationSuccess::PackageCreated { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -1019,6 +967,9 @@ impl OperationSuccess {
             }
             | OperationSuccess::PackageListGenerated {
                 steps_completed, ..
+            }
+            | OperationSuccess::PackageCreated {
+                steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
         }
@@ -1034,7 +985,7 @@ impl OperationFailure {
         available_environments: Vec<String>,
         package_file: std::path::PathBuf,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NotFound {
+        OperationFailure::Package(crate::package::port::PackageError::EnvironmentNotFound {
             package_name,
             environment,
             available_environments,
@@ -1050,7 +1001,7 @@ impl OperationFailure {
         package_file: std::path::PathBuf,
         other_envs_with_check: Vec<String>,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NoCheckCommand {
+        OperationFailure::Package(crate::package::port::PackageError::NoCheckCommand {
             package_name,
             environment,
             package_file,
@@ -1066,7 +1017,7 @@ impl OperationFailure {
         package_file: std::path::PathBuf,
         other_envs_with_install: Vec<String>,
     ) -> Self {
-        OperationFailure::EnvironmentError(EnvironmentFailure::NoInstallCommand {
+        OperationFailure::Package(crate::package::port::PackageError::NoInstallCommand {
             package_name,
             environment,
             package_file,
@@ -1082,7 +1033,7 @@ impl OperationFailure {
         files_examined: usize,
         search_patterns: Vec<String>,
     ) -> Self {
-        OperationFailure::PackageError(PackageFailure::NotFound {
+        OperationFailure::Package(crate::package::port::PackageError::PackageNotFound {
             name,
             packages_path,
             files_examined,
@@ -1109,13 +1060,28 @@ impl OperationFailure {
     /// Checks if this is an environment-related error
     #[must_use]
     pub fn is_environment_error(&self) -> bool {
-        matches!(self, OperationFailure::EnvironmentError(_))
+        matches!(
+            self,
+            OperationFailure::Package(
+                crate::package::port::PackageError::EnvironmentNotFound { .. }
+                    | crate::package::port::PackageError::NoCheckCommand { .. }
+                    | crate::package::port::PackageError::NoInstallCommand { .. }
+            )
+        )
     }
 
     /// Checks if this is a package-related error
     #[must_use]
     pub fn is_package_error(&self) -> bool {
-        matches!(self, OperationFailure::PackageError(_))
+        matches!(
+            self,
+            OperationFailure::Package(
+                crate::package::port::PackageError::PackageNotFound { .. }
+                    | crate::package::port::PackageError::MultiplePackagesFound { .. }
+                    | crate::package::port::PackageError::ParseError { .. }
+                    | crate::package::port::PackageError::PackageAlreadyExists { .. }
+            )
+        )
     }
 
     /// Checks if this is a command-related error
@@ -1124,22 +1090,57 @@ impl OperationFailure {
         matches!(self, OperationFailure::CommandError(_))
     }
 
-    /// Gets the environment failure details if this is an environment error
+    /// Checks if this is a dependency-related error
     #[must_use]
-    pub fn environment_failure(&self) -> Option<&EnvironmentFailure> {
+    pub fn is_dependency_error(&self) -> bool {
+        matches!(self, OperationFailure::DependencyError(_))
+    }
+
+    /// Gets the package error details if this is a package error
+    #[must_use]
+    pub fn package_error(&self) -> Option<&crate::package::port::PackageError> {
         match self {
-            OperationFailure::EnvironmentError(env_err) => Some(env_err),
+            OperationFailure::Package(pkg_err) => Some(pkg_err),
             _ => None,
         }
+    }
+
+    /// Gets the dependency failure details if this is a dependency error
+    #[must_use]
+    pub fn dependency_failure(&self) -> Option<&DependencyFailure> {
+        match self {
+            OperationFailure::DependencyError(dep_err) => Some(dep_err),
+            _ => None,
+        }
+    }
+
+    /// Creates a circular dependency error
+    #[must_use]
+    pub fn circular_dependency(package_name: String, cycle: Vec<String>) -> Self {
+        OperationFailure::DependencyError(DependencyFailure::CircularDependency {
+            package_name,
+            cycle,
+        })
+    }
+
+    /// Creates a missing dependency error
+    #[must_use]
+    pub fn missing_dependency(package_name: String, dependency_name: String) -> Self {
+        OperationFailure::DependencyError(DependencyFailure::MissingDependency {
+            package_name,
+            dependency_name,
+        })
     }
 }
 
 impl From<crate::package::port::PackageRepoError> for OperationFailure {
     fn from(err: crate::package::port::PackageRepoError) -> Self {
         match err {
-            crate::package::port::PackageRepoError::PackageError(pkg_err) => (*pkg_err).into(),
+            crate::package::port::PackageRepoError::PackageError(pkg_err) => {
+                OperationFailure::Package(*pkg_err)
+            }
             crate::package::port::PackageRepoError::PackageListError(list_err) => {
-                OperationFailure::Generic(list_err.to_string())
+                OperationFailure::PackageList(list_err)
             }
             crate::package::port::PackageRepoError::IoError(io_err) => {
                 OperationFailure::Generic(format!("IO error: {io_err}"))
@@ -1148,6 +1149,12 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
                 OperationFailure::Generic(format!("File system error: {fs_err}"))
             }
         }
+    }
+}
+
+impl From<crate::package::port::PackageListError> for OperationFailure {
+    fn from(err: crate::package::port::PackageListError) -> Self {
+        OperationFailure::PackageList(err)
     }
 }
 
@@ -1221,6 +1228,12 @@ pub enum PackageEvent {
         environment_status: EnvironmentStatusData,
     },
 
+    /// Sorted filtered package list ready for display (before status checks begin)
+    PackageListReady {
+        operation_info: OperationInfo,
+        packages: Vec<PackageListItem>,
+    },
+
     /// Package list loaded
     PackageListLoaded {
         operation_info: OperationInfo,
@@ -1237,6 +1250,12 @@ pub enum PackageEvent {
     ValidationResultCompleted {
         operation_info: OperationInfo,
         validation_result: ValidationResultData,
+    },
+
+    /// Individual package list item completed (for streaming)
+    PackageListItemCompleted {
+        operation_info: OperationInfo,
+        package_item: PackageListItem,
     },
 }
 
@@ -1306,29 +1325,22 @@ pub struct CheckResultData {
 }
 
 /// Result of a check operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::Display)]
 pub enum CheckResult {
-    Success,
+    #[strum(to_string = "successfully")]
+    Success { stdout: String, stderr: String },
+    #[strum(to_string = "with failures")]
     Failed {
         stdout: String,
         stderr: String,
         exit_code: Option<i32>,
     },
+    #[strum(to_string = "but command not found")]
     CommandNotFound,
+    #[strum(to_string = "but no check command defined")]
     NoCheckCommand,
+    #[strum(to_string = "with errors")]
     Error(String),
-}
-
-impl std::fmt::Display for CheckResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CheckResult::Success => write!(f, "successfully"),
-            CheckResult::Failed { .. } => write!(f, "with failures"),
-            CheckResult::CommandNotFound => write!(f, "but command not found"),
-            CheckResult::NoCheckCommand => write!(f, "but no check command defined"),
-            CheckResult::Error(_) => write!(f, "with errors"),
-        }
-    }
 }
 
 /// Structured data for validation results
@@ -1341,21 +1353,14 @@ pub struct ValidationResultData {
 }
 
 /// Overall validation status
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::Display)]
 pub enum ValidationStatus {
+    #[strum(to_string = "successfully")]
     Valid,
+    #[strum(to_string = "with warnings")]
     HasWarnings,
+    #[strum(to_string = "with errors")]
     HasErrors,
-}
-
-impl std::fmt::Display for ValidationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidationStatus::Valid => write!(f, "successfully"),
-            ValidationStatus::HasWarnings => write!(f, "with warnings"),
-            ValidationStatus::HasErrors => write!(f, "with errors"),
-        }
-    }
 }
 
 /// Individual validation issue
@@ -1420,7 +1425,16 @@ mod tests {
 
     #[test]
     fn test_check_result_display() {
-        assert_eq!(format!("{}", CheckResult::Success), "successfully");
+        assert_eq!(
+            format!(
+                "{}",
+                CheckResult::Success {
+                    stdout: String::new(),
+                    stderr: String::new()
+                }
+            ),
+            "successfully"
+        );
         assert_eq!(
             format!(
                 "{}",
@@ -1463,7 +1477,10 @@ mod tests {
         let success = OperationSuccess::PackageChecked {
             package_name: "test-package".to_string(),
             environment: "test".to_string(),
-            check_result: CheckResult::Success,
+            check_result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
             steps_completed: step_count,
         };
 
@@ -1489,5 +1506,30 @@ mod tests {
             format!("{success}"),
             "Package 'test-package' installation completed successfully (1/1 steps)"
         );
+    }
+
+    /// Compile-time exhaustiveness guard: if a new `PackageError` variant is added,
+    /// this match will fail to compile, reminding you to update
+    /// `OperationFailure::is_environment_error()` and `is_package_error()`.
+    #[test]
+    fn all_package_error_variants_are_categorized() {
+        use crate::package::port::PackageError;
+
+        fn categorize(err: &PackageError) -> &'static str {
+            match err {
+                // Environment-related (matched by is_environment_error)
+                PackageError::EnvironmentNotFound { .. }
+                | PackageError::NoCheckCommand { .. }
+                | PackageError::NoInstallCommand { .. } => "environment",
+                // Package-related (matched by is_package_error)
+                PackageError::PackageNotFound { .. }
+                | PackageError::MultiplePackagesFound { .. }
+                | PackageError::ParseError { .. }
+                | PackageError::PackageAlreadyExists { .. } => "package",
+            }
+        }
+        // The exhaustive match above is the real test — it forces a compile
+        // error when new variants are added to PackageError.
+        let _ = categorize;
     }
 }

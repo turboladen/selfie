@@ -48,7 +48,22 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         Ok(yaml_files)
     }
 
-    /// Enhanced version that tracks search context
+    /// Filter a list of paths to those matching `{name}.yml` or `{name}.yaml`.
+    fn filter_matching_packages(name: &str, entries: Vec<PathBuf>) -> Vec<PathBuf> {
+        entries
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|file_name| {
+                        file_name == format!("{name}.yml") || file_name == format!("{name}.yaml")
+                    })
+            })
+            .collect()
+    }
+
+    /// List directory entries and find matching package files, also reporting how many
+    /// entries were examined (for error diagnostics in `get_package`).
     fn find_package_files_with_context(
         &self,
         name: &str,
@@ -59,19 +74,9 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             .list_directory(&self.package_dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let mut matching_files = Vec::new();
+        *files_examined = entries.len();
 
-        for path in entries {
-            *files_examined += 1;
-
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name == format!("{name}.yml") || file_name == format!("{name}.yaml") {
-                    matching_files.push(path);
-                }
-            }
-        }
-
-        Ok(matching_files)
+        Ok(Self::filter_matching_packages(name, entries))
     }
 
     fn get_file_size(&self, path: &Path) -> u64 {
@@ -88,7 +93,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             .read_file(path)
             .map_err(|e| PackageParseError::FileSystemError {
                 package_path: path.to_path_buf(),
-                source_message: e.to_string(),
+                source: Arc::new(e),
             })?;
 
         let mut package: Package =
@@ -119,23 +124,23 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             .map_err(|e| PackageRepoError::IoError(Arc::new(e)))?;
 
         if package_files.is_empty() {
-            return Err(Box::new(PackageError::PackageNotFound {
+            return Err(PackageError::PackageNotFound {
                 name: name.to_string(),
                 packages_path: self.package_dir.clone(),
                 files_examined,
                 search_patterns,
-            })
+            }
             .into());
         }
 
         if package_files.len() > 1 {
-            return Err(Box::new(PackageError::MultiplePackagesFound {
+            return Err(PackageError::MultiplePackagesFound {
                 name: name.to_string(),
                 packages_path: self.package_dir.clone(),
                 conflicting_paths: package_files,
                 files_examined,
                 search_patterns,
-            })
+            }
             .into());
         }
 
@@ -144,14 +149,12 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| {
-                Box::new(PackageError::ParseError {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    file_size_bytes: file_size,
-                    source,
-                })
+            .map_err(|source| PackageError::ParseError {
+                name: name.to_string(),
+                packages_path: self.package_dir.clone(),
+                failed_file: package_file.clone(),
+                file_size_bytes: file_size,
+                source,
             })?;
 
         Ok(GetPackage::from_existing(package, package_file.clone()))
@@ -184,19 +187,13 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             ));
         }
 
-        // Look for both name.yaml and name.yml
-        let yaml_path = self.package_dir.join(format!("{name}.yaml"));
-        let yml_path = self.package_dir.join(format!("{name}.yml"));
+        let entries = self
+            .fs
+            .list_directory(&self.package_dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .map_err(|e| PackageListError::from(Arc::new(e)))?;
 
-        let mut result = Vec::new();
-        if self.fs.path_exists(&yaml_path) {
-            result.push(yaml_path);
-        }
-        if self.fs.path_exists(&yml_path) {
-            result.push(yml_path);
-        }
-
-        Ok(result)
+        Ok(Self::filter_matching_packages(name, entries))
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
@@ -389,31 +386,20 @@ mod tests {
         let mut fs = MockFileSystem::default();
         let package_dir = PathBuf::from("/test/packages");
 
-        // Create mock package files
         let yaml_path = package_dir.join("ripgrep.yaml");
         let yml_path = package_dir.join("other.yml");
 
+        // Mock path_exists for directory check only
         fs.expect_path_exists()
             .with(predicate::eq(package_dir.clone()))
             .returning(|_| true);
-        fs.expect_path_exists()
-            .with(predicate::eq(yaml_path.clone()))
-            .returning(|_| true);
-        fs.expect_path_exists()
-            .with(predicate::eq(package_dir.join("ripgrep.yml")))
-            .returning(|_| false);
-        fs.expect_path_exists()
-            .with(predicate::eq(yml_path.clone()))
-            .returning(|_| true);
-        fs.expect_path_exists()
-            .with(predicate::eq(package_dir.join("other.yaml")))
-            .returning(|_| false);
-        fs.expect_path_exists()
-            .with(predicate::eq(package_dir.join("nonexistent.yaml")))
-            .returning(|_| false);
-        fs.expect_path_exists()
-            .with(predicate::eq(package_dir.join("nonexistent.yml")))
-            .returning(|_| false);
+
+        // Mock list_directory to return all files in the package dir
+        let yaml_clone = yaml_path.clone();
+        let yml_clone = yml_path.clone();
+        fs.expect_list_directory()
+            .with(predicate::eq(package_dir.clone()))
+            .returning(move |_| Ok(vec![yaml_clone.clone(), yml_clone.clone()]));
 
         let repo = YamlPackageRepository::new(fs, package_dir.clone());
 
@@ -605,7 +591,7 @@ mod tests {
         // Mock invalid YAML content
         let invalid_yaml = "invalid: yaml: content: [";
 
-        fs.mock_list_directory(package_dir.clone(), &[package_path.clone()]);
+        fs.mock_list_directory(package_dir.clone(), std::slice::from_ref(&package_path));
         fs.mock_read_file(package_path.clone(), invalid_yaml);
 
         let repo = YamlPackageRepository::new(fs, package_dir.clone());

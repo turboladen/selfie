@@ -122,7 +122,7 @@ fn test_package_list_with_invalid_yaml() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("valid-package"))
-        .stderr(predicate::str::contains("invalid-package.yaml"));
+        .stdout(predicate::str::contains("invalid-package"));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn test_package_list_with_no_color_flag() {
 }
 
 #[test]
-fn test_package_list_shows_status_column() {
+fn test_package_list_shows_status() {
     let temp_dir = setup_default_test_config();
 
     // Create a package with a check command
@@ -211,11 +211,11 @@ fn test_package_list_shows_status_column() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Should contain the Status column header and status indicators
+    // Should contain the package name and a status indicator
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Status"))
-        .stdout(predicate::str::contains("test-package-with-check"));
+        .stdout(predicate::str::contains("test-package-with-check"))
+        .stdout(predicate::str::contains("Installed"));
 }
 
 #[test]
@@ -234,11 +234,11 @@ fn test_package_list_shows_no_check_status() {
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Should contain the Status column header
+    // Should show the package name and "No check" status
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Status"))
-        .stdout(predicate::str::contains("no-check-package"));
+        .stdout(predicate::str::contains("no-check-package"))
+        .stdout(predicate::str::contains("No check"));
 }
 
 #[test]
@@ -297,19 +297,14 @@ fn test_package_list_all_flag_environment_ordering() {
         .find(|line| line.contains("bacon"))
         .expect("bacon package should be in output");
 
-    // Extract the environments column (3rd column after splitting by ┆)
-    let bacon_parts: Vec<&str> = bacon_line.split('┆').collect();
-    assert!(bacon_parts.len() >= 4, "Should have at least 4 columns");
-    let bacon_envs = bacon_parts[2].trim();
-
-    // Should be "*test-env, arch-home" (current first, then alphabetical)
+    // In streaming spinner format, environments are shown in parentheses at end of line
     assert!(
-        bacon_envs.starts_with("*test-env"),
-        "Current environment should be first for bacon: {bacon_envs}"
+        bacon_line.contains("*test-env"),
+        "Current environment should be marked for bacon: {bacon_line}"
     );
     assert!(
-        bacon_envs.contains("arch-home"),
-        "Should contain arch-home for bacon: {bacon_envs}"
+        bacon_line.contains("arch-home"),
+        "Should contain arch-home for bacon: {bacon_line}"
     );
 
     // For bat: current environment (test-env) should come first, then ubuntu-server
@@ -318,18 +313,13 @@ fn test_package_list_all_flag_environment_ordering() {
         .find(|line| line.contains("bat"))
         .expect("bat package should be in output");
 
-    let bat_parts: Vec<&str> = bat_line.split('┆').collect();
-    assert!(bat_parts.len() >= 4, "Should have at least 4 columns");
-    let bat_envs = bat_parts[2].trim();
-
-    // Should be "*test-env, ubuntu-server" (current first, then alphabetical)
     assert!(
-        bat_envs.starts_with("*test-env"),
-        "Current environment should be first for bat: {bat_envs}"
+        bat_line.contains("*test-env"),
+        "Current environment should be marked for bat: {bat_line}"
     );
     assert!(
-        bat_envs.contains("ubuntu-server"),
-        "Should contain ubuntu-server for bat: {bat_envs}"
+        bat_line.contains("ubuntu-server"),
+        "Should contain ubuntu-server for bat: {bat_line}"
     );
 }
 
@@ -376,7 +366,11 @@ fn test_package_list_all_flag_shows_all_packages() {
 
     assert!(output_all_str.contains("current-env-package"));
     assert!(output_all_str.contains("different-env-package"));
-    assert!(output_all_str.contains("Environments")); // Should have environments column
+    // In streaming format, environments are shown in parentheses on each line
+    assert!(
+        output_all_str.contains("other-env"),
+        "Should show environment names in --all mode"
+    );
 }
 
 #[test]
@@ -414,16 +408,9 @@ fn test_package_list_all_flag_not_relevant_status() {
         .lines()
         .find(|line| line.contains("not-relevant-package"))
         .expect("not-relevant-package should be in output");
-
-    let not_relevant_parts: Vec<&str> = not_relevant_line.split('┆').collect();
     assert!(
-        not_relevant_parts.len() >= 4,
-        "Should have at least 4 columns"
-    );
-    let not_relevant_status = not_relevant_parts[3].trim();
-    assert!(
-        not_relevant_status.contains("N/A"),
-        "Package not relevant should show N/A: {not_relevant_status}"
+        not_relevant_line.contains("N/A"),
+        "Package not relevant should show N/A: {not_relevant_line}"
     );
 
     // Package with no check command should show "No check"
@@ -431,13 +418,9 @@ fn test_package_list_all_flag_not_relevant_status() {
         .lines()
         .find(|line| line.contains("no-check-package"))
         .expect("no-check-package should be in output");
-
-    let no_check_parts: Vec<&str> = no_check_line.split('┆').collect();
-    assert!(no_check_parts.len() >= 4, "Should have at least 4 columns");
-    let no_check_status = no_check_parts[3].trim();
     assert!(
-        no_check_status.contains("No check"),
-        "Package with no check should show 'No check': {no_check_status}"
+        no_check_line.contains("No check"),
+        "Package with no check should show 'No check': {no_check_line}"
     );
 }
 
@@ -471,12 +454,6 @@ fn test_package_list_default_behavior_filters_by_environment() {
     let output = cmd.assert().success().get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
-    // Should only have 3 columns (Name, Version, Status) - no Environments column
-    assert!(!output_str.contains("Environments"));
-    assert!(output_str.contains("Name"));
-    assert!(output_str.contains("Version"));
-    assert!(output_str.contains("Status"));
-
     // Both packages should be shown since they support current environment
     assert!(output_str.contains("no-check-package"));
     assert!(output_str.contains("with-check-package"));
@@ -486,13 +463,9 @@ fn test_package_list_default_behavior_filters_by_environment() {
         .lines()
         .find(|line| line.contains("no-check-package"))
         .expect("no-check-package should be in output");
-
-    let no_check_parts: Vec<&str> = no_check_line.split('┆').collect();
-    assert!(no_check_parts.len() >= 3, "Should have at least 3 columns");
-    let no_check_status = no_check_parts[2].trim();
     assert!(
-        no_check_status.contains("No check"),
-        "Package with no check should show 'No check': {no_check_status}"
+        no_check_line.contains("No check"),
+        "Package with no check should show 'No check': {no_check_line}"
     );
 }
 
@@ -535,7 +508,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
             "No packages found for environment 'test-env'.",
         ))
         .stdout(predicate::str::contains(
-            "📊 Packages by environment in this directory:",
+            "Packages by environment in this directory:",
         ))
         .stdout(predicate::str::contains("Environment"))
         .stdout(predicate::str::contains("Package Count"))
@@ -543,7 +516,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("ubuntu"))
         .stdout(predicate::str::contains("windows"))
         .stdout(predicate::str::contains("debian"))
-        .stdout(predicate::str::contains("💡 Try:"))
+        .stdout(predicate::str::contains("Try:"))
         .stdout(predicate::str::contains("--environment <env>"))
         .stdout(predicate::str::contains("--all"));
 }

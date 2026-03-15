@@ -1,15 +1,17 @@
 use dialoguer::{Confirm, theme::SimpleTheme};
-use selfie::{config::AppConfig, package::port::PackageRepository};
+use selfie::package::port::PackageRepository;
+
+use crate::config::CliConfig;
 use tracing::info;
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 use super::common;
 
 pub(crate) fn handle_remove(
     package_name: &str,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: &DisplayManager,
 ) -> i32 {
     info!("Removing package: {}", package_name);
 
@@ -18,35 +20,35 @@ pub(crate) fn handle_remove(
 
     // First, verify the package exists and get its details
     let Ok(package_blob) = repo.get_package(package_name) else {
-        reporter.report_error(format!("Package '{package_name}' not found."));
+        display.print_error(format!("Package '{package_name}' not found."));
         return 1;
     };
 
     // Show package location
-    reporter.report_info(format!("Package '{package_name}' found at:"));
-    reporter.report_info(format!("  {}", package_blob.file_path.display()));
+    display.print_info(format!("Package '{package_name}' found at:"));
+    display.print_info(format!("  {}", package_blob.file_path().display()));
 
     // Check if this package is a dependency of others
     let dependent_packages = match repo.find_dependent_packages(package_name) {
         Ok(deps) => deps,
         Err(e) => {
-            reporter.report_warning(format!("Could not check for dependent packages: {e}"));
+            display.print_warning(format!("Could not check for dependent packages: {e}"));
             Vec::new()
         }
     };
 
     // Build confirmation prompt based on dependencies
     let (prompt, default_answer) = if dependent_packages.is_empty() {
-        reporter.report_info(format!(
+        display.print_info(format!(
             "✓ Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
     } else {
-        reporter.report_warning(format!(
+        display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"
         ));
         for dep in &dependent_packages {
-            reporter.report_warning(format!("  - {}", dep.name()));
+            display.print_warning(format!("  - {}", dep.name()));
         }
         (
             "Are you sure you want to remove this package?".to_string(),
@@ -63,11 +65,11 @@ pub(crate) fn handle_remove(
     let proceed = match confirm_removal {
         Ok(true) => true,
         Ok(false) => {
-            reporter.report_info("Package removal cancelled.");
+            display.print_info("Package removal cancelled.");
             return 0;
         }
         Err(_) => {
-            reporter.report_error("Failed to read user input.");
+            display.print_error("Failed to read user input.");
             return 1;
         }
     };
@@ -78,23 +80,23 @@ pub(crate) fn handle_remove(
 
     // Perform the actual removal
     if let Err(e) = repo.remove_package(package_name) {
-        reporter.report_error(format!("Failed to remove package '{package_name}': {e}"));
+        display.print_error(format!("Failed to remove package '{package_name}': {e}"));
         return 1;
     }
 
-    reporter.report_success(format!(
+    display.print_success(format!(
         "Package '{}' removed successfully from {}",
         package_name,
-        package_blob.file_path.display()
+        package_blob.file_path().display()
     ));
 
     // Warn about broken dependencies if any exist
     if !dependent_packages.is_empty() {
-        reporter.report_warning("Note: The following packages may have broken dependencies:");
+        display.print_warning("Note: The following packages may have broken dependencies:");
         for dep in &dependent_packages {
-            reporter.report_warning(format!("  - {}", dep.name()));
+            display.print_warning(format!("  - {}", dep.name()));
         }
-        reporter.report_info("You may need to update these packages to remove the dependency.");
+        display.print_info("You may need to update these packages to remove the dependency.");
     }
 
     0
@@ -103,7 +105,7 @@ pub(crate) fn handle_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::fs::filesystem::MockFileSystem;
+    use selfie::fs::MockFileSystem;
     use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::test_config_with_dir;
@@ -112,7 +114,7 @@ mod tests {
     fn test_handle_remove_package_not_found() {
         // Test behavior when trying to remove a non-existent package - no filesystem needed
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test removing a package that doesn't exist by checking the repository directly
         let repo = common::create_package_repository(&config);
@@ -194,11 +196,10 @@ mod tests {
     fn test_repository_creation_with_different_filesystems() {
         // Test that we can create repositories with different filesystem implementations
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test with RealFileSystem
-        let repo =
-            common::create_package_repository_with_fs(&config, selfie::fs::real::RealFileSystem);
+        let repo = common::create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
         drop(repo);
 
         // Test with MockFileSystem
@@ -219,7 +220,7 @@ mod tests {
         mock_fs.mock_path_exists(&package_dir, true);
         mock_fs.mock_list_directory(&package_dir, &[]);
 
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let repo = common::create_package_repository_with_fs(&config, mock_fs);
 
         // Test removing non-existent package - should return error
@@ -262,7 +263,7 @@ environments:
         mock_fs.mock_read_file(&target_path, target_yaml);
         mock_fs.mock_read_file(&dependent_path, dependent_yaml);
 
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let repo = common::create_package_repository_with_fs(&config, mock_fs);
 
         // Test finding dependents - should find dependent-package
@@ -279,7 +280,7 @@ environments:
         // Test complete save and remove workflow using MockPackageRepository for pure CLI logic
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save operation
         mock_repo
@@ -296,7 +297,7 @@ environments:
 
         // Create and save a package
         let package_blob = common::create_new_package("workflow-test", &config);
-        let save_result = mock_repo.save_package(&package_blob.package, &package_blob.file_path);
+        let save_result = mock_repo.save_package(package_blob.package(), package_blob.file_path());
         assert!(save_result.is_ok());
 
         // Remove the package
@@ -389,7 +390,7 @@ environments:
     #[test]
     fn test_remove_package_not_found_with_mock_repo() {
         // Test CLI error handling when package doesn't exist using MockPackageRepository
-        use selfie::package::port::{MockPackageRepository, PackageError, PackageRepoError};
+        use selfie::package::port::{MockPackageRepository, PackageError};
 
         let mut mock_repo = MockPackageRepository::new();
 
@@ -399,14 +400,13 @@ environments:
             .with(mockall::predicate::eq("nonexistent"))
             .times(1)
             .returning(|_| {
-                Err(PackageRepoError::PackageError(Box::new(
-                    PackageError::PackageNotFound {
-                        name: "nonexistent".to_string(),
-                        packages_path: PathBuf::from("/test/packages"),
-                        files_examined: 0,
-                        search_patterns: vec!["nonexistent.yml".to_string()],
-                    },
-                )))
+                Err(PackageError::PackageNotFound {
+                    name: "nonexistent".to_string(),
+                    packages_path: PathBuf::from("/test/packages"),
+                    files_examined: 0,
+                    search_patterns: vec!["nonexistent.yml".to_string()],
+                }
+                .into())
             });
 
         // Test CLI error handling

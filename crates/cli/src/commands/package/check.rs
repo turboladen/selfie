@@ -1,139 +1,122 @@
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{
-            CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent,
-            error::StreamedError,
-        },
-        port::{PackageError, PackageRepoError},
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent},
+    port::PackageError,
+    service::PackageService,
 };
 
 use crate::{
-    commands::package::common::{self, create_package_service, report_status},
-    event_processor::EventProcessor,
-    formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
+    commands::package::common, config::CliConfig, display_manager::DisplayManager,
+    event_processor::EventProcessor, formatters::format_key, status_style,
 };
 
 pub(crate) async fn handle_check(
+    service: &impl PackageService,
     package_name: &str,
-    config: &AppConfig,
-    reporter: TerminalProgressReporter,
+    config: &CliConfig,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
 
     // Create animated spinner for check operation
-    report_status(&format!("Checking {package_name}..."));
-
-    // Create the package service
-    let service = create_package_service(config);
-
-    // Create tracker for consistent error handling
-    let mut tracker = common::PackageNotFoundTracker::new();
+    display.print_progress(format!("Checking {package_name}..."));
 
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
 
+    // Track whether we handled an environment error in the Completed arm
+    let mut env_error_handled = false;
+
     // Process the event stream with custom handling for structured data
-    let processor = EventProcessor::new(reporter);
+    let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::CheckResultCompleted { check_result, .. } => {
-                    display_check_result_card(check_result, config);
+                    if config.verbose() {
+                        display_check_result_card(check_result, config);
+                    } else {
+                        display_check_output_only(check_result, config);
+                    }
                     true // Handled
                 }
                 PackageEvent::Progress { .. } => {
                     true // Handled
                 }
-                PackageEvent::Error { error, .. } => {
-                    // Handle PackageNotFound errors consistently
-                    if tracker.handle_package_not_found_error(error) {
-                        return true; // Handled - prevent duplicate error display
-                    }
-
-                    // Handle environment configuration errors specially
-                    match error {
-                        StreamedError::PackageRepoError(PackageRepoError::PackageError(
-                            pkg_error,
-                        )) => {
-                            match pkg_error.as_ref() {
-                                PackageError::EnvironmentNotFound { .. } => {
-                                    handle_environment_not_found_error(package_name, error, config);
-                                    true // Handled completely - prevent duplicate error display
-                                }
-                                _ => false, // Use default handling for other errors
-                            }
-                        }
-                        _ => false, // Use default handling for other errors
-                    }
-                }
                 PackageEvent::Completed { result, .. } => {
-                    // Suppress completion errors if we already handled PackageNotFound
-                    if tracker.should_suppress_completion_error(result) {
-                        return true; // Handled - suppress duplicate error
+                    if let OperationResult::Failure(failure) = result
+                        && failure.is_environment_error()
+                    {
+                        display_environment_error(package_name, failure, config);
+                        env_error_handled = true;
+                        return true; // Handled
                     }
-
-                    match result {
-                        OperationResult::Failure(OperationFailure::EnvironmentError(_)) => {
-                            // Skip duplicate error display for environment configuration errors
-                            true // Handled - we already showed the error message above
-                        }
-                        _ => false, // Use default handling for other completion events
-                    }
+                    false // Use default handling for other completion events
                 }
                 _ => false, // Use default handling for other events
             }
         })
         .await;
 
-    // Return proper exit code - 1 for environment errors, otherwise use result from processor
-    if result.environment_error_handled {
+    if env_error_handled {
         1
     } else {
         result.exit_code
     }
 }
 
-/// Handle environment not found errors with helpful suggestions
-fn handle_environment_not_found_error(
-    package_name: &str,
-    error: &StreamedError,
-    config: &AppConfig,
-) {
-    // Show helpful information about available environments
+/// Display environment error with helpful suggestions from the typed failure data
+fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
     println!();
 
-    // Try to extract environment information from the structured error
-    if let StreamedError::PackageRepoError(PackageRepoError::PackageError(package_error)) = error {
-        if let PackageError::EnvironmentNotFound {
+    if let OperationFailure::Package(PackageError::EnvironmentNotFound {
+        available_environments,
+        ..
+    }) = failure
+    {
+        common::display_environment_summary(
+            package_name,
+            config.environment(),
             available_environments,
-            ..
-        } = package_error.as_ref()
-        {
-            common::display_environment_summary(
-                package_name,
-                config.environment(),
-                available_environments,
-                config,
-                "check",
-            );
-            return;
-        }
+            config,
+            "check",
+        );
+    } else {
+        common::display_generic_environment_suggestion(
+            package_name,
+            config.environment(),
+            config,
+            "check",
+        );
     }
-
-    // Fallback to generic suggestion if we can't extract environment info
-    common::display_generic_environment_suggestion(
-        package_name,
-        config.environment(),
-        config,
-        "check",
-    );
 }
 
-fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig) {
+fn display_check_output_only(check_result: &CheckResultData, _config: &CliConfig) {
+    match &check_result.result {
+        CheckResult::Success { stdout, stderr } => {
+            // Show stdout output if present
+            if !stdout.trim().is_empty() {
+                println!("📋 Check output: {}", stdout.trim());
+            } else if !stderr.trim().is_empty() {
+                println!("📋 Check output: {}", stderr.trim());
+            }
+        }
+        CheckResult::Failed { stdout, stderr, .. } => {
+            // Show error output
+            if !stderr.is_empty() {
+                println!("⚠️ Check failed: {}", stderr.trim());
+            } else if !stdout.is_empty() {
+                println!("⚠️ Check failed: {}", stdout.trim());
+            } else {
+                println!("⚠️ Check failed with no output");
+            }
+        }
+        _ => {
+            // For other cases, don't show additional output in non-verbose mode
+        }
+    }
+}
+
+fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig) {
     println!();
     println!("📋 Check Results:");
 
@@ -151,24 +134,42 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
         println!("{}{}", format_key_fn("Command"), cmd);
     }
 
-    let reporter = TerminalProgressReporter::new(config.use_colors());
+    let use_colors = config.use_colors();
 
     // Format status with appropriate icon and color
     let status_line = match &check_result.result {
-        CheckResult::Success => {
-            format!("{}{}", format_key_fn("Status"), reporter.format_installed())
+        CheckResult::Success { stdout, stderr } => {
+            let status = format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_installed(use_colors)
+            );
+
+            // Show stdout output if present
+            if !stdout.trim().is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Output"), stdout.trim())
+            } else if !stderr.trim().is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Output"), stderr.trim())
+            } else {
+                status
+            }
         }
         CheckResult::Failed {
-            stderr, exit_code, ..
+            stdout,
+            stderr,
+            exit_code,
+            ..
         } => {
             let status = format!(
                 "{}{}",
                 format_key_fn("Status"),
-                reporter.format_not_installed()
+                status_style::format_not_installed(use_colors)
             );
 
             if !stderr.is_empty() {
                 format!("{}\n{}{}", status, format_key_fn("Details"), stderr.trim())
+            } else if !stdout.is_empty() {
+                format!("{}\n{}{}", status, format_key_fn("Details"), stdout.trim())
             } else if let Some(code) = exit_code {
                 format!("{}\n{}Exit code {}", status, format_key_fn("Details"), code)
             } else {
@@ -176,28 +177,36 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
             }
         }
         CheckResult::NoCheckCommand => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            format!("   {}: {}", status_key, reporter.format_no_check())
+            format!(
+                "   {}: {}",
+                status_key,
+                status_style::format_no_check(use_colors)
+            )
         }
         CheckResult::CommandNotFound => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            format!("   {}: {}", status_key, reporter.format_cmd_not_found())
+            format!(
+                "   {}: {}",
+                status_key,
+                status_style::format_cmd_not_found(use_colors)
+            )
         }
         CheckResult::Error(error) => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            let details_key = if config.use_colors() {
+            let details_key = if use_colors {
                 console::style("Details").cyan().bold().to_string()
             } else {
                 "Details".to_string()
@@ -205,7 +214,7 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
             format!(
                 "   {}: {}\n   {}: {}",
                 status_key,
-                reporter.format_status_error(),
+                status_style::format_status_error(use_colors),
                 details_key,
                 error
             )
@@ -219,16 +228,19 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
 mod tests {
     use super::*;
     use selfie::package::event::{CheckResult, CheckResultData};
-    use test_common::{TEST_ENV, test_config, test_config_with_colors};
+    use test_common::TEST_ENV;
 
     #[test]
     fn test_display_check_result_card_success() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
             check_command: Some("which test-command".to_string()),
-            result: CheckResult::Success,
+            result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         };
 
         // Just test that the function doesn't panic
@@ -237,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_failed() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -255,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_no_command() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -269,12 +281,15 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
             check_command: Some("which test-command".to_string()),
-            result: CheckResult::Success,
+            result: CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         };
 
         // Just test that the function doesn't panic with colors enabled
@@ -283,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_error() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -297,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_command_not_found() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
