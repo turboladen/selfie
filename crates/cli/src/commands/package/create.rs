@@ -21,7 +21,7 @@ enum PackageNameResult {
 }
 
 pub(crate) async fn handle_create(
-    service: &dyn PackageService,
+    service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
     reporter: TerminalProgressReporter,

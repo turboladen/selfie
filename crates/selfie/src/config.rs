@@ -5,6 +5,9 @@ pub mod yaml;
 pub use self::loader::ConfigLoadError;
 pub use self::yaml::YamlLoader;
 
+#[cfg(feature = "with_mocks")]
+pub use self::loader::MockConfigLoader;
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,

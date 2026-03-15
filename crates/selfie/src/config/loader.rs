@@ -8,8 +8,7 @@ use crate::{config::SelfieConfig, fs::filesystem::FileSystemError};
 ///
 /// This trait abstracts configuration loading to allow for different implementations
 /// (e.g., YAML files, TOML files, environment variables) and to enable mocking in tests.
-#[cfg_attr(test, mockall::automock)]
-#[async_trait::async_trait]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait ConfigLoader: Send + Sync {
     /// Load configuration from standard locations
     ///

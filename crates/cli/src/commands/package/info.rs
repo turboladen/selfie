@@ -13,7 +13,7 @@ use crate::{
 use super::common;
 
 pub(crate) async fn handle_info(
-    service: &dyn PackageService,
+    service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
     reporter: TerminalProgressReporter,

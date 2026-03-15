@@ -30,7 +30,8 @@ pub fn create_test_service_with_config(
 ) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-    let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(30));
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
     PackageServiceImpl::new(repo, runner, config)
 }
 
@@ -44,7 +45,7 @@ pub fn create_test_service_with_timeout(
     let config = test_config_with_dir(temp_dir.path());
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-    let runner = ShellCommandRunner::new("/bin/sh", timeout);
+    let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
     PackageServiceImpl::new(repo, runner, config)
 }
 
@@ -66,7 +67,10 @@ pub fn create_cli_service(
     config: &SelfieConfig,
 ) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
     let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
-    let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
+    let command_runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.command_timeout(),
+    );
     PackageServiceImpl::new(repo, command_runner, config.clone())
 }
 

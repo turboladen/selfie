@@ -65,7 +65,10 @@ Additionally, `assets/branding` contains logos and icons can be used in document
 Follow the Hexagonal Architecture design (aka Ports and Adapters), particularly for the core library
 (`selfie`); the CLI crate will follow this too, but may also apply other patterns (like Command) as
 needed. Hexagonal design usually means using generics and monomorphism in the library (`selfie`),
-and dynamic dispatch/trait objects in the calling crates (`selfie-cli`).
+and generics (`&impl Trait`) in the calling crates (`selfie-cli`). Async trait methods use RPITIT
+(`fn method() -> impl Future + Send`) for zero-cost `Send` bounds, which makes traits
+non-dyn-compatible; this is an intentional tradeoff — `impl Trait` parameters give the same
+flexibility for testing (any concrete type satisfying the bound works) without heap allocation.
 
 Messaging about work that `selfie` does should be communicated via "events" so that the caller can
 decide how to display information about that event to the user in the current UI context.

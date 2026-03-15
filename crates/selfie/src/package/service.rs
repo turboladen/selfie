@@ -17,7 +17,7 @@ mod list;
 mod steps;
 mod validate;
 
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf};
 
 use tokio::sync::mpsc;
 use tracing::instrument;
@@ -104,7 +104,6 @@ impl ProgressTracker {
 /// progress, errors, and results. This enables different UI implementations
 /// (CLI, GUI, etc.) to provide appropriate user feedback.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
-#[async_trait::async_trait]
 pub trait PackageService: Send + Sync {
     /// Check if a package is already installed
     ///
@@ -124,7 +123,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn check(&self, package_name: &str) -> EventStream;
+    fn check(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Install a package using its configured installation method
     ///
@@ -144,7 +143,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site,
     /// however, errors may be emitted through the event stream.
-    async fn install(&self, package_name: &str) -> EventStream;
+    fn install(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Get detailed information about a package
     ///
@@ -164,7 +163,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn info(&self, package_name: &str) -> EventStream;
+    fn info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Validate a package definition file
     ///
@@ -185,7 +184,11 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream;
+    fn validate(
+        &self,
+        package_name: &str,
+        package_path: Option<PathBuf>,
+    ) -> impl Future<Output = EventStream> + Send;
 
     /// List all available packages in the package directory
     ///
@@ -200,7 +203,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn list(&self, show_all: bool) -> EventStream;
+    fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
 
     /// Create a new package definition file
     ///
@@ -219,7 +222,7 @@ pub trait PackageService: Send + Sync {
     ///
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
-    async fn create(&self, package: super::Package) -> EventStream;
+    fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -344,7 +347,6 @@ where
     }
 }
 
-#[async_trait::async_trait]
 impl<R, CR> PackageService for PackageServiceImpl<R, CR>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
