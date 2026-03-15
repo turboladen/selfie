@@ -3,7 +3,7 @@
 use super::steps;
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         GetPackage,
         event::{
@@ -18,7 +18,7 @@ use crate::{
 pub(super) async fn handle_check<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,

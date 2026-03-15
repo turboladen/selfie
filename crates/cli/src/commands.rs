@@ -24,8 +24,9 @@ pub(crate) mod config;
 pub(crate) mod package;
 
 use package::{common::create_package_service, list::ListCommand};
-use selfie::config::AppConfig;
 use tracing::debug;
+
+use crate::config::CliConfig;
 
 use crate::{
     cli::{ClapCommands, ConfigSubcommands, PackageSubcommands},
@@ -43,8 +44,7 @@ use completion::generate_completion;
 /// # Arguments
 ///
 /// * `command` - The parsed command to execute
-/// * `config` - Application configuration with CLI overrides applied
-/// * `original_config` - Original configuration from file (for config commands)
+/// * `config` - CLI configuration with overrides applied
 /// * `reporter` - Terminal progress reporter for user feedback
 ///
 /// # Returns
@@ -57,8 +57,7 @@ use completion::generate_completion;
 /// - **Config commands**: Validate configuration files and settings
 pub(crate) async fn dispatch_command(
     command: &ClapCommands,
-    config: &AppConfig,
-    original_config: AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     debug!("Dispatching command: {:?}", command);
@@ -68,7 +67,7 @@ pub(crate) async fn dispatch_command(
             dispatch_package_command(&package_cmd.command, config, reporter).await
         }
         ClapCommands::Config(config_cmd) => {
-            dispatch_config_command(&config_cmd.command, &original_config, reporter)
+            dispatch_config_command(&config_cmd.command, config, reporter)
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
@@ -103,7 +102,7 @@ pub(crate) async fn dispatch_command(
 /// - `validate`: Validate package definition files
 async fn dispatch_package_command(
     command: &PackageSubcommands,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     debug!("Handling package command: {:?}", command);
@@ -154,13 +153,11 @@ async fn dispatch_package_command(
 /// Handle configuration management commands
 ///
 /// Routes configuration-related subcommands to their specific handlers.
-/// Config operations use the original configuration (without CLI overrides)
-/// to validate the actual configuration file contents.
 ///
 /// # Arguments
 ///
 /// * `command` - The specific config subcommand to execute
-/// * `original_config` - Original configuration from file (no CLI overrides)
+/// * `config` - CLI configuration with overrides applied
 /// * `reporter` - Terminal progress reporter for user feedback
 ///
 /// # Returns
@@ -172,13 +169,13 @@ async fn dispatch_package_command(
 /// - `validate`: Validate the configuration file structure and values
 fn dispatch_config_command(
     command: &ConfigSubcommands,
-    original_config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     debug!("Handling config command: {:?}", command);
 
     match command {
-        ConfigSubcommands::Validate => config::handle_validate(original_config, reporter),
+        ConfigSubcommands::Validate => config::handle_validate(config, reporter),
     }
 }
 

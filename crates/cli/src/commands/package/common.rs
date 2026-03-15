@@ -8,7 +8,6 @@ use console::style;
 
 use selfie::{
     commands::ShellCommandRunner,
-    config::AppConfig,
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
         GetPackage,
@@ -17,13 +16,15 @@ use selfie::{
         service::{PackageService, PackageServiceImpl},
     },
 };
+
+use crate::config::CliConfig;
 use std::{path::Path, process::Command};
 
 use crate::terminal_progress_reporter::TerminalProgressReporter;
 
 /// Create a package repository instance with the configured package directory
 pub(super) fn create_package_repository(
-    config: &AppConfig,
+    config: &CliConfig,
 ) -> YamlPackageRepository<RealFileSystem> {
     create_package_repository_with_fs(config, RealFileSystem)
 }
@@ -31,7 +32,7 @@ pub(super) fn create_package_repository(
 /// Create a package repository with a specific filesystem implementation
 /// This is useful for testing with `MockFileSystem`
 pub(super) fn create_package_repository_with_fs<F: FileSystem>(
-    config: &AppConfig,
+    config: &CliConfig,
     fs: F,
 ) -> YamlPackageRepository<F> {
     YamlPackageRepository::new(fs, config.package_directory().clone())
@@ -131,18 +132,18 @@ pub(super) fn check_editor_available(
 }
 
 /// Create a new package template
-pub(super) fn create_new_package(package_name: &str, config: &AppConfig) -> GetPackage {
+pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
     GetPackage::new(package_name, config.package_directory())
 }
 
 /// Create a package service with repository and command runner
-pub(crate) fn create_package_service(config: &AppConfig) -> Box<dyn PackageService> {
+pub(crate) fn create_package_service(config: &CliConfig) -> Box<dyn PackageService> {
     let repo = create_package_repository(config);
     let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
     Box::new(PackageServiceImpl::new(
         repo,
         command_runner,
-        config.clone(),
+        config.selfie_config().clone(),
     ))
 }
 
@@ -161,7 +162,7 @@ pub(super) fn create_formatted_table() -> Table {
 pub(super) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
-    config: &AppConfig,
+    config: &CliConfig,
 ) -> String {
     let mut sorted_envs = environments.to_vec();
 
@@ -225,7 +226,7 @@ pub(crate) fn display_environment_summary(
     package_name: &str,
     current_environment: &str,
     available_environments: &[String],
-    config: &AppConfig,
+    config: &CliConfig,
     context: &str, // "check" or "install"
 ) {
     println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
@@ -277,7 +278,7 @@ pub(crate) fn display_environment_summary(
 pub(crate) fn display_generic_environment_suggestion(
     package_name: &str,
     current_environment: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     context: &str, // "check" or "install"
 ) {
     println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
@@ -315,7 +316,7 @@ mod tests {
     fn test_create_package_repository() {
         // Test repository creation without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let repo = create_package_repository(&config);
         // Just verify we can create it without panicking
@@ -326,7 +327,7 @@ mod tests {
     fn test_create_new_package() {
         // Test package creation logic without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("test-package", &config);
 
@@ -361,7 +362,7 @@ mod tests {
     fn test_save_package_logic() {
         // Test save package logic without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("save-test", &config);
 
@@ -381,7 +382,7 @@ mod tests {
         // Test package creation logic without filesystem operations
         // Note: create_new_package uses GetPackage::new which creates a "default" environment
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let package_blob = create_new_package("structure-test", &config);
 
@@ -402,7 +403,7 @@ mod tests {
     fn test_create_package_service() {
         // Test service creation without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let service = create_package_service(&config);
         // Just verify we can create it without panicking
@@ -413,7 +414,7 @@ mod tests {
     fn test_create_package_repository_generic() {
         // Test that the generic repository creation function works
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let repo = create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
         // Just verify we can create it without panicking
@@ -431,7 +432,7 @@ mod tests {
     fn test_format_environment_names() {
         // Test environment name formatting without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
         let environments = vec!["test".to_string(), "production".to_string()];
 
         let result = format_environment_names(&environments, "test", &config);
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_ordering() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Test with current environment not first in input list
         let environments = vec![
@@ -475,7 +476,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_single_environment() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let environments = vec!["macos-work".to_string()];
         let result = format_environment_names(&environments, "macos-work", &config);
@@ -486,7 +487,7 @@ mod tests {
     #[test]
     fn test_format_environment_names_current_not_present() {
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         let environments = vec!["arch-home".to_string(), "ubuntu-server".to_string()];
         let result = format_environment_names(&environments, "macos-work", &config);
@@ -521,7 +522,7 @@ mod tests {
     fn test_save_package_with_mock_repository() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save operation
         mock_repo
@@ -543,7 +544,7 @@ mod tests {
     fn test_save_package_repository_error_handling() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock repository error
         mock_repo.expect_save_package().times(1).returning(|_, _| {
@@ -570,7 +571,7 @@ mod tests {
     fn test_package_workflow_with_mock_repository() {
         let mut mock_repo = MockPackageRepository::new();
         let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = test_config_with_dir(&package_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
         // Mock successful save
         mock_repo
@@ -601,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_summary() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![
             "macos".to_string(),
             "ubuntu".to_string(),
@@ -614,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_summary_empty() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![];
 
         // Should not panic with empty environments (falls back to generic suggestion)
@@ -623,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_display_generic_environment_suggestion() {
-        let config = test_common::test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
 
         // Should not panic with any inputs
         display_generic_environment_suggestion("test-package", "test-env", &config, "check");
@@ -631,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_display_generic_environment_suggestion_with_colors() {
-        let config = test_common::test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Should not panic with colors enabled
         display_generic_environment_suggestion("test-package", "test-env", &config, "install");

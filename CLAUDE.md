@@ -84,11 +84,16 @@ decide how to display information about that event to the user in the current UI
 ### Boundary Rules
 
 - The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
-- `AppConfig` lives in the library but contains `verbose`/`use_colors` fields that are UI concerns
-  (known issue, tracked in beads).
+- **Config is split by concern:** `SelfieConfig` (library) holds operational settings (`environment`,
+  `package_directory`, `command_timeout`, `stop_on_error`, `max_parallel_installations`). `CliConfig`
+  (CLI crate) wraps `SelfieConfig` and adds presentation settings (`verbose`, `use_colors`). The
+  config file uses top-level keys for core settings and a `cli:` section for CLI-specific ones.
+  Each frontend reads only its own section; the library ignores unknown keys.
 - CLI commands should call `PackageService` methods, not use `PackageRepository` directly. This
   applies to both production code and tests — CLI tests should exercise the same service interface
   that production code uses, with mocked repositories injected into `PackageServiceImpl`.
+- CLI command handlers accept `&CliConfig`, which delegates core getters to `SelfieConfig`. Pass
+  `config.selfie_config()` when calling into library service methods.
 - **Event consumer tests** (e.g., `EventProcessor`) should construct `EventStream` directly via
   `stream::iter(vec![...])`, not spin up a real service. This avoids adapter dependencies.
 
@@ -136,5 +141,11 @@ environment in config so selfie knows which commands to run.
 
 Config file: `~/.config/selfie/config.yml`. Also settable via CLI flags.
 
+Core settings (top-level, read by `SelfieConfig`):
 - `environment`: The current environment label.
 - `package_directory`: Directory containing selfie package files.
+- `command_timeout`, `stop_on_error`, `max_parallel_installations`: Execution settings.
+
+CLI settings (under `cli:` section, read by `CliConfig`):
+- `verbose`: Enable debug logging.
+- `use_colors`: Enable colored terminal output.

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
     commands::runner::{CommandError, CommandOutput, CommandRunner},
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
         event::{ConsoleOutput, EventSender, OperationResult},
@@ -92,7 +92,7 @@ pub async fn execute_command_streaming<CR>(
     command_runner: &CR,
     cmd: &str,
     command_type: &str,
-    config: &AppConfig,
+    config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> Result<CommandOutput, CommandError>

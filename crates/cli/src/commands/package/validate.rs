@@ -1,22 +1,19 @@
 use comfy_table::{ContentArrangement, Table, modifiers, presets};
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
+    service::PackageService,
 };
 
 use crate::{
-    commands::package::common::report_status, event_processor::EventProcessor,
+    commands::package::common::report_status, config::CliConfig, event_processor::EventProcessor,
     formatters::format_key, terminal_progress_reporter::TerminalProgressReporter,
 };
 
 pub(crate) async fn handle_validate(
     service: &dyn PackageService,
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     tracing::debug!("Running validate command for package: {}", package_name);
@@ -34,7 +31,7 @@ pub(crate) async fn handle_validate(
     result.exit_code
 }
 
-fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> bool {
+fn handle_validate_event(event: &PackageEvent, config: &CliConfig) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
@@ -49,7 +46,7 @@ fn handle_validate_event(event: &PackageEvent, config: &AppConfig) -> bool {
     }
 }
 
-fn display_validation_result(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_result(validation_result: &ValidationResultData, config: &CliConfig) {
     match validation_result.status {
         ValidationStatus::Valid => {
             // Show success card for valid packages
@@ -62,7 +59,7 @@ fn display_validation_result(validation_result: &ValidationResultData, config: &
     }
 }
 
-fn display_validation_success_card(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_success_card(validation_result: &ValidationResultData, config: &CliConfig) {
     println!();
     println!("📋 Validation Results:");
 
@@ -90,7 +87,7 @@ fn display_validation_success_card(validation_result: &ValidationResultData, con
     println!("{status}");
 }
 
-fn display_validation_issues_table(validation_result: &ValidationResultData, config: &AppConfig) {
+fn display_validation_issues_table(validation_result: &ValidationResultData, config: &CliConfig) {
     if validation_result.issues.is_empty() {
         return;
     }
@@ -181,7 +178,7 @@ mod tests {
     use selfie::package::event::{
         ValidationIssueData, ValidationLevel, ValidationResultData, ValidationStatus,
     };
-    use test_common::{TEST_ENV, test_config, test_config_with_colors};
+    use test_common::TEST_ENV;
 
     fn create_test_validation_result(status: ValidationStatus) -> ValidationResultData {
         ValidationResultData {
@@ -194,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_success() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic
@@ -203,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_success_card() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic
@@ -212,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not panic with colors enabled
@@ -221,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_issues_table_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let validation_result = create_test_validation_result(ValidationStatus::Valid);
 
         // Should not display anything for empty issues
@@ -230,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_display_validation_result_with_issues() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut validation_result = create_test_validation_result(ValidationStatus::HasErrors);
         validation_result.issues = vec![ValidationIssueData {
             level: ValidationLevel::Error,

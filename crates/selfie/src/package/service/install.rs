@@ -4,7 +4,7 @@
 
 use crate::{
     commands::runner::CommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         EnvironmentConfig,
         event::{
@@ -21,7 +21,7 @@ use super::{check, deps, steps};
 pub(super) async fn handle_install<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -72,7 +72,7 @@ where
 async fn install_single_package<PR, CR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -187,7 +187,7 @@ async fn handle_already_installed_package<CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &ProgressTracker,
-    config: &AppConfig,
+    config: &SelfieConfig,
 ) -> Option<OperationResult>
 where
     CR: CommandRunner,
@@ -291,7 +291,7 @@ struct InstallationContext<'a> {
     package_name: &'a str,
     install_cmd: &'a str,
     env_config: &'a EnvironmentConfig,
-    config: &'a AppConfig,
+    config: &'a SelfieConfig,
     pre_install_check: &'a CheckResultData,
 }
 

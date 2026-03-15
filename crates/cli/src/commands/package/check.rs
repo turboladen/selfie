@@ -1,21 +1,18 @@
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent},
-        port::PackageError,
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{CheckResult, CheckResultData, OperationFailure, OperationResult, PackageEvent},
+    port::PackageError,
+    service::PackageService,
 };
 
 use crate::{
-    commands::package::common, event_processor::EventProcessor, formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
+    commands::package::common, config::CliConfig, event_processor::EventProcessor,
+    formatters::format_key, terminal_progress_reporter::TerminalProgressReporter,
 };
 
 pub(crate) async fn handle_check(
     service: &dyn PackageService,
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
@@ -68,7 +65,7 @@ pub(crate) async fn handle_check(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
-fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &AppConfig) {
+fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
     println!();
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
@@ -93,7 +90,7 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
     }
 }
 
-fn display_check_output_only(check_result: &CheckResultData, _config: &AppConfig) {
+fn display_check_output_only(check_result: &CheckResultData, _config: &CliConfig) {
     match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
             // Show stdout output if present
@@ -119,7 +116,7 @@ fn display_check_output_only(check_result: &CheckResultData, _config: &AppConfig
     }
 }
 
-fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig) {
+fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig) {
     println!();
     println!("📋 Check Results:");
 
@@ -219,11 +216,11 @@ fn display_check_result_card(check_result: &CheckResultData, config: &AppConfig)
 mod tests {
     use super::*;
     use selfie::package::event::{CheckResult, CheckResultData};
-    use test_common::{TEST_ENV, test_config, test_config_with_colors};
+    use test_common::TEST_ENV;
 
     #[test]
     fn test_display_check_result_card_success() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -240,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_failed() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -258,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_no_command() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -272,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -289,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_error() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),
@@ -303,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_display_check_result_card_command_not_found() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let check_result = CheckResultData {
             package_name: "test-package".to_string(),
             environment: TEST_ENV.to_string(),

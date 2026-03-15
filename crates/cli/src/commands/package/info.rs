@@ -1,15 +1,12 @@
 use comfy_table::Table;
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{
-        event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
-        service::PackageService,
-    },
+use selfie::package::{
+    event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
+    service::PackageService,
 };
 
 use crate::{
-    event_processor::EventProcessor, formatters::format_key,
+    config::CliConfig, event_processor::EventProcessor, formatters::format_key,
     terminal_progress_reporter::TerminalProgressReporter,
 };
 
@@ -18,7 +15,7 @@ use super::common;
 pub(crate) async fn handle_info(
     service: &dyn PackageService,
     package_name: &str,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
 ) -> i32 {
     tracing::debug!("Finding package info for: {package_name}");
@@ -59,7 +56,7 @@ pub(crate) async fn handle_info(
     result.exit_code
 }
 
-fn create_package_info_table(package_info: &PackageInfoData, config: &AppConfig) -> Table {
+fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> Table {
     let mut table = common::create_formatted_table();
 
     // Helper functions for formatting
@@ -105,7 +102,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &AppConfig)
     table
 }
 
-fn create_environment_table(env_status: &EnvironmentStatusData, config: &AppConfig) -> Table {
+fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConfig) -> Table {
     let mut env_table = common::create_formatted_table();
 
     // Create a header for the environment table
@@ -183,7 +180,7 @@ fn format_status(status: &EnvironmentStatus, reporter: TerminalProgressReporter)
 mod tests {
     use super::*;
     use selfie::package::event::{EnvironmentStatus, EnvironmentStatusData, PackageInfoData};
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION, test_config, test_config_with_colors};
+    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
 
     fn create_test_package_info() -> PackageInfoData {
         PackageInfoData {
@@ -213,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_create_package_info_table() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_info = create_test_package_info();
 
         let table = create_package_info_table(&package_info, &config);
@@ -223,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_create_package_info_table_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let package_info = create_test_package_info();
 
         let table = create_package_info_table(&package_info, &config);
@@ -233,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_create_environment_table() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let env_status = create_test_environment_status(true);
 
         let table = create_environment_table(&env_status, &config);
@@ -256,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_format_environment_names() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
         // Just test that it doesn't panic

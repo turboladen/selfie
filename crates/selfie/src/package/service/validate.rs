@@ -3,7 +3,7 @@
 //!
 
 use crate::{
-    config::AppConfig,
+    config::SelfieConfig,
     package::{
         event::{
             EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
@@ -17,7 +17,7 @@ use crate::{
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
-    config: &AppConfig,
+    config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> OperationResult

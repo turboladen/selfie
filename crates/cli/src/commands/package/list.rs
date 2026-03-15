@@ -1,22 +1,19 @@
 use console::style;
-use selfie::{
-    config::AppConfig,
-    package::{event, service::PackageService},
-};
+use selfie::package::{event, service::PackageService};
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::{config::CliConfig, terminal_progress_reporter::TerminalProgressReporter};
 
 use super::common;
 
 pub(crate) struct ListCommand<'a> {
-    config: &'a AppConfig,
+    config: &'a CliConfig,
     reporter: TerminalProgressReporter,
     show_all: bool,
 }
 
 impl<'a> ListCommand<'a> {
     pub(crate) fn new(
-        config: &'a AppConfig,
+        config: &'a CliConfig,
         reporter: TerminalProgressReporter,
         show_all: bool,
     ) -> Self {
@@ -53,7 +50,7 @@ impl ListCommand<'_> {
 
 fn handle_list_event(
     event: &event::PackageEvent,
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
     show_all: bool,
     collected_items: &mut Vec<event::PackageListItem>,
@@ -98,7 +95,7 @@ fn handle_list_event(
 
 fn display_packages_table(
     packages: &[selfie::package::event::PackageListItem],
-    config: &AppConfig,
+    config: &CliConfig,
     reporter: TerminalProgressReporter,
     show_all: bool,
 ) {
@@ -160,7 +157,7 @@ fn format_status(
 
 fn display_invalid_packages_table(
     invalid_packages: &[selfie::package::event::InvalidPackageInfo],
-    config: &AppConfig,
+    config: &CliConfig,
 ) {
     if invalid_packages.is_empty() {
         return;
@@ -229,7 +226,7 @@ fn clean_error_message(error: &str, file_path: &str) -> String {
 
 fn display_environment_stats(
     environment_stats: &std::collections::HashMap<String, usize>,
-    config: &AppConfig,
+    config: &CliConfig,
 ) {
     if environment_stats.is_empty() {
         return;
@@ -290,7 +287,7 @@ fn display_environment_stats(
 mod tests {
     use super::*;
     use selfie::package::event::PackageListItem;
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION, test_config, test_config_with_colors};
+    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
 
     fn create_mock_reporter() -> TerminalProgressReporter {
         TerminalProgressReporter::new(false)
@@ -298,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_list_command_new() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let reporter = create_mock_reporter();
 
         let command = ListCommand::new(&config, reporter, false);
@@ -309,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_display_packages_table_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let packages = vec![];
 
         // Should not panic with empty list
@@ -320,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_display_packages_table_single_package() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let packages = vec![PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
@@ -339,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_display_packages_table_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let packages = vec![PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
@@ -365,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_format_environments() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
 
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
@@ -376,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_display_invalid_packages_table_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let invalid_packages = vec![];
 
         // Should not panic with empty list
@@ -385,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_display_invalid_packages_table_with_items() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let invalid_packages = vec![selfie::package::event::InvalidPackageInfo {
             path: "/path/to/test-package.yml".to_string(),
             error: "missing field `name`".to_string(),
@@ -418,8 +415,8 @@ mod tests {
 
     #[test]
     fn test_format_status_n_a() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let config_with_colors = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Test N/A status without colors
         let result = format_status(None, TerminalProgressReporter::new(config.use_colors()));
@@ -437,8 +434,8 @@ mod tests {
 
     #[test]
     fn test_format_status_not_installed() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let config_with_colors = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Test "Not installed" status without colors
         let result = format_status(
@@ -467,8 +464,8 @@ mod tests {
 
     #[test]
     fn test_format_status_command_not_found() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let config_with_colors = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Test "Cmd not found" status without colors
         let result = format_status(
@@ -489,8 +486,8 @@ mod tests {
 
     #[test]
     fn test_format_status_error() {
-        let config = test_config();
-        let config_with_colors = test_config_with_colors();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let config_with_colors = CliConfig::wrap_for_test_with_colors(test_common::test_config());
 
         // Test "Error" status without colors
         let result = format_status(
@@ -511,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_empty() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let environment_stats = std::collections::HashMap::new();
 
         // Should not panic with empty stats
@@ -520,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_single_environment() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
 
@@ -530,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_multiple_environments() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
         environment_stats.insert("ubuntu".to_string(), 2);
@@ -542,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_display_environment_stats_with_colors() {
-        let config = test_config_with_colors();
+        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert(TEST_ENV.to_string(), 2);
         environment_stats.insert("other-env".to_string(), 1);
@@ -553,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_empty_packages_and_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
             invalid_packages: vec![],
@@ -575,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_no_packages_but_has_environment_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert("macos".to_string(), 3);
         environment_stats.insert("ubuntu".to_string(), 2);
@@ -601,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_with_valid_packages() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),
@@ -636,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_with_invalid_packages_only() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let invalid_package = selfie::package::event::InvalidPackageInfo {
             path: "/test/invalid.yml".to_string(),
             error: "missing field `name`".to_string(),
@@ -663,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_mixed_packages_and_environment_stats() {
-        let config = test_config();
+        let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
             version: TEST_VERSION.to_string(),

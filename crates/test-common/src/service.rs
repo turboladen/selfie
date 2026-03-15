@@ -5,7 +5,7 @@ use crate::config::{
 };
 use selfie::{
     commands::shell::ShellCommandRunner,
-    config::AppConfig,
+    config::SelfieConfig,
     fs::real::RealFileSystem,
     package::{repository::YamlPackageRepository, service::PackageServiceImpl},
 };
@@ -26,7 +26,7 @@ pub fn create_test_service(
 /// Useful when you need custom config settings like different environments.
 #[must_use]
 pub fn create_test_service_with_config(
-    config: AppConfig,
+    config: SelfieConfig,
 ) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
@@ -63,7 +63,7 @@ pub fn create_test_service_for_env(
 /// This matches the exact pattern used in CLI commands for consistency.
 #[must_use]
 pub fn create_cli_service(
-    config: &AppConfig,
+    config: &SelfieConfig,
 ) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
     let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
     let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
