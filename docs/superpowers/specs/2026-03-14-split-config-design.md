@@ -2,9 +2,9 @@
 
 ## Context
 
-`AppConfig` lives in the `selfie` library but contains UI-specific fields (`verbose`,
-`use_colors`) that the library never reads. This violates hexagonal architecture boundaries — the
-library shouldn't know about presentation concerns. Additionally, the current
+`AppConfig` lives in the `selfie` library but contains UI-specific fields (`verbose`, `use_colors`)
+that the library never reads. This violates hexagonal architecture boundaries — the library
+shouldn't know about presentation concerns. Additionally, the current
 `#[serde(deny_unknown_fields)]` prevents the config file from containing frontend-specific sections.
 
 The goal is to split config so the library owns operational settings, each frontend owns its
@@ -87,6 +87,7 @@ pub struct CliConfig {
 ```
 
 Methods:
+
 - `selfie_config(&self) -> &SelfieConfig` — for passing to library service calls
 - `verbose(&self) -> bool`
 - `use_colors(&self) -> bool`
@@ -146,6 +147,7 @@ Handled entirely in the CLI crate. `ClapCli` applies overrides when constructing
 - `--no-color` → overrides `CliSection.use_colors`
 
 `SelfieConfig` needs mutable access for the CLI to apply core overrides. Options:
+
 - Keep `environment_mut()` / `package_directory_mut()` on `SelfieConfig`
 - Or use a builder to reconstruct with overrides
 
@@ -181,16 +183,19 @@ entire dispatch chain. This simplifies the loading flow in `main.rs` — it only
 ## Public API Changes (selfie lib)
 
 ### Removed
+
 - `AppConfig` (replaced by `SelfieConfig`)
 - `AppConfigBuilder` (replaced by `SelfieConfigBuilder`)
 - `ApplyToConfig` trait
 - `verbose()` / `verbose_mut()` / `use_colors()` / `use_colors_mut()` getters
 
 ### Added
+
 - `SelfieConfig` (same fields minus `verbose`/`use_colors`)
 - `SelfieConfigBuilder`
 
 ### Changed
+
 - `ConfigLoader::load_config()` returns `SelfieConfig`
 - `YamlLoader::load_config()` returns `SelfieConfig`
 - All service methods that take `&AppConfig` now take `&SelfieConfig`
@@ -198,6 +203,7 @@ entire dispatch chain. This simplifies the loading flow in `main.rs` — it only
 ## Files Modified
 
 ### Library (`crates/selfie/`)
+
 - `src/config.rs` — rename `AppConfig` → `SelfieConfig`, remove `verbose`/`use_colors`, remove
   `deny_unknown_fields`, rename builder, update re-exports (this file is the module root — there is
   no separate `config/mod.rs`), remove `ApplyToConfig` re-export
@@ -211,17 +217,19 @@ entire dispatch chain. This simplifies the loading flow in `main.rs` — it only
   config; update type references
 
 ### CLI (`crates/cli/`)
-- `src/config.rs` — remove `ApplyToConfig` impl, add `CliSection`, `CliConfig`,
-  `RawCliFile`, and CLI-specific override logic
+
+- `src/config.rs` — remove `ApplyToConfig` impl, add `CliSection`, `CliConfig`, `RawCliFile`, and
+  CLI-specific override logic
 - `src/main.rs` — update config loading flow to use `CliConfig`
 - `src/commands/` — all command handlers change `&AppConfig` to `&CliConfig` (not `&SelfieConfig`),
   since handlers like `format_environment_names` and `display_environment_summary` need both core
-  fields and `use_colors()`. The delegation getters on `CliConfig` make this a straightforward
-  type rename.
+  fields and `use_colors()`. The delegation getters on `CliConfig` make this a straightforward type
+  rename.
 
 ### Test Common (`crates/test-common/`)
-- `src/config.rs` — rename to `SelfieConfig`/`SelfieConfigBuilder`, audit which helpers are
-  still needed
+
+- `src/config.rs` — rename to `SelfieConfig`/`SelfieConfigBuilder`, audit which helpers are still
+  needed
 - `src/lib.rs` — update re-export from `AppConfigBuilder` to `SelfieConfigBuilder`
 
 ## Verification

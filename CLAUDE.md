@@ -87,11 +87,12 @@ decide how to display information about that event to the user in the current UI
 ### Boundary Rules
 
 - The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
-- **Config is split by concern:** `SelfieConfig` (library) holds operational settings (`environment`,
-  `package_directory`, `command_timeout`, `stop_on_error`, `max_parallel_installations`). `CliConfig`
-  (CLI crate) wraps `SelfieConfig` and adds presentation settings (`verbose`, `use_colors`). The
-  config file uses top-level keys for core settings and a `cli:` section for CLI-specific ones.
-  Each frontend reads only its own section; the library ignores unknown keys.
+- **Config is split by concern:** `SelfieConfig` (library) holds operational settings
+  (`environment`, `package_directory`, `command_timeout`, `stop_on_error`,
+  `max_parallel_installations`). `CliConfig` (CLI crate) wraps `SelfieConfig` and adds presentation
+  settings (`verbose`, `use_colors`). The config file uses top-level keys for core settings and a
+  `cli:` section for CLI-specific ones. Each frontend reads only its own section; the library
+  ignores unknown keys.
 - CLI commands should call `PackageService` methods, not use `PackageRepository` directly. This
   applies to both production code and tests — CLI tests should exercise the same service interface
   that production code uses, with mocked repositories injected into `PackageServiceImpl`.
@@ -102,8 +103,8 @@ decide how to display information about that event to the user in the current UI
 
 ## Gotchas
 
-- **`selfie-cli` is a binary crate**: No lib target, so `cargo test -p selfie-cli --lib` won't
-  work. Use `cargo test -p selfie-cli` instead.
+- **`selfie-cli` is a binary crate**: No lib target, so `cargo test -p selfie-cli --lib` won't work.
+  Use `cargo test -p selfie-cli` instead.
 - **`uuid` is not a workspace dep**: It's declared directly in `crates/selfie/Cargo.toml`. If CLI
   tests need to construct `OperationInfo`, add `uuid` as a dev-dep to the CLI crate.
 - **Rust 2024 edition**: All crates use `edition = "2024"`. This affects import syntax and some
@@ -114,15 +115,15 @@ decide how to display information about that event to the user in the current UI
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
 - **No circular dependency detection**: Install follows deps linearly without cycle detection.
   Tracked in beads.
-- **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native
-  PATH lookup. It finds filesystem executables only — not shell builtins like `cd` or `test`.
-  This is intentional: selfie checks for package manager binaries (`brew`, `npm`, `apt`).
+- **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native PATH
+  lookup. It finds filesystem executables only — not shell builtins like `cd` or `test`. This is
+  intentional: selfie checks for package manager binaries (`brew`, `npm`, `apt`).
 
 ## `selfie` Concepts
 
 We're incrementally implementing this functionality. selfie is a personal meta-package manager: it
-doesn't install packages directly, it runs whatever commands the user configures per package. It's
-a glorified command runner, scoped to user-defined environments.
+doesn't install packages directly, it runs whatever commands the user configures per package. It's a
+glorified command runner, scoped to user-defined environments.
 
 ### Packages
 
@@ -132,6 +133,7 @@ macOS and `npm` on Ubuntu -- the user decides per environment, then just runs
 `selfie install bash-language-server` regardless of which machine they're on.
 
 Package operations:
+
 - **Validate**: Check that a package file follows the spec.
 - **Check**: Run the user-defined check command to see if a package is installed.
 - **List**: List all YAML files in the configured package directory.
@@ -148,10 +150,12 @@ environment in config so selfie knows which commands to run.
 Config file: `~/.config/selfie/config.yml`. Also settable via CLI flags.
 
 Core settings (top-level, read by `SelfieConfig`):
+
 - `environment`: The current environment label.
 - `package_directory`: Directory containing selfie package files.
 - `command_timeout`, `stop_on_error`, `max_parallel_installations`: Execution settings.
 
 CLI settings (under `cli:` section, read by `CliConfig`):
+
 - `verbose`: Enable debug logging.
 - `use_colors`: Enable colored terminal output.
