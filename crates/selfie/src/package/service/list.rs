@@ -32,8 +32,8 @@ where
     PR: PackageRepository,
     CR: CommandRunner + Clone + 'static,
 {
-    // Step 1: List all packages
-    progress.next(sender, "Loading package list").await;
+    // Step 1: Load, process, sort, filter packages and emit ready event
+    progress.next(sender, "Loading packages").await;
 
     let list_output = match repo.list_packages() {
         Ok(output) => {
@@ -45,18 +45,8 @@ where
         }
     };
 
-    // Step 2: Process valid packages
-    progress
-        .next(sender, "Processing package information")
-        .await;
-
     let valid_packages: Vec<_> = list_output.valid_packages().collect();
     let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
-
-    // Step 3: Sort packages alphabetically first for streaming
-    progress
-        .next(sender, "Sorting packages for streaming")
-        .await;
 
     // Sort packages alphabetically by name before processing
     let mut sorted_packages: Vec<_> = valid_packages.into_iter().collect();
@@ -76,9 +66,20 @@ where
         .filter(|package| show_all || package.environments().contains_key(config.environment()))
         .collect();
 
-    progress
-        .next(sender, "Checking package status in parallel")
-        .await;
+    // Emit PackageListReady with all packages (status: None) before checking
+    let ready_items: Vec<PackageListItem> = packages_to_process
+        .iter()
+        .map(|package| PackageListItem {
+            name: package.name().to_string(),
+            version: package.version().to_string(),
+            environments: package.environments().keys().cloned().collect(),
+            status: None,
+        })
+        .collect();
+    sender.send_package_list_ready(ready_items).await;
+
+    // Step 2: Check package status in parallel
+    progress.next(sender, "Checking package status").await;
 
     // Create parallel tasks for status checking with order preservation
     let check_futures: Vec<_> = packages_to_process
@@ -136,8 +137,20 @@ where
     // Wait for all tasks and collect results in original order
     let mut results: Vec<(usize, PackageListItem)> = Vec::new();
     for handle in check_futures {
-        if let Ok(result) = handle.await {
-            results.push(result);
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                sender
+                    .send_package_list_item(PackageListItem {
+                        name: format!("<task error: {e}>"),
+                        version: String::new(),
+                        environments: Vec::new(),
+                        status: Some(crate::package::event::CheckResult::Error(format!(
+                            "Task failed: {e}"
+                        ))),
+                    })
+                    .await;
+            }
         }
     }
 
@@ -167,9 +180,6 @@ where
 
     // Send final summary data event (CLI can use this for invalid packages and stats)
     sender.send_package_list(package_list_data).await;
-
-    // Step 4: Complete operation
-    progress.next(sender, "Finalizing package list").await;
 
     sender
         .send_debug("Package listing completed successfully")
