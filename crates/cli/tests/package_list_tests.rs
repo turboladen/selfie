@@ -508,7 +508,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
             "No packages found for environment 'test-env'.",
         ))
         .stdout(predicate::str::contains(
-            "📊 Packages by environment in this directory:",
+            "Packages by environment in this directory:",
         ))
         .stdout(predicate::str::contains("Environment"))
         .stdout(predicate::str::contains("Package Count"))
@@ -516,7 +516,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("ubuntu"))
         .stdout(predicate::str::contains("windows"))
         .stdout(predicate::str::contains("debian"))
-        .stdout(predicate::str::contains("💡 Try:"))
+        .stdout(predicate::str::contains("Try:"))
         .stdout(predicate::str::contains("--environment <env>"))
         .stdout(predicate::str::contains("--all"));
 }

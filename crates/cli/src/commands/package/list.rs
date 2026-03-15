@@ -166,10 +166,7 @@ fn handle_list_event(
             }
 
             println!();
-            println!(
-                "\u{1f4c1} Package directory: {}",
-                package_list.package_directory
-            );
+            println!("Package directory: {}", package_list.package_directory);
 
             if package_list.valid_packages.is_empty() && package_list.environment_stats.is_empty() {
                 println!("No packages found.");
@@ -285,7 +282,7 @@ fn display_environment_stats(
     }
 
     println!();
-    println!("\u{1f4ca} Packages by environment in this directory:");
+    println!("Packages by environment in this directory:");
 
     // Sort environments by package count (descending), then by name
     let mut env_counts: Vec<(String, usize)> = environment_stats
@@ -322,7 +319,7 @@ fn display_environment_stats(
 
     if config.use_colors() {
         println!(
-            "\u{1f4a1} Try: {} to see packages for a different environment",
+            "Try: {} to see packages for a different environment",
             console::style("--environment <env>").yellow()
         );
         println!(
@@ -330,7 +327,7 @@ fn display_environment_stats(
             console::style("--all").yellow()
         );
     } else {
-        println!("\u{1f4a1} Try: --environment <env> to see packages for a different environment");
+        println!("Try: --environment <env> to see packages for a different environment");
         println!("   or: --all to see all packages regardless of environment");
     }
 }

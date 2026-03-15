@@ -71,15 +71,19 @@ pub(crate) async fn handle_install(
                     if verbose {
                         false // Use default handler in verbose mode
                     } else {
-                        // In non-verbose mode, print trimmed lines directly
-                        let lines = match output {
-                            selfie::package::event::ConsoleOutput::Stdout(line) => line,
-                            selfie::package::event::ConsoleOutput::Stderr(line) => line,
+                        // In non-verbose mode, print trimmed lines preserving stream
+                        let (lines, is_stderr) = match output {
+                            selfie::package::event::ConsoleOutput::Stdout(line) => (line, false),
+                            selfie::package::event::ConsoleOutput::Stderr(line) => (line, true),
                         };
                         for line in lines.lines() {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
-                                display.println(trimmed);
+                                if is_stderr {
+                                    eprintln!("{trimmed}");
+                                } else {
+                                    display.println(trimmed);
+                                }
                             }
                         }
                         true // Handled
