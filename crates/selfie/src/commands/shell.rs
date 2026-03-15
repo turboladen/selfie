@@ -58,11 +58,13 @@ impl ShellCommandRunner {
 
 #[async_trait]
 impl CommandRunner for ShellCommandRunner {
-    /// Check if a command is available in the current environment
+    /// Check if a command executable exists on `PATH`
     ///
     /// Uses the `which` crate to perform a native PATH lookup without
-    /// spawning a subprocess. This is faster and avoids routing through
-    /// the command timeout.
+    /// spawning a subprocess. This checks for filesystem executables
+    /// only — shell builtins (e.g., `cd`, `test`) will not be found.
+    /// This is the appropriate check for package manager prerequisites
+    /// like `brew`, `npm`, or `apt`.
     ///
     /// # Arguments
     ///
@@ -70,7 +72,7 @@ impl CommandRunner for ShellCommandRunner {
     ///
     /// # Returns
     ///
-    /// `true` if the command is available, `false` otherwise
+    /// `true` if an executable with the given name exists on `PATH`, `false` otherwise
     async fn is_command_available(&self, command: &str) -> bool {
         which::which(command).is_ok()
     }
@@ -347,8 +349,8 @@ mod tests {
     async fn test_command_availability() {
         let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
 
-        // "echo" should be available in most environments
-        assert!(runner.is_command_available("echo").await);
+        // "ls" is a filesystem binary on all target platforms
+        assert!(runner.is_command_available("ls").await);
 
         // A random string should not be a valid command
         let random_cmd = "xyzabc123notarealcommand";
