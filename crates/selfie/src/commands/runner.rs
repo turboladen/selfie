@@ -39,11 +39,12 @@ impl fmt::Display for OutputChunk {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait CommandRunner: Send + Sync {
-    /// Check if a command is available in the current environment
+    /// Check if a command executable exists on `PATH`
     ///
-    /// Tests whether the specified command can be found and executed in the
-    /// current system environment. This is useful for dependency checking
-    /// before attempting package installations.
+    /// Tests whether the specified command can be found as a filesystem
+    /// executable on `PATH`. Shell builtins are not detected. This is
+    /// useful for checking package manager prerequisites (e.g., `brew`,
+    /// `npm`, `apt`) before attempting package installations.
     ///
     /// # Arguments
     ///
@@ -51,7 +52,7 @@ pub trait CommandRunner: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `true` if the command is available, `false` otherwise
+    /// `true` if an executable with the given name exists on `PATH`, `false` otherwise
     async fn is_command_available(&self, command: &str) -> bool;
 
     /// Execute a command and wait for completion
