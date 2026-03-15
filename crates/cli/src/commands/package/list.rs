@@ -6,6 +6,7 @@ use selfie::package::{event, service::PackageService};
 use crate::{
     config::CliConfig,
     display_manager::{DisplayManager, OperationHandle},
+    status_style,
 };
 
 use super::common;
@@ -103,15 +104,15 @@ fn handle_list_event(
                     let handle = display.start_list_spinner(&msg);
                     spinners.insert(pkg.name.clone(), handle);
                 } else {
-                    // Non-TTY: just print a placeholder (will be overwritten conceptually)
-                    // We'll print the final result in PackageListItemCompleted instead
+                    // Non-TTY: skip spinners; results print in PackageListItemCompleted
                 }
             }
             true // Handled
         }
 
         event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
-            let status_text = format_check_status(package_item.status.as_ref(), use_colors);
+            let status_text =
+                status_style::format_check_result(package_item.status.as_ref(), use_colors);
             let version = format!("v{}", package_item.version);
 
             let line = if show_all {
@@ -208,53 +209,6 @@ fn handle_list_event(
         }
 
         _ => false, // Use default handling for other events
-    }
-}
-
-fn format_check_status(status: Option<&event::CheckResult>, use_colors: bool) -> String {
-    match status {
-        Some(event::CheckResult::Success { .. }) => {
-            if use_colors {
-                style("Installed").green().to_string()
-            } else {
-                "Installed".to_string()
-            }
-        }
-        Some(event::CheckResult::Failed { .. }) => {
-            if use_colors {
-                style("Not installed").cyan().to_string()
-            } else {
-                "Not installed".to_string()
-            }
-        }
-        Some(event::CheckResult::NoCheckCommand) => {
-            if use_colors {
-                style("No check").yellow().to_string()
-            } else {
-                "No check".to_string()
-            }
-        }
-        Some(event::CheckResult::CommandNotFound) => {
-            if use_colors {
-                style("Cmd not found").red().to_string()
-            } else {
-                "Cmd not found".to_string()
-            }
-        }
-        Some(event::CheckResult::Error(e)) => {
-            if use_colors {
-                style(format!("Error: {e}")).red().to_string()
-            } else {
-                format!("Error: {e}")
-            }
-        }
-        None => {
-            if use_colors {
-                style("N/A").dim().to_string()
-            } else {
-                "N/A".to_string()
-            }
-        }
     }
 }
 
@@ -473,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_format_check_status_installed() {
-        let result = format_check_status(
+        let result = status_style::format_check_result(
             Some(&event::CheckResult::Success {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -485,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_format_check_status_not_installed() {
-        let result = format_check_status(
+        let result = status_style::format_check_result(
             Some(&event::CheckResult::Failed {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -498,19 +452,21 @@ mod tests {
 
     #[test]
     fn test_format_check_status_no_check() {
-        let result = format_check_status(Some(&event::CheckResult::NoCheckCommand), false);
+        let result =
+            status_style::format_check_result(Some(&event::CheckResult::NoCheckCommand), false);
         assert_eq!(result, "No check");
     }
 
     #[test]
     fn test_format_check_status_cmd_not_found() {
-        let result = format_check_status(Some(&event::CheckResult::CommandNotFound), false);
+        let result =
+            status_style::format_check_result(Some(&event::CheckResult::CommandNotFound), false);
         assert_eq!(result, "Cmd not found");
     }
 
     #[test]
     fn test_format_check_status_error() {
-        let result = format_check_status(
+        let result = status_style::format_check_result(
             Some(&event::CheckResult::Error("test error".to_string())),
             false,
         );
@@ -519,14 +475,14 @@ mod tests {
 
     #[test]
     fn test_format_check_status_na() {
-        let result = format_check_status(None, false);
+        let result = status_style::format_check_result(None, false);
         assert_eq!(result, "N/A");
     }
 
     #[test]
     fn test_format_check_status_with_colors() {
         // Just verify these don't panic and return non-empty strings
-        let result = format_check_status(
+        let result = status_style::format_check_result(
             Some(&event::CheckResult::Success {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -535,7 +491,7 @@ mod tests {
         );
         assert!(result.contains("Installed"));
 
-        let result = format_check_status(None, true);
+        let result = status_style::format_check_result(None, true);
         assert!(result.contains("N/A"));
     }
 
