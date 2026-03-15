@@ -11,8 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_trait::async_trait;
-
 use tokio::{io::AsyncReadExt, process::Command};
 
 use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk};
@@ -45,7 +43,7 @@ impl ShellCommandRunner {
     /// use std::time::Duration;
     /// use selfie::commands::ShellCommandRunner;
     ///
-    /// let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(30));
+    /// let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
     /// ```
     #[must_use]
     pub fn new(shell: &str, default_timeout: Duration) -> Self {
@@ -54,9 +52,26 @@ impl ShellCommandRunner {
             default_timeout,
         }
     }
+
+    /// Return the platform-appropriate default shell path.
+    ///
+    /// - **Unix**: `/bin/sh`
+    /// - **Windows**: the value of `COMSPEC` (usually `cmd.exe`)
+    #[must_use]
+    pub fn default_shell() -> &'static str {
+        #[cfg(unix)]
+        {
+            "/bin/sh"
+        }
+        #[cfg(windows)]
+        {
+            // COMSPEC is always set on Windows; fall back to cmd.exe
+            static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            SHELL.get_or_init(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()))
+        }
+    }
 }
 
-#[async_trait]
 impl CommandRunner for ShellCommandRunner {
     /// Check if a command executable exists on `PATH`
     ///
@@ -328,7 +343,8 @@ mod tests {
     // They could be skipped in CI environments if necessary
     #[tokio::test]
     async fn test_shell_command_runner_basic() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
 
         // Test a basic echo command
         let result = runner.execute("echo hello").await;
@@ -347,7 +363,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_availability() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(10));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
 
         // "ls" is a filesystem binary on all target platforms
         assert!(runner.is_command_available("ls").await);
@@ -361,7 +378,10 @@ mod tests {
     // Consider skipping or adjusting in CI environments
     #[tokio::test]
     async fn test_timeout() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_millis(100));
+        let runner = ShellCommandRunner::new(
+            ShellCommandRunner::default_shell(),
+            Duration::from_millis(100),
+        );
 
         // Command that should timeout (sleep for 1s)
         // Note: This is a simple test and may be flaky since timeouts aren't enforced
@@ -375,7 +395,10 @@ mod tests {
     // Error handling tests
     #[tokio::test]
     async fn test_command_timeout_error() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_millis(50));
+        let runner = ShellCommandRunner::new(
+            ShellCommandRunner::default_shell(),
+            Duration::from_millis(50),
+        );
 
         // Create a command that will timeout
         let result = runner
@@ -394,7 +417,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_io_error() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Try to execute a command that doesn't exist
         let result = runner.execute("nonexistent_command_12345_xyz").await;
@@ -409,7 +433,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_permission_denied() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Try to access a file that should not be accessible
         let result = runner
@@ -429,7 +454,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_invalid_syntax() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Try to execute a command with invalid syntax
         let result = runner.execute("if [ 1 -eq 1 ; then echo 'unclosed'").await;
@@ -480,7 +506,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_large_output() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Generate a large amount of output to test buffering
         let result = runner
@@ -495,7 +522,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_output_methods() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Test that our output methods work correctly
         let result = runner.execute("echo 'test output'").await;
@@ -511,7 +539,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_exit_code_handling() {
-        let runner = ShellCommandRunner::new("/bin/sh", Duration::from_secs(5));
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
 
         // Command that exits with non-zero status
         let result = runner.execute("exit 42").await;

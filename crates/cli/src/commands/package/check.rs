@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub(crate) async fn handle_check(
-    service: &dyn PackageService,
+    service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
     reporter: TerminalProgressReporter,

@@ -6,6 +6,9 @@ pub mod shell;
 pub use runner::{CommandError, CommandOutput, CommandRunner, OutputChunk};
 pub use shell::ShellCommandRunner;
 
+#[cfg(feature = "with_mocks")]
+pub use runner::MockCommandRunner;
+
 #[cfg(test)]
 mod tests {
     // Error context tests temporarily disabled due to compilation issues

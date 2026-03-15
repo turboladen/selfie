@@ -26,7 +26,7 @@ impl<'a> ListCommand<'a> {
 }
 
 impl ListCommand<'_> {
-    pub(crate) async fn handle_command(&self, service: &dyn PackageService) -> i32 {
+    pub(crate) async fn handle_command(&self, service: &impl PackageService) -> i32 {
         // Call the service's list method to get an event stream
         let event_stream = service.list(self.show_all).await;
 

@@ -4,9 +4,10 @@
 //! in a cross-platform manner. It implements the Command Runner port pattern
 //! to allow different command execution strategies while maintaining a consistent interface.
 
-use std::{borrow::Cow, fmt, path::PathBuf, process::Output, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow, fmt, future::Future, path::PathBuf, process::Output, sync::Arc, time::Duration,
+};
 
-use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -35,9 +36,8 @@ impl fmt::Display for OutputChunk {
 ///
 /// This trait abstracts command execution to allow different implementations
 /// (shell commands, mock execution, etc.) and to enable comprehensive testing.
-/// It provides both synchronous and streaming execution modes with timeout support.
-#[cfg_attr(test, mockall::automock)]
-#[async_trait]
+/// It provides both buffered and streaming execution modes with timeout support.
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait CommandRunner: Send + Sync {
     /// Check if a command executable exists on `PATH`
     ///
@@ -53,7 +53,7 @@ pub trait CommandRunner: Send + Sync {
     /// # Returns
     ///
     /// `true` if an executable with the given name exists on `PATH`, `false` otherwise
-    async fn is_command_available(&self, command: &str) -> bool;
+    fn is_command_available(&self, command: &str) -> impl Future<Output = bool> + Send;
 
     /// Execute a command and wait for completion
     ///
@@ -71,7 +71,10 @@ pub trait CommandRunner: Send + Sync {
     /// - The command cannot be started (IO error)
     /// - The command exits with a non-zero status code
     /// - Command execution times out (implementation-dependent default)
-    async fn execute(&self, command: &str) -> Result<CommandOutput, CommandError>;
+    fn execute(
+        &self,
+        command: &str,
+    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
     /// Execute a command with a specific timeout
     ///
@@ -89,11 +92,11 @@ pub trait CommandRunner: Send + Sync {
     /// - The command cannot be started (IO error)
     /// - The command exits with a non-zero status code
     /// - The command times out before completion
-    async fn execute_with_timeout(
+    fn execute_with_timeout(
         &self,
         command: &str,
         timeout: Duration,
-    ) -> Result<CommandOutput, CommandError>;
+    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
     /// Execute a command with streaming output
     ///
@@ -114,12 +117,12 @@ pub trait CommandRunner: Send + Sync {
     /// - The command exits with a non-zero status code
     /// - The command times out before completion
     /// - Channel communication fails
-    async fn execute_streaming(
+    fn execute_streaming(
         &self,
         command: &str,
         timeout: Duration,
         output_sender: mpsc::Sender<OutputChunk>,
-    ) -> Result<CommandOutput, CommandError>;
+    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 }
 
 /// Result of executing a command

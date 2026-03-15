@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(crate) async fn handle_validate(
-    service: &dyn PackageService,
+    service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
     reporter: TerminalProgressReporter,

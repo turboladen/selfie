@@ -137,14 +137,13 @@ pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetP
 }
 
 /// Create a package service with repository and command runner
-pub(crate) fn create_package_service(config: &CliConfig) -> Box<dyn PackageService> {
+pub(crate) fn create_package_service(config: &CliConfig) -> impl PackageService {
     let repo = create_package_repository(config);
-    let command_runner = ShellCommandRunner::new("/bin/sh", config.command_timeout());
-    Box::new(PackageServiceImpl::new(
-        repo,
-        command_runner,
-        config.selfie_config().clone(),
-    ))
+    let command_runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.command_timeout(),
+    );
+    PackageServiceImpl::new(repo, command_runner, config.selfie_config().clone())
 }
 
 /// Create a formatted table with consistent styling

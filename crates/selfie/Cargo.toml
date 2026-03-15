@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = "0.1.87"
 config = { version = "0.15.9", features = ["yaml"] }
 etcetera = "0.10.0"
 futures.workspace = true

@@ -111,31 +111,25 @@ async fn dispatch_package_command(
 
     match command {
         PackageSubcommands::Install { package_name } => {
-            package::install::handle_install(service.as_ref(), package_name, config, reporter).await
+            package::install::handle_install(&service, package_name, config, reporter).await
         }
         PackageSubcommands::Check { package_name } => {
-            package::check::handle_check(service.as_ref(), package_name, config, reporter).await
+            package::check::handle_check(&service, package_name, config, reporter).await
         }
         PackageSubcommands::List { all } => {
             ListCommand::new(config, reporter, *all)
-                .handle_command(service.as_ref())
+                .handle_command(&service)
                 .await
         }
         PackageSubcommands::Info { package_name } => {
-            package::info::handle_info(service.as_ref(), package_name, config, reporter).await
+            package::info::handle_info(&service, package_name, config, reporter).await
         }
         PackageSubcommands::Create {
             package_name,
             interactive,
         } => {
-            package::create::handle_create(
-                service.as_ref(),
-                package_name,
-                config,
-                reporter,
-                *interactive,
-            )
-            .await
+            package::create::handle_create(&service, package_name, config, reporter, *interactive)
+                .await
         }
         PackageSubcommands::Edit { package_name } => {
             package::edit::handle_edit(package_name, config, reporter)
@@ -144,8 +138,7 @@ async fn dispatch_package_command(
             package::remove::handle_remove(package_name, config, reporter)
         }
         PackageSubcommands::Validate { package_name } => {
-            package::validate::handle_validate(service.as_ref(), package_name, config, reporter)
-                .await
+            package::validate::handle_validate(&service, package_name, config, reporter).await
         }
     }
 }
