@@ -96,6 +96,8 @@ fn init_tracing(verbose: bool) {
 /// program to exit with usage information rather than returning an error.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    human_panic::setup_panic!();
+
     let args = ClapCli::parse();
 
     // Initialize tracing based on verbose flag
