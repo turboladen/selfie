@@ -145,8 +145,8 @@ impl Package {
 
     /// Validate the package version format
     ///
-    /// Checks that the version follows semantic versioning format (major.minor.patch).
-    /// Uses the `semver` crate for spec-compliant parsing.
+    /// Checks that the version follows the SemVer 2.0.0 spec (major.minor.patch,
+    /// with optional pre-release and build metadata). Uses the `semver` crate.
     ///
     /// # Errors
     ///
