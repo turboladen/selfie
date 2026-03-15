@@ -214,6 +214,19 @@ fn display_invalid_packages(
     eprintln!();
     eprintln!("\u{26a0} Invalid package files:");
 
+    // Compute max filename length for aligned error messages
+    let max_len = invalid_packages
+        .iter()
+        .map(|p| {
+            std::path::Path::new(&p.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&p.path)
+                .len()
+        })
+        .max()
+        .unwrap_or(0);
+
     for invalid_package in invalid_packages {
         let filename = std::path::Path::new(&invalid_package.path)
             .file_name()
@@ -224,13 +237,14 @@ fn display_invalid_packages(
 
         if config.use_colors() {
             eprintln!(
-                "  {} {}: {}",
+                "  {} {:<width$}  {}",
                 style("\u{2717}").red(),
                 style(filename).red(),
-                style(clean_error).dim()
+                style(clean_error).dim(),
+                width = max_len
             );
         } else {
-            eprintln!("  \u{2717} {filename}: {clean_error}");
+            eprintln!("  \u{2717} {filename:<max_len$}  {clean_error}");
         }
     }
 }
