@@ -111,6 +111,9 @@ decide how to display information about that event to the user in the current UI
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
 - **No circular dependency detection**: Install follows deps linearly without cycle detection.
   Tracked in beads.
+- **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native
+  PATH lookup. It finds filesystem executables only — not shell builtins like `cd` or `test`.
+  This is intentional: selfie checks for package manager binaries (`brew`, `npm`, `apt`).
 
 ## `selfie` Concepts
 
