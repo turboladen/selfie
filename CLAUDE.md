@@ -16,15 +16,18 @@ cargo test -p selfie-cli       # Test CLI only
 cargo run -- <args>            # Run the CLI (from workspace root)
 cargo clippy --all-targets     # Lint
 cargo fmt --check              # Check formatting
+dprint fmt                     # Format Markdown/YAML (CI checks this)
+dprint check                   # Verify Markdown/YAML formatting
 ```
 
 ### Pre-commit checklist
 
-Before every commit (unless instructed otherwise), run all three and fix any issues:
+Before every commit (unless instructed otherwise), run all four and fix any issues:
 
 1. `cargo fmt` — auto-fix formatting
-2. `cargo clippy --all-targets` — fix all warnings (zero warnings policy)
-3. `cargo test` — all tests must pass
+2. `dprint fmt` — auto-fix Markdown/YAML formatting
+3. `cargo clippy --all-targets` — fix all warnings (zero warnings policy)
+4. `cargo test` — all tests must pass
 
 When testing the CLI crate, enable mocks: the `selfie` dev-dependency already uses
 `features = ["with_mocks"]`.
