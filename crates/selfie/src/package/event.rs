@@ -344,6 +344,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send sorted filtered package list ready for display
+    pub(crate) async fn send_package_list_ready(&self, packages: Vec<PackageListItem>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::PackageListReady {
+            operation_info,
+            packages,
+        })
+        .await;
+    }
+
     /// Send check result data
     pub(crate) async fn send_check_result(&self, check_result: CheckResultData) {
         let operation_info = self.touch_operation_info();
@@ -1216,6 +1226,12 @@ pub enum PackageEvent {
     EnvironmentStatusChecked {
         operation_info: OperationInfo,
         environment_status: EnvironmentStatusData,
+    },
+
+    /// Sorted filtered package list ready for display (before status checks begin)
+    PackageListReady {
+        operation_info: OperationInfo,
+        packages: Vec<PackageListItem>,
     },
 
     /// Package list loaded
