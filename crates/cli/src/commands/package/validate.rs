@@ -6,25 +6,25 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::package::common::report_status, config::CliConfig, event_processor::EventProcessor,
-    formatters::format_key, terminal_progress_reporter::TerminalProgressReporter,
+    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
+    formatters::format_key,
 };
 
 pub(crate) async fn handle_validate(
     service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    report_status(&format!("Validating {package_name}..."));
+    display.print_progress(format!("Validating {package_name}..."));
 
     // Call the service's validate method to get an event stream
     let event_stream = service.validate(package_name, None).await;
 
     // Process the event stream with custom handling for structured data
-    let processor = EventProcessor::new(reporter);
+    let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| handle_validate_event(event, config))
         .await;
@@ -77,13 +77,17 @@ fn display_validation_success_card(validation_result: &ValidationResultData, con
         validation_result.environment
     );
 
-    let reporter = TerminalProgressReporter::new(config.use_colors());
     let status_key = if config.use_colors() {
-        console::style("Status").cyan().bold().to_string()
+        style("Status").cyan().bold().to_string()
     } else {
         "Status".to_string()
     };
-    let status = format!("   {}: {}", status_key, reporter.format_success("Valid"));
+    let status_text = if config.use_colors() {
+        style("✓ Valid").green().to_string()
+    } else {
+        "✓ Valid".to_string()
+    };
+    let status = format!("   {}: {}", status_key, status_text);
     println!("{status}");
 }
 

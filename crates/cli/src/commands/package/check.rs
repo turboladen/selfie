@@ -5,20 +5,20 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::package::common, config::CliConfig, event_processor::EventProcessor,
-    formatters::format_key, terminal_progress_reporter::TerminalProgressReporter,
+    commands::package::common, config::CliConfig, display_manager::DisplayManager,
+    event_processor::EventProcessor, formatters::format_key, status_style,
 };
 
 pub(crate) async fn handle_check(
     service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
 
     // Create animated spinner for check operation
-    common::report_status(&format!("Checking {package_name}..."));
+    display.print_progress(format!("Checking {package_name}..."));
 
     // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
@@ -27,7 +27,7 @@ pub(crate) async fn handle_check(
     let mut env_error_handled = false;
 
     // Process the event stream with custom handling for structured data
-    let processor = EventProcessor::new(reporter);
+    let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
             match event {
@@ -134,12 +134,16 @@ fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig)
         println!("{}{}", format_key_fn("Command"), cmd);
     }
 
-    let reporter = TerminalProgressReporter::new(config.use_colors());
+    let use_colors = config.use_colors();
 
     // Format status with appropriate icon and color
     let status_line = match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
-            let status = format!("{}{}", format_key_fn("Status"), reporter.format_installed());
+            let status = format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_installed(use_colors)
+            );
 
             // Show stdout output if present
             if !stdout.trim().is_empty() {
@@ -159,7 +163,7 @@ fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig)
             let status = format!(
                 "{}{}",
                 format_key_fn("Status"),
-                reporter.format_not_installed()
+                status_style::format_not_installed(use_colors)
             );
 
             if !stderr.is_empty() {
@@ -173,28 +177,36 @@ fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig)
             }
         }
         CheckResult::NoCheckCommand => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            format!("   {}: {}", status_key, reporter.format_no_check())
+            format!(
+                "   {}: {}",
+                status_key,
+                status_style::format_no_check(use_colors)
+            )
         }
         CheckResult::CommandNotFound => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            format!("   {}: {}", status_key, reporter.format_cmd_not_found())
+            format!(
+                "   {}: {}",
+                status_key,
+                status_style::format_cmd_not_found(use_colors)
+            )
         }
         CheckResult::Error(error) => {
-            let status_key = if config.use_colors() {
+            let status_key = if use_colors {
                 console::style("Status").cyan().bold().to_string()
             } else {
                 "Status".to_string()
             };
-            let details_key = if config.use_colors() {
+            let details_key = if use_colors {
                 console::style("Details").cyan().bold().to_string()
             } else {
                 "Details".to_string()
@@ -202,7 +214,7 @@ fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig)
             format!(
                 "   {}: {}\n   {}: {}",
                 status_key,
-                reporter.format_status_error(),
+                status_style::format_status_error(use_colors),
                 details_key,
                 error
             )

@@ -26,19 +26,20 @@
 mod cli;
 mod commands;
 mod config;
+mod display_manager;
 mod event_processor;
 mod formatters;
+mod status_style;
 mod tables;
-mod terminal_progress_reporter;
 
 use std::process;
 
 use clap::Parser;
+use display_manager::DisplayManager;
 use selfie::{
     config::{YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
-use terminal_progress_reporter::TerminalProgressReporter;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -115,8 +116,7 @@ async fn main() -> anyhow::Result<()> {
 
     debug!("Final config: {:#?}", &config);
 
-    // TODO: Maybe don't need to build this until it's needed?
-    let reporter = TerminalProgressReporter::new(config.use_colors());
+    let display = DisplayManager::new(config.use_colors());
 
     // Set up graceful shutdown: first Ctrl+C cancels in-flight operations,
     // second Ctrl+C forces immediate exit.
@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Dispatch and execute the requested command
-    let exit_code = dispatch_command(&args.command, &config, reporter, cancellation_token).await;
+    let exit_code = dispatch_command(&args.command, &config, display, cancellation_token).await;
 
     process::exit(exit_code)
 }

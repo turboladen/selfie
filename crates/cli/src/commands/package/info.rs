@@ -6,8 +6,8 @@ use selfie::package::{
 };
 
 use crate::{
-    config::CliConfig, event_processor::EventProcessor, formatters::format_key,
-    terminal_progress_reporter::TerminalProgressReporter,
+    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
+    formatters::format_key, status_style,
 };
 
 use super::common;
@@ -16,18 +16,18 @@ pub(crate) async fn handle_info(
     service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> i32 {
     tracing::debug!("Finding package info for: {package_name}");
 
     // Status message:
-    common::report_status(&format!("Getting info for {package_name}..."));
+    display.print_progress(format!("Getting info for {package_name}..."));
 
     // Call the service's info method to get an event stream
     let event_stream = service.info(package_name).await;
 
     // Process the event stream with custom handling for structured data
-    let processor = EventProcessor::new(reporter);
+    let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
             match event {
@@ -136,8 +136,7 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConf
     if env_status.is_current
         && let Some(status) = &env_status.status
     {
-        let reporter = TerminalProgressReporter::new(config.use_colors());
-        let status_text = format_status(status, reporter);
+        let status_text = format_status(status, config.use_colors());
         env_table.add_row(vec![format_env_key("Status"), status_text]);
     }
 
@@ -161,13 +160,13 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConf
     env_table
 }
 
-fn format_status(status: &EnvironmentStatus, reporter: TerminalProgressReporter) -> String {
+fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
     match status {
-        EnvironmentStatus::Installed => reporter.format_installed(),
-        EnvironmentStatus::NotInstalled => reporter.format_not_installed(),
+        EnvironmentStatus::Installed => status_style::format_installed(use_colors),
+        EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => {
             let msg = format!("Unknown ({reason})");
-            if reporter.use_colors() {
+            if use_colors {
                 style(msg).yellow().italic().to_string()
             } else {
                 msg
@@ -240,14 +239,14 @@ mod tests {
 
     #[test]
     fn test_format_status_functions() {
-        let reporter = TerminalProgressReporter::new(false);
+        let use_colors = false;
 
         let status = EnvironmentStatus::Installed;
-        let result = format_status(&status, reporter);
+        let result = format_status(&status, use_colors);
         assert!(result.contains("Installed"));
 
         let status = EnvironmentStatus::NotInstalled;
-        let result = format_status(&status, reporter);
+        let result = format_status(&status, use_colors);
         assert!(result.contains("Not installed"));
     }
 

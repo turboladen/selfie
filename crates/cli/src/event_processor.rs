@@ -12,10 +12,10 @@
 //!
 //! ```rust,ignore
 //! async fn handle_command_with_custom_progress(
-//!     reporter: TerminalProgressReporter,
+//!     display: DisplayManager,
 //!     event_stream: EventStream
 //! ) -> i32 {
-//!     let processor = EventProcessor::new(reporter);
+//!     let processor = EventProcessor::new(display);
 //!
 //!     processor.process_events(event_stream, |event| {
 //!         match event {
@@ -46,7 +46,7 @@ use selfie::package::{
     port::{PackageError, PackageListError},
 };
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 /// Result of processing events, including metadata about what was encountered
 #[derive(Debug, Clone)]
@@ -72,13 +72,19 @@ impl EventProcessingResult {
 /// and displayed in the CLI, reducing boilerplate across different commands.
 #[derive(Debug)]
 pub struct EventProcessor {
-    reporter: TerminalProgressReporter,
+    display: DisplayManager,
 }
 
 impl EventProcessor {
-    /// Create a new event processor with the given reporter
-    pub fn new(reporter: TerminalProgressReporter) -> Self {
-        Self { reporter }
+    /// Create a new event processor with the given display manager
+    pub fn new(display: DisplayManager) -> Self {
+        Self { display }
+    }
+
+    /// Get a reference to the display manager
+    #[allow(dead_code)]
+    pub(crate) fn display(&self) -> &DisplayManager {
+        &self.display
     }
 
     /// Process events from the stream with a custom event handler
@@ -112,6 +118,8 @@ impl EventProcessor {
             }
         }
 
+        self.display.finish();
+
         result
     }
 
@@ -136,11 +144,11 @@ impl EventProcessor {
                         operation_info.environment
                     )
                 };
-                self.reporter.report_info(message);
+                self.display.print_info(message);
             }
 
             PackageEvent::Progress { message, .. } => {
-                self.reporter.report_progress(message);
+                self.display.print_progress(message);
             }
 
             PackageEvent::Info { output, .. } => {
@@ -156,12 +164,12 @@ impl EventProcessor {
             }
 
             PackageEvent::Warning { message, .. } => {
-                self.reporter.report_warning(message);
+                self.display.print_warning(message);
                 // Warnings don't set failure exit code by default
             }
 
             PackageEvent::Error { message, error, .. } => {
-                self.reporter.report_error(format!("{message}: {error}"));
+                self.display.print_error(format!("{message}: {error}"));
                 result.exit_code = 1;
                 result.had_errors = true;
             }
@@ -170,7 +178,7 @@ impl EventProcessor {
                 result: op_result, ..
             } => match op_result {
                 OperationResult::Success(success) => {
-                    self.reporter.report_success(success.to_string());
+                    self.display.print_success(success.to_string());
                 }
                 OperationResult::Failure(err) => {
                     use selfie::package::event::OperationFailure;
@@ -181,7 +189,7 @@ impl EventProcessor {
                             packages_path,
                             ..
                         }) => {
-                            self.reporter.report_error(format!(
+                            self.display.print_error(format!(
                                 "Package `{name}` not found in path {}",
                                 packages_path.display()
                             ));
@@ -189,17 +197,17 @@ impl EventProcessor {
                         OperationFailure::PackageList(
                             PackageListError::PackageDirectoryNotFound(path),
                         ) => {
-                            self.reporter.report_error(format!(
+                            self.display.print_error(format!(
                                 "Package directory not found: {}",
                                 path.display()
                             ));
-                            self.reporter.report_suggestion(format!(
+                            self.display.print_suggestion(format!(
                                 "Create the directory with 'mkdir -p {}' or set a different path with 'selfie config --package-directory <path>'",
                                 path.display()
                             ));
                         }
                         _ => {
-                            self.reporter.report_error(err.to_string());
+                            self.display.print_error(err.to_string());
                         }
                     }
                     result.exit_code = 1;
@@ -208,8 +216,8 @@ impl EventProcessor {
             },
 
             PackageEvent::Canceled { reason, .. } => {
-                self.reporter
-                    .report_warning(format!("Operation canceled: {reason}"));
+                self.display
+                    .print_warning(format!("Operation canceled: {reason}"));
                 // 128 + 2 (SIGINT) is the Unix convention for Ctrl+C termination
                 result.exit_code = 130;
                 result.had_errors = true;
@@ -277,8 +285,8 @@ mod tests {
 
     #[test]
     fn test_event_processor_creation() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         // Just verify it can be created
         assert!(std::mem::size_of_val(&processor) > 0);
@@ -286,8 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_empty_stream() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
@@ -300,8 +308,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_handler_behavior() {
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         let events: Vec<PackageEvent> = vec![];
         let event_stream = Box::pin(stream::iter(events));
@@ -374,8 +382,8 @@ mod tests {
             },
         ];
 
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
@@ -413,8 +421,8 @@ mod tests {
             },
         ];
 
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
 
         let mut started_events_seen = 0;
         let mut progress_events_seen = 0;
@@ -472,8 +480,8 @@ mod tests {
             },
         ];
 
-        let reporter = TerminalProgressReporter::new(false);
-        let processor = EventProcessor::new(reporter);
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
         let event_stream = Box::pin(stream::iter(events));
 
         let mut events_after_cancel = 0;

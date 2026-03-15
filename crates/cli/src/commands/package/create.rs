@@ -1,5 +1,4 @@
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
-use futures::StreamExt;
 use selfie::package::{
     EnvironmentConfig, PackageService,
     event::{OperationResult, OperationSuccess, PackageEvent},
@@ -8,7 +7,7 @@ use selfie::package::{
 use std::{collections::HashMap, path::PathBuf};
 use tracing::info;
 
-use crate::{config::CliConfig, terminal_progress_reporter::TerminalProgressReporter};
+use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
 
 use super::common;
 
@@ -24,7 +23,7 @@ pub(crate) async fn handle_create(
     service: &impl PackageService,
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
     interactive: bool,
 ) -> i32 {
     info!("Creating package: {}", package_name);
@@ -33,18 +32,18 @@ pub(crate) async fn handle_create(
     let repo = common::create_package_repository(config);
 
     // Get a valid package name or handle existing package scenarios
-    let package_name = match get_valid_package_name(package_name, &repo, reporter) {
+    let package_name = match get_valid_package_name(package_name, &repo, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
         Ok(PackageNameResult::EditExisting(path)) => {
-            reporter.report_info(format!(
+            display.print_info(format!(
                 "Opening existing package for editing at {}",
                 path.display()
             ));
             let success_message = format!("Package editing completed at {}", path.display());
-            return common::open_editor(&path, reporter, Some(success_message));
+            return common::open_editor(&path, display, Some(success_message));
         }
         Ok(PackageNameResult::Cancelled) => {
-            reporter.report_info("Package creation cancelled.");
+            display.print_info("Package creation cancelled.");
             return 0;
         }
         Err(exit_code) => return exit_code,
@@ -52,7 +51,7 @@ pub(crate) async fn handle_create(
 
     // Build the Package (CLI handles interactive prompting)
     let package = if interactive {
-        match create_package_interactive(&package_name, config, reporter) {
+        match create_package_interactive(&package_name, config, display) {
             Ok(pkg) => pkg,
             Err(exit_code) => return exit_code,
         }
@@ -61,52 +60,29 @@ pub(crate) async fn handle_create(
     };
 
     // Use PackageService::create to persist (hexagonal pattern)
-    let mut stream = service.create(package).await;
+    let event_stream = service.create(package).await;
 
-    // Process the event stream
+    // Process the event stream with custom handling for create-specific events
     let mut created_file_path: Option<PathBuf> = None;
-    let mut exit_code = 0;
+    let processor = EventProcessor::new(display.clone());
+    let result = processor
+        .process_events(event_stream, |event| match event {
+            PackageEvent::Completed {
+                result: OperationResult::Success(OperationSuccess::PackageCreated {
+                    file_path, ..
+                }),
+                ..
+            } => {
+                created_file_path = Some(file_path.clone());
+                false // Let default handler print success message
+            }
+            PackageEvent::Progress { .. } if !config.verbose() => true, // Suppress in non-verbose
+            _ => false, // Default handling for everything else
+        })
+        .await;
 
-    while let Some(event) = stream.next().await {
-        match event {
-            PackageEvent::Progress { message, .. } => {
-                if config.verbose() {
-                    reporter.report_info(&message);
-                }
-            }
-            PackageEvent::Completed { result, .. } => match result {
-                OperationResult::Success(OperationSuccess::PackageCreated {
-                    ref package_name,
-                    ref file_path,
-                    ..
-                }) => {
-                    reporter.report_success(format!(
-                        "Package '{}' created successfully at {}",
-                        package_name,
-                        file_path.display()
-                    ));
-                    created_file_path = Some(file_path.clone());
-                }
-                OperationResult::Success(success) => {
-                    reporter.report_success(format!("{success}"));
-                }
-                OperationResult::Failure(failure) => {
-                    reporter.report_error(format!("Package creation failed: {failure}"));
-                    exit_code = 1;
-                }
-            },
-            PackageEvent::Warning { message, .. } => {
-                reporter.report_warning(&message);
-            }
-            PackageEvent::Error { message, .. } => {
-                reporter.report_error(&message);
-            }
-            _ => {}
-        }
-    }
-
-    if exit_code != 0 {
-        return exit_code;
+    if result.exit_code != 0 {
+        return result.exit_code;
     }
 
     // Ask if user wants to edit the file (only in interactive mode)
@@ -124,16 +100,16 @@ pub(crate) async fn handle_create(
                         package_name,
                         file_path.display()
                     );
-                    common::open_editor(file_path, reporter, Some(success_message))
+                    common::open_editor(file_path, display, Some(success_message))
                 }
                 Ok(false) => {
-                    reporter.report_info(
+                    display.print_info(
                         "Package created. You can edit it later with 'selfie package edit'.",
                     );
                     0
                 }
                 Err(_) => {
-                    reporter.report_error("Failed to read user input.");
+                    display.print_error("Failed to read user input.");
                     1
                 }
             }
@@ -141,7 +117,7 @@ pub(crate) async fn handle_create(
             0
         }
     } else {
-        reporter.report_info("Package created. Use 'selfie package edit' to customize it.");
+        display.print_info("Package created. Use 'selfie package edit' to customize it.");
         0
     }
 }
@@ -149,7 +125,7 @@ pub(crate) async fn handle_create(
 fn get_valid_package_name(
     initial_name: &str,
     repo: &impl PackageRepository,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<PackageNameResult, i32> {
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
@@ -157,7 +133,7 @@ fn get_valid_package_name(
     loop {
         // Check if package already exists
         if let Ok(existing_package) = repo.get_package(&current_name) {
-            reporter.report_info(format!("Package '{current_name}' already exists."));
+            display.print_info(format!("Package '{current_name}' already exists."));
 
             let action = Select::with_theme(&SimpleTheme)
                 .with_prompt("What would you like to do?")
@@ -180,7 +156,7 @@ fn get_valid_package_name(
                     // Create with different name
                     retry_count += 1;
                     if retry_count > MAX_NAME_RETRIES {
-                        reporter.report_error(format!(
+                        display.print_error(format!(
                             "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
                         ));
                         return Err(1);
@@ -194,7 +170,7 @@ fn get_valid_package_name(
                     {
                         name
                     } else {
-                        reporter.report_error("Failed to read package name.");
+                        display.print_error("Failed to read package name.");
                         return Err(1);
                     };
                     current_name = new_name;
@@ -239,16 +215,16 @@ fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::packa
 fn create_package_interactive(
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<selfie::package::Package, i32> {
-    reporter.report_info("Creating package interactively...");
+    display.print_info("Creating package interactively...");
 
-    let name = prompt_package_name(package_name, reporter)?;
-    let version = prompt_package_version(reporter)?;
-    let homepage = prompt_package_homepage(reporter)?;
-    let description = prompt_package_description(reporter)?;
-    let environments = prompt_environments(&name, config, reporter)?;
-    let file_name = prompt_file_name(&name, reporter)?;
+    let name = prompt_package_name(package_name, display)?;
+    let version = prompt_package_version(display)?;
+    let homepage = prompt_package_homepage(display)?;
+    let description = prompt_package_description(display)?;
+    let environments = prompt_environments(&name, config, display)?;
+    let file_name = prompt_file_name(&name, display)?;
 
     Ok(selfie::package::Package::new(
         name,
@@ -260,38 +236,35 @@ fn create_package_interactive(
     ))
 }
 
-fn prompt_package_name(
-    default_name: &str,
-    reporter: TerminalProgressReporter,
-) -> Result<String, i32> {
+fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
     Input::with_theme(&SimpleTheme)
         .with_prompt("Package name")
         .default(default_name.to_string())
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read package name.");
+            display.print_error("Failed to read package name.");
             1
         })
 }
 
-fn prompt_package_version(reporter: TerminalProgressReporter) -> Result<String, i32> {
+fn prompt_package_version(display: &DisplayManager) -> Result<String, i32> {
     Input::with_theme(&SimpleTheme)
         .with_prompt("Version")
         .default("0.1.0".to_string())
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read version.");
+            display.print_error("Failed to read version.");
             1
         })
 }
 
-fn prompt_package_homepage(reporter: TerminalProgressReporter) -> Result<Option<String>, i32> {
+fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
     let homepage: String = Input::with_theme(&SimpleTheme)
         .with_prompt("Homepage URL (optional)")
         .allow_empty(true)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read homepage.");
+            display.print_error("Failed to read homepage.");
             1
         })?;
 
@@ -302,13 +275,13 @@ fn prompt_package_homepage(reporter: TerminalProgressReporter) -> Result<Option<
     })
 }
 
-fn prompt_package_description(reporter: TerminalProgressReporter) -> Result<Option<String>, i32> {
+fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, i32> {
     let description: String = Input::with_theme(&SimpleTheme)
         .with_prompt("Description (optional)")
         .allow_empty(true)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read description.");
+            display.print_error("Failed to read description.");
             1
         })?;
 
@@ -322,22 +295,22 @@ fn prompt_package_description(reporter: TerminalProgressReporter) -> Result<Opti
 fn prompt_environments(
     package_name: &str,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<HashMap<String, EnvironmentConfig>, i32> {
     let mut environments = HashMap::new();
 
     loop {
-        reporter.report_info("Adding environment configuration...");
+        display.print_info("Adding environment configuration...");
 
-        let env_name = prompt_environment_name(&environments, config, reporter)?;
-        let install_cmd = prompt_install_command(reporter)?;
-        let check_cmd = prompt_check_command(package_name, reporter)?;
-        let dependencies = prompt_dependencies(config, reporter)?;
+        let env_name = prompt_environment_name(&environments, config, display)?;
+        let install_cmd = prompt_install_command(display)?;
+        let check_cmd = prompt_check_command(package_name, display)?;
+        let dependencies = prompt_dependencies(config, display)?;
 
         let env_config = EnvironmentConfig::new(install_cmd, check_cmd, dependencies);
         environments.insert(env_name, env_config);
 
-        if !prompt_add_another_environment(reporter)? {
+        if !prompt_add_another_environment(display)? {
             break;
         }
     }
@@ -348,7 +321,7 @@ fn prompt_environments(
 fn prompt_environment_name(
     existing_environments: &HashMap<String, EnvironmentConfig>,
     config: &CliConfig,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<String, i32> {
     let default_env = if existing_environments.is_empty() {
         config.environment().to_string()
@@ -361,18 +334,18 @@ fn prompt_environment_name(
         .default(default_env)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read environment name.");
+            display.print_error("Failed to read environment name.");
             1
         })
 }
 
-fn prompt_install_command(reporter: TerminalProgressReporter) -> Result<String, i32> {
+fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
     loop {
         let cmd: String = Input::with_theme(&SimpleTheme)
             .with_prompt("Install command (required)")
             .interact()
             .map_err(|_| {
-                reporter.report_error("Failed to read install command.");
+                display.print_error("Failed to read install command.");
                 1
             })?;
 
@@ -380,13 +353,13 @@ fn prompt_install_command(reporter: TerminalProgressReporter) -> Result<String, 
             break Ok(cmd);
         }
 
-        reporter.report_error("Install command cannot be empty.");
+        display.print_error("Install command cannot be empty.");
     }
 }
 
 fn prompt_check_command(
     package_name: &str,
-    reporter: TerminalProgressReporter,
+    display: &DisplayManager,
 ) -> Result<Option<String>, i32> {
     let default_check = format!("command -v {package_name}");
     let check_cmd: String = Input::with_theme(&SimpleTheme)
@@ -395,7 +368,7 @@ fn prompt_check_command(
         .allow_empty(true)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read check command.");
+            display.print_error("Failed to read check command.");
             1
         })?;
 
@@ -406,10 +379,7 @@ fn prompt_check_command(
     })
 }
 
-fn prompt_dependencies(
-    config: &CliConfig,
-    reporter: TerminalProgressReporter,
-) -> Result<Vec<String>, i32> {
+fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<Vec<String>, i32> {
     let repo = common::create_package_repository(config);
     let mut available_packages = repo.available_packages().unwrap_or_default();
 
@@ -425,7 +395,7 @@ fn prompt_dependencies(
         .items(&available_packages)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read dependencies.");
+            display.print_error("Failed to read dependencies.");
             1
         })?;
 
@@ -435,24 +405,24 @@ fn prompt_dependencies(
         .collect())
 }
 
-fn prompt_add_another_environment(reporter: TerminalProgressReporter) -> Result<bool, i32> {
+fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32> {
     Confirm::with_theme(&SimpleTheme)
         .with_prompt("Add another environment?")
         .default(false)
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read user input.");
+            display.print_error("Failed to read user input.");
             1
         })
 }
 
-fn prompt_file_name(default_name: &str, reporter: TerminalProgressReporter) -> Result<String, i32> {
+fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
     Input::with_theme(&SimpleTheme)
         .with_prompt("File name (without .yml extension)")
         .default(default_name.to_string())
         .interact()
         .map_err(|_| {
-            reporter.report_error("Failed to read file name.");
+            display.print_error("Failed to read file name.");
             1
         })
 }

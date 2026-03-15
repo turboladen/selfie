@@ -4,15 +4,11 @@ use selfie::package::port::PackageRepository;
 use crate::config::CliConfig;
 use tracing::info;
 
-use crate::terminal_progress_reporter::TerminalProgressReporter;
+use crate::display_manager::DisplayManager;
 
 use super::common;
 
-pub(crate) fn handle_edit(
-    package_name: &str,
-    config: &CliConfig,
-    reporter: TerminalProgressReporter,
-) -> i32 {
+pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &DisplayManager) -> i32 {
     info!("Editing package: {}", package_name);
 
     // Create repository to look up the package
@@ -25,19 +21,19 @@ pub(crate) fn handle_edit(
 
     // Check if EDITOR is available with context-specific error messages
     let Some(_editor) =
-        common::check_editor_available(reporter, package_name, package_exists, package_path)
+        common::check_editor_available(display, package_name, package_exists, package_path)
     else {
         return 1;
     };
 
     // Try to get existing package, or create a new one
     let package_blob = if let Some(pkg) = existing_package {
-        reporter.report_info(format!(
+        display.print_info(format!(
             "Opening existing package '{package_name}' for editing"
         ));
         pkg
     } else {
-        reporter.report_info(format!("Package '{package_name}' does not exist."));
+        display.print_info(format!("Package '{package_name}' does not exist."));
 
         // Prompt user for confirmation before creating
         let confirm = Confirm::with_theme(&SimpleTheme)
@@ -50,21 +46,21 @@ pub(crate) fn handle_edit(
                 // User confirmed, proceed with creation
             }
             Ok(false) => {
-                reporter.report_info("Package creation cancelled.");
+                display.print_info("Package creation cancelled.");
                 return 0;
             }
             Err(_) => {
-                reporter.report_error("Failed to read user input.");
+                display.print_error("Failed to read user input.");
                 return 1;
             }
         }
 
-        reporter.report_info(format!("Creating new package '{package_name}'"));
+        display.print_info(format!("Creating new package '{package_name}'"));
         common::create_new_package(package_name, config)
     };
 
     // Write the package to the file system first
-    if let Err(exit_code) = common::save_package(&repo, &package_blob, reporter) {
+    if let Err(exit_code) = common::save_package(&repo, &package_blob, display) {
         return exit_code;
     }
 
@@ -79,7 +75,7 @@ pub(crate) fn handle_edit(
         package_blob.file_path().display()
     );
 
-    common::open_editor(package_blob.file_path(), reporter, Some(success_message))
+    common::open_editor(package_blob.file_path(), display, Some(success_message))
 }
 
 #[cfg(test)]
@@ -93,10 +89,6 @@ mod tests {
     use std::{fs, path::PathBuf};
     use tempfile::TempDir;
     use test_common::test_config_with_dir;
-
-    fn create_mock_reporter() -> TerminalProgressReporter {
-        TerminalProgressReporter::new(false)
-    }
 
     #[test]
     fn test_handle_edit_nonexistent_package() {
@@ -112,11 +104,11 @@ mod tests {
         }
 
         let config = CliConfig::wrap_for_test(test_config_with_dir(package_dir));
-        let reporter = create_mock_reporter();
+        let display = DisplayManager::new(false);
 
         // This test will exit early because there's no EDITOR
         let result =
-            tokio_test::block_on(async { handle_edit("nonexistent-package", &config, reporter) });
+            tokio_test::block_on(async { handle_edit("nonexistent-package", &config, &display) });
 
         // Should fail with exit code 1 due to missing EDITOR
         assert_eq!(result, 1);

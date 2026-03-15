@@ -1,18 +1,19 @@
 use comfy_table::{
     ContentArrangement, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL_CONDENSED,
 };
+use console::style;
 use selfie::validation::ValidationIssue;
-
-use crate::terminal_progress_reporter::TerminalProgressReporter;
 
 pub(crate) struct ValidationTableReporter {
     table: Table,
+    use_colors: bool,
 }
 
 impl ValidationTableReporter {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(use_colors: bool) -> Self {
         Self {
             table: Table::new(),
+            use_colors,
         }
     }
 
@@ -26,14 +27,19 @@ impl ValidationTableReporter {
         self
     }
 
-    pub(crate) fn add_validation_errors(
-        &mut self,
-        error_issues: &[&ValidationIssue],
-        reporter: TerminalProgressReporter,
-    ) -> &mut Self {
+    pub(crate) fn add_validation_errors(&mut self, error_issues: &[&ValidationIssue]) -> &mut Self {
         for error in error_issues {
+            let category = if self.use_colors {
+                style(error.category().to_string())
+                    .for_stderr()
+                    .red()
+                    .bold()
+                    .to_string()
+            } else {
+                error.category().to_string()
+            };
             self.table.add_row(vec![
-                reporter.format_error(error.category().to_string()),
+                category,
                 error.field().to_string(),
                 error.message().to_string(),
                 error
@@ -49,11 +55,19 @@ impl ValidationTableReporter {
     pub(crate) fn add_validation_warnings(
         &mut self,
         warning_issues: &[&ValidationIssue],
-        reporter: TerminalProgressReporter,
     ) -> &mut Self {
         for warning in warning_issues {
+            let category = if self.use_colors {
+                style(warning.category().to_string())
+                    .for_stderr()
+                    .yellow()
+                    .bold()
+                    .to_string()
+            } else {
+                warning.category().to_string()
+            };
             self.table.add_row(vec![
-                reporter.format_warning(warning.category().to_string()),
+                category,
                 warning.field().to_string(),
                 warning.message().to_string(),
                 warning
