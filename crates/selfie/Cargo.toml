@@ -10,7 +10,7 @@ futures.workspace = true
 mockall = { workspace = true, optional = true }
 num_cpus = "1.16.0"
 pretty_assertions = "1.4.1"
-regex = "1.11.1"
+semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml.workspace = true
