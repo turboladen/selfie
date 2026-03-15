@@ -160,6 +160,42 @@ fn handle_list_event(
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
+            // Print invalid packages inline with error status
+            if !package_list.invalid_packages.is_empty() {
+                for invalid in &package_list.invalid_packages {
+                    let filename = std::path::Path::new(&invalid.path)
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&invalid.path);
+
+                    let clean_error = clean_error_message(&invalid.error, &invalid.path);
+                    let error_text = if use_colors {
+                        style(clean_error).red().to_string()
+                    } else {
+                        clean_error
+                    };
+
+                    let prefix = if use_colors {
+                        style("✗").red().bold().to_string()
+                    } else {
+                        "✗".to_string()
+                    };
+
+                    let line = format!(
+                        "{prefix} {:<width$}  {:<10}  {error_text}",
+                        filename,
+                        "",
+                        width = *max_name_len
+                    );
+
+                    if let Some(handle) = spinner.as_ref() {
+                        handle.println(&line);
+                    } else {
+                        println!("{line}");
+                    }
+                }
+            }
+
             // Clear the spinner before printing summary
             if let Some(handle) = spinner.take() {
                 handle.finish_clear();
@@ -168,26 +204,22 @@ fn handle_list_event(
             println!();
             println!("Package directory: {}", package_list.package_directory);
 
-            if package_list.valid_packages.is_empty() && package_list.environment_stats.is_empty() {
+            let valid = package_list.valid_packages.len();
+            let invalid = package_list.invalid_packages.len();
+            let total = valid + invalid;
+
+            if total == 0 && package_list.environment_stats.is_empty() {
                 println!("No packages found.");
-            } else if package_list.valid_packages.is_empty() {
+            } else if valid == 0 && invalid == 0 {
                 println!(
                     "No packages found for environment '{}'.",
                     config.environment()
                 );
                 display_environment_stats(&package_list.environment_stats, config);
+            } else if invalid > 0 {
+                println!("{valid} valid, {invalid} invalid");
             } else {
-                let valid = package_list.valid_packages.len();
-                let invalid = package_list.invalid_packages.len();
-                if invalid > 0 {
-                    println!("{valid} valid, {invalid} invalid");
-                } else {
-                    println!("{valid} packages");
-                }
-            }
-
-            if !package_list.invalid_packages.is_empty() {
-                display_invalid_packages(&package_list.invalid_packages, config);
+                println!("{valid} packages");
             }
             true
         }
@@ -197,52 +229,6 @@ fn handle_list_event(
         }
 
         _ => false,
-    }
-}
-
-fn display_invalid_packages(
-    invalid_packages: &[selfie::package::event::InvalidPackageInfo],
-    config: &CliConfig,
-) {
-    if invalid_packages.is_empty() {
-        return;
-    }
-
-    eprintln!();
-    eprintln!("\u{26a0} Invalid package files:");
-
-    // Compute max filename length for aligned error messages
-    let max_len = invalid_packages
-        .iter()
-        .map(|p| {
-            std::path::Path::new(&p.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&p.path)
-                .len()
-        })
-        .max()
-        .unwrap_or(0);
-
-    for invalid_package in invalid_packages {
-        let filename = std::path::Path::new(&invalid_package.path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&invalid_package.path);
-
-        let clean_error = clean_error_message(&invalid_package.error, &invalid_package.path);
-
-        if config.use_colors() {
-            eprintln!(
-                "  {} {:<width$}  {}",
-                style("\u{2717}").red(),
-                style(filename).red(),
-                style(clean_error).dim(),
-                width = max_len
-            );
-        } else {
-            eprintln!("  \u{2717} {filename:<max_len$}  {clean_error}");
-        }
     }
 }
 
@@ -387,27 +373,6 @@ mod tests {
 
         // Just test that it doesn't panic and returns something
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_display_invalid_packages_empty() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let invalid_packages = vec![];
-
-        // Should not panic with empty list
-        display_invalid_packages(&invalid_packages, &config);
-    }
-
-    #[test]
-    fn test_display_invalid_packages_with_items() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let invalid_packages = vec![selfie::package::event::InvalidPackageInfo {
-            path: "/path/to/test-package.yml".to_string(),
-            error: "missing field `name`".to_string(),
-        }];
-
-        // Should not panic
-        display_invalid_packages(&invalid_packages, &config);
     }
 
     #[test]
