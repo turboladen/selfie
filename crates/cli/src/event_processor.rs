@@ -226,6 +226,7 @@ impl EventProcessor {
 
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
+            | PackageEvent::PackageListReady { .. }
             | PackageEvent::PackageListLoaded { .. }
             | PackageEvent::CheckResultCompleted { .. }
             | PackageEvent::ValidationResultCompleted { .. }
