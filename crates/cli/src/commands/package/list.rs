@@ -160,15 +160,26 @@ fn handle_list_event(
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Print invalid packages inline with error status
+            // Print invalid packages inline with error status,
+            // filtered to the current environment (unless --all)
             if !package_list.invalid_packages.is_empty() {
+                let current_env = config.environment();
                 for invalid in &package_list.invalid_packages {
+                    let clean_error = clean_error_message(&invalid.error, &invalid.path);
+
+                    // Filter: only show errors relevant to the current environment
+                    // (or all errors when --all). Since invalid packages failed to
+                    // parse, we can't inspect their environments — but the error
+                    // message often contains the environment name.
+                    if !show_all && !error_matches_environment(&clean_error, current_env) {
+                        continue;
+                    }
+
                     let filename = std::path::Path::new(&invalid.path)
                         .file_stem()
                         .and_then(|n| n.to_str())
                         .unwrap_or(&invalid.path);
 
-                    let clean_error = clean_error_message(&invalid.error, &invalid.path);
                     let error_text = if use_colors {
                         style(clean_error).red().to_string()
                     } else {
@@ -229,6 +240,22 @@ fn handle_list_event(
         }
 
         _ => false,
+    }
+}
+
+/// Check if an error message is relevant to a specific environment.
+///
+/// Since invalid packages failed to parse, we can't inspect their environment
+/// list directly. Instead, check if the error mentions the environment name
+/// (e.g., "environments.macos-home: missing field"). Errors that don't mention
+/// any environment are shown regardless (they affect all environments).
+fn error_matches_environment(error: &str, environment: &str) -> bool {
+    if error.contains("environments.") {
+        // Error is environment-specific — only show if it matches
+        error.contains(&format!("environments.{environment}"))
+    } else {
+        // Error is not environment-specific (e.g., missing `name` field) — always show
+        true
     }
 }
 
