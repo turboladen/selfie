@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+use tokio_util::sync::CancellationToken;
+
 use super::{check, deps, steps};
 
 pub(super) async fn handle_install<PR, CR>(
@@ -25,6 +27,7 @@ pub(super) async fn handle_install<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository + Sync,
@@ -48,8 +51,21 @@ where
 
     // Install each package in dependency order
     for pkg_name in &dep_graph.install_order {
-        let result =
-            install_single_package(pkg_name, repo, config, command_runner, sender, progress).await;
+        // Check for cancellation between packages
+        if token.is_cancelled() {
+            return OperationResult::Failure("Installation cancelled".into());
+        }
+
+        let result = install_single_package(
+            pkg_name,
+            repo,
+            config,
+            command_runner,
+            sender,
+            progress,
+            token,
+        )
+        .await;
 
         match result {
             OperationResult::Success(_) => {
@@ -76,6 +92,7 @@ async fn install_single_package<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -112,6 +129,7 @@ where
         sender,
         progress,
         &format!("Checking if '{package_name}' is already installed"),
+        token,
     )
     .await;
 
@@ -123,6 +141,7 @@ where
         sender,
         progress,
         config,
+        token,
     )
     .await
     {
@@ -178,7 +197,7 @@ where
         pre_install_check: &pre_install_check,
     };
 
-    execute_installation_and_verification(context, command_runner, sender, progress).await
+    execute_installation_and_verification(context, command_runner, sender, progress, token).await
 }
 
 async fn handle_already_installed_package<CR>(
@@ -188,6 +207,7 @@ async fn handle_already_installed_package<CR>(
     sender: &EventSender,
     progress: &ProgressTracker,
     config: &SelfieConfig,
+    token: &CancellationToken,
 ) -> Option<OperationResult>
 where
     CR: CommandRunner,
@@ -197,7 +217,8 @@ where
             .send_debug(format!("Package '{package_name}' is already installed"))
             .await;
 
-        let executable_path = find_executable_path(package_name, command_runner, sender).await;
+        let executable_path =
+            find_executable_path(package_name, command_runner, sender, token).await;
 
         return Some(OperationResult::Success(
             OperationSuccess::package_installed(
@@ -216,6 +237,7 @@ async fn find_executable_path<CR>(
     package_name: &str,
     command_runner: &CR,
     sender: &EventSender,
+    token: &CancellationToken,
 ) -> Option<String>
 where
     CR: CommandRunner,
@@ -226,7 +248,7 @@ where
         format!("which {package_name}")
     };
 
-    match command_runner.execute(&finder_command).await {
+    match command_runner.execute(&finder_command, token).await {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {
             let executable_path = output.stdout_str().trim().to_string();
             sender
@@ -300,6 +322,7 @@ async fn execute_installation_and_verification<CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     CR: CommandRunner,
@@ -312,6 +335,7 @@ where
         context.config,
         sender,
         progress,
+        token,
     )
     .await
     {
@@ -335,9 +359,10 @@ where
     }
 
     // Verify installation if check command is available
-    verify_installation(&context, command_runner, sender, progress).await;
+    verify_installation(&context, command_runner, sender, progress, token).await;
 
-    let executable_path = find_executable_path(context.package_name, command_runner, sender).await;
+    let executable_path =
+        find_executable_path(context.package_name, command_runner, sender, token).await;
 
     // Final step: Report success
     progress
@@ -380,6 +405,7 @@ async fn verify_installation<CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) where
     CR: CommandRunner,
 {
@@ -392,6 +418,7 @@ async fn verify_installation<CR>(
             sender,
             progress,
             "Verifying package installation",
+            token,
         )
         .await;
 

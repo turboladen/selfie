@@ -210,7 +210,8 @@ impl EventProcessor {
             PackageEvent::Canceled { reason, .. } => {
                 self.reporter
                     .report_warning(format!("Operation canceled: {reason}"));
-                result.exit_code = 1;
+                // 128 + 2 (SIGINT) is the Unix convention for Ctrl+C termination
+                result.exit_code = 130;
                 result.had_errors = true;
                 return true; // Stop processing after cancellation
             }
@@ -443,6 +444,53 @@ mod tests {
         assert_eq!(completed_events_seen, 1);
         assert_eq!(result.exit_code, 1);
         assert!(result.had_errors);
+    }
+
+    #[tokio::test]
+    async fn test_canceled_event_stops_processing_with_exit_130() {
+        use selfie::package::event::{OperationResult, OperationSuccess};
+
+        let op = make_operation_info("cancel-test-package");
+
+        // Canceled followed by Completed — the Completed should never be processed
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Started {
+                operation_info: op.clone(),
+            },
+            PackageEvent::Canceled {
+                operation_info: op.clone(),
+                reason: "User pressed Ctrl+C".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: op,
+                result: OperationResult::Success(OperationSuccess::package_checked(
+                    "cancel-test-package".to_string(),
+                    "test".to_string(),
+                    selfie::package::event::CheckResult::NoCheckCommand,
+                    (1, 1).into(),
+                )),
+            },
+        ];
+
+        let reporter = TerminalProgressReporter::new(false);
+        let processor = EventProcessor::new(reporter);
+        let event_stream = Box::pin(stream::iter(events));
+
+        let mut events_after_cancel = 0;
+        let result = processor
+            .process_events(event_stream, |event| {
+                if matches!(event, PackageEvent::Completed { .. }) {
+                    events_after_cancel += 1;
+                }
+                false
+            })
+            .await;
+
+        // Should use exit code 130 (128 + SIGINT)
+        assert_eq!(result.exit_code, 130);
+        assert!(result.had_errors);
+        // Completed event after Canceled should not have been processed
+        assert_eq!(events_after_cancel, 0);
     }
 
     #[test]

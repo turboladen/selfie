@@ -2,6 +2,8 @@
 //! Helps break down the pieces of running the `package info` command.
 //!
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     commands::runner::CommandRunner,
     config::SelfieConfig,
@@ -22,6 +24,7 @@ pub(super) async fn handle_info<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -88,7 +91,7 @@ where
     for (env_name, env_config) in environments {
         let is_current = env_name == config.environment();
         let status = if is_current {
-            get_installation_status(env_config, command_runner).await
+            get_installation_status(env_config, command_runner, token).await
         } else {
             None
         };
@@ -120,11 +123,12 @@ where
 async fn get_installation_status(
     env_config: &crate::package::EnvironmentConfig,
     command_runner: &impl CommandRunner,
+    token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
     // Only run check for current environment
     if let Some(check_cmd) = env_config.check() {
         // Run the check command asynchronously
-        if let Ok(output) = command_runner.execute(check_cmd).await {
+        if let Ok(output) = command_runner.execute(check_cmd, token).await {
             if output.is_success() {
                 Some(EnvironmentStatus::Installed)
             } else {

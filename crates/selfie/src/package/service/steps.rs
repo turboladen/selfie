@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     commands::runner::{CommandError, CommandOutput, CommandRunner},
     config::SelfieConfig,
@@ -95,6 +97,7 @@ pub async fn execute_command_streaming<CR>(
     config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
+    token: &CancellationToken,
 ) -> Result<CommandOutput, CommandError>
 where
     CR: CommandRunner,
@@ -140,7 +143,7 @@ where
 
     // Execute the wrapped command with streaming channel
     let result = command_runner
-        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx)
+        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx, token)
         .await;
 
     // Wait for the output task to finish and handle any task errors

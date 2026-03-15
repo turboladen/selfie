@@ -1464,6 +1464,7 @@ dependencies = [
  "test-common",
  "thiserror 2.0.16",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",
@@ -1491,6 +1492,7 @@ dependencies = [
  "test-common",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1701,6 +1703,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1822,6 +1825,20 @@ dependencies = [
  "futures-core",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

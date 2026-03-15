@@ -20,6 +20,7 @@ mod validate;
 use std::{future::Future, path::PathBuf};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::{
@@ -241,6 +242,8 @@ pub struct PackageServiceImpl<R, CR> {
     command_runner: CR,
     /// Application configuration including environment and settings
     config: SelfieConfig,
+    /// Token used to signal graceful cancellation of in-flight operations
+    cancellation_token: CancellationToken,
 }
 
 impl<R, CR> PackageServiceImpl<R, CR>
@@ -255,11 +258,17 @@ where
     /// * `package_repository` - Repository implementation for package storage
     /// * `command_runner` - Command runner implementation for executing system commands
     /// * `config` - Application configuration
-    pub fn new(package_repository: R, command_runner: CR, config: SelfieConfig) -> Self {
+    pub fn new(
+        package_repository: R,
+        command_runner: CR,
+        config: SelfieConfig,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             package_repository,
             command_runner,
             config,
+            cancellation_token,
         }
     }
 
@@ -318,13 +327,16 @@ where
         handler: F,
     ) -> EventStream
     where
-        F: FnOnce(R, CR, SelfieConfig, EventSender, ProgressTracker) -> Fut + Send + 'static,
+        F: FnOnce(R, CR, SelfieConfig, EventSender, ProgressTracker, CancellationToken) -> Fut
+            + Send
+            + 'static,
         Fut: std::future::Future<Output = OperationResult> + Send,
     {
         let repo = self.package_repository.clone();
         let command_runner = self.command_runner.clone();
         let config = self.config.clone();
         let package_name = package_name.to_string();
+        let token = self.cancellation_token.clone();
 
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
@@ -335,14 +347,36 @@ where
                 context,
             );
 
+            // Check for cancellation before starting
+            if token.is_cancelled() {
+                sender
+                    .send_canceled("Operation cancelled before start")
+                    .await;
+                return;
+            }
+
             sender.send_started().await;
             sender
                 .send_trace(format!("Current environment: {}", config.environment()))
                 .await;
 
             let progress = ProgressTracker::new(total_steps);
-            let result = handler(repo, command_runner, config, sender.clone(), progress).await;
-            sender.send_completed(result).await;
+            let result = handler(
+                repo,
+                command_runner,
+                config,
+                sender.clone(),
+                progress,
+                token.clone(),
+            )
+            .await;
+
+            // If cancelled during execution, emit Canceled instead of Completed
+            if token.is_cancelled() {
+                sender.send_canceled("Operation cancelled").await;
+            } else {
+                sender.send_completed(result).await;
+            }
         })
     }
 }
@@ -381,7 +415,7 @@ where
             package_name,
             OperationContext::default(),
             3, // Load package + check environment + run check command
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 check::handle_check(
                     &package_name_owned,
                     &repo,
@@ -389,6 +423,7 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
@@ -426,7 +461,7 @@ where
             package_name,
             OperationContext::default(),
             1, // Initial step (dependency resolution); total is adjusted dynamically
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 install::handle_install(
                     &package_name_owned,
                     &repo,
@@ -434,6 +469,7 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
@@ -476,7 +512,7 @@ where
             package_name,
             context,
             3, // load_package + validate_package + result processing
-            move |repo, _, config, sender, mut progress| async move {
+            move |repo, _, config, sender, mut progress, _token| async move {
                 validate::handle_validate(
                     &package_name_owned,
                     &repo,
@@ -514,7 +550,7 @@ where
             "", // No specific package for list operation
             OperationContext::default(),
             4, // Load packages + process + check status + finalize
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 list::handle_list(
                     &repo,
                     &config,
@@ -522,6 +558,7 @@ where
                     &sender,
                     &mut progress,
                     show_all,
+                    &token,
                 )
                 .await
             },
@@ -559,7 +596,7 @@ where
             package_name,
             OperationContext::default(),
             3, // Load package + gather info + check status
-            move |repo, command_runner, config, sender, mut progress| async move {
+            move |repo, command_runner, config, sender, mut progress, token| async move {
                 info::handle_info(
                     &package_name_owned,
                     &repo,
@@ -567,6 +604,7 @@ where
                     &command_runner,
                     &sender,
                     &mut progress,
+                    &token,
                 )
                 .await
             },
@@ -603,7 +641,7 @@ where
             &package_name,
             OperationContext::default(),
             2, // Check existence + save
-            move |repo, _, config, sender, mut progress| async move {
+            move |repo, _, config, sender, mut progress, _token| async move {
                 create::handle_create(package, &repo, &config, &sender, &mut progress).await
             },
         )

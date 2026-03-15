@@ -12,6 +12,7 @@ use std::{
 };
 
 use tokio::{io::AsyncReadExt, process::Command};
+use tokio_util::sync::CancellationToken;
 
 use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk};
 
@@ -107,8 +108,12 @@ impl CommandRunner for ShellCommandRunner {
     /// - The command cannot be started (IO error)
     /// - The command times out (exceeds default timeout)
     /// - Any other execution error occurs
-    async fn execute(&self, command: &str) -> Result<CommandOutput, CommandError> {
-        self.execute_with_timeout(command, self.default_timeout)
+    async fn execute(
+        &self,
+        command: &str,
+        token: &CancellationToken,
+    ) -> Result<CommandOutput, CommandError> {
+        self.execute_with_timeout(command, self.default_timeout, token)
             .await
     }
 
@@ -133,32 +138,82 @@ impl CommandRunner for ShellCommandRunner {
         &self,
         command: &str,
         timeout: Duration,
+        token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
-
-        let mut cmd = Command::new(&self.shell);
-        cmd.arg("-c").arg(command).stdin(Stdio::null());
-
         let working_directory =
             std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
 
-        // Execute the command within the context of a timeout
-        let output = tokio::time::timeout(timeout, cmd.output())
-            .await
-            .map_err(|_| CommandError::Timeout {
+        // Check for pre-cancellation before spawning
+        if token.is_cancelled() {
+            return Err(CommandError::Cancelled {
                 command: command.to_string(),
-                timeout,
-                working_directory: working_directory.clone(),
-            })?
-            .map_err(|e| CommandError::IoError {
-                command: command.to_string(),
-                working_directory: working_directory.clone(),
-                source: Arc::new(e),
-            })?;
+                working_directory,
+            });
+        }
 
-        let duration = start_time.elapsed();
+        let mut cmd = Command::new(&self.shell);
+        cmd.arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        Ok(CommandOutput { output, duration })
+        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
+            command: command.to_string(),
+            working_directory: working_directory.clone(),
+            source: Arc::new(e),
+        })?;
+
+        // Take pipes and read them concurrently with wait() to avoid
+        // deadlock when the child produces more than the OS pipe buffer (~64KB).
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+        let stdout_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = child_stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child_stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
+
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.map_err(|e| CommandError::IoError {
+                    command: command.to_string(),
+                    working_directory: working_directory.clone(),
+                    source: Arc::new(e),
+                })?;
+                let stdout = stdout_handle.await.unwrap_or_default();
+                let stderr = stderr_handle.await.unwrap_or_default();
+                Ok(CommandOutput {
+                    output: Output { status, stdout, stderr },
+                    duration: start_time.elapsed(),
+                })
+            }
+            () = tokio::time::sleep(timeout) => {
+                let _ = child.kill().await;
+                Err(CommandError::Timeout {
+                    command: command.to_string(),
+                    timeout,
+                    working_directory,
+                })
+            }
+            () = token.cancelled() => {
+                let _ = child.kill().await;
+                Err(CommandError::Cancelled {
+                    command: command.to_string(),
+                    working_directory,
+                })
+            }
+        }
     }
 
     /// Execute a command with streaming output processing
@@ -186,8 +241,19 @@ impl CommandRunner for ShellCommandRunner {
         command: &str,
         timeout: Duration,
         output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
+        token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
+        let working_directory =
+            std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+
+        // Check for pre-cancellation before spawning
+        if token.is_cancelled() {
+            return Err(CommandError::Cancelled {
+                command: command.to_string(),
+                working_directory,
+            });
+        }
 
         let mut cmd = Command::new(&self.shell);
         cmd.arg("-c")
@@ -196,16 +262,11 @@ impl CommandRunner for ShellCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                return Err(CommandError::IoError {
-                    command: command.to_string(),
-                    working_directory: Path::new(".").to_path_buf(),
-                    source: Arc::new(e),
-                });
-            }
-        };
+        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
+            command: command.to_string(),
+            working_directory: working_directory.clone(),
+            source: Arc::new(e),
+        })?;
 
         let stdout = child
             .stdout
@@ -225,66 +286,68 @@ impl CommandRunner for ShellCommandRunner {
         let mut stdout_buf = vec![0; 1024]; // Buffer of 1024 bytes
         let mut stderr_buf = vec![0; 1024]; // Buffer of 1024 bytes
 
-        let timeout_future = tokio::time::timeout(timeout, async {
-            let mut stdout_done = false;
-            let mut stderr_done = false;
-            let mut process_done = false;
-            let mut exit_status = None;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let mut process_done = false;
+        let mut exit_status = None;
 
-            loop {
-                tokio::select! {
-                    result = stdout.read(&mut stdout_buf), if !stdout_done => {
-                        if handle_chunked_read_result_streaming(result, &mut full_stdout, &mut stdout_buf, &output_sender, OutputChunk::Stdout)? {
-                            stdout_done = true;  // EOF reached
-                        }
-                    },
-                    result = stderr.read(&mut stderr_buf), if !stderr_done => {
-                        if handle_chunked_read_result_streaming(result, &mut full_stderr, &mut stderr_buf, &output_sender, OutputChunk::Stderr)? {
-                            stderr_done = true;  // EOF reached
-                        }
-                    },
-                    status = child.wait(), if !process_done => {
-                        exit_status = Some(status.map_err(|e| CommandError::IoError {
-                            command: command.to_string(),
-                            working_directory: std::env::current_dir()
-                                .unwrap_or_else(|_| Path::new(".").to_path_buf()),
-                            source: Arc::new(e),
-                        })?);
-                        process_done = true;
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            tokio::select! {
+                result = stdout.read(&mut stdout_buf), if !stdout_done => {
+                    if handle_chunked_read_result_streaming(result, &mut full_stdout, &mut stdout_buf, &output_sender, OutputChunk::Stdout)? {
+                        stdout_done = true;
                     }
-                }
-
-                // Exit when process is done AND both streams are done
-                if process_done && stdout_done && stderr_done {
-                    break;
+                },
+                result = stderr.read(&mut stderr_buf), if !stderr_done => {
+                    if handle_chunked_read_result_streaming(result, &mut full_stderr, &mut stderr_buf, &output_sender, OutputChunk::Stderr)? {
+                        stderr_done = true;
+                    }
+                },
+                status = child.wait(), if !process_done => {
+                    exit_status = Some(status.map_err(|e| CommandError::IoError {
+                        command: command.to_string(),
+                        working_directory: working_directory.clone(),
+                        source: Arc::new(e),
+                    })?);
+                    process_done = true;
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    let _ = child.kill().await;
+                    return Err(CommandError::Timeout {
+                        command: command.to_string(),
+                        timeout,
+                        working_directory,
+                    });
+                },
+                () = token.cancelled() => {
+                    let _ = child.kill().await;
+                    return Err(CommandError::Cancelled {
+                        command: command.to_string(),
+                        working_directory,
+                    });
                 }
             }
 
-            let duration = start_time.elapsed();
-            Ok(CommandOutput {
-                output: Output {
-                    // SAFETY: exit_status is guaranteed to be Some(_) at this point because
-                    // the loop only exits when process_done is true, which is only set to true
-                    // after exit_status is assigned Some(status) from child.wait()
-                    status: exit_status.unwrap(),
-                    stdout: full_stdout,
-                    stderr: full_stderr,
-                },
-                duration,
-            })
-        });
-
-        if let Ok(result) = timeout_future.await {
-            result
-        } else {
-            let _ = child.kill().await;
-            Err(CommandError::Timeout {
-                command: command.to_string(),
-                timeout,
-                working_directory: std::env::current_dir()
-                    .unwrap_or_else(|_| Path::new(".").to_path_buf()),
-            })
+            // Exit when process is done AND both streams are done
+            if process_done && stdout_done && stderr_done {
+                break;
+            }
         }
+
+        let duration = start_time.elapsed();
+        Ok(CommandOutput {
+            output: Output {
+                // SAFETY: exit_status is guaranteed to be Some(_) at this point because
+                // the loop only exits when process_done is true, which is only set to true
+                // after exit_status is assigned Some(status) from child.wait()
+                status: exit_status.unwrap(),
+                stdout: full_stdout,
+                stderr: full_stderr,
+            },
+            duration,
+        })
     }
 }
 
@@ -339,22 +402,27 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn token() -> CancellationToken {
+        CancellationToken::new()
+    }
+
     // These tests will actually run commands on the system
     // They could be skipped in CI environments if necessary
     #[tokio::test]
     async fn test_shell_command_runner_basic() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(10));
+        let token = token();
 
         // Test a basic echo command
-        let result = runner.execute("echo hello").await;
+        let result = runner.execute("echo hello", &token).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout_str().contains("hello"));
         assert!(output.is_success());
 
         // Test command failure
-        let result = runner.execute("exit 1").await;
+        let result = runner.execute("exit 1", &token).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(!output.is_success());
@@ -382,12 +450,11 @@ mod tests {
             ShellCommandRunner::default_shell(),
             Duration::from_millis(100),
         );
+        let token = token();
 
         // Command that should timeout (sleep for 1s)
-        // Note: This is a simple test and may be flaky since timeouts aren't enforced
-        // in a separate thread in our implementation
         let result = runner
-            .execute_with_timeout("sleep 1", Duration::from_millis(10))
+            .execute_with_timeout("sleep 1", Duration::from_millis(10), &token)
             .await;
         assert!(matches!(result, Err(CommandError::Timeout { .. })));
     }
@@ -399,10 +466,11 @@ mod tests {
             ShellCommandRunner::default_shell(),
             Duration::from_millis(50),
         );
+        let token = token();
 
         // Create a command that will timeout
         let result = runner
-            .execute_with_timeout("sleep 1", Duration::from_millis(10))
+            .execute_with_timeout("sleep 1", Duration::from_millis(10), &token)
             .await;
 
         assert!(result.is_err());
@@ -419,9 +487,12 @@ mod tests {
     async fn test_command_io_error() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Try to execute a command that doesn't exist
-        let result = runner.execute("nonexistent_command_12345_xyz").await;
+        let result = runner
+            .execute("nonexistent_command_12345_xyz", &token)
+            .await;
 
         // Command might succeed but with non-zero exit code, or fail
         if let Ok(output) = result {
@@ -435,10 +506,14 @@ mod tests {
     async fn test_command_permission_denied() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Try to access a file that should not be accessible
         let result = runner
-            .execute("cat /root/.ssh/id_rsa 2>/dev/null || echo 'permission denied'")
+            .execute(
+                "cat /root/.ssh/id_rsa 2>/dev/null || echo 'permission denied'",
+                &token,
+            )
             .await;
 
         // This should either succeed with "permission denied" message or fail
@@ -456,9 +531,12 @@ mod tests {
     async fn test_command_invalid_syntax() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Try to execute a command with invalid syntax
-        let result = runner.execute("if [ 1 -eq 1 ; then echo 'unclosed'").await;
+        let result = runner
+            .execute("if [ 1 -eq 1 ; then echo 'unclosed'", &token)
+            .await;
 
         // This should fail due to invalid shell syntax
         if let Ok(output) = result {
@@ -491,6 +569,13 @@ mod tests {
         };
         assert!(cmd_error.to_string().contains("test-command"));
 
+        let cancelled_error = CommandError::Cancelled {
+            command: "test-command".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+        };
+        assert!(cancelled_error.to_string().contains("Command cancelled"));
+        assert!(cancelled_error.to_string().contains("test-command"));
+
         let stdout_error = CommandError::StdoutSpawn("stdout issue".to_string());
         assert_eq!(
             stdout_error.to_string(),
@@ -508,10 +593,11 @@ mod tests {
     async fn test_command_with_large_output() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Generate a large amount of output to test buffering
         let result = runner
-            .execute("for i in $(seq 1 1000); do echo \"Line $i\"; done")
+            .execute("for i in $(seq 1 1000); do echo \"Line $i\"; done", &token)
             .await;
 
         assert!(result.is_ok());
@@ -524,9 +610,10 @@ mod tests {
     async fn test_command_output_methods() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Test that our output methods work correctly
-        let result = runner.execute("echo 'test output'").await;
+        let result = runner.execute("echo 'test output'", &token).await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -541,13 +628,39 @@ mod tests {
     async fn test_command_exit_code_handling() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = token();
 
         // Command that exits with non-zero status
-        let result = runner.execute("exit 42").await;
+        let result = runner.execute("exit 42", &token).await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_pre_cancelled_token_returns_cancelled_error() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = CancellationToken::new();
+        token.cancel(); // Pre-cancel
+
+        let result = runner.execute("echo should_not_run", &token).await;
+        assert!(matches!(result, Err(CommandError::Cancelled { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_pre_cancelled_token_streaming_returns_cancelled_error() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let token = CancellationToken::new();
+        token.cancel(); // Pre-cancel
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let result = runner
+            .execute_streaming("echo should_not_run", Duration::from_secs(5), tx, &token)
+            .await;
+        assert!(matches!(result, Err(CommandError::Cancelled { .. })));
     }
 }

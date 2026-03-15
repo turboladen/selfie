@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     commands::runner::CommandRunner,
     config::SelfieConfig,
@@ -24,6 +26,7 @@ pub(super) async fn handle_list<PR, CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     show_all: bool,
+    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -95,6 +98,7 @@ where
 
             let command_runner = command_runner.clone();
             let sender = sender.clone();
+            let token = token.clone();
 
             tokio::spawn(async move {
                 let status = if let Some(ref cmd) = check_command {
@@ -103,6 +107,7 @@ where
                         &current_env,
                         Some(cmd.as_str()),
                         &command_runner,
+                        &token,
                     )
                     .await;
                     Some(check_result.result)
