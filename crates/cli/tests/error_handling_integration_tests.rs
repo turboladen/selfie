@@ -139,8 +139,8 @@ fn test_package_file_invalid_yaml_error() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success() // List continues but reports errors
-        .stderr(predicate::str::contains("invalid-package.yaml"));
+        .success() // List continues but reports errors inline
+        .stdout(predicate::str::contains("invalid-package"));
 }
 
 #[test]
@@ -160,8 +160,8 @@ name: "incomplete-package"
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success() // List continues but reports errors
-        .stderr(predicate::str::contains("incomplete-package.yaml"));
+        .success() // List continues but reports errors inline
+        .stdout(predicate::str::contains("incomplete-package"));
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn test_large_number_of_invalid_packages() {
     // Should handle all invalid packages gracefully
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("invalid-"));
+        .stdout(predicate::str::contains("invalid-"));
 }
 
 // =============================================================================
@@ -546,7 +546,7 @@ fn test_partial_package_directory_corruption() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("valid-package"))
-        .stderr(predicate::str::contains("corrupted"));
+        .stdout(predicate::str::contains("corrupted"));
 }
 
 #[test]

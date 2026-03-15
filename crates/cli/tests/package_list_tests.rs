@@ -122,7 +122,7 @@ fn test_package_list_with_invalid_yaml() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("valid-package"))
-        .stderr(predicate::str::contains("invalid-package.yaml"));
+        .stdout(predicate::str::contains("invalid-package"));
 }
 
 #[test]
