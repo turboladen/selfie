@@ -259,7 +259,7 @@ pub enum PackageError {
     },
 
     /// Package definition file exists but could not be parsed
-    #[error("Parse error in package `{name}` from {}", packages_path.display())]
+    #[error("Parse error in package `{name}` from {}: {source}", packages_path.display())]
     ParseError {
         name: String,
         packages_path: PathBuf,
