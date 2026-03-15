@@ -56,6 +56,42 @@ pub(crate) fn format_status_error(use_colors: bool) -> String {
     format_status_indicator(STATUS_ERROR_EMOJI, "Error", use_colors, |s| s.red())
 }
 
+/// Format a check result as plain text status (no emoji prefix).
+///
+/// Used in contexts where emoji prefixes are inappropriate, such as
+/// inline status within spinner lines. For emoji-prefixed status
+/// indicators (used in tables), use `format_installed()` etc.
+pub(crate) fn format_check_result(
+    status: Option<&selfie::package::event::CheckResult>,
+    use_colors: bool,
+) -> String {
+    use selfie::package::event::CheckResult;
+    match status {
+        Some(CheckResult::Success { .. }) => styled_text("Installed", use_colors, |s| s.green()),
+        Some(CheckResult::Failed { .. }) => styled_text("Not installed", use_colors, |s| s.cyan()),
+        Some(CheckResult::NoCheckCommand) => styled_text("No check", use_colors, |s| s.yellow()),
+        Some(CheckResult::CommandNotFound) => styled_text("Cmd not found", use_colors, |s| s.red()),
+        Some(CheckResult::Error(e)) => {
+            let msg = format!("Error: {e}");
+            styled_text(&msg, use_colors, |s| s.red())
+        }
+        None => styled_text("N/A", use_colors, |s| s.dim()),
+    }
+}
+
+/// Apply color styling to text, or return plain text if colors disabled
+fn styled_text(
+    text: &str,
+    use_colors: bool,
+    style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
+) -> String {
+    if use_colors {
+        style_fn(style(text.to_string())).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

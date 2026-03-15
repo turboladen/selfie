@@ -82,6 +82,12 @@ where
     progress.next(sender, "Checking package status").await;
 
     // Create parallel tasks for status checking with order preservation
+    // Collect package names for JoinError handling (names move into spawned tasks)
+    let package_names: Vec<String> = packages_to_process
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect();
+
     let check_futures: Vec<_> = packages_to_process
         .iter()
         .enumerate()
@@ -136,13 +142,15 @@ where
 
     // Wait for all tasks and collect results in original order
     let mut results: Vec<(usize, PackageListItem)> = Vec::new();
-    for handle in check_futures {
+    for (i, handle) in check_futures.into_iter().enumerate() {
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
+                // Use the captured package name so the CLI can resolve the correct spinner
+                let name = package_names.get(i).cloned().unwrap_or_default();
                 sender
                     .send_package_list_item(PackageListItem {
-                        name: format!("<task error: {e}>"),
+                        name,
                         version: String::new(),
                         environments: Vec::new(),
                         status: Some(crate::package::event::CheckResult::Error(format!(
