@@ -170,6 +170,42 @@ impl OperationHandle {
     pub(crate) fn finish_clear(&self) {
         self.bar.finish_and_clear();
     }
+
+    /// Complete the operation in-place (preserves position in MultiProgress)
+    pub(crate) fn finish_success_in_place(&self, message: impl Display) {
+        let msg = if self.use_colors {
+            format!("{} {}", style("✓").green().bold(), style(message).green())
+        } else {
+            format!("✓ {message}")
+        };
+        self.bar
+            .set_style(ProgressStyle::with_template("{msg}").unwrap());
+        self.bar.finish_with_message(msg);
+    }
+
+    /// Complete the operation in-place with failure
+    pub(crate) fn finish_failure_in_place(&self, message: impl Display) {
+        let msg = if self.use_colors {
+            format!("{} {}", style("✗").red().bold(), style(message).red())
+        } else {
+            format!("✗ {message}")
+        };
+        self.bar
+            .set_style(ProgressStyle::with_template("{msg}").unwrap());
+        self.bar.finish_with_message(msg);
+    }
+
+    /// Complete the operation in-place with warning
+    pub(crate) fn finish_warning_in_place(&self, message: impl Display) {
+        let msg = if self.use_colors {
+            format!("{} {}", style("⚠").yellow().bold(), style(message).yellow())
+        } else {
+            format!("⚠ {message}")
+        };
+        self.bar
+            .set_style(ProgressStyle::with_template("{msg}").unwrap());
+        self.bar.finish_with_message(msg);
+    }
 }
 
 /// Central display manager for all CLI output
@@ -185,7 +221,6 @@ pub struct DisplayManager {
     #[allow(dead_code)]
     mp: MultiProgress,
     use_colors: bool,
-    #[allow(dead_code)]
     is_tty: bool,
     errors: Arc<Mutex<ErrorCollector>>,
 }
@@ -310,6 +345,11 @@ impl DisplayManager {
         }
     }
 
+    /// Whether the output is a TTY (interactive terminal)
+    pub(crate) fn is_tty(&self) -> bool {
+        self.is_tty
+    }
+
     // ── Dynamic output methods ─────────────────────────────────────────
 
     /// Start a new operation with a spinner
@@ -338,6 +378,35 @@ impl DisplayManager {
             use_colors: self.use_colors,
             output_lines: VecDeque::new(),
             max_output_lines: 5,
+            mp: self.mp.clone(),
+        }
+    }
+
+    /// Create a spinner for a list item (used by package list command)
+    ///
+    /// Unlike `start_operation()`, this creates a spinner optimized for
+    /// sorted lists: the spinner resolves in-place to preserve ordering.
+    pub(crate) fn start_list_spinner(&self, message: impl Display) -> OperationHandle {
+        let spinner_style = if self.use_colors {
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+        } else {
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+        };
+
+        let bar = self.mp.add(ProgressBar::new_spinner());
+        bar.set_style(spinner_style);
+        bar.set_message(message.to_string());
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        OperationHandle {
+            bar,
+            use_colors: self.use_colors,
+            output_lines: VecDeque::new(),
+            max_output_lines: 0,
             mp: self.mp.clone(),
         }
     }
@@ -533,5 +602,26 @@ mod tests {
 
         // Clone should see the same errors (Arc<Mutex<>>)
         assert!(dm2.has_errors());
+    }
+
+    #[test]
+    fn test_in_place_finish_variants() {
+        let dm = DisplayManager::new(false);
+
+        let h1 = dm.start_list_spinner("Test 1");
+        h1.finish_success_in_place("Success result");
+
+        let h2 = dm.start_list_spinner("Test 2");
+        h2.finish_failure_in_place("Failed result");
+
+        let h3 = dm.start_list_spinner("Test 3");
+        h3.finish_warning_in_place("Warning result");
+    }
+
+    #[test]
+    fn test_is_tty() {
+        let dm = DisplayManager::new(false);
+        // Just verify it returns a bool without panicking
+        let _is_tty = dm.is_tty();
     }
 }
