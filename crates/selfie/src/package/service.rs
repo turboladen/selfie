@@ -549,7 +549,7 @@ where
             OperationType::PackageList,
             "", // No specific package for list operation
             OperationContext::default(),
-            4, // Load packages + process + check status + finalize
+            5, // Load + process + sort + check status + finalize
             move |repo, command_runner, config, sender, mut progress, token| async move {
                 list::handle_list(
                     &repo,
