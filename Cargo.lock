@@ -1437,7 +1437,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "config",
- "console 0.15.11",
  "etcetera",
  "futures",
  "mockall",
