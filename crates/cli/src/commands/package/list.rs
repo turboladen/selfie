@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use console::style;
 use selfie::package::{event, service::PackageService};
 
@@ -38,9 +36,11 @@ impl ListCommand<'_> {
         let use_colors = config.use_colors();
         let is_tty = display.is_tty();
 
-        // Track spinners by package name for in-place resolution
-        let mut spinners: HashMap<String, OperationHandle> = HashMap::new();
+        // Single spinner for the check phase + streaming result lines
+        let mut spinner: Option<OperationHandle> = None;
         let mut max_name_len: usize = 0;
+        let mut total_packages: usize = 0;
+        let mut checked_count: usize = 0;
 
         let result = processor
             .process_events(event_stream, |event| {
@@ -51,8 +51,10 @@ impl ListCommand<'_> {
                     use_colors,
                     show_all,
                     is_tty,
-                    &mut spinners,
+                    &mut spinner,
                     &mut max_name_len,
+                    &mut total_packages,
+                    &mut checked_count,
                 )
             })
             .await;
@@ -68,52 +70,58 @@ fn handle_list_event(
     use_colors: bool,
     show_all: bool,
     is_tty: bool,
-    spinners: &mut HashMap<String, OperationHandle>,
+    spinner: &mut Option<OperationHandle>,
     max_name_len: &mut usize,
+    total_packages: &mut usize,
+    checked_count: &mut usize,
 ) -> bool {
     match event {
         event::PackageEvent::PackageListReady { packages, .. } => {
-            // Compute column width from longest package name
             *max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
+            *total_packages = packages.len();
+            *checked_count = 0;
 
-            // Create one spinner per package in sorted order
-            for pkg in packages {
-                let version = format!("v{}", pkg.version);
-                let msg = if show_all {
-                    let envs = common::format_environment_names(
-                        &pkg.environments,
-                        config.environment(),
-                        config,
-                    );
-                    format!(
-                        "{:<width$}  {:<10}  checking...  ({envs})",
-                        pkg.name,
-                        version,
-                        width = *max_name_len
-                    )
-                } else {
-                    format!(
-                        "{:<width$}  {:<10}  checking...",
-                        pkg.name,
-                        version,
-                        width = *max_name_len
-                    )
-                };
-
-                if is_tty {
-                    let handle = display.start_list_spinner(&msg);
-                    spinners.insert(pkg.name.clone(), handle);
-                } else {
-                    // Non-TTY: skip spinners; results print in PackageListItemCompleted
-                }
+            if is_tty && !packages.is_empty() {
+                *spinner = Some(
+                    display
+                        .start_list_spinner(format!("Checking packages (0/{})...", total_packages)),
+                );
             }
-            true // Handled
+            true
         }
 
         event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
+            *checked_count += 1;
             let status_text =
                 status_style::format_check_result(package_item.status.as_ref(), use_colors);
             let version = format!("v{}", package_item.version);
+
+            // Format the result line
+            let prefix = match &package_item.status {
+                Some(event::CheckResult::Success { .. }) => {
+                    if use_colors {
+                        style("✓").green().bold().to_string()
+                    } else {
+                        "✓".to_string()
+                    }
+                }
+                Some(event::CheckResult::Failed { .. })
+                | Some(event::CheckResult::CommandNotFound)
+                | Some(event::CheckResult::Error(_)) => {
+                    if use_colors {
+                        style("✗").red().bold().to_string()
+                    } else {
+                        "✗".to_string()
+                    }
+                }
+                Some(event::CheckResult::NoCheckCommand) | None => {
+                    if use_colors {
+                        style("⚠").yellow().bold().to_string()
+                    } else {
+                        "⚠".to_string()
+                    }
+                }
+            };
 
             let line = if show_all {
                 let envs = common::format_environment_names(
@@ -122,57 +130,41 @@ fn handle_list_event(
                     config,
                 );
                 format!(
-                    "{:<width$}  {:<10}  {status_text}  ({envs})",
+                    "{prefix} {:<width$}  {:<10}  {status_text}  ({envs})",
                     package_item.name,
                     version,
                     width = *max_name_len
                 )
             } else {
                 format!(
-                    "{:<width$}  {:<10}  {status_text}",
+                    "{prefix} {:<width$}  {:<10}  {status_text}",
                     package_item.name,
                     version,
                     width = *max_name_len
                 )
             };
 
-            if is_tty {
-                if let Some(handle) = spinners.remove(&package_item.name) {
-                    match &package_item.status {
-                        Some(event::CheckResult::Success { .. }) => {
-                            handle.finish_success_in_place(&line);
-                        }
-                        Some(event::CheckResult::Failed { .. })
-                        | Some(event::CheckResult::CommandNotFound) => {
-                            handle.finish_failure_in_place(&line);
-                        }
-                        Some(event::CheckResult::NoCheckCommand) => {
-                            handle.finish_warning_in_place(&line);
-                        }
-                        Some(event::CheckResult::Error(_)) => {
-                            handle.finish_failure_in_place(&line);
-                        }
-                        None => {
-                            handle.finish_warning_in_place(&line);
-                        }
-                    }
-                }
+            if let Some(handle) = spinner.as_ref() {
+                // Print result line above the spinner
+                handle.println(&line);
+                // Update spinner with progress count
+                handle.set_message(format!(
+                    "Checking packages ({}/{})...",
+                    checked_count, total_packages
+                ));
             } else {
-                // Non-TTY: print result line directly
-                let prefix = match &package_item.status {
-                    Some(event::CheckResult::Success { .. }) => "\u{2713}",
-                    Some(event::CheckResult::Failed { .. })
-                    | Some(event::CheckResult::CommandNotFound)
-                    | Some(event::CheckResult::Error(_)) => "\u{2717}",
-                    Some(event::CheckResult::NoCheckCommand) | None => "\u{26a0}",
-                };
-                println!("{prefix} {line}");
+                // Non-TTY or no spinner: print directly
+                println!("{line}");
             }
-            true // Handled
+            true
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Print summary
+            // Clear the spinner before printing summary
+            if let Some(handle) = spinner.take() {
+                handle.finish_clear();
+            }
+
             println!();
             println!(
                 "\u{1f4c1} Package directory: {}",
@@ -197,18 +189,17 @@ fn handle_list_event(
                 }
             }
 
-            // Display invalid packages if any
             if !package_list.invalid_packages.is_empty() {
                 display_invalid_packages(&package_list.invalid_packages, config);
             }
-            true // Handled
+            true
         }
 
         event::PackageEvent::Progress { .. } => {
-            true // Suppress — spinners are the progress indicator
+            true // Suppress — spinner is the progress indicator
         }
 
-        _ => false, // Use default handling for other events
+        _ => false,
     }
 }
 
@@ -340,8 +331,10 @@ mod tests {
     fn test_handle_event(event: &event::PackageEvent, config: &CliConfig, show_all: bool) -> bool {
         let display = DisplayManager::new(false);
         let use_colors = config.use_colors();
-        let mut spinners = HashMap::new();
+        let mut spinner = None;
         let mut max_name_len = 0;
+        let mut total_packages = 0;
+        let mut checked_count = 0;
         handle_list_event(
             event,
             config,
@@ -349,8 +342,10 @@ mod tests {
             use_colors,
             show_all,
             false,
-            &mut spinners,
+            &mut spinner,
             &mut max_name_len,
+            &mut total_packages,
+            &mut checked_count,
         )
     }
 

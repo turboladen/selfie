@@ -115,6 +115,11 @@ impl OperationHandle {
         self.bar.set_message(message.to_string());
     }
 
+    /// Print a line above the spinner (safe during active spinner)
+    pub(crate) fn println(&self, message: &str) {
+        let _ = self.mp.println(message);
+    }
+
     /// Add a line of command output below the spinner
     pub(crate) fn add_output_line(&mut self, line: &str, is_stderr: bool) {
         let prefix = if is_stderr { "  │ err: " } else { "  │ " };
