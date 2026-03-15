@@ -1299,32 +1299,22 @@ pub struct CheckResultData {
 }
 
 /// Result of a check operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::Display)]
 pub enum CheckResult {
-    Success {
-        stdout: String,
-        stderr: String,
-    },
+    #[strum(to_string = "successfully")]
+    Success { stdout: String, stderr: String },
+    #[strum(to_string = "with failures")]
     Failed {
         stdout: String,
         stderr: String,
         exit_code: Option<i32>,
     },
+    #[strum(to_string = "but command not found")]
     CommandNotFound,
+    #[strum(to_string = "but no check command defined")]
     NoCheckCommand,
+    #[strum(to_string = "with errors")]
     Error(String),
-}
-
-impl std::fmt::Display for CheckResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CheckResult::Success { .. } => write!(f, "successfully"),
-            CheckResult::Failed { .. } => write!(f, "with failures"),
-            CheckResult::CommandNotFound => write!(f, "but command not found"),
-            CheckResult::NoCheckCommand => write!(f, "but no check command defined"),
-            CheckResult::Error(_) => write!(f, "with errors"),
-        }
-    }
 }
 
 /// Structured data for validation results
@@ -1337,21 +1327,14 @@ pub struct ValidationResultData {
 }
 
 /// Overall validation status
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::Display)]
 pub enum ValidationStatus {
+    #[strum(to_string = "successfully")]
     Valid,
+    #[strum(to_string = "with warnings")]
     HasWarnings,
+    #[strum(to_string = "with errors")]
     HasErrors,
-}
-
-impl std::fmt::Display for ValidationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidationStatus::Valid => write!(f, "successfully"),
-            ValidationStatus::HasWarnings => write!(f, "with warnings"),
-            ValidationStatus::HasErrors => write!(f, "with errors"),
-        }
-    }
 }
 
 /// Individual validation issue

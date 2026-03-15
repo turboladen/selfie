@@ -1,5 +1,3 @@
-use core::fmt;
-
 /// Collection of validation issues (errors and warnings)
 ///
 /// Provides methods to query and filter validation results, allowing
@@ -185,7 +183,8 @@ pub enum ValidationLevel {
 }
 
 /// Categories of package validation errors
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum ValidationErrorCategory {
     /// Missing required fields
     ///
@@ -210,17 +209,4 @@ pub enum ValidationErrorCategory {
     /// Path format errors
     ///
     PathFormat,
-}
-
-impl fmt::Display for ValidationErrorCategory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RequiredField => f.write_str("required_field"),
-            Self::InvalidValue => f.write_str("invalid_value"),
-            Self::Environment => f.write_str("environment"),
-            Self::CommandSyntax => f.write_str("command_syntax"),
-            Self::UrlFormat => f.write_str("url_format"),
-            Self::PathFormat => f.write_str("path_format"),
-        }
-    }
 }
