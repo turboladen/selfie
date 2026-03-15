@@ -60,9 +60,9 @@ impl ShellCommandRunner {
 impl CommandRunner for ShellCommandRunner {
     /// Check if a command is available in the current environment
     ///
-    /// Uses the shell's `command -v` to test if the specified command
-    /// can be found in the current PATH. This is shell-agnostic and
-    /// works across different Unix-like systems.
+    /// Uses the `which` crate to perform a native PATH lookup without
+    /// spawning a subprocess. This is faster and avoids routing through
+    /// the command timeout.
     ///
     /// # Arguments
     ///
@@ -72,13 +72,7 @@ impl CommandRunner for ShellCommandRunner {
     ///
     /// `true` if the command is available, `false` otherwise
     async fn is_command_available(&self, command: &str) -> bool {
-        // Shell-agnostic way to check if a command exists
-        let check_cmd = format!("command -v {command} >/dev/null 2>&1");
-
-        match self.execute(&check_cmd).await {
-            Ok(output) => output.is_success(),
-            Err(_) => false,
-        }
+        which::which(command).is_ok()
     }
 
     /// Execute a command using the default timeout

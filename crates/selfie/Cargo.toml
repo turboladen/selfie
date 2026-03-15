@@ -29,6 +29,7 @@ tokio = { workspace = true, features = [
 tracing.workspace = true
 url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.16.0", features = ["serde", "v4"] }
+which = "7.0"
 
 [dev-dependencies]
 mockall.workspace = true
