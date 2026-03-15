@@ -38,7 +38,7 @@ pub(crate) async fn handle_install(
             } = event
                 && failure.is_environment_error()
             {
-                display_environment_error(failure, config);
+                display_environment_error(package_name, failure, config);
                 env_error_handled = true;
                 return true; // Handled
             }
@@ -110,29 +110,46 @@ pub(crate) async fn handle_install(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
-fn display_environment_error(failure: &OperationFailure, config: &CliConfig) {
+fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
     println!();
 
-    if let OperationFailure::Package(PackageError::EnvironmentNotFound {
-        package_name,
-        available_environments,
-        ..
-    }) = failure
-    {
-        common::display_environment_summary(
-            package_name,
-            config.environment(),
+    match failure {
+        OperationFailure::Package(PackageError::EnvironmentNotFound {
             available_environments,
-            config,
-            "install",
-        );
-    } else {
-        common::display_generic_environment_suggestion(
-            "package",
-            config.environment(),
-            config,
-            "install",
-        );
+            ..
+        }) => {
+            common::display_environment_summary(
+                package_name,
+                config.environment(),
+                available_environments,
+                config,
+                "install",
+            );
+        }
+        OperationFailure::Package(PackageError::NoInstallCommand {
+            environment,
+            other_envs_with_install,
+            ..
+        }) => {
+            println!(
+                "No install command defined for '{}' in environment '{}'.",
+                package_name, environment
+            );
+            if !other_envs_with_install.is_empty() {
+                println!(
+                    "Environments with install commands: {}",
+                    other_envs_with_install.join(", ")
+                );
+            }
+        }
+        _ => {
+            common::display_generic_environment_suggestion(
+                package_name,
+                config.environment(),
+                config,
+                "install",
+            );
+        }
     }
 }
 

@@ -313,7 +313,7 @@ impl CommandRunner for ShellCommandRunner {
                     })?);
                     process_done = true;
                 },
-                () = tokio::time::sleep_until(deadline) => {
+                () = tokio::time::sleep_until(deadline), if !process_done => {
                     let _ = child.kill().await;
                     return Err(CommandError::Timeout {
                         command: command.to_string(),
@@ -321,7 +321,7 @@ impl CommandRunner for ShellCommandRunner {
                         working_directory,
                     });
                 },
-                () = token.cancelled() => {
+                () = token.cancelled(), if !process_done => {
                     let _ = child.kill().await;
                     return Err(CommandError::Cancelled {
                         command: command.to_string(),
