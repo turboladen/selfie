@@ -11,6 +11,7 @@ static NOT_INSTALLED_EMOJI: Emoji<'_, '_> = Emoji("📦 ", "[×] ");
 static NO_CHECK_EMOJI: Emoji<'_, '_> = Emoji("⚠️ ", "[?] ");
 static CMD_NOT_FOUND_EMOJI: Emoji<'_, '_> = Emoji("🔍 ", "[!] ");
 static STATUS_ERROR_EMOJI: Emoji<'_, '_> = Emoji("💥 ", "[E] ");
+#[allow(dead_code)]
 static NA_EMOJI: Emoji<'_, '_> = Emoji("⚪ ", "[N/A] ");
 
 // Output line emojis for installation display
@@ -66,6 +67,7 @@ pub(crate) fn format_status_error(use_colors: bool) -> String {
 }
 
 /// Format a "not available" status indicator
+#[allow(dead_code)]
 pub(crate) fn format_na(use_colors: bool) -> String {
     format_status_indicator(NA_EMOJI, "N/A", use_colors, |s| s.dim())
 }
