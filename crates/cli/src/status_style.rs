@@ -3,18 +3,11 @@
 //! Pure formatting functions that produce styled text strings for use in
 //! table cells and status displays. No spinner or progress bar dependency.
 
-use console::{Emoji, style};
+use console::style;
 
-// Status-specific emojis for package status indicators
-static INSTALLED_EMOJI: Emoji<'_, '_> = Emoji("✅ ", "[✓] ");
-static NOT_INSTALLED_EMOJI: Emoji<'_, '_> = Emoji("📦 ", "[×] ");
-static NO_CHECK_EMOJI: Emoji<'_, '_> = Emoji("⚠️ ", "[?] ");
-static CMD_NOT_FOUND_EMOJI: Emoji<'_, '_> = Emoji("🔍 ", "[!] ");
-static STATUS_ERROR_EMOJI: Emoji<'_, '_> = Emoji("💥 ", "[E] ");
-
-/// Format a status indicator with emoji and optional color styling
+/// Format a status indicator with a marker prefix and optional color styling
 fn format_status_indicator(
-    emoji: Emoji<'_, '_>,
+    marker: &str,
     label: &str,
     use_colors: bool,
     style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
@@ -24,36 +17,32 @@ fn format_status_indicator(
     } else {
         label.to_string()
     };
-    format!("{emoji}{text}")
+    format!("{marker} {text}")
 }
 
 /// Format an "installed" status indicator
 pub(crate) fn format_installed(use_colors: bool) -> String {
-    format_status_indicator(INSTALLED_EMOJI, "Installed", use_colors, |s| s.green())
+    format_status_indicator("✓", "Installed", use_colors, |s| s.green())
 }
 
 /// Format a "not installed" status indicator
 pub(crate) fn format_not_installed(use_colors: bool) -> String {
-    format_status_indicator(NOT_INSTALLED_EMOJI, "Not installed", use_colors, |s| {
-        s.cyan()
-    })
+    format_status_indicator("✗", "Not installed", use_colors, |s| s.cyan())
 }
 
 /// Format a "no check command" status indicator
 pub(crate) fn format_no_check(use_colors: bool) -> String {
-    format_status_indicator(NO_CHECK_EMOJI, "No check", use_colors, |s| s.yellow())
+    format_status_indicator("⚠", "No check", use_colors, |s| s.yellow())
 }
 
 /// Format a "command not found" status indicator
 pub(crate) fn format_cmd_not_found(use_colors: bool) -> String {
-    format_status_indicator(CMD_NOT_FOUND_EMOJI, "Cmd not found", use_colors, |s| {
-        s.red()
-    })
+    format_status_indicator("✗", "Cmd not found", use_colors, |s| s.red())
 }
 
 /// Format a status check error indicator
 pub(crate) fn format_status_error(use_colors: bool) -> String {
-    format_status_indicator(STATUS_ERROR_EMOJI, "Error", use_colors, |s| s.red())
+    format_status_indicator("✗", "Error", use_colors, |s| s.red())
 }
 
 /// Format a check result as plain text status (no emoji prefix).
@@ -100,7 +89,7 @@ mod tests {
     fn test_format_installed_with_colors() {
         let result = format_installed(true);
         assert!(result.contains("Installed"));
-        assert!(result.contains("✅") || result.contains("[✓]"));
+        assert!(result.contains("✓"));
     }
 
     #[test]
@@ -114,7 +103,7 @@ mod tests {
     fn test_format_not_installed() {
         let result = format_not_installed(false);
         assert!(result.contains("Not installed"));
-        assert!(result.contains("📦") || result.contains("[×]"));
+        assert!(result.contains("✗"));
     }
 
     #[test]
