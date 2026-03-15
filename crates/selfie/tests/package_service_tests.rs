@@ -12,6 +12,7 @@
 //! These tests complement the unit tests by testing the full service layer
 //! integration with real file system and command runner implementations.
 
+use futures::StreamExt;
 use tempfile::TempDir;
 use test_common::{
     assert_failed_operation, assert_successful_operation, collect_events,
@@ -433,4 +434,64 @@ async fn test_service_install_already_installed_dependency() {
     let stream = service.install("installed-a").await;
     let events = collect_events(stream).await;
     assert_successful_operation(&events);
+}
+
+/// Test that PackageListReady is emitted before any PackageListItemCompleted,
+/// and PackageListLoaded is emitted after all PackageListItemCompleted events.
+#[tokio::test]
+async fn test_package_list_ready_emitted_before_item_completed() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create a couple of test packages
+    let _ = create_service_test_package_file(&temp_dir, "alpha-pkg", true);
+    let _ = create_service_test_package_file(&temp_dir, "beta-pkg", true);
+
+    let service = create_service_test_service(&temp_dir);
+    let mut stream = service.list(false).await;
+
+    let mut saw_ready = false;
+    let mut saw_item_before_ready = false;
+    let mut saw_loaded = false;
+    let mut saw_item_after_loaded = false;
+    let mut ready_count = 0;
+
+    while let Some(event) = stream.next().await {
+        match &event {
+            PackageEvent::PackageListReady { packages, .. } => {
+                saw_ready = true;
+                ready_count = packages.len();
+                // All items should have status: None
+                for pkg in packages {
+                    assert!(
+                        pkg.status.is_none(),
+                        "PackageListReady items should have status: None"
+                    );
+                }
+            }
+            PackageEvent::PackageListItemCompleted { .. } => {
+                if !saw_ready {
+                    saw_item_before_ready = true;
+                }
+                if saw_loaded {
+                    saw_item_after_loaded = true;
+                }
+            }
+            PackageEvent::PackageListLoaded { .. } => {
+                saw_loaded = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_ready, "PackageListReady should be emitted");
+    assert!(
+        !saw_item_before_ready,
+        "No PackageListItemCompleted should appear before PackageListReady"
+    );
+    assert!(saw_loaded, "PackageListLoaded should be emitted");
+    assert!(
+        !saw_item_after_loaded,
+        "No PackageListItemCompleted should appear after PackageListLoaded"
+    );
+    assert_eq!(ready_count, 2, "PackageListReady should contain 2 packages");
 }
