@@ -216,6 +216,7 @@ pub fn create_test_operation_info(
 ) -> OperationInfo {
     let op_type = match operation_type {
         "config_validate" => OperationType::ConfigValidate,
+        "package_audit" => OperationType::PackageAudit,
         "package_check" => OperationType::PackageCheck,
         "package_create" => OperationType::PackageCreate,
         "package_info" => OperationType::PackageInfo,

@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 pub(crate) mod check;
 pub(crate) mod common;
 pub(crate) mod create;

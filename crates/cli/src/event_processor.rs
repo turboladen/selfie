@@ -229,6 +229,7 @@ impl EventProcessor {
             | PackageEvent::PackageListReady { .. }
             | PackageEvent::PackageListLoaded { .. }
             | PackageEvent::CheckResultCompleted { .. }
+            | PackageEvent::AuditResultCompleted { .. }
             | PackageEvent::ValidationResultCompleted { .. }
             | PackageEvent::PackageListItemCompleted { .. } => {
                 // These structured events are handled by command-specific handlers

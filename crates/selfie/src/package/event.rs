@@ -364,6 +364,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send audit result data
+    pub(crate) async fn send_audit_result(&self, audit_result: AuditResultData) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::AuditResultCompleted {
+            operation_info,
+            audit_result,
+        })
+        .await;
+    }
+
     /// Send validation result data
     pub(crate) async fn send_validation_result(&self, validation_result: ValidationResultData) {
         let operation_info = self.touch_operation_info();
@@ -510,6 +520,13 @@ pub enum OperationSuccess {
         package_name: String,
         environment: String,
         check_result: CheckResult,
+        steps_completed: StepCount,
+    },
+    /// Package audit operation completed
+    PackageAudited {
+        package_name: String,
+        environment: String,
+        audit_result: AuditResult,
         steps_completed: StepCount,
     },
     /// Package installation operation completed
@@ -683,6 +700,15 @@ impl std::fmt::Display for OperationSuccess {
                 f,
                 "Package '{package_name}' check completed {check_result} {steps_completed}"
             ),
+            OperationSuccess::PackageAudited {
+                package_name,
+                audit_result,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' audit completed {audit_result} {steps_completed}"
+            ),
             OperationSuccess::PackageInstalled {
                 package_name,
                 was_already_installed,
@@ -822,6 +848,22 @@ impl OperationSuccess {
         }
     }
 
+    /// Creates a package audit success result
+    #[must_use]
+    pub fn package_audited(
+        package_name: String,
+        environment: String,
+        audit_result: AuditResult,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageAudited {
+            package_name,
+            environment,
+            audit_result,
+            steps_completed,
+        }
+    }
+
     /// Create a `PackageInstalled` success variant
     #[must_use]
     pub fn package_installed(
@@ -910,6 +952,12 @@ impl OperationSuccess {
         matches!(self, OperationSuccess::PackageChecked { .. })
     }
 
+    /// Checks if this is a package audit success
+    #[must_use]
+    pub fn is_package_audit(&self) -> bool {
+        matches!(self, OperationSuccess::PackageAudited { .. })
+    }
+
     /// Checks if this is a package installation success
     #[must_use]
     pub fn is_package_install(&self) -> bool {
@@ -927,6 +975,7 @@ impl OperationSuccess {
     pub fn package_name(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { package_name, .. }
+            | OperationSuccess::PackageAudited { package_name, .. }
             | OperationSuccess::PackageInstalled { package_name, .. }
             | OperationSuccess::PackageValidated { package_name, .. }
             | OperationSuccess::PackageInfoRetrieved { package_name, .. }
@@ -940,6 +989,7 @@ impl OperationSuccess {
     pub fn environment(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { environment, .. }
+            | OperationSuccess::PackageAudited { environment, .. }
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::PackageInfoRetrieved { environment, .. }
@@ -954,6 +1004,9 @@ impl OperationSuccess {
     pub fn steps_completed(&self) -> Option<StepCount> {
         match self {
             OperationSuccess::PackageChecked {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageAudited {
                 steps_completed, ..
             }
             | OperationSuccess::PackageInstalled {
@@ -1246,6 +1299,12 @@ pub enum PackageEvent {
         check_result: CheckResultData,
     },
 
+    /// Audit result completed
+    AuditResultCompleted {
+        operation_info: OperationInfo,
+        audit_result: AuditResultData,
+    },
+
     /// Validation result completed
     ValidationResultCompleted {
         operation_info: OperationInfo,
@@ -1339,6 +1398,33 @@ pub enum CheckResult {
     CommandNotFound,
     #[strum(to_string = "but no check command defined")]
     NoCheckCommand,
+    #[strum(to_string = "with errors")]
+    Error(String),
+}
+
+/// Structured data for audit results
+#[derive(Debug, Clone)]
+pub struct AuditResultData {
+    pub package_name: String,
+    pub environment: String,
+    pub audit_command: Option<String>,
+    pub result: AuditResult,
+}
+
+/// Result of an audit operation
+#[derive(Debug, Clone, strum::Display)]
+pub enum AuditResult {
+    #[strum(to_string = "clean")]
+    Clean { sources: Vec<String> },
+    #[strum(to_string = "with conflicts")]
+    Conflicts {
+        sources: Vec<String>,
+        expected: Vec<String>,
+    },
+    #[strum(to_string = "not installed")]
+    NotInstalled,
+    #[strum(to_string = "no audit command defined")]
+    NoAuditCommand,
     #[strum(to_string = "with errors")]
     Error(String),
 }

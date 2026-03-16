@@ -120,6 +120,16 @@ async fn dispatch_package_command(
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(&service, package_name, config, &display).await
         }
+        PackageSubcommands::Audit { package_name, all } => {
+            if *all {
+                package::audit::handle_audit_all(&service, config, &display).await
+            } else if let Some(name) = package_name {
+                package::audit::handle_audit(&service, name, config, &display).await
+            } else {
+                display.print_error("Package name is required unless --all is used.");
+                1
+            }
+        }
         PackageSubcommands::List { all } => {
             ListCommand::new(config, display, *all)
                 .handle_command(&service)

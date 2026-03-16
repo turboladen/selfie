@@ -145,6 +145,22 @@ pub(crate) enum PackageSubcommands {
         package_name: String,
     },
 
+    /// Audit a package's installation sources and detect conflicts
+    ///
+    /// Runs the package's configured audit command to detect how it's installed
+    /// and whether there are conflicting installations via multiple package managers.
+    ///
+    /// Example: `selfie package audit prettier`
+    /// Example: `selfie package audit --all`
+    Audit {
+        /// Name of the package to audit (required unless --all is used)
+        package_name: Option<String>,
+
+        /// Audit all packages in the package directory
+        #[arg(long)]
+        all: bool,
+    },
+
     /// List packages relevant to the current environment
     ///
     /// By default, displays only packages that support the current environment,

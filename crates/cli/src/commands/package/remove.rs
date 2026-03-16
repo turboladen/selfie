@@ -148,6 +148,7 @@ mod tests {
             EnvironmentConfig::new(
                 "echo 'install target'".to_string(),
                 Some("echo 'check target'".to_string()),
+                None,
                 Vec::new(),
             ),
         );
@@ -167,6 +168,7 @@ mod tests {
             EnvironmentConfig::new(
                 "echo 'install dependent'".to_string(),
                 Some("echo 'check dependent'".to_string()),
+                None,
                 vec!["target-package".to_string()],
             ),
         );

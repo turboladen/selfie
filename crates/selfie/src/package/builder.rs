@@ -100,6 +100,7 @@ impl PackageBuilder {
 pub struct EnvironmentConfigBuilder {
     install: String,
     check: Option<String>,
+    audit: Option<String>,
     dependencies: Vec<String>,
 }
 impl EnvironmentConfigBuilder {
@@ -127,6 +128,18 @@ impl EnvironmentConfigBuilder {
     }
 
     #[must_use]
+    pub fn audit<T: AsRef<str>>(mut self, audit: Option<T>) -> Self {
+        self.audit = audit.map(|a| a.as_ref().to_string());
+        self
+    }
+
+    #[must_use]
+    pub fn audit_some<T: AsRef<str>>(mut self, audit: T) -> Self {
+        self.audit = Some(audit.as_ref().to_string());
+        self
+    }
+
+    #[must_use]
     pub fn dependencies<T: AsRef<str>>(mut self, dependencies: Vec<T>) -> Self {
         self.dependencies = dependencies
             .into_iter()
@@ -143,6 +156,7 @@ impl EnvironmentConfigBuilder {
         EnvironmentConfig {
             install: self.install,
             check: self.check,
+            audit: self.audit,
             dependencies: self.dependencies,
         }
     }

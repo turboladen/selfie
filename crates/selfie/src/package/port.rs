@@ -450,6 +450,7 @@ mod tests {
                     crate::package::EnvironmentConfig::new(
                         "echo install".to_string(),
                         None,
+                        None,
                         vec!["target-package".to_string()],
                     ),
                 );
@@ -459,6 +460,7 @@ mod tests {
                     "test".to_string(),
                     crate::package::EnvironmentConfig::new(
                         "echo install".to_string(),
+                        None,
                         None,
                         vec!["target-package".to_string()],
                     ),
