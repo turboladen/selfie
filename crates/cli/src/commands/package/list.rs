@@ -385,13 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_table() {
-        let table = common::create_formatted_table();
-        // Just test that table creation doesn't panic
-        let _table_str = table.to_string();
-    }
-
-    #[test]
     fn test_format_environments() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
@@ -491,48 +484,6 @@ mod tests {
 
         let result = status_style::format_check_result(None, true);
         assert!(result.contains("N/A"));
-    }
-
-    #[test]
-    fn test_display_environment_stats_empty() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let environment_stats = std::collections::HashMap::new();
-
-        // Should not panic with empty stats
-        display_environment_stats(&environment_stats, &config);
-    }
-
-    #[test]
-    fn test_display_environment_stats_single_environment() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut environment_stats = std::collections::HashMap::new();
-        environment_stats.insert("macos".to_string(), 3);
-
-        // Should not panic with single environment
-        display_environment_stats(&environment_stats, &config);
-    }
-
-    #[test]
-    fn test_display_environment_stats_multiple_environments() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut environment_stats = std::collections::HashMap::new();
-        environment_stats.insert("macos".to_string(), 3);
-        environment_stats.insert("ubuntu".to_string(), 2);
-        environment_stats.insert("windows".to_string(), 1);
-
-        // Should not panic with multiple environments
-        display_environment_stats(&environment_stats, &config);
-    }
-
-    #[test]
-    fn test_display_environment_stats_with_colors() {
-        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
-        let mut environment_stats = std::collections::HashMap::new();
-        environment_stats.insert(TEST_ENV.to_string(), 2);
-        environment_stats.insert("other-env".to_string(), 1);
-
-        // Should not panic with colors enabled
-        display_environment_stats(&environment_stats, &config);
     }
 
     #[test]

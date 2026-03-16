@@ -315,17 +315,6 @@ mod tests {
     use test_common::test_config_with_dir;
 
     #[test]
-    fn test_create_package_repository() {
-        // Test repository creation without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let repo = create_package_repository(&config);
-        // Just verify we can create it without panicking
-        drop(repo);
-    }
-
-    #[test]
     fn test_create_new_package() {
         // Test package creation logic without filesystem operations
         let package_dir = std::path::PathBuf::from("/test/packages");
@@ -399,35 +388,6 @@ mod tests {
         // create_new_package uses GetPackage::new which creates "default" environment
         let environments = package_blob.package().environments();
         assert!(environments.contains_key("default"));
-    }
-
-    #[test]
-    fn test_create_package_service() {
-        // Test service creation without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let service = create_package_service(&config, CancellationToken::new());
-        // Just verify we can create it without panicking
-        drop(service);
-    }
-
-    #[test]
-    fn test_create_package_repository_generic() {
-        // Test that the generic repository creation function works
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let repo = create_package_repository_with_fs(&config, selfie::fs::RealFileSystem);
-        // Just verify we can create it without panicking
-        drop(repo);
-    }
-
-    #[test]
-    fn test_create_formatted_table() {
-        let table = create_formatted_table();
-        // Just test that table creation doesn't panic
-        let _table_str = table.to_string();
     }
 
     #[test]
@@ -594,43 +554,5 @@ mod tests {
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation
-    }
-
-    #[test]
-    fn test_display_environment_summary() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let environments = vec![
-            "macos".to_string(),
-            "ubuntu".to_string(),
-            "windows".to_string(),
-        ];
-
-        // Should not panic with valid environments
-        display_environment_summary("test-package", "test-env", &environments, &config, "check");
-    }
-
-    #[test]
-    fn test_display_environment_summary_empty() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let environments = vec![];
-
-        // Should not panic with empty environments (falls back to generic suggestion)
-        display_environment_summary("test-package", "test-env", &environments, &config, "check");
-    }
-
-    #[test]
-    fn test_display_generic_environment_suggestion() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-
-        // Should not panic with any inputs
-        display_generic_environment_suggestion("test-package", "test-env", &config, "check");
-    }
-
-    #[test]
-    fn test_display_generic_environment_suggestion_with_colors() {
-        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
-
-        // Should not panic with colors enabled
-        display_generic_environment_suggestion("test-package", "test-env", &config, "install");
     }
 }

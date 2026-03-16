@@ -113,11 +113,6 @@ impl CliConfig {
             },
         )
     }
-
-    /// Wrap a `SelfieConfig` with colors enabled for testing color output.
-    pub(crate) fn wrap_for_test_with_colors(selfie: SelfieConfig) -> Self {
-        Self::new(selfie, CliSection::default())
-    }
 }
 
 impl ClapCli {
