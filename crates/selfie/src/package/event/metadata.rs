@@ -11,5 +11,7 @@ pub enum OperationType {
     PackageInfo,
     PackageInstall,
     PackageList,
+    PackageRemove,
+    PackageUpdate,
     PackageValidate,
 }

@@ -222,6 +222,8 @@ pub fn create_test_operation_info(
         "package_info" => OperationType::PackageInfo,
         "package_install" => OperationType::PackageInstall,
         "package_list" => OperationType::PackageList,
+        "package_remove" => OperationType::PackageRemove,
+        "package_update" => OperationType::PackageUpdate,
         "package_validate" => OperationType::PackageValidate,
         _ => OperationType::PackageCheck, // Default fallback
     };

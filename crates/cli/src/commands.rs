@@ -149,7 +149,7 @@ async fn dispatch_package_command(
             package::edit::handle_edit(package_name, config, &display)
         }
         PackageSubcommands::Remove { package_name } => {
-            package::remove::handle_remove(package_name, config, &display)
+            package::remove::handle_remove(&service, package_name, config, &display).await
         }
         PackageSubcommands::Validate { package_name } => {
             package::validate::handle_validate(&service, package_name, config, &display).await

@@ -15,7 +15,9 @@ mod deps;
 mod info;
 mod install;
 mod list;
+mod remove;
 mod steps;
+mod update;
 mod validate;
 
 use std::{future::Future, path::PathBuf};
@@ -231,6 +233,16 @@ pub trait PackageService: Send + Sync {
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
     fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
+
+    /// Update a package's fields
+    fn update(
+        &self,
+        package_name: &str,
+        fields: super::event::PackageUpdateFields,
+    ) -> impl Future<Output = EventStream> + Send;
+
+    /// Remove a package from the repository
+    fn remove(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -694,6 +706,47 @@ where
             2, // Check existence + save
             move |repo, _, config, sender, mut progress, _token| async move {
                 create::handle_create(package, &repo, &config, &sender, &mut progress).await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn update(
+        &self,
+        package_name: &str,
+        fields: super::event::PackageUpdateFields,
+    ) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageUpdate,
+            package_name,
+            OperationContext::default(),
+            3, // Load + apply changes + save
+            move |repo, _, config, sender, mut progress, _token| async move {
+                update::handle_update(
+                    &package_name_owned,
+                    fields,
+                    &repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn remove(&self, package_name: &str) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageRemove,
+            package_name,
+            OperationContext::default(),
+            3, // Load + check dependents + remove
+            move |repo, _, config, sender, mut progress, _token| async move {
+                remove::handle_remove(&package_name_owned, &repo, &config, &sender, &mut progress)
+                    .await
             },
         )
     }
