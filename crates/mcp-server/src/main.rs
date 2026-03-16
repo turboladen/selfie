@@ -33,8 +33,6 @@ async fn main() -> Result<()> {
     let (stdin, stdout) = stdio();
     let service = mcp_server.serve((stdin, stdout)).await?;
 
-    tracing::info!("selfie-mcp server started");
-
     service.waiting().await?;
 
     Ok(())

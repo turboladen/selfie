@@ -22,6 +22,10 @@ pub(crate) async fn handle_remove(
 
     // Pre-flight: verify the package exists and check dependencies for the confirmation prompt.
     // These read-only repo calls gather info for UX before we commit to removal via the service.
+    // Note: service.remove() repeats the get_package + find_dependent_packages internally.
+    // This is an intentional tradeoff — the service needs to be self-contained for non-CLI
+    // consumers (like the MCP server) that skip confirmation, while the CLI needs dependency
+    // info before prompting the user. A dry-run API could eliminate this but adds complexity.
     let repo = common::create_package_repository(config);
 
     let Ok(package_blob) = repo.get_package(package_name) else {
