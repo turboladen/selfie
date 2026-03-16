@@ -140,3 +140,152 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
 
     EventCollectorResult { success, data }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use selfie::package::event::{
+        AuditResultData, CheckResult, CheckResultData, OperationContext, OperationFailure,
+        OperationInfo, OperationSuccess, StepCount, metadata::OperationType,
+    };
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    fn test_op_info() -> OperationInfo {
+        OperationInfo {
+            id: Uuid::new_v4(),
+            operation_type: OperationType::PackageCheck,
+            package_name: "test-pkg".to_string(),
+            environment: "test".to_string(),
+            context: OperationContext::default(),
+            timestamp: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_success_with_check_result() {
+        let events = vec![
+            PackageEvent::CheckResultCompleted {
+                operation_info: test_op_info(),
+                check_result: CheckResultData {
+                    package_name: "test-pkg".to_string(),
+                    environment: "test".to_string(),
+                    check_command: Some("which test".to_string()),
+                    result: CheckResult::Success {
+                        stdout: "found".to_string(),
+                        stderr: String::new(),
+                    },
+                },
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::package_checked(
+                    "test-pkg".to_string(),
+                    "test".to_string(),
+                    CheckResult::Success {
+                        stdout: "found".to_string(),
+                        stderr: String::new(),
+                    },
+                    StepCount::new(3, 3),
+                )),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "success");
+        assert_eq!(result.data["data"][0]["type"], "check_result");
+        assert_eq!(result.data["data"][0]["package"], "test-pkg");
+        assert_eq!(result.data["data"][0]["status"], "successfully");
+    }
+
+    #[tokio::test]
+    async fn test_collect_failure() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Failure(OperationFailure::Generic(
+                "something went wrong".to_string(),
+            )),
+        }];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "failure");
+        assert!(
+            result.data["result"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("something went wrong")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_no_completion_event() {
+        let events: Vec<PackageEvent> = vec![];
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_collect_audit_result() {
+        let events = vec![
+            PackageEvent::AuditResultCompleted {
+                operation_info: test_op_info(),
+                audit_result: AuditResultData {
+                    package_name: "prettier".to_string(),
+                    environment: "macos".to_string(),
+                    audit_command: Some("audit-cmd".to_string()),
+                    result: AuditResult::Conflicts {
+                        sources: vec!["bun".to_string(), "npm".to_string()],
+                        expected: vec!["bun".to_string(), "prettier".to_string()],
+                    },
+                },
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["data"][0]["type"], "audit_result");
+        assert_eq!(result.data["data"][0]["status"], "with conflicts");
+        assert_eq!(result.data["data"][0]["details"]["sources"][0], "bun");
+        assert_eq!(result.data["data"][0]["details"]["sources"][1], "npm");
+        assert_eq!(result.data["data"][0]["details"]["expected"][0], "bun");
+    }
+
+    #[tokio::test]
+    async fn test_collect_removal_dependency_info() {
+        let events = vec![
+            PackageEvent::RemovalDependencyInfo {
+                operation_info: test_op_info(),
+                package_name: "target-pkg".to_string(),
+                dependent_packages: vec!["dep-a".to_string(), "dep-b".to_string()],
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("removed".to_string())),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["data"][0]["type"], "removal_dependency_info");
+        assert_eq!(result.data["data"][0]["package"], "target-pkg");
+        assert_eq!(result.data["data"][0]["dependent_packages"][0], "dep-a");
+    }
+}

@@ -84,15 +84,38 @@ pub struct UpdateParam {
     /// Update install command (requires environment)
     #[serde(default)]
     pub install: Option<String>,
-    /// Update check command (requires environment)
+    /// Update check command (requires environment). Set to empty string to remove.
     #[serde(default)]
     pub check: Option<String>,
-    /// Update audit command (requires environment)
+    /// Update audit command (requires environment). Set to empty string to remove.
     #[serde(default)]
     pub audit: Option<String>,
     /// Update dependencies (requires environment)
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
+    /// Add a new environment configuration
+    #[serde(default)]
+    pub add_environment: Option<AddEnvironmentParam>,
+    /// Remove an environment by name
+    #[serde(default)]
+    pub remove_environment: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddEnvironmentParam {
+    /// Environment name
+    pub name: String,
+    /// Install command
+    pub install: String,
+    /// Optional check command
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Optional audit command
+    #[serde(default)]
+    pub audit: Option<String>,
+    /// Optional dependencies
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -247,16 +270,35 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<UpdateParam>,
     ) -> Result<CallToolResult, McpError> {
+        // Map check/audit: empty string means "remove", non-empty means "set"
+        let check = params
+            .check
+            .map(|v| if v.is_empty() { None } else { Some(v) });
+        let audit = params
+            .audit
+            .map(|v| if v.is_empty() { None } else { Some(v) });
+
+        let add_environment =
+            params
+                .add_environment
+                .map(|ae| selfie::package::event::AddEnvironment {
+                    name: ae.name,
+                    install: ae.install,
+                    check: ae.check,
+                    audit: ae.audit,
+                    dependencies: ae.dependencies,
+                });
+
         let fields = PackageUpdateFields {
             description: params.description,
             homepage: params.homepage,
             install: params.install,
-            check: params.check.map(Some),
-            audit: params.audit.map(Some),
+            check,
+            audit,
             dependencies: params.dependencies,
             environment: params.environment,
-            add_environment: None,
-            remove_environment: None,
+            add_environment,
+            remove_environment: params.remove_environment,
         };
 
         let stream = self.service.update(&params.package, fields).await;

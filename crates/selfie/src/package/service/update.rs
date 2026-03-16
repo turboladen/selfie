@@ -112,8 +112,21 @@ where
         );
     }
 
-    // Step 3: Save the updated package
-    progress.next(sender, "Saving package file").await;
+    // Step 3: Validate and save
+    progress.next(sender, "Validating and saving package").await;
+
+    let validation = package.validate(config.environment());
+    if validation.issues().has_errors() {
+        let error_messages: Vec<String> = validation
+            .issues()
+            .errors()
+            .iter()
+            .map(|i| format!("{}: {}", i.field(), i.message()))
+            .collect();
+        return OperationResult::Failure(
+            format!("Validation failed: {}", error_messages.join("; ")).into(),
+        );
+    }
 
     if let Err(err) = repo.save_package(&package, &file_path) {
         return OperationResult::Failure(err.into());
@@ -323,7 +336,14 @@ mod tests {
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
 
-        let package = create_test_package("test-pkg");
+        // Package with two environments so removing one still leaves a valid package
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .version("1.0.0")
+            .environment("test-env", |b| b.install("brew install test"))
+            .environment("other-env", |b| b.install("apt install test"))
+            .path("/test/packages/test-pkg.yml")
+            .build();
         let get_package =
             GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
 
@@ -333,6 +353,7 @@ mod tests {
 
         mock_repo.expect_save_package().returning(|pkg, _| {
             assert!(!pkg.environments().contains_key("test-env"));
+            assert!(pkg.environments().contains_key("other-env"));
             Ok(())
         });
 
