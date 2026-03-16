@@ -1607,11 +1607,14 @@ pub struct PackageUpdateFields {
     pub description: Option<String>,
     /// Top-level: update package homepage
     pub homepage: Option<String>,
-    /// Environment-scoped: update install command (requires environment)
+    /// Environment-scoped: update install command (requires environment).
+    /// `Option<String>` because install is a required field — it can be replaced but not removed.
     pub install: Option<String>,
-    /// Environment-scoped: update check command (requires environment)
+    /// Environment-scoped: update check command (requires environment).
+    /// `Option<Option<String>>`: None=unchanged, Some(None)=remove, Some(Some(val))=set.
     pub check: Option<Option<String>>,
-    /// Environment-scoped: update audit command (requires environment)
+    /// Environment-scoped: update audit command (requires environment).
+    /// `Option<Option<String>>`: None=unchanged, Some(None)=remove, Some(Some(val))=set.
     pub audit: Option<Option<String>>,
     /// Environment-scoped: update dependencies (requires environment)
     pub dependencies: Option<Vec<String>>,

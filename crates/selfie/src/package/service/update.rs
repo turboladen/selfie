@@ -31,16 +31,8 @@ where
         Err(err) => return OperationResult::Failure(err.into()),
     };
 
+    let file_path = get_package.file_path().to_path_buf();
     let mut package = get_package.into_package();
-    let file_path = repo
-        .find_package_files(package_name)
-        .ok()
-        .and_then(|files| files.into_iter().next())
-        .unwrap_or_else(|| {
-            config
-                .package_directory()
-                .join(format!("{package_name}.yml"))
-        });
 
     // Step 2: Apply changes
     progress.next(sender, "Applying updates").await;
@@ -210,10 +202,6 @@ mod tests {
             .expect_get_package()
             .return_once(move |_| Ok(get_package));
 
-        mock_repo
-            .expect_find_package_files()
-            .return_once(|_| Ok(vec![PathBuf::from("/test/packages/test-pkg.yml")]));
-
         mock_repo.expect_save_package().returning(|pkg, _| {
             assert_eq!(pkg.description(), Some("Updated description"));
             Ok(())
@@ -251,10 +239,6 @@ mod tests {
         mock_repo
             .expect_get_package()
             .return_once(move |_| Ok(get_package));
-
-        mock_repo
-            .expect_find_package_files()
-            .return_once(|_| Ok(vec![PathBuf::from("/test/packages/test-pkg.yml")]));
 
         mock_repo.expect_save_package().returning(|pkg, _| {
             let env = pkg.environments().get("test-env").unwrap();
@@ -299,10 +283,6 @@ mod tests {
         mock_repo
             .expect_get_package()
             .return_once(move |_| Ok(get_package));
-
-        mock_repo
-            .expect_find_package_files()
-            .return_once(|_| Ok(vec![PathBuf::from("/test/packages/test-pkg.yml")]));
 
         mock_repo.expect_save_package().returning(|pkg, _| {
             assert!(pkg.environments().contains_key("new-env"));
@@ -351,10 +331,6 @@ mod tests {
             .expect_get_package()
             .return_once(move |_| Ok(get_package));
 
-        mock_repo
-            .expect_find_package_files()
-            .return_once(|_| Ok(vec![PathBuf::from("/test/packages/test-pkg.yml")]));
-
         mock_repo.expect_save_package().returning(|pkg, _| {
             assert!(!pkg.environments().contains_key("test-env"));
             Ok(())
@@ -393,13 +369,43 @@ mod tests {
             .expect_get_package()
             .return_once(move |_| Ok(get_package));
 
-        mock_repo
-            .expect_find_package_files()
-            .return_once(|_| Ok(vec![PathBuf::from("/test/packages/test-pkg.yml")]));
-
         let fields = PackageUpdateFields {
             install: Some("new install command".to_string()),
             // No environment set!
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Failure(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_environment_target_errors() {
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+
+        let package = create_test_package("test-pkg");
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+
+        let fields = PackageUpdateFields {
+            install: Some("new install command".to_string()),
+            environment: Some("nonexistent-env".to_string()),
             ..Default::default()
         };
 
