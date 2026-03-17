@@ -57,6 +57,8 @@ environments:
   macos:
     install: brew install ripgrep
     check: which rg
+    audit: |
+      brew list ripgrep 2>/dev/null && echo "homebrew"
     dependencies: [homebrew]
 
   arch-linux:
@@ -67,6 +69,10 @@ environments:
     install: sudo apt install ripgrep
     check: which rg
 ```
+
+The optional `audit` field lets you detect _how_ a package is installed — useful for finding
+conflicts when the same tool is available via multiple package managers. Run
+`selfie package audit ripgrep` to check, or `selfie package audit --all` to scan everything.
 
 Then simply:
 
@@ -239,6 +245,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Package validation and listing
 - ✅ Interactive package creation and editing
 - ✅ Configuration management
+- ✅ Audit: detect installation sources and flag conflicts
+- ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ⏳ Advanced dependency resolution (in progress)
 - 📋 Package groups and bulk operations (planned)
 
