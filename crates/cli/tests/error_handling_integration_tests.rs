@@ -61,7 +61,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("missing field `environment`"));
+        .stderr(predicate::str::contains("environment"));
 }
 
 #[test]

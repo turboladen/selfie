@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.dependencies]
 anyhow = "1.0"
-console = "0.15"
+console = "0.16"
 futures = "0.3.31"
 indicatif = "0.17"
 mockall = "0.14.0"

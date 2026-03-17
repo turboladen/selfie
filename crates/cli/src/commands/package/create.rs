@@ -137,7 +137,7 @@ fn get_valid_package_name(
 
             let action = Select::with_theme(&SimpleTheme)
                 .with_prompt("What would you like to do?")
-                .items(&[
+                .items([
                     "Edit the existing package",
                     "Create a new package with a different name",
                     "Cancel",
