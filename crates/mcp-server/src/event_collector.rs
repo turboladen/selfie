@@ -70,13 +70,14 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "environments": &package_info.environments,
             "current_environment": &package_info.current_environment,
         })),
-        PackageEvent::PackageListReady { packages, .. } => {
-            let pkg_list: Vec<Value> = packages
-                .iter()
-                .map(|p| serde_json::json!({ "name": &p.name, "version": &p.version, "environments": &p.environments }))
-                .collect();
-            Some(serde_json::json!({ "type": "package_list", "packages": pkg_list }))
-        }
+        PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
+        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
+            "type": "package_list_item",
+            "name": &package_item.name,
+            "version": &package_item.version,
+            "environments": &package_item.environments,
+            "status": package_item.status.as_ref().map(|s| format!("{s}")),
+        })),
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
@@ -234,6 +235,54 @@ mod tests {
         assert_eq!(result.data["data"][0]["details"]["sources"][0], "bun");
         assert_eq!(result.data["data"][0]["details"]["sources"][1], "npm");
         assert_eq!(result.data["data"][0]["details"]["expected"][0], "bun");
+    }
+
+    #[tokio::test]
+    async fn test_collect_package_list_with_status() {
+        use selfie::package::event::PackageListItem;
+
+        let events = vec![
+            PackageEvent::PackageListItemCompleted {
+                operation_info: test_op_info(),
+                package_item: PackageListItem {
+                    name: "ripgrep".to_string(),
+                    version: "1.0.0".to_string(),
+                    environments: vec!["macos".to_string()],
+                    status: Some(CheckResult::Success {
+                        stdout: "/opt/homebrew/bin/rg".to_string(),
+                        stderr: String::new(),
+                    }),
+                },
+            },
+            PackageEvent::PackageListItemCompleted {
+                operation_info: test_op_info(),
+                package_item: PackageListItem {
+                    name: "missing-pkg".to_string(),
+                    version: "1.0.0".to_string(),
+                    environments: vec!["macos".to_string()],
+                    status: Some(CheckResult::Failed {
+                        stdout: String::new(),
+                        stderr: "not found".to_string(),
+                        exit_code: Some(1),
+                    }),
+                },
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("listed".to_string())),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["data"].as_array().unwrap().len(), 2);
+        assert_eq!(result.data["data"][0]["type"], "package_list_item");
+        assert_eq!(result.data["data"][0]["name"], "ripgrep");
+        assert_eq!(result.data["data"][0]["status"], "successfully");
+        assert_eq!(result.data["data"][1]["name"], "missing-pkg");
+        assert_eq!(result.data["data"][1]["status"], "with failures");
     }
 
     #[tokio::test]

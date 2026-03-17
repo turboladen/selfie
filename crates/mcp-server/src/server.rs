@@ -143,7 +143,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_list_packages",
-        description = "List all packages managed by selfie with their status"
+        description = "List packages relevant to the current environment with their installation status (installed/not installed). Set all=true to include packages from other environments too."
     )]
     async fn list_packages(
         &self,

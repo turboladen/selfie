@@ -70,7 +70,7 @@ instructions.
 
 | Tool                      | Description                                                    |
 | ------------------------- | -------------------------------------------------------------- |
-| `selfie_list_packages`    | List all packages with their status                            |
+| `selfie_list_packages`    | List packages for the current environment with install status  |
 | `selfie_get_package`      | Get detailed package info (environments, dependencies, status) |
 | `selfie_check_package`    | Check if a package is installed                                |
 | `selfie_validate_package` | Validate a package definition file                             |
