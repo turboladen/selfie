@@ -120,6 +120,12 @@ pub struct AddEnvironmentParam {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct BatchUpdateParam {
+    /// List of package updates to apply
+    pub updates: Vec<UpdateParam>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct RemoveParam {
     /// Name of the package to remove
     pub package: String,
@@ -310,6 +316,72 @@ impl SelfieServer {
         let stream = self.service.update(&params.package, fields).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_update_packages",
+        description = "Update multiple packages in a single call. Each entry in the updates array has the same fields as selfie_update_package. Use this instead of calling selfie_update_package repeatedly to avoid hitting tool call limits."
+    )]
+    async fn update_packages(
+        &self,
+        Parameters(params): Parameters<BatchUpdateParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results: Vec<serde_json::Value> = Vec::new();
+
+        for update in params.updates {
+            let package_name = update.package.clone();
+            let check = update
+                .check
+                .map(|v| if v.is_empty() { None } else { Some(v) });
+            let audit = update
+                .audit
+                .map(|v| if v.is_empty() { None } else { Some(v) });
+            let add_environment =
+                update
+                    .add_environment
+                    .map(|ae| selfie::package::event::AddEnvironment {
+                        name: ae.name,
+                        install: ae.install,
+                        check: ae.check,
+                        audit: ae.audit,
+                        dependencies: ae.dependencies,
+                    });
+
+            let fields = PackageUpdateFields {
+                description: update.description,
+                homepage: update.homepage,
+                install: update.install,
+                check,
+                audit,
+                dependencies: update.dependencies,
+                environment: update.environment,
+                add_environment,
+                remove_environment: update.remove_environment,
+            };
+
+            let stream = self.service.update(&package_name, fields).await;
+            let result = event_collector::collect_events(stream).await;
+
+            results.push(serde_json::json!({
+                "package": package_name,
+                "success": result.success,
+                "result": result.data["result"],
+            }));
+        }
+
+        let succeeded = results.iter().filter(|r| r["success"] == true).count();
+        let failed = results.len() - succeeded;
+
+        let output = serde_json::json!({
+            "total": results.len(),
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_default(),
+        )]))
     }
 
     #[tool(

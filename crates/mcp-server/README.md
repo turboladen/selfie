@@ -110,12 +110,13 @@ The MCP server handles two common issues with GUI-launched processes:
 
 ### Mutating
 
-| Tool                     | Description                                                 |
-| ------------------------ | ----------------------------------------------------------- |
-| `selfie_install_package` | Install a package using its configured method               |
-| `selfie_create_package`  | Create a new package definition file                        |
-| `selfie_update_package`  | Update package fields (description, commands, environments) |
-| `selfie_remove_package`  | Remove a package definition file                            |
+| Tool                     | Description                                       |
+| ------------------------ | ------------------------------------------------- |
+| `selfie_install_package` | Install a package using its configured method     |
+| `selfie_create_package`  | Create a new package definition file              |
+| `selfie_update_package`  | Update a single package's fields                  |
+| `selfie_update_packages` | Update multiple packages in a single call (batch) |
+| `selfie_remove_package`  | Remove a package definition file                  |
 
 ## What AI Assistants Can Do
 
