@@ -624,9 +624,16 @@ mod tests {
     }
 
     #[test]
-    fn test_is_tty() {
+    fn test_is_tty_false_when_stdout_piped() {
+        // Test runners pipe stdout, so is_tty must be false.
+        // This validates that we check BOTH stdout and stderr —
+        // if we only checked stderr (which may still be a terminal),
+        // is_tty could incorrectly return true when stdout is piped,
+        // causing list output to go to stderr via MultiProgress.
         let dm = DisplayManager::new(false);
-        // Just verify it returns a bool without panicking
-        let _is_tty = dm.is_tty();
+        assert!(
+            !dm.is_tty(),
+            "is_tty should be false when stdout is piped (as in test runners)"
+        );
     }
 }

@@ -661,6 +661,91 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_list_event_non_tty_skips_spinner() {
+        // When stdout is piped (is_tty=false), no spinner should be created,
+        // so output goes directly to stdout via println!() instead of
+        // through MultiProgress (which writes to stderr).
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let display = DisplayManager::new(false);
+        let mut spinner = None;
+        let mut max_name_len = 0;
+        let mut total_packages = 0;
+        let mut checked_count = 0;
+
+        let packages = vec![PackageListItem {
+            name: "alpha".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: None,
+        }];
+
+        let event = event::PackageEvent::PackageListReady {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            packages,
+        };
+
+        handle_list_event(
+            &event,
+            &config,
+            &display,
+            false,
+            false,
+            false, // is_tty=false: stdout is piped
+            &mut spinner,
+            &mut max_name_len,
+            &mut total_packages,
+            &mut checked_count,
+        );
+
+        assert!(
+            spinner.is_none(),
+            "Non-TTY mode must not create a spinner (output must go to stdout, not stderr)"
+        );
+    }
+
+    #[test]
+    fn test_handle_list_event_tty_creates_spinner() {
+        // When both stdout and stderr are terminals (is_tty=true),
+        // a spinner should be created for visual feedback.
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let display = DisplayManager::new(false);
+        let mut spinner = None;
+        let mut max_name_len = 0;
+        let mut total_packages = 0;
+        let mut checked_count = 0;
+
+        let packages = vec![PackageListItem {
+            name: "alpha".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: None,
+        }];
+
+        let event = event::PackageEvent::PackageListReady {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            packages,
+        };
+
+        handle_list_event(
+            &event,
+            &config,
+            &display,
+            false,
+            false,
+            true, // is_tty=true: interactive terminal
+            &mut spinner,
+            &mut max_name_len,
+            &mut total_packages,
+            &mut checked_count,
+        );
+
+        assert!(
+            spinner.is_some(),
+            "TTY mode should create a spinner for non-empty package list"
+        );
+    }
+
+    #[test]
     fn test_handle_list_event_package_item_completed() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = PackageListItem {
