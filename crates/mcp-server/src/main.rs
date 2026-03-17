@@ -22,10 +22,10 @@ async fn main() -> Result<()> {
     let config = YamlLoader::new(&fs).load_config()?;
 
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-    let runner = ShellCommandRunner::new(
-        ShellCommandRunner::default_shell(),
-        config.command_timeout(),
-    );
+    // Use a login shell so the user's PATH includes tools like ~/.cargo/bin,
+    // homebrew, fnm, etc. GUI-launched processes (like MCP servers started by
+    // Claude Desktop) don't inherit the terminal's environment.
+    let runner = ShellCommandRunner::login_shell(config.command_timeout());
     let service = PackageServiceImpl::new(repo, runner, config.clone(), CancellationToken::new());
 
     let mcp_server = server::SelfieServer::new(service, config);
