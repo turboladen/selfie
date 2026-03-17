@@ -208,6 +208,16 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // Write the YAML content to the specified path
         self.fs.write_file(path, yaml_content.as_bytes())?;
 
+        // Best-effort: run dprint fmt on the saved file to normalize formatting.
+        // Silently ignored if dprint is not installed or fails.
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            let _ = std::process::Command::new("dprint")
+                .args(["fmt", &canonical.to_string_lossy()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
         Ok(())
     }
 
