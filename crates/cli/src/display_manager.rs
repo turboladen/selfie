@@ -233,7 +233,7 @@ pub struct DisplayManager {
 impl DisplayManager {
     /// Create a new display manager
     pub fn new(use_colors: bool) -> Self {
-        let is_tty = console::Term::stderr().is_term();
+        let is_tty = console::Term::stderr().is_term() && console::Term::stdout().is_term();
         let mp = if is_tty {
             MultiProgress::new()
         } else {
