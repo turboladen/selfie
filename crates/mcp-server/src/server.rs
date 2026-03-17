@@ -248,13 +248,18 @@ impl SelfieServer {
             ),
         );
 
+        let file_path = self
+            .config
+            .package_directory()
+            .join(format!("{}.yml", &params.package));
+
         let package = Package::new(
             params.package,
             "0.1.0".to_string(),
             params.homepage,
             params.description,
             environments,
-            std::path::PathBuf::new(),
+            file_path,
         );
 
         let stream = self.service.create(package).await;
