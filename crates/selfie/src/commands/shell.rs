@@ -28,6 +28,12 @@ pub struct ShellCommandRunner {
 
     /// Default timeout for commands when no explicit timeout is provided
     default_timeout: Duration,
+
+    /// Whether to run as a login shell (-l flag), sourcing the user's profile.
+    /// Needed when the process is launched from a GUI app (e.g., MCP server
+    /// started by Claude Desktop) where PATH doesn't include user-installed
+    /// tools like ~/.cargo/bin, homebrew, fnm, etc.
+    login: bool,
 }
 
 impl ShellCommandRunner {
@@ -51,7 +57,52 @@ impl ShellCommandRunner {
         Self {
             shell: shell.to_string(),
             default_timeout,
+            login: false,
         }
+    }
+
+    /// Create a login shell command runner that sources the user's profile.
+    ///
+    /// On Unix, uses the user's default shell (from `SHELL` env var, falling
+    /// back to `/bin/sh`) with the `-l` flag to source login profiles
+    /// (`.bash_profile`, `.zshrc`, etc.). This ensures PATH includes
+    /// user-installed tools like `~/.cargo/bin`, homebrew paths, etc.
+    ///
+    /// On non-Unix platforms, falls back to the default shell without `-l`
+    /// since login shell semantics don't apply.
+    ///
+    /// Use this when the process is launched from a non-shell context
+    /// (e.g., an MCP server started by a GUI application).
+    #[must_use]
+    pub fn login_shell(default_timeout: Duration) -> Self {
+        #[cfg(unix)]
+        {
+            let shell =
+                std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
+            Self {
+                shell,
+                default_timeout,
+                login: true,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::new(Self::default_shell(), default_timeout)
+        }
+    }
+
+    /// Build a `Command` with the configured shell, login flag, and command string.
+    fn build_command(&self, command: &str) -> Command {
+        let mut cmd = Command::new(&self.shell);
+        if self.login {
+            cmd.arg("-l");
+        }
+        cmd.arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
     }
 
     /// Return the platform-appropriate default shell path.
@@ -152,12 +203,7 @@ impl CommandRunner for ShellCommandRunner {
             });
         }
 
-        let mut cmd = Command::new(&self.shell);
-        cmd.arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = self.build_command(command);
 
         let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
             command: command.to_string(),
@@ -255,12 +301,7 @@ impl CommandRunner for ShellCommandRunner {
             });
         }
 
-        let mut cmd = Command::new(&self.shell);
-        cmd.arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = self.build_command(command);
 
         let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
             command: command.to_string(),

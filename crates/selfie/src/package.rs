@@ -129,6 +129,10 @@ pub struct EnvironmentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) check: Option<String>,
 
+    /// Optional command to audit the package's installation sources
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) audit: Option<String>,
+
     /// Dependencies that must be installed before this package
     #[serde(default)]
     pub(crate) dependencies: Vec<String>,
@@ -137,10 +141,16 @@ pub struct EnvironmentConfig {
 impl EnvironmentConfig {
     /// Create a new environment configuration
     #[must_use]
-    pub fn new(install: String, check: Option<String>, dependencies: Vec<String>) -> Self {
+    pub fn new(
+        install: String,
+        check: Option<String>,
+        audit: Option<String>,
+        dependencies: Vec<String>,
+    ) -> Self {
         Self {
             install,
             check,
+            audit,
             dependencies,
         }
     }
@@ -155,6 +165,12 @@ impl EnvironmentConfig {
     #[must_use]
     pub fn check(&self) -> Option<&str> {
         self.check.as_deref()
+    }
+
+    /// Get the optional audit command for this environment
+    #[must_use]
+    pub fn audit(&self) -> Option<&str> {
+        self.audit.as_deref()
     }
 
     /// Get the list of dependencies for this environment
@@ -201,6 +217,7 @@ impl Package {
             EnvironmentConfig {
                 install: format!("# TODO: Add install command for {name}"),
                 check: Some(format!("# TODO: Add check command for {name}")),
+                audit: None,
                 dependencies: Vec::new(),
             },
         );

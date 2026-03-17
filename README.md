@@ -57,6 +57,8 @@ environments:
   macos:
     install: brew install ripgrep
     check: which rg
+    audit: |
+      brew list ripgrep 2>/dev/null && echo "homebrew"
     dependencies: [homebrew]
 
   arch-linux:
@@ -67,6 +69,10 @@ environments:
     install: sudo apt install ripgrep
     check: which rg
 ```
+
+The optional `audit` field lets you detect _how_ a package is installed — useful for finding
+conflicts when the same tool is available via multiple package managers. Run
+`selfie package audit ripgrep` to check, or `selfie package audit --all` to scan everything.
 
 Then simply:
 
@@ -127,6 +133,15 @@ git clone https://github.com/turboladen/selfie.git
 cd selfie
 cargo install --path crates/cli
 ```
+
+### MCP Server (for AI assistants)
+
+```bash
+cargo install --path crates/mcp-server
+```
+
+See the [MCP server README](crates/mcp-server/README.md) for setup with Claude Desktop, Claude Code,
+Cursor, etc.
 
 ### Verify Installation
 
@@ -239,6 +254,10 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Package validation and listing
 - ✅ Interactive package creation and editing
 - ✅ Configuration management
+- ✅ Audit: detect installation sources and flag conflicts
+- ✅ Package update: structured field modifications via CLI and MCP
+- ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
+- ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ⏳ Advanced dependency resolution (in progress)
 - 📋 Package groups and bulk operations (planned)
 

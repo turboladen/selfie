@@ -229,8 +229,10 @@ impl EventProcessor {
             | PackageEvent::PackageListReady { .. }
             | PackageEvent::PackageListLoaded { .. }
             | PackageEvent::CheckResultCompleted { .. }
+            | PackageEvent::AuditResultCompleted { .. }
             | PackageEvent::ValidationResultCompleted { .. }
-            | PackageEvent::PackageListItemCompleted { .. } => {
+            | PackageEvent::PackageListItemCompleted { .. }
+            | PackageEvent::RemovalDependencyInfo { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }

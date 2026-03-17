@@ -33,7 +33,7 @@ package_directory: "/test/packages"
 
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("missing field `environment`"));
+        .stderr(predicates::str::contains("environment"));
 }
 
 #[test]

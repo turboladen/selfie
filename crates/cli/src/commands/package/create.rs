@@ -137,7 +137,7 @@ fn get_valid_package_name(
 
             let action = Select::with_theme(&SimpleTheme)
                 .with_prompt("What would you like to do?")
-                .items(&[
+                .items([
                     "Edit the existing package",
                     "Create a new package with a different name",
                     "Cancel",
@@ -195,6 +195,7 @@ fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::packa
     let env_config = EnvironmentConfig::new(
         format!("# TODO: Add install command for {package_name}"),
         Some(format!("# TODO: Add check command for {package_name}")),
+        None,
         Vec::new(),
     );
 
@@ -307,7 +308,7 @@ fn prompt_environments(
         let check_cmd = prompt_check_command(package_name, display)?;
         let dependencies = prompt_dependencies(config, display)?;
 
-        let env_config = EnvironmentConfig::new(install_cmd, check_cmd, dependencies);
+        let env_config = EnvironmentConfig::new(install_cmd, check_cmd, None, dependencies);
         environments.insert(env_name, env_config);
 
         if !prompt_add_another_environment(display)? {
@@ -477,6 +478,7 @@ mod tests {
         let env_config = EnvironmentConfig::new(
             "brew install test".to_string(),
             Some("command -v test".to_string()),
+            None,
             vec!["dependency1".to_string(), "dependency2".to_string()],
         );
 

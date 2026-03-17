@@ -5,10 +5,13 @@ use serde::{Deserialize, Serialize};
 #[strum(serialize_all = "snake_case")]
 pub enum OperationType {
     ConfigValidate,
+    PackageAudit,
     PackageCheck,
     PackageCreate,
     PackageInfo,
     PackageInstall,
     PackageList,
+    PackageRemove,
+    PackageUpdate,
     PackageValidate,
 }

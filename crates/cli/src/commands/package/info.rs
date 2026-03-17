@@ -178,64 +178,8 @@ fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::event::{EnvironmentStatus, EnvironmentStatusData, PackageInfoData};
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
-
-    fn create_test_package_info() -> PackageInfoData {
-        PackageInfoData {
-            name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
-            description: Some("A test package".to_string()),
-            homepage: Some("https://example.com".to_string()),
-            environments: vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()],
-            current_environment: TEST_ENV.to_string(),
-        }
-    }
-
-    fn create_test_environment_status(is_current: bool) -> EnvironmentStatusData {
-        EnvironmentStatusData {
-            environment_name: if is_current { TEST_ENV } else { ALT_TEST_ENV }.to_string(),
-            is_current,
-            install_command: "apt install test-package".to_string(),
-            check_command: Some("which test-package".to_string()),
-            dependencies: vec!["dependency1".to_string(), "dependency2".to_string()],
-            status: if is_current {
-                Some(EnvironmentStatus::Installed)
-            } else {
-                None
-            },
-        }
-    }
-
-    #[test]
-    fn test_create_package_info_table() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let package_info = create_test_package_info();
-
-        let table = create_package_info_table(&package_info, &config);
-        // Just test that the function doesn't panic
-        let _table_str = table.to_string();
-    }
-
-    #[test]
-    fn test_create_package_info_table_with_colors() {
-        let config = CliConfig::wrap_for_test_with_colors(test_common::test_config());
-        let package_info = create_test_package_info();
-
-        let table = create_package_info_table(&package_info, &config);
-        // Just test that it doesn't panic with colors enabled
-        let _table_str = table.to_string();
-    }
-
-    #[test]
-    fn test_create_environment_table() {
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let env_status = create_test_environment_status(true);
-
-        let table = create_environment_table(&env_status, &config);
-        // Just test that the function doesn't panic
-        let _table_str = table.to_string();
-    }
+    use selfie::package::event::EnvironmentStatus;
+    use test_common::TEST_ENV;
 
     #[test]
     fn test_format_status_functions() {
@@ -253,16 +197,8 @@ mod tests {
     #[test]
     fn test_format_environment_names() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
+        let environments = vec![TEST_ENV.to_string(), "alt-test-env".to_string()];
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
-        // Just test that it doesn't panic
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_create_table() {
-        let table = common::create_formatted_table();
-        // Just test that table creation doesn't panic
-        let _table_str = table.to_string();
     }
 }

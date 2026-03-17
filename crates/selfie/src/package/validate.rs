@@ -298,6 +298,14 @@ impl Package {
                     &format!("environments.{env_name}.check"),
                 ));
             }
+
+            // Check audit command syntax if present
+            if let Some(audit_cmd) = &env_config.audit {
+                issues.extend(Self::validate_single_command(
+                    audit_cmd,
+                    &format!("environments.{env_name}.audit"),
+                ));
+            }
         }
 
         issues
@@ -458,6 +466,7 @@ mod tests {
         let env_config = EnvironmentConfig {
             install: String::new(),
             check: None,
+            audit: None,
             dependencies: vec![],
         };
 

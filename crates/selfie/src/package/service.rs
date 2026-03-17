@@ -8,13 +8,16 @@
 //! validation, and information retrieval. It coordinates between the package repository,
 //! command execution, and event streaming to provide a complete package management experience.
 
+mod audit;
 mod check;
 mod create;
 mod deps;
 mod info;
 mod install;
 mod list;
+mod remove;
 mod steps;
+mod update;
 mod validate;
 
 use std::{future::Future, path::PathBuf};
@@ -126,6 +129,12 @@ pub trait PackageService: Send + Sync {
     /// However, errors may be emitted through the event stream.
     fn check(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
+    /// Audit a package's installation sources and detect conflicts
+    fn audit(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// Audit all packages' installation sources and detect conflicts
+    fn audit_all(&self) -> impl Future<Output = EventStream> + Send;
+
     /// Install a package using its configured installation method
     ///
     /// Executes the package's installation command for the current environment.
@@ -224,6 +233,16 @@ pub trait PackageService: Send + Sync {
     /// This method returns an `EventStream` directly and cannot fail at the call site.
     /// However, errors may be emitted through the event stream.
     fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
+
+    /// Update a package's fields
+    fn update(
+        &self,
+        package_name: &str,
+        fields: super::event::PackageUpdateFields,
+    ) -> impl Future<Output = EventStream> + Send;
+
+    /// Remove a package from the repository
+    fn remove(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -418,6 +437,50 @@ where
             move |repo, command_runner, config, sender, mut progress, token| async move {
                 check::handle_check(
                     &package_name_owned,
+                    &repo,
+                    &config,
+                    &command_runner,
+                    &sender,
+                    &mut progress,
+                    &token,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn audit(&self, package_name: &str) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageAudit,
+            package_name,
+            OperationContext::default(),
+            3, // Load package + check environment + run audit command
+            move |repo, command_runner, config, sender, mut progress, token| async move {
+                audit::handle_audit(
+                    &package_name_owned,
+                    &repo,
+                    &config,
+                    &command_runner,
+                    &sender,
+                    &mut progress,
+                    &token,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn audit_all(&self) -> EventStream {
+        self.execute_operation_with_deps(
+            OperationType::PackageAudit,
+            "",
+            OperationContext::default(),
+            1,
+            move |repo, command_runner, config, sender, mut progress, token| async move {
+                audit::handle_audit_all(
                     &repo,
                     &config,
                     &command_runner,
@@ -643,6 +706,47 @@ where
             2, // Check existence + save
             move |repo, _, config, sender, mut progress, _token| async move {
                 create::handle_create(package, &repo, &config, &sender, &mut progress).await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn update(
+        &self,
+        package_name: &str,
+        fields: super::event::PackageUpdateFields,
+    ) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageUpdate,
+            package_name,
+            OperationContext::default(),
+            3, // Load + apply changes + save
+            move |repo, _, config, sender, mut progress, _token| async move {
+                update::handle_update(
+                    &package_name_owned,
+                    fields,
+                    &repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn remove(&self, package_name: &str) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageRemove,
+            package_name,
+            OperationContext::default(),
+            3, // Load + check dependents + remove
+            move |repo, _, config, sender, mut progress, _token| async move {
+                remove::handle_remove(&package_name_owned, &repo, &config, &sender, &mut progress)
+                    .await
             },
         )
     }

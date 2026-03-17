@@ -120,6 +120,16 @@ async fn dispatch_package_command(
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(&service, package_name, config, &display).await
         }
+        PackageSubcommands::Audit { package_name, all } => {
+            if *all {
+                package::audit::handle_audit_all(&service, config, &display).await
+            } else if let Some(name) = package_name {
+                package::audit::handle_audit(&service, name, config, &display).await
+            } else {
+                display.print_error("Package name is required unless --all is used.");
+                1
+            }
+        }
         PackageSubcommands::List { all } => {
             ListCommand::new(config, display, *all)
                 .handle_command(&service)
@@ -139,7 +149,7 @@ async fn dispatch_package_command(
             package::edit::handle_edit(package_name, config, &display)
         }
         PackageSubcommands::Remove { package_name } => {
-            package::remove::handle_remove(package_name, config, &display)
+            package::remove::handle_remove(&service, package_name, config, &display).await
         }
         PackageSubcommands::Validate { package_name } => {
             package::validate::handle_validate(&service, package_name, config, &display).await

@@ -364,6 +364,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send audit result data
+    pub(crate) async fn send_audit_result(&self, audit_result: AuditResultData) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::AuditResultCompleted {
+            operation_info,
+            audit_result,
+        })
+        .await;
+    }
+
     /// Send validation result data
     pub(crate) async fn send_validation_result(&self, validation_result: ValidationResultData) {
         let operation_info = self.touch_operation_info();
@@ -380,6 +390,21 @@ impl EventSender {
         self.send(PackageEvent::PackageListItemCompleted {
             operation_info,
             package_item,
+        })
+        .await;
+    }
+
+    /// Send removal dependency info event
+    pub(crate) async fn send_removal_dependency_info(
+        &self,
+        package_name: String,
+        dependent_packages: Vec<String>,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RemovalDependencyInfo {
+            operation_info,
+            package_name,
+            dependent_packages,
         })
         .await;
     }
@@ -512,6 +537,13 @@ pub enum OperationSuccess {
         check_result: CheckResult,
         steps_completed: StepCount,
     },
+    /// Package audit operation completed
+    PackageAudited {
+        package_name: String,
+        environment: String,
+        audit_result: AuditResult,
+        steps_completed: StepCount,
+    },
     /// Package installation operation completed
     PackageInstalled {
         package_name: String,
@@ -546,6 +578,20 @@ pub enum OperationSuccess {
         package_name: String,
         file_path: std::path::PathBuf,
         environment: String,
+        steps_completed: StepCount,
+    },
+    /// Package update operation completed
+    PackageUpdated {
+        package_name: String,
+        environment: String,
+        steps_completed: StepCount,
+    },
+    /// Package removal operation completed
+    PackageRemoved {
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        dependent_packages: Vec<String>,
         steps_completed: StepCount,
     },
     /// Generic success with just a message (for backward compatibility)
@@ -683,6 +729,15 @@ impl std::fmt::Display for OperationSuccess {
                 f,
                 "Package '{package_name}' check completed {check_result} {steps_completed}"
             ),
+            OperationSuccess::PackageAudited {
+                package_name,
+                audit_result,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' audit completed {audit_result} {steps_completed}"
+            ),
             OperationSuccess::PackageInstalled {
                 package_name,
                 was_already_installed,
@@ -751,6 +806,36 @@ impl std::fmt::Display for OperationSuccess {
                 "Package '{package_name}' created at {} {steps_completed}",
                 file_path.display()
             ),
+            OperationSuccess::PackageUpdated {
+                package_name,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' updated successfully {steps_completed}"
+            ),
+            OperationSuccess::PackageRemoved {
+                package_name,
+                file_path,
+                dependent_packages,
+                steps_completed,
+                ..
+            } => {
+                if dependent_packages.is_empty() {
+                    write!(
+                        f,
+                        "Package '{package_name}' removed from {} {steps_completed}",
+                        file_path.display()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Package '{package_name}' removed from {} (had {} dependent package(s)) {steps_completed}",
+                        file_path.display(),
+                        dependent_packages.len()
+                    )
+                }
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -818,6 +903,22 @@ impl OperationSuccess {
             package_name,
             environment,
             check_result,
+            steps_completed,
+        }
+    }
+
+    /// Creates a package audit success result
+    #[must_use]
+    pub fn package_audited(
+        package_name: String,
+        environment: String,
+        audit_result: AuditResult,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageAudited {
+            package_name,
+            environment,
+            audit_result,
             steps_completed,
         }
     }
@@ -904,10 +1005,48 @@ impl OperationSuccess {
         }
     }
 
+    /// Create a `PackageUpdated` success variant
+    #[must_use]
+    pub fn package_updated(
+        package_name: String,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageUpdated {
+            package_name,
+            environment,
+            steps_completed,
+        }
+    }
+
+    /// Create a `PackageRemoved` success variant
+    #[must_use]
+    pub fn package_removed(
+        package_name: String,
+        file_path: std::path::PathBuf,
+        environment: String,
+        dependent_packages: Vec<String>,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageRemoved {
+            package_name,
+            file_path,
+            environment,
+            dependent_packages,
+            steps_completed,
+        }
+    }
+
     /// Checks if this is a package check success
     #[must_use]
     pub fn is_package_check(&self) -> bool {
         matches!(self, OperationSuccess::PackageChecked { .. })
+    }
+
+    /// Checks if this is a package audit success
+    #[must_use]
+    pub fn is_package_audit(&self) -> bool {
+        matches!(self, OperationSuccess::PackageAudited { .. })
     }
 
     /// Checks if this is a package installation success
@@ -922,15 +1061,30 @@ impl OperationSuccess {
         matches!(self, OperationSuccess::PackageValidated { .. })
     }
 
+    /// Checks if this is a package update success
+    #[must_use]
+    pub fn is_package_update(&self) -> bool {
+        matches!(self, OperationSuccess::PackageUpdated { .. })
+    }
+
+    /// Checks if this is a package remove success
+    #[must_use]
+    pub fn is_package_remove(&self) -> bool {
+        matches!(self, OperationSuccess::PackageRemoved { .. })
+    }
+
     /// Gets the package name from the success result if available
     #[must_use]
     pub fn package_name(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { package_name, .. }
+            | OperationSuccess::PackageAudited { package_name, .. }
             | OperationSuccess::PackageInstalled { package_name, .. }
             | OperationSuccess::PackageValidated { package_name, .. }
             | OperationSuccess::PackageInfoRetrieved { package_name, .. }
-            | OperationSuccess::PackageCreated { package_name, .. } => Some(package_name),
+            | OperationSuccess::PackageCreated { package_name, .. }
+            | OperationSuccess::PackageUpdated { package_name, .. }
+            | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
             OperationSuccess::PackageListGenerated { .. } | OperationSuccess::Generic(_) => None,
         }
     }
@@ -940,11 +1094,14 @@ impl OperationSuccess {
     pub fn environment(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { environment, .. }
+            | OperationSuccess::PackageAudited { environment, .. }
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::PackageInfoRetrieved { environment, .. }
             | OperationSuccess::PackageListGenerated { environment, .. }
-            | OperationSuccess::PackageCreated { environment, .. } => Some(environment),
+            | OperationSuccess::PackageCreated { environment, .. }
+            | OperationSuccess::PackageUpdated { environment, .. }
+            | OperationSuccess::PackageRemoved { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -954,6 +1111,9 @@ impl OperationSuccess {
     pub fn steps_completed(&self) -> Option<StepCount> {
         match self {
             OperationSuccess::PackageChecked {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageAudited {
                 steps_completed, ..
             }
             | OperationSuccess::PackageInstalled {
@@ -969,6 +1129,12 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::PackageCreated {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageUpdated {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageRemoved {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
@@ -1246,6 +1412,12 @@ pub enum PackageEvent {
         check_result: CheckResultData,
     },
 
+    /// Audit result completed
+    AuditResultCompleted {
+        operation_info: OperationInfo,
+        audit_result: AuditResultData,
+    },
+
     /// Validation result completed
     ValidationResultCompleted {
         operation_info: OperationInfo,
@@ -1256,6 +1428,13 @@ pub enum PackageEvent {
     PackageListItemCompleted {
         operation_info: OperationInfo,
         package_item: PackageListItem,
+    },
+
+    /// Information about dependent packages found during removal
+    RemovalDependencyInfo {
+        operation_info: OperationInfo,
+        package_name: String,
+        dependent_packages: Vec<String>,
     },
 }
 
@@ -1343,6 +1522,33 @@ pub enum CheckResult {
     Error(String),
 }
 
+/// Structured data for audit results
+#[derive(Debug, Clone)]
+pub struct AuditResultData {
+    pub package_name: String,
+    pub environment: String,
+    pub audit_command: Option<String>,
+    pub result: AuditResult,
+}
+
+/// Result of an audit operation
+#[derive(Debug, Clone, strum::Display)]
+pub enum AuditResult {
+    #[strum(to_string = "clean")]
+    Clean { sources: Vec<String> },
+    #[strum(to_string = "with conflicts")]
+    Conflicts {
+        sources: Vec<String>,
+        expected: Vec<String>,
+    },
+    #[strum(to_string = "not installed")]
+    NotInstalled,
+    #[strum(to_string = "no audit command defined")]
+    NoAuditCommand,
+    #[strum(to_string = "with errors")]
+    Error(String),
+}
+
 /// Structured data for validation results
 #[derive(Debug, Clone)]
 pub struct ValidationResultData {
@@ -1392,6 +1598,42 @@ pub enum LogLevel {
 pub enum ConsoleOutput {
     Stdout(String),
     Stderr(String),
+}
+
+/// Structured update fields for modifying a package
+#[derive(Debug, Clone, Default)]
+pub struct PackageUpdateFields {
+    /// Top-level: update package description
+    pub description: Option<String>,
+    /// Top-level: update package homepage
+    pub homepage: Option<String>,
+    /// Environment-scoped: update install command (requires environment).
+    /// `Option<String>` because install is a required field — it can be replaced but not removed.
+    pub install: Option<String>,
+    /// Environment-scoped: update check command (requires environment).
+    /// `Option<Option<String>>`: None=unchanged, Some(None)=remove, Some(Some(val))=set.
+    pub check: Option<Option<String>>,
+    /// Environment-scoped: update audit command (requires environment).
+    /// `Option<Option<String>>`: None=unchanged, Some(None)=remove, Some(Some(val))=set.
+    pub audit: Option<Option<String>>,
+    /// Environment-scoped: update dependencies (requires environment)
+    pub dependencies: Option<Vec<String>>,
+    /// Target environment for environment-scoped fields
+    pub environment: Option<String>,
+    /// Add a new environment configuration
+    pub add_environment: Option<AddEnvironment>,
+    /// Remove an environment configuration
+    pub remove_environment: Option<String>,
+}
+
+/// Configuration for adding a new environment
+#[derive(Debug, Clone)]
+pub struct AddEnvironment {
+    pub name: String,
+    pub install: String,
+    pub check: Option<String>,
+    pub audit: Option<String>,
+    pub dependencies: Vec<String>,
 }
 
 #[cfg(test)]
