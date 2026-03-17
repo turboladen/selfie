@@ -8,7 +8,7 @@ name = "selfie"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.97"
+anyhow.workspace = true
 clap = { version = "4.5.31", features = ["derive"] }
 clap_complete = "4.5"
 comfy-table = { version = "7.1.4", features = ["custom_styling"] }
@@ -27,7 +27,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
-uuid = { version = "1.16.0", features = ["v4"] }
+uuid.workspace = true
 mockall.workspace = true
 predicates = "3.1"
 selfie = { path = "../selfie/", features = ["with_mocks"] }
