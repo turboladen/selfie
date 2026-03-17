@@ -238,7 +238,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_create_package",
-        description = "Create a new package definition file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_get_config to check)."
+        description = "Create a new package definition file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_get_config to check). Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e' to fail fast."
     )]
     async fn create_package(
         &self,
@@ -288,7 +288,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_update_package",
-        description = "Update fields of an existing package. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter."
+        description = "Update fields of an existing package. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e'."
     )]
     async fn update_package(
         &self,
@@ -332,7 +332,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_update_packages",
-        description = "Update multiple packages in a single call. Each entry in the updates array has the same fields as selfie_update_package. Use this instead of calling selfie_update_package repeatedly to avoid hitting tool call limits."
+        description = "Update multiple packages in a single call. Each entry in the updates array has the same fields as selfie_update_package. Use this instead of calling selfie_update_package repeatedly to avoid hitting tool call limits. Command conventions: check commands should use 'command -v X' not 'which X'. Multi-line install scripts should start with 'set -e'."
     )]
     async fn update_packages(
         &self,
