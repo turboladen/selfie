@@ -66,17 +66,24 @@ instructions.
 
 ## Available Tools
 
-### Read-only
+### Single package
 
 | Tool                      | Description                                                    |
 | ------------------------- | -------------------------------------------------------------- |
-| `selfie_list_packages`    | List packages for the current environment with install status  |
 | `selfie_get_package`      | Get detailed package info (environments, dependencies, status) |
 | `selfie_check_package`    | Check if a package is installed                                |
 | `selfie_validate_package` | Validate a package definition file                             |
 | `selfie_audit_package`    | Audit a package's installation sources and detect conflicts    |
-| `selfie_audit_all`        | Audit all packages for installation source conflicts           |
-| `selfie_get_config`       | Get current environment, package directory, and settings       |
+
+### Bulk (current environment)
+
+| Tool                   | Description                                                        |
+| ---------------------- | ------------------------------------------------------------------ |
+| `selfie_get_all_specs` | Get full definitions for all packages (fast, no commands executed) |
+| `selfie_list_packages` | List all packages with install status (runs check commands)        |
+| `selfie_audit_all`     | Audit all packages for installation source conflicts               |
+| `selfie_validate_all`  | Validate all package definitions (fast, no commands executed)      |
+| `selfie_get_config`    | Get current environment, package directory, and settings           |
 
 ### Mutating
 

@@ -379,6 +379,69 @@ impl SelfieServer {
     }
 
     #[tool(
+        name = "selfie_validate_all",
+        description = "Validate all package definition files in the current environment for correctness. Returns validation issues (errors and warnings) per package. Fast — no commands are executed."
+    )]
+    async fn validate_all(&self) -> Result<CallToolResult, McpError> {
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().clone());
+        let packages = repo
+            .list_packages()
+            .map_err(|e| McpError::internal_error(format!("Failed to list packages: {e}"), None))?;
+
+        let current_env = self.config.environment();
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        let mut error_count = 0usize;
+        let mut warning_count = 0usize;
+
+        for package in packages
+            .valid_packages()
+            .filter(|p| p.environments().contains_key(current_env))
+        {
+            let validation = package.validate(current_env);
+            let issues: Vec<serde_json::Value> = validation
+                .issues()
+                .all_issues()
+                .iter()
+                .map(|i| {
+                    serde_json::json!({
+                        "field": i.field(),
+                        "message": i.message(),
+                        "level": format!("{:?}", i.level()),
+                        "suggestion": i.suggestion(),
+                    })
+                })
+                .collect();
+
+            if validation.issues().has_errors() {
+                error_count += 1;
+            }
+            if validation.issues().has_warnings() {
+                warning_count += 1;
+            }
+
+            if validation.issues().has_issues() {
+                results.push(serde_json::json!({
+                    "package": package.name(),
+                    "valid": !validation.issues().has_errors(),
+                    "issues": issues,
+                }));
+            }
+        }
+
+        let result = serde_json::json!({
+            "environment": current_env,
+            "packages_with_errors": error_count,
+            "packages_with_warnings": warning_count,
+            "results": results,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         name = "selfie_get_config",
         description = "Get the current selfie configuration including environment, package directory, and settings"
     )]
