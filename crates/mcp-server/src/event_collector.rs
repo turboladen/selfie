@@ -1,5 +1,7 @@
 use futures::StreamExt;
-use selfie::package::event::{AuditResult, EventStream, OperationResult, PackageEvent};
+use selfie::package::event::{
+    AuditResult, CheckResult, EventStream, OperationResult, PackageEvent,
+};
 use serde_json::Value;
 
 pub struct EventCollectorResult {
@@ -51,7 +53,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "package": &check_result.package_name,
             "environment": &check_result.environment,
             "command": &check_result.check_command,
-            "status": format!("{}", check_result.result),
+            "status": check_status_label(&check_result.result),
         })),
         PackageEvent::AuditResultCompleted { audit_result, .. } => Some(serde_json::json!({
             "type": "audit_result",
@@ -76,7 +78,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "name": &package_item.name,
             "version": &package_item.version,
             "environments": &package_item.environments,
-            "status": package_item.status.as_ref().map(|s| format!("{s}")),
+            "status": package_item.status.as_ref().map(check_status_label),
         })),
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
@@ -98,6 +100,16 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             serde_json::json!({ "type": "removal_dependency_info", "package": package_name, "dependent_packages": dependent_packages }),
         ),
         _ => None,
+    }
+}
+
+fn check_status_label(result: &CheckResult) -> &'static str {
+    match result {
+        CheckResult::Success { .. } => "installed",
+        CheckResult::Failed { .. } => "not installed",
+        CheckResult::CommandNotFound => "check command not found",
+        CheckResult::NoCheckCommand => "no check command defined",
+        CheckResult::Error(_) => "error",
     }
 }
 
@@ -170,7 +182,7 @@ mod tests {
         assert_eq!(result.data["result"]["status"], "success");
         assert_eq!(result.data["data"][0]["type"], "check_result");
         assert_eq!(result.data["data"][0]["package"], "test-pkg");
-        assert_eq!(result.data["data"][0]["status"], "successfully");
+        assert_eq!(result.data["data"][0]["status"], "installed");
     }
 
     #[tokio::test]
@@ -280,9 +292,9 @@ mod tests {
         assert_eq!(result.data["data"].as_array().unwrap().len(), 2);
         assert_eq!(result.data["data"][0]["type"], "package_list_item");
         assert_eq!(result.data["data"][0]["name"], "ripgrep");
-        assert_eq!(result.data["data"][0]["status"], "successfully");
+        assert_eq!(result.data["data"][0]["status"], "installed");
         assert_eq!(result.data["data"][1]["name"], "missing-pkg");
-        assert_eq!(result.data["data"][1]["status"], "with failures");
+        assert_eq!(result.data["data"][1]["status"], "not installed");
     }
 
     #[tokio::test]
