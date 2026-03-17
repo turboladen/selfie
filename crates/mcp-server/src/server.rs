@@ -14,7 +14,8 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         EnvironmentConfig, Package, PackageService, event::PackageUpdateFields,
-        repository::yaml::YamlPackageRepository, service::PackageServiceImpl,
+        port::PackageRepository, repository::yaml::YamlPackageRepository,
+        service::PackageServiceImpl,
     },
 };
 use serde::Deserialize;
@@ -322,6 +323,59 @@ impl SelfieServer {
         let stream = self.service.remove(&params.package).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_get_all_specs",
+        description = "Get the full definition (name, version, description, homepage, environments with install/check/audit commands and dependencies) for all packages in the current environment. Fast bulk read — no commands are executed. Use this instead of calling selfie_get_package repeatedly."
+    )]
+    async fn get_all_specs(&self) -> Result<CallToolResult, McpError> {
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().clone());
+        let packages = repo
+            .list_packages()
+            .map_err(|e| McpError::internal_error(format!("Failed to list packages: {e}"), None))?;
+
+        let current_env = self.config.environment();
+        let specs: Vec<serde_json::Value> = packages
+            .valid_packages()
+            .filter(|p| p.environments().contains_key(current_env))
+            .map(|p| {
+                let envs: serde_json::Map<String, serde_json::Value> = p
+                    .environments()
+                    .iter()
+                    .map(|(env_name, env_config)| {
+                        (
+                            env_name.clone(),
+                            serde_json::json!({
+                                "install": env_config.install(),
+                                "check": env_config.check(),
+                                "audit": env_config.audit(),
+                                "dependencies": env_config.dependencies(),
+                            }),
+                        )
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "name": p.name(),
+                    "version": p.version(),
+                    "description": p.description(),
+                    "homepage": p.homepage(),
+                    "environments": envs,
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "environment": current_env,
+            "package_count": specs.len(),
+            "packages": specs,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
     }
 
     #[tool(
