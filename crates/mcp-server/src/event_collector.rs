@@ -72,6 +72,21 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "environments": &package_info.environments,
             "current_environment": &package_info.current_environment,
         })),
+        PackageEvent::EnvironmentStatusChecked {
+            environment_status, ..
+        } => Some(serde_json::json!({
+            "type": "environment_status",
+            "environment": &environment_status.environment_name,
+            "is_current": environment_status.is_current,
+            "install_command": &environment_status.install_command,
+            "check_command": &environment_status.check_command,
+            "dependencies": &environment_status.dependencies,
+            "status": environment_status.status.as_ref().map(|s| match s {
+                selfie::package::event::EnvironmentStatus::Installed => "installed",
+                selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
+                selfie::package::event::EnvironmentStatus::Unknown(_) => "unknown",
+            }),
+        })),
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
         PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
             "type": "package_list_item",
