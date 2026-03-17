@@ -44,6 +44,20 @@ Or if running from source:
 }
 ```
 
+### Configure in Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "selfie": {
+      "command": "selfie-mcp"
+    }
+  }
+}
+```
+
 ### Configure in Cursor
 
 Add to Cursor's MCP settings:
@@ -63,6 +77,15 @@ Add to Cursor's MCP settings:
 selfie-mcp reads the same config file as the CLI (`~/.config/selfie/config.yml`). Make sure selfie
 is configured before starting the MCP server. See the main [README](../../README.md) for setup
 instructions.
+
+## Environment Notes
+
+The MCP server handles two common issues with GUI-launched processes:
+
+- **PATH**: Uses a login shell (`$SHELL -l -c`) to source your profile, so tools in `~/.cargo/bin`,
+  homebrew paths, fnm, etc. are available for check/install/audit commands.
+- **HOME**: Recovers the home directory from the system password database if `HOME` isn't set,
+  ensuring `~` in config paths expands correctly.
 
 ## Available Tools
 
@@ -108,3 +131,5 @@ With these tools, an AI assistant can:
 
 selfie-mcp uses stdio transport (stdin/stdout for the MCP JSON-RPC protocol). Diagnostic logs go to
 stderr at WARN level. Set `RUST_LOG=selfie_mcp=debug` for verbose logging.
+
+Saved package files are automatically formatted with `dprint fmt` if dprint is installed.

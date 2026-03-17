@@ -134,6 +134,15 @@ cd selfie
 cargo install --path crates/cli
 ```
 
+### MCP Server (for AI assistants)
+
+```bash
+cargo install --path crates/mcp-server
+```
+
+See the [MCP server README](crates/mcp-server/README.md) for setup with Claude Desktop, Claude Code,
+Cursor, etc.
+
 ### Verify Installation
 
 ```bash
@@ -246,7 +255,9 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Interactive package creation and editing
 - ✅ Configuration management
 - ✅ Audit: detect installation sources and flag conflicts
+- ✅ Package update: structured field modifications via CLI and MCP
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
+- ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ⏳ Advanced dependency resolution (in progress)
 - 📋 Package groups and bulk operations (planned)
 
