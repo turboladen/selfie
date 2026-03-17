@@ -63,20 +63,31 @@ impl ShellCommandRunner {
 
     /// Create a login shell command runner that sources the user's profile.
     ///
-    /// Uses the user's default shell (from `SHELL` env var, falling back to
-    /// the platform default) with the `-l` flag to source login profiles
+    /// On Unix, uses the user's default shell (from `SHELL` env var, falling
+    /// back to `/bin/sh`) with the `-l` flag to source login profiles
     /// (`.bash_profile`, `.zshrc`, etc.). This ensures PATH includes
     /// user-installed tools like `~/.cargo/bin`, homebrew paths, etc.
+    ///
+    /// On non-Unix platforms, falls back to the default shell without `-l`
+    /// since login shell semantics don't apply.
     ///
     /// Use this when the process is launched from a non-shell context
     /// (e.g., an MCP server started by a GUI application).
     #[must_use]
     pub fn login_shell(default_timeout: Duration) -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
-        Self {
-            shell,
-            default_timeout,
-            login: true,
+        #[cfg(unix)]
+        {
+            let shell =
+                std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
+            Self {
+                shell,
+                default_timeout,
+                login: true,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::new(Self::default_shell(), default_timeout)
         }
     }
 

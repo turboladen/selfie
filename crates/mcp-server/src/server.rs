@@ -255,6 +255,18 @@ impl SelfieServer {
             ),
         );
 
+        // Validate package name to prevent path traversal (e.g. "../outside")
+        if params.package.contains('/')
+            || params.package.contains('\\')
+            || params.package.contains("..")
+            || params.package.is_empty()
+        {
+            return Err(McpError::invalid_params(
+                format!("Invalid package name: '{}'", params.package),
+                None,
+            ));
+        }
+
         let file_path = self
             .config
             .package_directory()
