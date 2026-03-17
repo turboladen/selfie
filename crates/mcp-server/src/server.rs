@@ -208,7 +208,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_audit_all",
-        description = "Audit all packages for installation source conflicts. Returns per-package audit results."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results."
     )]
     async fn audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;

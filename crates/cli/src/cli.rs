@@ -156,7 +156,7 @@ pub(crate) enum PackageSubcommands {
         /// Name of the package to audit (required unless --all is used)
         package_name: Option<String>,
 
-        /// Audit all packages in the package directory
+        /// Audit all packages for the current environment
         #[arg(long)]
         all: bool,
     },

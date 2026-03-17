@@ -93,6 +93,7 @@ where
 
     let package_names: Vec<String> = packages
         .valid_packages()
+        .filter(|p| p.environments().contains_key(config.environment()))
         .map(|p| p.name().to_string())
         .collect();
 
@@ -720,13 +721,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_audit_all_env_not_found_reports_error() {
+    async fn test_handle_audit_all_skips_packages_for_other_environments() {
         use crate::package::port::ListPackagesOutput;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = test_config(temp_dir.path());
 
-        // Package only has "macos" environment, not "test"
+        // Package only has "macos" environment, not "test" — should be excluded
         let pkg = PackageBuilder::default()
             .name("wrong-env-pkg")
             .version("1.0.0")
@@ -736,19 +737,10 @@ mod tests {
             .path(temp_dir.path().join("wrong-env-pkg.yml"))
             .build();
 
-        let pkg_clone = pkg.clone();
-        let pkg_path = temp_dir.path().join("wrong-env-pkg.yml");
-
         let mut mock_repo = MockPackageRepository::new();
         mock_repo
             .expect_list_packages()
             .returning(move || Ok(ListPackagesOutput(vec![Ok(pkg.clone())])));
-        mock_repo.expect_get_package().returning(move |_| {
-            Ok(GetPackage::from_existing(
-                pkg_clone.clone(),
-                pkg_path.clone(),
-            ))
-        });
 
         let mock_runner = MockCommandRunner::new();
 
@@ -756,7 +748,7 @@ mod tests {
         let mut progress = ProgressTracker::new(1);
         let token = CancellationToken::new();
 
-        let _result = handle_audit_all(
+        let result = handle_audit_all(
             &mock_repo,
             &config,
             &mock_runner,
@@ -766,7 +758,9 @@ mod tests {
         )
         .await;
 
-        // Find the audit result — should be Error, not NoAuditCommand
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        // No audit results should be emitted — the package was filtered out
         let mut audit_results = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let crate::package::event::PackageEvent::AuditResultCompleted {
@@ -777,11 +771,10 @@ mod tests {
             }
         }
 
-        assert_eq!(audit_results.len(), 1);
-        assert!(
-            matches!(&audit_results[0].result, AuditResult::Error(msg) if msg.contains("not configured")),
-            "Expected Error about environment not configured, got: {:?}",
-            audit_results[0].result
+        assert_eq!(
+            audit_results.len(),
+            0,
+            "Packages for other environments should be skipped"
         );
     }
 
