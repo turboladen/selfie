@@ -114,6 +114,17 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         } => Some(
             serde_json::json!({ "type": "removal_dependency_info", "package": package_name, "dependent_packages": dependent_packages }),
         ),
+        PackageEvent::Info { output, .. } => Some(serde_json::json!({
+            "type": "output",
+            "text": match output {
+                selfie::package::event::ConsoleOutput::Stdout(s) => s,
+                selfie::package::event::ConsoleOutput::Stderr(s) => s,
+            },
+        })),
+        PackageEvent::Warning { message, .. } => Some(serde_json::json!({
+            "type": "warning",
+            "message": message,
+        })),
         _ => None,
     }
 }

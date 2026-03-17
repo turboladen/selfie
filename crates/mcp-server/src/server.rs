@@ -232,7 +232,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_create_package",
-        description = "Create a new package definition file"
+        description = "Create a new package definition file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_get_config to check)."
     )]
     async fn create_package(
         &self,
@@ -391,8 +391,8 @@ impl SelfieServer {
 
         let current_env = self.config.environment();
         let mut results: Vec<serde_json::Value> = Vec::new();
-        let mut error_count = 0usize;
-        let mut warning_count = 0usize;
+        let mut packages_with_errors = 0usize;
+        let mut packages_with_warnings = 0usize;
 
         for package in packages
             .valid_packages()
@@ -414,10 +414,10 @@ impl SelfieServer {
                 .collect();
 
             if validation.issues().has_errors() {
-                error_count += 1;
+                packages_with_errors += 1;
             }
             if validation.issues().has_warnings() {
-                warning_count += 1;
+                packages_with_warnings += 1;
             }
 
             if validation.issues().has_issues() {
@@ -431,8 +431,8 @@ impl SelfieServer {
 
         let result = serde_json::json!({
             "environment": current_env,
-            "packages_with_errors": error_count,
-            "packages_with_warnings": warning_count,
+            "packages_with_errors": packages_with_errors,
+            "packages_with_warnings": packages_with_warnings,
             "results": results,
         });
 

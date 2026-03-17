@@ -11,15 +11,12 @@ use selfie::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(tracing::Level::WARN)
-        .init();
-
-    // Ensure HOME is set — GUI-launched processes (like MCP servers started by
-    // Claude Desktop) may not have it, which breaks tilde expansion in config paths.
+/// Recover HOME env var before the async runtime starts.
+///
+/// GUI-launched processes (like MCP servers started by Claude Desktop) may not
+/// have HOME set, which breaks tilde expansion in config paths. We do this
+/// before tokio starts so set_var is safe (truly single-threaded).
+fn ensure_home_env() {
     #[cfg(unix)]
     if std::env::var("HOME").is_err() {
         use std::ffi::CStr;
@@ -27,11 +24,27 @@ async fn main() -> Result<()> {
         if !pw.is_null() {
             let home = unsafe { CStr::from_ptr((*pw).pw_dir) };
             if let Ok(home_str) = home.to_str() {
-                // SAFETY: single-threaded at startup, before tokio runtime spawns tasks
+                // SAFETY: called before tokio runtime starts — truly single-threaded
                 unsafe { std::env::set_var("HOME", home_str) };
             }
         }
     }
+}
+
+fn main() -> Result<()> {
+    ensure_home_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(tracing::Level::WARN)
+        .init();
 
     let fs = RealFileSystem;
     let config = YamlLoader::new(&fs).load_config()?;
