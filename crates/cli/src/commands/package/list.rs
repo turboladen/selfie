@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use console::style;
 use selfie::package::{event, service::PackageService};
 
@@ -8,6 +11,27 @@ use crate::{
 };
 
 use super::common;
+
+/// Result variant for a formatted list item, determining which finish method to call.
+enum ListItemResult {
+    Success,
+    Failure,
+    Warning,
+}
+
+/// Mutable state accumulated while processing list events.
+#[derive(Default)]
+struct ListState {
+    /// TTY: per-package spinners keyed by name, pre-allocated in sorted order.
+    spinners: HashMap<String, OperationHandle>,
+    /// TTY: trailing spinner showing "Checking (N/M)..." progress.
+    progress_spinner: Option<OperationHandle>,
+    /// Non-TTY: buffered (name, formatted_line) pairs for post-sort printing.
+    buffered_lines: Vec<(String, String)>,
+    max_name_len: usize,
+    total_packages: usize,
+    checked_count: usize,
+}
 
 pub(crate) struct ListCommand<'a> {
     config: &'a CliConfig,
@@ -36,25 +60,12 @@ impl ListCommand<'_> {
         let use_colors = config.use_colors();
         let is_tty = display.is_tty();
 
-        // Single spinner for the check phase + streaming result lines
-        let mut spinner: Option<OperationHandle> = None;
-        let mut max_name_len: usize = 0;
-        let mut total_packages: usize = 0;
-        let mut checked_count: usize = 0;
+        let mut state = ListState::default();
 
         let result = processor
             .process_events(event_stream, |event| {
                 handle_list_event(
-                    event,
-                    config,
-                    display,
-                    use_colors,
-                    show_all,
-                    is_tty,
-                    &mut spinner,
-                    &mut max_name_len,
-                    &mut total_packages,
-                    &mut checked_count,
+                    event, config, display, use_colors, show_all, is_tty, &mut state,
                 )
             })
             .await;
@@ -62,7 +73,80 @@ impl ListCommand<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Extract formatted content and result variant from a list item.
+///
+/// Returns the result variant (for choosing finish method) and the content string
+/// **without** the prefix symbol — `finish_*_in_place` prepends its own prefix.
+/// The non-TTY path prepends a plain prefix separately.
+fn format_list_item(
+    package_item: &event::PackageListItem,
+    config: &CliConfig,
+    use_colors: bool,
+    show_all: bool,
+    max_name_len: usize,
+) -> (ListItemResult, String) {
+    let status_text = status_style::format_check_result(package_item.status.as_ref(), use_colors);
+    let version = format!("v{}", package_item.version);
+
+    let result = match &package_item.status {
+        Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
+        Some(event::CheckResult::Failed { .. })
+        | Some(event::CheckResult::CommandNotFound)
+        | Some(event::CheckResult::Error(_)) => ListItemResult::Failure,
+        Some(event::CheckResult::NoCheckCommand) | None => ListItemResult::Warning,
+    };
+
+    let content = if show_all {
+        let envs = common::format_environment_names(
+            &package_item.environments,
+            config.environment(),
+            config,
+        );
+        format!(
+            "{:<width$}  {:<10}  {status_text}  ({envs})",
+            package_item.name,
+            version,
+            width = max_name_len
+        )
+    } else {
+        format!(
+            "{:<width$}  {:<10}  {status_text}",
+            package_item.name,
+            version,
+            width = max_name_len
+        )
+    };
+
+    (result, content)
+}
+
+/// Build a plain-text prefix for non-TTY output.
+fn plain_prefix(result: &ListItemResult, use_colors: bool) -> Cow<'static, str> {
+    match result {
+        ListItemResult::Success => {
+            if use_colors {
+                style("✓").green().bold().to_string().into()
+            } else {
+                "✓".into()
+            }
+        }
+        ListItemResult::Failure => {
+            if use_colors {
+                style("✗").red().bold().to_string().into()
+            } else {
+                "✗".into()
+            }
+        }
+        ListItemResult::Warning => {
+            if use_colors {
+                style("⚠").yellow().bold().to_string().into()
+            } else {
+                "⚠".into()
+            }
+        }
+    }
+}
+
 fn handle_list_event(
     event: &event::PackageEvent,
     config: &CliConfig,
@@ -70,96 +154,77 @@ fn handle_list_event(
     use_colors: bool,
     show_all: bool,
     is_tty: bool,
-    spinner: &mut Option<OperationHandle>,
-    max_name_len: &mut usize,
-    total_packages: &mut usize,
-    checked_count: &mut usize,
+    state: &mut ListState,
 ) -> bool {
     match event {
         event::PackageEvent::PackageListReady { packages, .. } => {
-            *max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
-            *total_packages = packages.len();
-            *checked_count = 0;
+            state.max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
+            state.total_packages = packages.len();
+            state.checked_count = 0;
 
             if is_tty && !packages.is_empty() {
-                *spinner = Some(
-                    display
-                        .start_list_spinner(format!("Checking packages (0/{})...", total_packages)),
-                );
+                // Create one spinner per package. The sorted visual order comes
+                // from calling `start_list_spinner()` in sequence — MultiProgress
+                // preserves insertion order. The HashMap is only used for O(1)
+                // lookup by name when resolving spinners; it does not need to
+                // preserve order itself.
+                for pkg in packages {
+                    let handle = display.start_list_spinner(&pkg.name);
+                    state.spinners.insert(pkg.name.clone(), handle);
+                }
+                // Trailing progress counter spinner
+                state.progress_spinner = Some(display.start_list_spinner(format!(
+                    "Checking packages (0/{})...",
+                    state.total_packages
+                )));
             }
             true
         }
 
         event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
-            *checked_count += 1;
-            let status_text =
-                status_style::format_check_result(package_item.status.as_ref(), use_colors);
-            let version = format!("v{}", package_item.version);
+            state.checked_count += 1;
+            let (result, content) = format_list_item(
+                package_item,
+                config,
+                use_colors,
+                show_all,
+                state.max_name_len,
+            );
 
-            // Format the result line
-            let prefix = match &package_item.status {
-                Some(event::CheckResult::Success { .. }) => {
-                    if use_colors {
-                        style("✓").green().bold().to_string()
-                    } else {
-                        "✓".to_string()
+            if is_tty {
+                // Resolve the pre-allocated spinner in-place
+                if let Some(handle) = state.spinners.remove(&package_item.name) {
+                    match result {
+                        ListItemResult::Success => handle.finish_success_in_place(&content),
+                        ListItemResult::Failure => handle.finish_failure_in_place(&content),
+                        ListItemResult::Warning => handle.finish_warning_in_place(&content),
                     }
                 }
-                Some(event::CheckResult::Failed { .. })
-                | Some(event::CheckResult::CommandNotFound)
-                | Some(event::CheckResult::Error(_)) => {
-                    if use_colors {
-                        style("✗").red().bold().to_string()
-                    } else {
-                        "✗".to_string()
-                    }
+                // Update trailing progress counter
+                if let Some(ref progress) = state.progress_spinner {
+                    progress.set_message(format!(
+                        "Checking packages ({}/{})...",
+                        state.checked_count, state.total_packages
+                    ));
                 }
-                Some(event::CheckResult::NoCheckCommand) | None => {
-                    if use_colors {
-                        style("⚠").yellow().bold().to_string()
-                    } else {
-                        "⚠".to_string()
-                    }
-                }
-            };
-
-            let line = if show_all {
-                let envs = common::format_environment_names(
-                    &package_item.environments,
-                    config.environment(),
-                    config,
-                );
-                format!(
-                    "{prefix} {:<width$}  {:<10}  {status_text}  ({envs})",
-                    package_item.name,
-                    version,
-                    width = *max_name_len
-                )
             } else {
-                format!(
-                    "{prefix} {:<width$}  {:<10}  {status_text}",
-                    package_item.name,
-                    version,
-                    width = *max_name_len
-                )
-            };
-
-            if let Some(handle) = spinner.as_ref() {
-                // Print result line above the spinner
-                handle.println(&line);
-                // Update spinner with progress count
-                handle.set_message(format!(
-                    "Checking packages ({}/{})...",
-                    checked_count, total_packages
-                ));
-            } else {
-                // Non-TTY or no spinner: print directly
-                println!("{line}");
+                // Non-TTY: buffer for sorted output at the end
+                let prefix = plain_prefix(&result, use_colors);
+                let line = format!("{prefix} {content}");
+                state.buffered_lines.push((package_item.name.clone(), line));
             }
             true
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
+            // Non-TTY: print buffered lines sorted by name
+            if !is_tty {
+                state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
+                for (_, line) in &state.buffered_lines {
+                    println!("{line}");
+                }
+            }
+
             // Print invalid packages inline with error status,
             // filtered to the current environment (unless --all)
             if !package_list.invalid_packages.is_empty() {
@@ -167,10 +232,6 @@ fn handle_list_event(
                 for invalid in &package_list.invalid_packages {
                     let clean_error = clean_error_message(&invalid.error, &invalid.path);
 
-                    // Filter: only show errors relevant to the current environment
-                    // (or all errors when --all). Since invalid packages failed to
-                    // parse, we can't inspect their environments — but the error
-                    // message often contains the environment name.
                     if !show_all && !error_matches_environment(&clean_error, current_env) {
                         continue;
                     }
@@ -196,19 +257,24 @@ fn handle_list_event(
                         "{prefix} {:<width$}  {:<10}  {error_text}",
                         filename,
                         "",
-                        width = *max_name_len
+                        width = state.max_name_len
                     );
 
-                    if let Some(handle) = spinner.as_ref() {
-                        handle.println(&line);
+                    if is_tty {
+                        if let Some(ref progress) = state.progress_spinner {
+                            progress.println(&line);
+                        }
                     } else {
                         println!("{line}");
                     }
                 }
             }
 
-            // Clear the spinner before printing summary
-            if let Some(handle) = spinner.take() {
+            // Clear remaining spinners (TTY)
+            if let Some(handle) = state.progress_spinner.take() {
+                handle.finish_clear();
+            }
+            for (_, handle) in state.spinners.drain() {
                 handle.finish_clear();
             }
 
@@ -355,22 +421,22 @@ mod tests {
     fn test_handle_event(event: &event::PackageEvent, config: &CliConfig, show_all: bool) -> bool {
         let display = DisplayManager::new(false);
         let use_colors = config.use_colors();
-        let mut spinner = None;
-        let mut max_name_len = 0;
-        let mut total_packages = 0;
-        let mut checked_count = 0;
+        let mut state = ListState::default();
         handle_list_event(
-            event,
-            config,
-            &display,
-            use_colors,
-            show_all,
-            false,
-            &mut spinner,
-            &mut max_name_len,
-            &mut total_packages,
-            &mut checked_count,
+            event, config, &display, use_colors, show_all, false, &mut state,
         )
+    }
+
+    /// Helper to call handle_list_event with explicit is_tty flag
+    fn test_handle_event_with_tty(
+        event: &event::PackageEvent,
+        config: &CliConfig,
+        is_tty: bool,
+        state: &mut ListState,
+    ) -> bool {
+        let display = DisplayManager::new(false);
+        let use_colors = config.use_colors();
+        handle_list_event(event, config, &display, use_colors, false, is_tty, state)
     }
 
     #[test]
@@ -662,15 +728,10 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_non_tty_skips_spinner() {
-        // When stdout is piped (is_tty=false), no spinner should be created,
-        // so output goes directly to stdout via println!() instead of
-        // through MultiProgress (which writes to stderr).
+        // When stdout is piped (is_tty=false), no spinners should be created,
+        // so output goes to buffered_lines instead of through MultiProgress.
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let display = DisplayManager::new(false);
-        let mut spinner = None;
-        let mut max_name_len = 0;
-        let mut total_packages = 0;
-        let mut checked_count = 0;
+        let mut state = ListState::default();
 
         let packages = vec![PackageListItem {
             name: "alpha".to_string(),
@@ -684,65 +745,250 @@ mod tests {
             packages,
         };
 
-        handle_list_event(
-            &event,
-            &config,
-            &display,
-            false,
-            false,
-            false, // is_tty=false: stdout is piped
-            &mut spinner,
-            &mut max_name_len,
-            &mut total_packages,
-            &mut checked_count,
-        );
+        test_handle_event_with_tty(&event, &config, false, &mut state);
 
         assert!(
-            spinner.is_none(),
-            "Non-TTY mode must not create a spinner (output must go to stdout, not stderr)"
+            state.spinners.is_empty(),
+            "Non-TTY mode must not create spinners (output must go to stdout, not stderr)"
+        );
+        assert!(
+            state.progress_spinner.is_none(),
+            "Non-TTY mode must not create a progress spinner"
         );
     }
 
     #[test]
     fn test_handle_list_event_tty_creates_spinner() {
         // When both stdout and stderr are terminals (is_tty=true),
-        // a spinner should be created for visual feedback.
+        // per-package spinners should be created in sorted order.
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let display = DisplayManager::new(false);
-        let mut spinner = None;
-        let mut max_name_len = 0;
-        let mut total_packages = 0;
-        let mut checked_count = 0;
+        let mut state = ListState::default();
 
-        let packages = vec![PackageListItem {
-            name: "alpha".to_string(),
-            version: TEST_VERSION.to_string(),
-            environments: vec![TEST_ENV.to_string()],
-            status: None,
-        }];
+        let packages = vec![
+            PackageListItem {
+                name: "alpha".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+            PackageListItem {
+                name: "beta".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+        ];
 
         let event = event::PackageEvent::PackageListReady {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             packages,
         };
 
-        handle_list_event(
-            &event,
-            &config,
-            &display,
-            false,
-            false,
-            true, // is_tty=true: interactive terminal
-            &mut spinner,
-            &mut max_name_len,
-            &mut total_packages,
-            &mut checked_count,
-        );
+        test_handle_event_with_tty(&event, &config, true, &mut state);
 
-        assert!(
-            spinner.is_some(),
-            "TTY mode should create a spinner for non-empty package list"
+        assert_eq!(
+            state.spinners.len(),
+            2,
+            "TTY mode should create one spinner per package"
         );
+        assert!(
+            state.spinners.contains_key("alpha"),
+            "Should have spinner for 'alpha'"
+        );
+        assert!(
+            state.spinners.contains_key("beta"),
+            "Should have spinner for 'beta'"
+        );
+        assert!(
+            state.progress_spinner.is_some(),
+            "TTY mode should create a trailing progress spinner"
+        );
+    }
+
+    #[test]
+    fn test_tty_removes_spinner_on_completion() {
+        // When a PackageListItemCompleted event arrives in TTY mode,
+        // the corresponding spinner should be removed from state.
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let mut state = ListState::default();
+
+        // First, send PackageListReady to create spinners
+        let packages = vec![
+            PackageListItem {
+                name: "alpha".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+            PackageListItem {
+                name: "beta".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: None,
+            },
+        ];
+
+        let ready_event = event::PackageEvent::PackageListReady {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            packages,
+        };
+        test_handle_event_with_tty(&ready_event, &config, true, &mut state);
+        assert_eq!(state.spinners.len(), 2);
+
+        // Now complete one item — its spinner should be removed
+        let completed_event = event::PackageEvent::PackageListItemCompleted {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_item: PackageListItem {
+                name: "alpha".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: Some(event::CheckResult::Success {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }),
+            },
+        };
+        test_handle_event_with_tty(&completed_event, &config, true, &mut state);
+
+        assert_eq!(
+            state.spinners.len(),
+            1,
+            "Completed spinner should be removed"
+        );
+        assert!(
+            !state.spinners.contains_key("alpha"),
+            "'alpha' spinner should be gone after completion"
+        );
+        assert!(
+            state.spinners.contains_key("beta"),
+            "'beta' spinner should still be present"
+        );
+        assert_eq!(state.checked_count, 1);
+    }
+
+    #[test]
+    fn test_non_tty_buffers_results() {
+        // In non-TTY mode, PackageListItemCompleted should buffer results
+        // rather than printing immediately.
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let mut state = ListState::default();
+
+        // Send Ready to initialize state
+        let ready_event = event::PackageEvent::PackageListReady {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            packages: vec![
+                PackageListItem {
+                    name: "zebra".to_string(),
+                    version: TEST_VERSION.to_string(),
+                    environments: vec![TEST_ENV.to_string()],
+                    status: None,
+                },
+                PackageListItem {
+                    name: "alpha".to_string(),
+                    version: TEST_VERSION.to_string(),
+                    environments: vec![TEST_ENV.to_string()],
+                    status: None,
+                },
+            ],
+        };
+        test_handle_event_with_tty(&ready_event, &config, false, &mut state);
+
+        // Send completed items out of order
+        let completed_zebra = event::PackageEvent::PackageListItemCompleted {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_item: PackageListItem {
+                name: "zebra".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: Some(event::CheckResult::Success {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }),
+            },
+        };
+        test_handle_event_with_tty(&completed_zebra, &config, false, &mut state);
+
+        let completed_alpha = event::PackageEvent::PackageListItemCompleted {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_item: PackageListItem {
+                name: "alpha".to_string(),
+                version: TEST_VERSION.to_string(),
+                environments: vec![TEST_ENV.to_string()],
+                status: Some(event::CheckResult::Failed {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(1),
+                }),
+            },
+        };
+        test_handle_event_with_tty(&completed_alpha, &config, false, &mut state);
+
+        assert_eq!(
+            state.buffered_lines.len(),
+            2,
+            "Non-TTY mode should buffer results"
+        );
+        // Buffered in arrival order (zebra first, alpha second)
+        assert_eq!(state.buffered_lines[0].0, "zebra");
+        assert_eq!(state.buffered_lines[1].0, "alpha");
+    }
+
+    #[test]
+    fn test_format_list_item_variants() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+
+        // Success variant
+        let success_item = PackageListItem {
+            name: "ripgrep".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(event::CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        };
+        let (result, content) = format_list_item(&success_item, &config, false, false, 10);
+        assert!(matches!(result, ListItemResult::Success));
+        assert!(content.contains("ripgrep"));
+        assert!(content.contains("Installed"));
+
+        // Failure variant
+        let failure_item = PackageListItem {
+            name: "missing-pkg".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(event::CheckResult::Failed {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(1),
+            }),
+        };
+        let (result, content) = format_list_item(&failure_item, &config, false, false, 12);
+        assert!(matches!(result, ListItemResult::Failure));
+        assert!(content.contains("missing-pkg"));
+        assert!(content.contains("Not installed"));
+
+        // Warning variant (no check command)
+        let warning_item = PackageListItem {
+            name: "no-check".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(event::CheckResult::NoCheckCommand),
+        };
+        let (result, content) = format_list_item(&warning_item, &config, false, false, 10);
+        assert!(matches!(result, ListItemResult::Warning));
+        assert!(content.contains("no-check"));
+        assert!(content.contains("No check"));
+
+        // N/A variant (status is None)
+        let na_item = PackageListItem {
+            name: "pending".to_string(),
+            version: TEST_VERSION.to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: None,
+        };
+        let (result, _) = format_list_item(&na_item, &config, false, false, 10);
+        assert!(matches!(result, ListItemResult::Warning));
     }
 
     #[test]
@@ -763,7 +1009,7 @@ mod tests {
             package_item,
         };
 
-        // In non-TTY mode, should print the result line directly
+        // In non-TTY mode, should buffer the result line
         let result = test_handle_event(&event, &config, false);
         assert!(result);
     }
