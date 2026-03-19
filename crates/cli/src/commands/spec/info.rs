@@ -10,7 +10,7 @@ use crate::{
     formatters::format_key, status_style,
 };
 
-use super::common;
+use crate::commands::common;
 
 pub(crate) async fn handle_info(
     service: &impl SpecService,
@@ -102,7 +102,10 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
     table
 }
 
-fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConfig) -> Table {
+pub(crate) fn create_environment_table(
+    env_status: &EnvironmentStatusData,
+    config: &CliConfig,
+) -> Table {
     let mut env_table = common::create_formatted_table();
 
     // Create a header for the environment table
@@ -160,7 +163,7 @@ fn create_environment_table(env_status: &EnvironmentStatusData, config: &CliConf
     env_table
 }
 
-fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
+pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
     match status {
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),

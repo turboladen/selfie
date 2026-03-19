@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
 
-use super::common;
+use crate::commands::common;
 
 const MAX_NAME_RETRIES: usize = 3;
 
@@ -104,7 +104,7 @@ pub(crate) async fn handle_create(
                 }
                 Ok(false) => {
                     display.print_info(
-                        "Package created. You can edit it later with 'selfie package edit'.",
+                        "Package created. You can edit it later with 'selfie spec edit'.",
                     );
                     0
                 }
@@ -117,7 +117,7 @@ pub(crate) async fn handle_create(
             0
         }
     } else {
-        display.print_info("Package created. Use 'selfie package edit' to customize it.");
+        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
         0
     }
 }

@@ -10,7 +10,7 @@ use crate::display_manager::DisplayManager;
 use crate::event_processor::EventProcessor;
 use tracing::info;
 
-use super::common;
+use crate::commands::common;
 
 pub(crate) async fn handle_remove(
     service: &impl SpecService,
@@ -129,7 +129,7 @@ mod tests {
 
     use crate::config::CliConfig;
 
-    use super::common;
+    use crate::commands::common;
 
     #[test]
     fn test_dependency_check_integration() {

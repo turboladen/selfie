@@ -169,7 +169,7 @@ fn test_package_not_found_error() {
     let temp_dir = setup_default_test_config();
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", "nonexistent-package"]);
+    cmd.args(["spec", "info", "nonexistent-package"]);
 
     cmd.assert().failure().stderr(predicate::str::contains(
         "Package `nonexistent-package` not found in path",
@@ -194,7 +194,7 @@ environments:
     fs::write(&invalid_package_path, invalid_yaml).unwrap();
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "validate", "invalid-package"]);
+    cmd.args(["spec", "validate", "invalid-package"]);
 
     cmd.assert()
         .failure()
@@ -374,7 +374,7 @@ fn test_duplicate_package_names_error() {
     fs::write(packages_dir.join("duplicate-v2.yaml"), yaml2).unwrap();
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", "duplicate-package"]);
+    cmd.args(["spec", "info", "duplicate-package"]);
 
     cmd.assert()
         .failure()
@@ -420,7 +420,7 @@ fn test_empty_package_name_error() {
     let temp_dir = setup_default_test_config();
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", ""]);
+    cmd.args(["spec", "info", ""]);
 
     cmd.assert()
         .failure()
@@ -432,7 +432,7 @@ fn test_package_name_with_special_characters() {
     let temp_dir = setup_default_test_config();
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", "package/with/slashes"]);
+    cmd.args(["spec", "info", "package/with/slashes"]);
 
     cmd.assert()
         .failure()
@@ -445,7 +445,7 @@ fn test_very_long_package_name_error() {
     let long_name = "a".repeat(1000);
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", &long_name]);
+    cmd.args(["spec", "info", &long_name]);
 
     cmd.assert()
         .failure()

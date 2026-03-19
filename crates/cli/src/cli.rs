@@ -75,10 +75,16 @@ pub struct ClapCli {
 /// and specific options.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ClapCommands {
-    /// Package management operations
+    /// Spec (definition) operations — create, edit, remove, validate, info
     ///
-    /// Commands for installing, checking, listing, and managing packages.
-    /// This is the primary interface for package operations.
+    /// Commands for managing package definition files (specs). These operate
+    /// on the YAML files that describe packages, without running any commands.
+    Spec(SpecCommands),
+
+    /// Package (runtime) operations — install, check, audit, list, status
+    ///
+    /// Commands for installing, checking, listing, and querying runtime status
+    /// of packages. These execute configured commands on the system.
     Package(PackageCommands),
 
     /// Configuration management operations
@@ -99,10 +105,108 @@ pub(crate) enum ClapCommands {
     },
 }
 
+/// Spec command group container
+///
+/// This structure holds the spec-related subcommands for managing
+/// package definition files (YAML specs).
+#[derive(Args, Debug, Clone)]
+pub(crate) struct SpecCommands {
+    /// The specific spec operation to perform
+    #[clap(subcommand)]
+    pub(crate) command: SpecSubcommands,
+}
+
+/// Spec (definition) management operations
+///
+/// These subcommands manage the YAML package definition files without
+/// executing any system commands.
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum SpecSubcommands {
+    /// Create a new package definition file
+    ///
+    /// Creates a new package definition file with a basic template structure
+    /// in the package directory. This provides a starting point for defining
+    /// custom packages.
+    ///
+    /// Example: `selfie spec create my-tool`
+    Create {
+        /// Name of the new package to create
+        ///
+        /// This will be used as the filename for the package definition.
+        /// The package name should be unique within the package directory.
+        package_name: String,
+
+        /// Enable interactive mode for package creation
+        ///
+        /// Walks through prompts to configure package details like version,
+        /// description, environments, and dependencies interactively.
+        #[arg(short, long)]
+        interactive: bool,
+    },
+
+    /// Edit a package definition file
+    ///
+    /// Opens an existing package definition file for editing, or creates a new one
+    /// if it doesn't exist. Uses the editor specified in the EDITOR environment
+    /// variable, with fallbacks to common editors like VS Code, vim, or nano.
+    ///
+    /// Example: `selfie spec edit my-tool`
+    Edit {
+        /// Name of the package to edit or create
+        ///
+        /// If the package exists, it will be opened for editing.
+        /// If it doesn't exist, a new template will be created and opened.
+        package_name: String,
+    },
+
+    /// Remove a package definition file
+    ///
+    /// Permanently removes a package definition file from the package directory.
+    /// This operation requires confirmation and will warn if the package is a
+    /// dependency of other packages.
+    ///
+    /// Example: `selfie spec remove my-tool`
+    Remove {
+        /// Name of the package to remove
+        ///
+        /// The package definition file will be permanently deleted from the
+        /// package directory. This operation cannot be undone.
+        package_name: String,
+    },
+
+    /// Validate a package definition file
+    ///
+    /// Performs comprehensive validation of a package definition including
+    /// schema validation, environment configuration checks, and command
+    /// syntax verification.
+    ///
+    /// Example: `selfie spec validate node`
+    Validate {
+        /// Name of the package to validate
+        ///
+        /// Must correspond to a package definition file in the package directory.
+        package_name: String,
+    },
+
+    /// Show detailed information about a package definition
+    ///
+    /// Displays comprehensive information about a package including its
+    /// configuration, available environments, dependencies, and current
+    /// installation status.
+    ///
+    /// Example: `selfie spec info node`
+    Info {
+        /// Name of the package to get information about
+        ///
+        /// Must correspond to a package definition file in the package directory.
+        package_name: String,
+    },
+}
+
 /// Package command group container
 ///
-/// This structure holds the package-related subcommands. It serves as
-/// an organizational container for all package management operations.
+/// This structure holds the package-related subcommands for runtime
+/// package operations that execute system commands.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct PackageCommands {
     /// The specific package operation to perform
@@ -110,10 +214,10 @@ pub(crate) struct PackageCommands {
     pub(crate) command: PackageSubcommands,
 }
 
-/// Specific package management operations
+/// Package (runtime) management operations
 ///
-/// These subcommands provide the core package management functionality
-/// including installation, checking, validation, and information retrieval.
+/// These subcommands execute configured commands on the system to install,
+/// check, audit, list, or query the status of packages.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum PackageSubcommands {
     /// Install a package using its configured installation method
@@ -177,81 +281,14 @@ pub(crate) enum PackageSubcommands {
         all: bool,
     },
 
-    /// Show detailed information about a package
+    /// Show runtime status for a package in the current environment
     ///
-    /// Displays comprehensive information about a package including its
-    /// configuration, available environments, dependencies, and current
-    /// installation status.
+    /// Checks whether a package is installed and displays its environment
+    /// configuration and installation status.
     ///
-    /// Example: `selfie package info node`
-    Info {
-        /// Name of the package to get information about
-        ///
-        /// Must correspond to a package definition file in the package directory.
-        package_name: String,
-    },
-
-    /// Create a new package definition file
-    ///
-    /// Creates a new package definition file with a basic template structure
-    /// in the package directory. This provides a starting point for defining
-    /// custom packages.
-    ///
-    /// Example: `selfie package create my-tool`
-    Create {
-        /// Name of the new package to create
-        ///
-        /// This will be used as the filename for the package definition.
-        /// The package name should be unique within the package directory.
-        package_name: String,
-
-        /// Enable interactive mode for package creation
-        ///
-        /// Walks through prompts to configure package details like version,
-        /// description, environments, and dependencies interactively.
-        #[arg(short, long)]
-        interactive: bool,
-    },
-
-    /// Edit a package definition file
-    ///
-    /// Opens an existing package definition file for editing, or creates a new one
-    /// if it doesn't exist. Uses the editor specified in the EDITOR environment
-    /// variable, with fallbacks to common editors like VS Code, vim, or nano.
-    ///
-    /// Example: `selfie package edit my-tool`
-    Edit {
-        /// Name of the package to edit or create
-        ///
-        /// If the package exists, it will be opened for editing.
-        /// If it doesn't exist, a new template will be created and opened.
-        package_name: String,
-    },
-
-    /// Remove a package definition file
-    ///
-    /// Permanently removes a package definition file from the package directory.
-    /// This operation requires confirmation and will warn if the package is a
-    /// dependency of other packages.
-    ///
-    /// Example: `selfie package remove my-tool`
-    Remove {
-        /// Name of the package to remove
-        ///
-        /// The package definition file will be permanently deleted from the
-        /// package directory. This operation cannot be undone.
-        package_name: String,
-    },
-
-    /// Validate a package definition file
-    ///
-    /// Performs comprehensive validation of a package definition including
-    /// schema validation, environment configuration checks, and command
-    /// syntax verification.
-    ///
-    /// Example: `selfie package validate node`
-    Validate {
-        /// Name of the package to validate
+    /// Example: `selfie package status node`
+    Status {
+        /// Name of the package to check status for
         ///
         /// Must correspond to a package definition file in the package directory.
         package_name: String,

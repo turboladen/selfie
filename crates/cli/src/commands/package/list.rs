@@ -9,7 +9,7 @@ use crate::{
     status_style,
 };
 
-use super::common;
+use crate::commands::common;
 
 /// Result variant for a formatted list item, determining which finish method to call.
 enum ListItemResult {

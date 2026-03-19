@@ -24,7 +24,7 @@ use std::{path::Path, process::Command};
 use crate::display_manager::DisplayManager;
 
 /// Create a package repository instance with the configured package directory
-pub(super) fn create_package_repository(
+pub(crate) fn create_package_repository(
     config: &CliConfig,
 ) -> YamlPackageRepository<RealFileSystem> {
     create_package_repository_with_fs(config, RealFileSystem)
@@ -32,7 +32,7 @@ pub(super) fn create_package_repository(
 
 /// Create a package repository with a specific filesystem implementation
 /// This is useful for testing with `MockFileSystem`
-pub(super) fn create_package_repository_with_fs<F: FileSystem>(
+pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     config: &CliConfig,
     fs: F,
 ) -> YamlPackageRepository<F> {
@@ -40,7 +40,7 @@ pub(super) fn create_package_repository_with_fs<F: FileSystem>(
 }
 
 /// Save a package to the filesystem with consistent error handling
-pub(super) fn save_package(
+pub(crate) fn save_package(
     repo: &impl PackageRepository,
     package_blob: &GetPackage,
     display: &DisplayManager,
@@ -59,7 +59,7 @@ pub(super) fn save_package(
 /// - Adding --wait flag for VS Code
 /// - Executing the editor command
 /// - Providing appropriate success/failure messages
-pub(super) fn open_editor(
+pub(crate) fn open_editor(
     file_path: &Path,
     display: &DisplayManager,
     success_message: Option<String>,
@@ -100,7 +100,7 @@ pub(super) fn open_editor(
 ///
 /// Returns the editor command if available, or reports an error and returns None.
 /// Provides context-specific error messages for different scenarios.
-pub(super) fn check_editor_available(
+pub(crate) fn check_editor_available(
     display: &DisplayManager,
     package_name: &str,
     package_exists: bool,
@@ -133,7 +133,7 @@ pub(super) fn check_editor_available(
 }
 
 /// Create a new package template
-pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
+pub(crate) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
     GetPackage::new(package_name, config.package_directory())
 }
 
@@ -156,7 +156,7 @@ pub(crate) fn create_package_service(
 }
 
 /// Create a formatted table with consistent styling
-pub(super) fn create_formatted_table() -> Table {
+pub(crate) fn create_formatted_table() -> Table {
     let mut table = Table::new();
     table
         .load_preset(presets::UTF8_FULL_CONDENSED)
@@ -167,7 +167,7 @@ pub(super) fn create_formatted_table() -> Table {
 
 /// Format environment names with current environment highlighting
 /// Current environment appears first, followed by others sorted alphabetically
-pub(super) fn format_environment_names(
+pub(crate) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
     config: &CliConfig,
@@ -206,7 +206,7 @@ pub(super) fn format_environment_names(
 }
 
 /// Format a key with consistent styling
-pub(super) fn format_field_key(key: &str, use_colors: bool) -> String {
+pub(crate) fn format_field_key(key: &str, use_colors: bool) -> String {
     if use_colors {
         style(key).cyan().bold().to_string()
     } else {
@@ -215,7 +215,7 @@ pub(super) fn format_field_key(key: &str, use_colors: bool) -> String {
 }
 
 /// Format a value with consistent styling
-pub(super) fn format_field_value(value: &str, use_colors: bool) -> String {
+pub(crate) fn format_field_value(value: &str, use_colors: bool) -> String {
     if use_colors {
         style(value).white().to_string()
     } else {
@@ -296,15 +296,13 @@ pub(crate) fn display_generic_environment_suggestion(
         );
         println!(
             "   • {} to see which environments this package supports",
-            console::style("selfie package info <package>").yellow()
+            console::style("selfie spec info <package>").yellow()
         );
     } else {
         println!(
             "   • selfie package {context} --environment <env> <package> to {context} with a different environment"
         );
-        println!(
-            "   • selfie package info <package> to see which environments this package supports"
-        );
+        println!("   • selfie spec info <package> to see which environments this package supports");
     }
 }
 

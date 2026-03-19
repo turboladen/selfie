@@ -1,9 +1,6 @@
 use tracing::info;
 
-use crate::{
-    commands::report_with_style, config::CliConfig, display_manager::DisplayManager,
-    tables::ValidationTableReporter,
-};
+use crate::{config::CliConfig, display_manager::DisplayManager, tables::ValidationTableReporter};
 
 pub(crate) fn handle_validate(config: &CliConfig, display: &DisplayManager) -> i32 {
     info!("Validating configuration");
@@ -51,6 +48,14 @@ pub(crate) fn handle_validate(config: &CliConfig, display: &DisplayManager) -> i
 
         0
     }
+}
+
+fn report_with_style(
+    display: &DisplayManager,
+    param1: impl std::fmt::Display,
+    param2: impl std::fmt::Display,
+) {
+    display.print_field(param1, param2);
 }
 
 #[cfg(test)]

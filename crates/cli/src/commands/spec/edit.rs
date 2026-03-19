@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::display_manager::DisplayManager;
 
-use super::common;
+use crate::commands::common;
 
 pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &DisplayManager) -> i32 {
     info!("Editing package: {}", package_name);

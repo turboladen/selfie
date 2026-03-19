@@ -102,7 +102,7 @@ fn test_cli_package_list() {
 }
 
 #[test]
-fn test_cli_package_info() {
+fn test_cli_spec_info() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
@@ -113,7 +113,7 @@ fn test_cli_package_info() {
     add_package(&temp_dir, &package);
 
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "info", "test-package"]);
+    cmd.args(["spec", "info", "test-package"]);
     cmd.assert().success();
 }
 
@@ -156,15 +156,45 @@ fn test_cli_package_install() {
 }
 
 #[test]
-fn test_cli_package_create() {
+fn test_cli_package_status() {
     let temp_dir = setup_default_test_config();
+    let package = PackageBuilder::default()
+        .name("test-package")
+        .version("0.1.0")
+        .environment(SELFIE_ENV, |builder| {
+            builder
+                .install("echo 'hi'")
+                .check_some("echo 'package is installed'")
+        })
+        .build();
+
+    add_package(&temp_dir, &package);
+
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "create", "test-package"]);
+    cmd.args(["package", "status", "test-package"]);
     cmd.assert().success();
 }
 
 #[test]
-fn test_cli_package_validate() {
+fn test_cli_spec_create() {
+    let temp_dir = setup_default_test_config();
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["spec", "create", "test-package"]);
+    cmd.assert().success();
+}
+
+#[test]
+fn test_cli_spec_remove_not_found() {
+    let temp_dir = setup_default_test_config();
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["spec", "remove", "nonexistent-package"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_cli_spec_validate() {
     let temp_dir = setup_default_test_config();
 
     let package = PackageBuilder::default()
@@ -175,6 +205,6 @@ fn test_cli_package_validate() {
 
     add_package(&temp_dir, &package);
     let mut cmd = get_command_with_test_config(&temp_dir);
-    cmd.args(["package", "validate", "test-package"]);
+    cmd.args(["spec", "validate", "test-package"]);
     cmd.assert().success();
 }

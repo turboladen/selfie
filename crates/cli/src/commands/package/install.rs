@@ -6,7 +6,7 @@ use selfie::package::{
 use tracing::info;
 
 use crate::{
-    commands::package::common, config::CliConfig, display_manager::DisplayManager,
+    commands::common, config::CliConfig, display_manager::DisplayManager,
     event_processor::EventProcessor,
 };
 

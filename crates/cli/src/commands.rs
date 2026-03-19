@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! The dispatcher follows a hierarchical routing pattern:
-//! 1. Top-level command dispatch (package vs config)
+//! 1. Top-level command dispatch (spec, package, config)
 //! 2. Subcommand dispatch within each category
 //! 3. Individual command handler execution
 //!
@@ -19,43 +19,27 @@
 //! - 2: Validation/usage error
 //! - Other codes: Command-specific errors
 
+pub(crate) mod common;
 pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod package;
+pub(crate) mod spec;
 
-use package::{common::create_package_service, list::ListCommand};
+use common::create_package_service;
+use package::list::ListCommand;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::config::CliConfig;
 
 use crate::{
-    cli::{ClapCommands, ConfigSubcommands, PackageSubcommands},
+    cli::{ClapCommands, ConfigSubcommands, PackageSubcommands, SpecSubcommands},
     display_manager::DisplayManager,
 };
 
 use completion::generate_completion;
 
 /// Primary command dispatcher that routes to the appropriate command handler
-///
-/// This function serves as the main entry point for command execution after
-/// CLI parsing is complete. It routes commands to specialized handlers based
-/// on the command type and manages the overall execution flow.
-///
-/// # Arguments
-///
-/// * `command` - The parsed command to execute
-/// * `config` - CLI configuration with overrides applied
-/// * `display` - Display manager for user feedback
-///
-/// # Returns
-///
-/// Exit code indicating command success (0) or failure (non-zero)
-///
-/// # Command Categories
-///
-/// - **Package commands**: Install, check, list, info, create, validate packages
-/// - **Config commands**: Validate configuration files and settings
 pub(crate) async fn dispatch_command(
     command: &ClapCommands,
     config: &CliConfig,
@@ -65,6 +49,9 @@ pub(crate) async fn dispatch_command(
     debug!("Dispatching command: {:?}", command);
 
     match command {
+        ClapCommands::Spec(spec_cmd) => {
+            dispatch_spec_command(&spec_cmd.command, config, display, cancellation_token).await
+        }
         ClapCommands::Package(package_cmd) => {
             dispatch_package_command(&package_cmd.command, config, display, cancellation_token)
                 .await
@@ -74,35 +61,63 @@ pub(crate) async fn dispatch_command(
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
-            0 // Success exit code
+            0
         }
     }
 }
 
-/// Handle package management commands
+/// Handle spec (definition) commands
 ///
-/// Routes package-related subcommands to their specific handlers. All package
-/// operations use the modified configuration (with CLI overrides) and provide
-/// progress feedback through the terminal reporter.
+/// Routes spec-related subcommands to their handlers. Spec operations work
+/// with package definition files without executing system commands.
+async fn dispatch_spec_command(
+    command: &SpecSubcommands,
+    config: &CliConfig,
+    display: DisplayManager,
+    cancellation_token: CancellationToken,
+) -> i32 {
+    debug!("Handling spec command: {:?}", command);
+
+    match command {
+        SpecSubcommands::Edit { package_name } => {
+            // Edit doesn't need a service — it works directly with files
+            spec::edit::handle_edit(package_name, config, &display)
+        }
+        _ => {
+            let service = create_package_service(config, cancellation_token);
+            match command {
+                SpecSubcommands::Create {
+                    package_name,
+                    interactive,
+                } => {
+                    spec::create::handle_create(
+                        &service,
+                        package_name,
+                        config,
+                        &display,
+                        *interactive,
+                    )
+                    .await
+                }
+                SpecSubcommands::Remove { package_name } => {
+                    spec::remove::handle_remove(&service, package_name, config, &display).await
+                }
+                SpecSubcommands::Validate { package_name } => {
+                    spec::validate::handle_validate(&service, package_name, config, &display).await
+                }
+                SpecSubcommands::Info { package_name } => {
+                    spec::info::handle_info(&service, package_name, config, &display).await
+                }
+                SpecSubcommands::Edit { .. } => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Handle package (runtime) commands
 ///
-/// # Arguments
-///
-/// * `command` - The specific package subcommand to execute
-/// * `config` - Application configuration with CLI overrides applied
-/// * `display` - Display manager for user feedback
-///
-/// # Returns
-///
-/// Exit code indicating command success (0) or failure (non-zero)
-///
-/// # Supported Operations
-///
-/// - `install`: Install packages using configured installation methods
-/// - `check`: Verify if packages are already installed
-/// - `list`: Display all available packages
-/// - `info`: Show detailed package information
-/// - `create`: Create new package definition templates
-/// - `validate`: Validate package definition files
+/// Routes package-related subcommands to their handlers. Package operations
+/// execute configured commands on the system.
 async fn dispatch_package_command(
     command: &PackageSubcommands,
     config: &CliConfig,
@@ -135,45 +150,13 @@ async fn dispatch_package_command(
                 .handle_command(&service)
                 .await
         }
-        PackageSubcommands::Info { package_name } => {
-            package::info::handle_info(&service, package_name, config, &display).await
-        }
-        PackageSubcommands::Create {
-            package_name,
-            interactive,
-        } => {
-            package::create::handle_create(&service, package_name, config, &display, *interactive)
-                .await
-        }
-        PackageSubcommands::Edit { package_name } => {
-            package::edit::handle_edit(package_name, config, &display)
-        }
-        PackageSubcommands::Remove { package_name } => {
-            package::remove::handle_remove(&service, package_name, config, &display).await
-        }
-        PackageSubcommands::Validate { package_name } => {
-            package::validate::handle_validate(&service, package_name, config, &display).await
+        PackageSubcommands::Status { package_name } => {
+            package::status::handle_status(&service, package_name, config, &display).await
         }
     }
 }
 
 /// Handle configuration management commands
-///
-/// Routes configuration-related subcommands to their specific handlers.
-///
-/// # Arguments
-///
-/// * `command` - The specific config subcommand to execute
-/// * `config` - CLI configuration with overrides applied
-/// * `display` - Display manager for user feedback
-///
-/// # Returns
-///
-/// Exit code indicating command success (0) or failure (non-zero)
-///
-/// # Supported Operations
-///
-/// - `validate`: Validate the configuration file structure and values
 fn dispatch_config_command(
     command: &ConfigSubcommands,
     config: &CliConfig,
@@ -184,30 +167,4 @@ fn dispatch_config_command(
     match command {
         ConfigSubcommands::Validate => config::handle_validate(config, &display),
     }
-}
-
-/// Report a styled key-value pair to the terminal
-///
-/// Provides a consistent way to display formatted messages with visual styling.
-/// Delegates to `DisplayManager::print_field()` which displays the first parameter
-/// in italic/dim style and the second parameter in bold style.
-///
-/// # Arguments
-///
-/// * `display` - Display manager for output
-/// * `param1` - First part of the message (key, displayed italic/dim)
-/// * `param2` - Second part of the message (value, displayed bold)
-///
-/// # Example
-///
-/// ```
-/// report_with_style(&display, "Installing", "package-name");
-/// // Displays:   Installing package-name (with appropriate styling)
-/// ```
-fn report_with_style(
-    display: &DisplayManager,
-    param1: impl std::fmt::Display,
-    param2: impl std::fmt::Display,
-) {
-    display.print_field(param1, param2);
 }

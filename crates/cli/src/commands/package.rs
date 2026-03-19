@@ -1,10 +1,5 @@
 pub(crate) mod audit;
 pub(crate) mod check;
-pub(crate) mod common;
-pub(crate) mod create;
-pub(crate) mod edit;
-pub(crate) mod info;
 pub(crate) mod install;
 pub(crate) mod list;
-pub(crate) mod remove;
-pub(crate) mod validate;
+pub(crate) mod status;
