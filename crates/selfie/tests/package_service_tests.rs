@@ -142,7 +142,7 @@ async fn test_service_list_packages() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.list(false).await;
+    let stream = PackageService::list(&service, false).await;
     let events = collect_events(stream).await;
 
     // Assert
@@ -447,7 +447,7 @@ async fn test_package_list_ready_emitted_before_item_completed() {
     let _ = create_service_test_package_file(&temp_dir, "beta-pkg", true);
 
     let service = create_service_test_service(&temp_dir);
-    let mut stream = service.list(false).await;
+    let mut stream = PackageService::list(&service, false).await;
 
     let mut saw_ready = false;
     let mut saw_item_before_ready = false;

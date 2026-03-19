@@ -204,7 +204,7 @@ impl Package {
     /// * `current_env` - The current environment name to validate against
     ///
     /// All validation issues are collected and returned as a vector of `ValidationIssue`.
-    fn validate_environments_contents(&self, current_env: &str) -> Vec<ValidationIssue> {
+    pub(crate) fn validate_environments_contents(&self, current_env: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
         // Check if current environment is configured
@@ -247,7 +247,7 @@ impl Package {
     }
 
     /// Validate URL fields
-    fn validate_urls(&self) -> Vec<ValidationIssue> {
+    pub(crate) fn validate_urls(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
         // Check homepage URL if present
@@ -282,16 +282,26 @@ impl Package {
     }
     /// Basic command syntax validation that doesn't require external dependencies
     pub(crate) fn validate_command_syntax(&self) -> Vec<ValidationIssue> {
+        self.validate_command_syntax_for(self.environments.keys().map(String::as_str))
+    }
+
+    /// Validate command syntax for only the specified environments
+    pub(crate) fn validate_command_syntax_for<'a>(
+        &self,
+        env_names: impl Iterator<Item = &'a str>,
+    ) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
-        for (env_name, env_config) in &self.environments {
-            // Check install command syntax
+        for env_name in env_names {
+            let Some(env_config) = self.environments.get(env_name) else {
+                continue;
+            };
+
             issues.extend(Self::validate_single_command(
                 &env_config.install,
                 &format!("environments.{env_name}.install"),
             ));
 
-            // Check check command syntax if present
             if let Some(check_cmd) = &env_config.check {
                 issues.extend(Self::validate_single_command(
                     check_cmd,
@@ -299,7 +309,6 @@ impl Package {
                 ));
             }
 
-            // Check audit command syntax if present
             if let Some(audit_cmd) = &env_config.audit {
                 issues.extend(Self::validate_single_command(
                     audit_cmd,

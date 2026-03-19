@@ -394,6 +394,26 @@ impl EventSender {
         .await;
     }
 
+    /// Send individual spec list item data (for streaming)
+    pub(crate) async fn send_spec_list_item(&self, spec_item: SpecListItem) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::SpecListItemCompleted {
+            operation_info,
+            spec_item,
+        })
+        .await;
+    }
+
+    /// Send spec list summary data
+    pub(crate) async fn send_spec_list(&self, spec_list: SpecListData) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::SpecListLoaded {
+            operation_info,
+            spec_list,
+        })
+        .await;
+    }
+
     /// Send removal dependency info event
     pub(crate) async fn send_removal_dependency_info(
         &self,
@@ -598,6 +618,21 @@ pub enum OperationSuccess {
         file_path: std::path::PathBuf,
         environment: String,
         dependent_packages: Vec<String>,
+        steps_completed: StepCount,
+    },
+    /// Spec list generation operation completed
+    SpecListGenerated {
+        valid_count: usize,
+        invalid_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    },
+    /// Bulk spec validation operation completed
+    SpecsValidated {
+        validated_count: usize,
+        error_count: usize,
+        warning_count: usize,
+        environment: String,
         steps_completed: StepCount,
     },
     /// Generic success with just a message (for backward compatibility)
@@ -850,6 +885,37 @@ impl std::fmt::Display for OperationSuccess {
                     )
                 }
             }
+            OperationSuccess::SpecListGenerated {
+                valid_count,
+                invalid_count,
+                steps_completed,
+                ..
+            } => {
+                let status = if *invalid_count > 0 {
+                    format!("with {valid_count} valid spec(s) and {invalid_count} invalid spec(s)")
+                } else {
+                    format!("with {valid_count} valid spec(s)")
+                };
+                write!(f, "Spec listing completed {status} {steps_completed}")
+            }
+            OperationSuccess::SpecsValidated {
+                validated_count,
+                error_count,
+                warning_count,
+                steps_completed,
+                ..
+            } => {
+                let status = if *error_count > 0 {
+                    format!(
+                        "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings"
+                    )
+                } else if *warning_count > 0 {
+                    format!("{validated_count} package(s) validated, {warning_count} with warnings")
+                } else {
+                    format!("{validated_count} package(s) validated successfully")
+                };
+                write!(f, "Spec validation completed: {status} {steps_completed}")
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -1001,6 +1067,40 @@ impl OperationSuccess {
         }
     }
 
+    /// Create a `SpecsValidated` success variant
+    #[must_use]
+    pub fn specs_validated(
+        validated_count: usize,
+        error_count: usize,
+        warning_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::SpecsValidated {
+            validated_count,
+            error_count,
+            warning_count,
+            environment,
+            steps_completed,
+        }
+    }
+
+    /// Create a `SpecListGenerated` success variant
+    #[must_use]
+    pub fn spec_list_generated(
+        valid_count: usize,
+        invalid_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::SpecListGenerated {
+            valid_count,
+            invalid_count,
+            environment,
+            steps_completed,
+        }
+    }
+
     /// Create a `PackageListGenerated` success variant
     #[must_use]
     pub fn package_list_generated(
@@ -1114,7 +1214,10 @@ impl OperationSuccess {
             | OperationSuccess::PackageCreated { package_name, .. }
             | OperationSuccess::PackageUpdated { package_name, .. }
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
-            OperationSuccess::PackageListGenerated { .. } | OperationSuccess::Generic(_) => None,
+            OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::Generic(_) => None,
         }
     }
 
@@ -1129,6 +1232,8 @@ impl OperationSuccess {
             | OperationSuccess::SpecInfoRetrieved { environment, .. }
             | OperationSuccess::PackageStatusChecked { environment, .. }
             | OperationSuccess::PackageListGenerated { environment, .. }
+            | OperationSuccess::SpecListGenerated { environment, .. }
+            | OperationSuccess::SpecsValidated { environment, .. }
             | OperationSuccess::PackageCreated { environment, .. }
             | OperationSuccess::PackageUpdated { environment, .. }
             | OperationSuccess::PackageRemoved { environment, .. } => Some(environment),
@@ -1168,6 +1273,12 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::PackageRemoved {
+                steps_completed, ..
+            }
+            | OperationSuccess::SpecListGenerated {
+                steps_completed, ..
+            }
+            | OperationSuccess::SpecsValidated {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
@@ -1469,6 +1580,18 @@ pub enum PackageEvent {
         package_name: String,
         dependent_packages: Vec<String>,
     },
+
+    /// Individual spec list item completed (for streaming)
+    SpecListItemCompleted {
+        operation_info: OperationInfo,
+        spec_item: SpecListItem,
+    },
+
+    /// Spec list loaded (summary data)
+    SpecListLoaded {
+        operation_info: OperationInfo,
+        spec_list: SpecListData,
+    },
 }
 
 /// Structured data for package information
@@ -1525,6 +1648,26 @@ pub struct PackageListItem {
 pub struct InvalidPackageInfo {
     pub path: String,
     pub error: String,
+}
+
+/// Information about a spec (definition only, no runtime status)
+#[derive(Debug, Clone)]
+pub struct SpecListItem {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub environments: Vec<String>,
+}
+
+/// Structured data for spec list
+#[derive(Debug, Clone)]
+pub struct SpecListData {
+    pub specs: Vec<SpecListItem>,
+    pub invalid_packages: Vec<InvalidPackageInfo>,
+    pub current_environment: String,
+    pub package_directory: String,
+    pub environment_stats: std::collections::HashMap<String, usize>,
+    pub show_all: bool,
 }
 
 /// Structured data for check results

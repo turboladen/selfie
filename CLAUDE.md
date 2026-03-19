@@ -101,11 +101,9 @@ decide how to display information about that event to the user in the current UI
   settings (`verbose`, `use_colors`). The config file uses top-level keys for core settings and a
   `cli:` section for CLI-specific ones. Each frontend reads only its own section; the library
   ignores unknown keys.
-- CLI and MCP server commands should call `PackageService` methods, not use `PackageRepository`
-  directly. Exception: MCP bulk read-only tools (`get_all_specs`, `validate_all`) construct a
-  temporary `YamlPackageRepository` for fast file reads without running commands. Tests should
-  exercise the same service interface that production code uses, with mocked repositories injected
-  into `PackageServiceImpl`.
+- CLI and MCP server commands should call `SpecService` or `PackageService` methods, not use
+  `PackageRepository` directly. Tests should exercise the same service interface that production
+  code uses, with mocked repositories injected into `PackageServiceImpl`.
 - CLI command handlers accept `&CliConfig`, which delegates core getters to `SelfieConfig`. Pass
   `config.selfie_config()` when calling into library service methods.
 - **Event consumer tests** (e.g., `EventProcessor`) should construct `EventStream` directly via

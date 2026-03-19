@@ -19,9 +19,11 @@ mod info;
 mod install;
 mod list;
 mod remove;
+mod spec_list;
 mod steps;
 mod update;
 mod validate;
+mod validate_all;
 
 use std::{future::Future, path::PathBuf};
 
@@ -130,6 +132,12 @@ pub trait SpecService: Send + Sync {
 
     /// Get package definition info (no runtime status check)
     fn spec_info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// List all specs without checking runtime status
+    fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
+
+    /// Validate all specs for the current environment
+    fn validate_all(&self) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Port for runtime package operations (Hexagonal Architecture)
@@ -408,6 +416,30 @@ where
             move |repo, _, config, sender, mut progress, _token| async move {
                 info::handle_spec_info(&package_name_owned, &repo, &config, &sender, &mut progress)
                     .await
+            },
+        )
+    }
+
+    async fn list(&self, show_all: bool) -> EventStream {
+        self.execute_operation_with_deps(
+            OperationType::SpecList,
+            "",
+            OperationContext::default(),
+            2, // Load packages + emit items
+            move |repo, _, config, sender, mut progress, _token| async move {
+                spec_list::handle_spec_list(&repo, &config, &sender, &mut progress, show_all).await
+            },
+        )
+    }
+
+    async fn validate_all(&self) -> EventStream {
+        self.execute_operation_with_deps(
+            OperationType::SpecValidateAll,
+            "",
+            OperationContext::default(),
+            2, // Load packages + validate each
+            move |repo, _, config, sender, mut progress, _token| async move {
+                validate_all::handle_validate_all(&repo, &config, &sender, &mut progress).await
             },
         )
     }

@@ -15,4 +15,6 @@ pub enum OperationType {
     PackageUpdate,
     PackageValidate,
     SpecInfo,
+    SpecList,
+    SpecValidateAll,
 }
