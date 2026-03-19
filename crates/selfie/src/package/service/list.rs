@@ -3,7 +3,9 @@
 //!
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -81,6 +83,9 @@ where
     // Step 2: Check package status in parallel
     progress.next(sender, "Checking package status").await;
 
+    // Limit concurrent subprocess spawns to avoid exhausting file descriptors.
+    let semaphore = Arc::new(Semaphore::new(config.max_parallel_installations().get()));
+
     // Create parallel tasks for status checking with order preservation
     // Collect package names for JoinError handling (names move into spawned tasks)
     let package_names: Vec<String> = packages_to_process
@@ -106,9 +111,12 @@ where
             let command_runner = command_runner.clone();
             let sender = sender.clone();
             let token = token.clone();
+            let semaphore = semaphore.clone();
 
             tokio::spawn(async move {
                 let status = if let Some(ref cmd) = check_command {
+                    // Acquire permit before spawning a subprocess
+                    let _permit = semaphore.acquire().await;
                     let check_result = super::check::execute_check_command_quiet(
                         &package_name,
                         &current_env,
