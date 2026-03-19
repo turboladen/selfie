@@ -58,9 +58,15 @@ where
         );
     }
 
+    // Track which environments are modified so we can scope command syntax
+    // validation to only those — avoids a deadlock where pre-existing errors
+    // in untouched environments block fixes to the targeted environment.
+    let mut modified_envs: Vec<String> = Vec::new();
+
     // Apply environment-scoped fields
     if let Some(ref env_name) = fields.environment {
         if let Some(env_config) = package.environments.get_mut(env_name) {
+            modified_envs.push(env_name.clone());
             if let Some(install) = fields.install {
                 env_config.install = install;
             }
@@ -92,6 +98,7 @@ where
             );
         }
 
+        modified_envs.push(add_env.name.clone());
         package.environments.insert(
             add_env.name,
             EnvironmentConfig::new(
@@ -115,10 +122,23 @@ where
     // Step 3: Validate and save
     progress.next(sender, "Validating and saving package").await;
 
-    let validation = package.validate(config.environment());
-    if validation.issues().has_errors() {
-        let error_messages: Vec<String> = validation
-            .issues()
+    // Validate top-level fields (name, version, URLs, env existence) globally
+    let mut all_issues = Vec::new();
+    all_issues.extend(package.validate_required_fields());
+    all_issues.extend(package.validate_urls());
+    all_issues.extend(package.validate_environments_contents(config.environment()));
+
+    // Validate command syntax only for environments we actually touched
+    if modified_envs.is_empty() {
+        // No env-scoped changes — skip command syntax validation entirely
+    } else {
+        all_issues
+            .extend(package.validate_command_syntax_for(modified_envs.iter().map(String::as_str)));
+    }
+
+    let issues: crate::validation::ValidationIssues = all_issues.into();
+    if issues.has_errors() {
+        let error_messages: Vec<String> = issues
             .errors()
             .iter()
             .map(|i| format!("{}: {}", i.field(), i.message()))
@@ -441,5 +461,57 @@ mod tests {
         .await;
 
         assert!(matches!(result, OperationResult::Failure(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_env_with_error_in_other_env_succeeds() {
+        // Regression: fixing one environment should not be blocked by
+        // pre-existing errors in a different environment.
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+
+        // Package where both envs have unmatched single quotes
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .version("1.0.0")
+            .environment("test-env", |b| b.install("echo it's broken"))
+            .environment("other-env", |b| b.install("echo it's also broken"))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+
+        mock_repo.expect_save_package().returning(|pkg, _| {
+            let env = pkg.environments().get("test-env").unwrap();
+            assert_eq!(env.install(), "echo fixed");
+            Ok(())
+        });
+
+        let fields = PackageUpdateFields {
+            install: Some("echo fixed".to_string()),
+            environment: Some("test-env".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "Fixing test-env should succeed even though other-env still has errors"
+        );
     }
 }
