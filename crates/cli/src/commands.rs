@@ -105,11 +105,10 @@ async fn dispatch_spec_command(
                 SpecSubcommands::Validate { package_name, all } => {
                     if *all {
                         spec::validate::handle_validate_all(&service, config, &display).await
-                    } else if let Some(name) = package_name {
-                        spec::validate::handle_validate(&service, name, config, &display).await
                     } else {
-                        display.print_error("Package name is required unless --all is used.");
-                        1
+                        // clap enforces: package_name is required unless --all
+                        let name = package_name.as_ref().unwrap();
+                        spec::validate::handle_validate(&service, name, config, &display).await
                     }
                 }
                 SpecSubcommands::List { all } => {
@@ -148,11 +147,10 @@ async fn dispatch_package_command(
         PackageSubcommands::Audit { package_name, all } => {
             if *all {
                 package::audit::handle_audit_all(&service, config, &display).await
-            } else if let Some(name) = package_name {
-                package::audit::handle_audit(&service, name, config, &display).await
             } else {
-                display.print_error("Package name is required unless --all is used.");
-                1
+                // clap enforces: package_name is required unless --all
+                let name = package_name.as_ref().unwrap();
+                package::audit::handle_audit(&service, name, config, &display).await
             }
         }
         PackageSubcommands::List { all } => {
