@@ -270,7 +270,7 @@ pub(crate) fn display_environment_summary(
 
         if config.use_colors() {
             display.print_suggestion(format!(
-                "Try: {} with one of the environments above",
+                "{} with one of the environments above",
                 console::style(format!(
                     "selfie package {context} --environment <env> <package>"
                 ))
@@ -278,7 +278,7 @@ pub(crate) fn display_environment_summary(
             ));
         } else {
             display.print_suggestion(format!(
-                "Try: selfie package {context} --environment <env> <package> with one of the environments above"
+                "selfie package {context} --environment <env> <package> with one of the environments above"
             ));
         }
     }

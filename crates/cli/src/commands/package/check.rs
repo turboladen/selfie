@@ -113,13 +113,14 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
-            // Show error output
+            // Not installed — use warning (not error) to match verbose mode's
+            // "Not installed" severity and keep output on stdout
             if !stderr.is_empty() {
-                display.print_error(format!("Check failed: {}", stderr.trim()));
+                display.print_warning(format!("Check failed: {}", stderr.trim()));
             } else if !stdout.is_empty() {
-                display.print_error(format!("Check failed: {}", stdout.trim()));
+                display.print_warning(format!("Check failed: {}", stdout.trim()));
             } else {
-                display.print_error("Check failed with no output");
+                display.print_warning("Check failed with no output");
             }
         }
         _ => {

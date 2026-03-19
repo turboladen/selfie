@@ -292,7 +292,7 @@ fn display_audit_result_card(
             format!(
                 "{}{}",
                 format_key_fn("Status"),
-                status_style::format_no_check(use_colors)
+                status_style::format_no_audit(use_colors)
             )
         }
         AuditResult::Error(err) => {

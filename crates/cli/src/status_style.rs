@@ -57,7 +57,12 @@ pub(crate) fn format_audit_clean(use_colors: bool) -> String {
 
 /// Format a "conflicts detected" audit status indicator
 pub(crate) fn format_audit_conflicts(use_colors: bool) -> String {
-    format_status_indicator("⚠", "Conflicts Detected", use_colors, |s| s.red())
+    format_status_indicator("⚠", "Conflicts Detected", use_colors, |s| s.yellow())
+}
+
+/// Format a "no audit command" status indicator
+pub(crate) fn format_no_audit(use_colors: bool) -> String {
+    format_status_indicator("⚠", "No audit command", use_colors, |s| s.yellow())
 }
 
 /// Format a check result as plain text status (no emoji prefix).
@@ -161,6 +166,13 @@ mod tests {
     }
 
     #[test]
+    fn test_format_no_audit() {
+        let result = format_no_audit(false);
+        assert!(result.contains("No audit command"));
+        assert!(result.contains("⚠"));
+    }
+
+    #[test]
     fn test_all_formats_no_ansi_without_colors() {
         // Verify no ANSI escape codes when colors disabled
         let formats = vec![
@@ -168,6 +180,7 @@ mod tests {
             format_valid(false),
             format_not_installed(false),
             format_no_check(false),
+            format_no_audit(false),
             format_cmd_not_found(false),
             format_status_error(false),
             format_audit_clean(false),
