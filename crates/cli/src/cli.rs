@@ -184,6 +184,7 @@ pub(crate) enum SpecSubcommands {
     /// Example: `selfie spec validate --all`
     Validate {
         /// Name of the package to validate (required unless --all is used)
+        #[arg(conflicts_with = "all", required_unless_present = "all")]
         package_name: Option<String>,
 
         /// Validate all packages for the current environment
@@ -274,6 +275,7 @@ pub(crate) enum PackageSubcommands {
     /// Example: `selfie package audit --all`
     Audit {
         /// Name of the package to audit (required unless --all is used)
+        #[arg(conflicts_with = "all", required_unless_present = "all")]
         package_name: Option<String>,
 
         /// Audit all packages for the current environment
