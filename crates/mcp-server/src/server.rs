@@ -13,7 +13,7 @@ use selfie::{
     config::SelfieConfig,
     fs::RealFileSystem,
     package::{
-        EnvironmentConfig, Package, PackageService, event::PackageUpdateFields,
+        EnvironmentConfig, Package, PackageService, SpecService, event::PackageUpdateFields,
         port::PackageRepository, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
@@ -169,7 +169,7 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<PackageNameParam>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = self.service.info(&params.package).await;
+        let stream = self.service.spec_info(&params.package).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }

@@ -23,7 +23,7 @@ use test_common::{
 
 use selfie::package::{
     event::{OperationResult, PackageEvent},
-    service::PackageService,
+    service::{PackageService, SpecService},
 };
 
 fn create_test_package_file(dir: &TempDir, name: &str, has_check: bool) -> std::path::PathBuf {
@@ -180,17 +180,17 @@ async fn test_service_list_packages() {
     }
 }
 
-/// Test the info service with a real package file
-/// This verifies that package information is correctly extracted and environment status is checked
+/// Test the spec_info service with a real package file
+/// This verifies that package definition info is correctly extracted
 #[tokio::test]
-async fn test_service_info_package() {
+async fn test_service_spec_info_package() {
     // Arrange
     let temp_dir = TempDir::new().unwrap();
     create_test_package_file(&temp_dir, "info-package", true);
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.info("info-package").await;
+    let stream = service.spec_info("info-package").await;
     let events = collect_events(stream).await;
 
     // Assert
@@ -216,15 +216,15 @@ async fn test_service_info_package() {
         panic!("Expected PackageInfoLoaded event");
     }
 
-    // Should have environment status events
+    // spec_info does NOT check environment status — no EnvironmentStatusChecked events
     let env_status_events: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, PackageEvent::EnvironmentStatusChecked { .. }))
         .collect();
     assert_eq!(
         env_status_events.len(),
-        1,
-        "Should have environment status event for test environment"
+        0,
+        "spec_info should not emit environment status events"
     );
 }
 

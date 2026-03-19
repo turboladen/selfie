@@ -2,7 +2,7 @@ use comfy_table::Table;
 use console::style;
 use selfie::package::{
     event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
-    service::PackageService,
+    service::SpecService,
 };
 
 use crate::{
@@ -13,18 +13,18 @@ use crate::{
 use super::common;
 
 pub(crate) async fn handle_info(
-    service: &impl PackageService,
+    service: &impl SpecService,
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> i32 {
-    tracing::debug!("Finding package info for: {package_name}");
+    tracing::debug!("Getting package definition for: {package_name}");
 
     // Status message:
     display.print_progress(format!("Getting info for {package_name}..."));
 
-    // Call the service's info method to get an event stream
-    let event_stream = service.info(package_name).await;
+    // Call the service's spec_info method to get an event stream
+    let event_stream = service.spec_info(package_name).await;
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(display.clone());

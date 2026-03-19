@@ -560,8 +560,14 @@ pub enum OperationSuccess {
         warning_count: Option<usize>,
         steps_completed: StepCount,
     },
-    /// Package info retrieval operation completed
-    PackageInfoRetrieved {
+    /// Spec info retrieval operation completed (definition only, no runtime check)
+    SpecInfoRetrieved {
+        package_name: String,
+        environment: String,
+        steps_completed: StepCount,
+    },
+    /// Package status check operation completed (install status only)
+    PackageStatusChecked {
         package_name: String,
         environment: String,
         steps_completed: StepCount,
@@ -773,13 +779,21 @@ impl std::fmt::Display for OperationSuccess {
                     "Package '{package_name}' validation completed {status_msg} {steps_completed}"
                 )
             }
-            OperationSuccess::PackageInfoRetrieved {
+            OperationSuccess::SpecInfoRetrieved {
                 package_name,
                 steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' information retrieved successfully {steps_completed}"
+                "Package '{package_name}' spec info retrieved successfully {steps_completed}"
+            ),
+            OperationSuccess::PackageStatusChecked {
+                package_name,
+                steps_completed,
+                ..
+            } => write!(
+                f,
+                "Package '{package_name}' status checked successfully {steps_completed}"
             ),
             OperationSuccess::PackageListGenerated {
                 valid_count,
@@ -959,14 +973,28 @@ impl OperationSuccess {
         }
     }
 
-    /// Create a `PackageInfoRetrieved` success variant
+    /// Create a `SpecInfoRetrieved` success variant
     #[must_use]
-    pub fn package_info_retrieved(
+    pub fn spec_info_retrieved(
         package_name: String,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
-        OperationSuccess::PackageInfoRetrieved {
+        OperationSuccess::SpecInfoRetrieved {
+            package_name,
+            environment,
+            steps_completed,
+        }
+    }
+
+    /// Create a `PackageStatusChecked` success variant
+    #[must_use]
+    pub fn package_status_checked(
+        package_name: String,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::PackageStatusChecked {
             package_name,
             environment,
             steps_completed,
@@ -1081,7 +1109,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageAudited { package_name, .. }
             | OperationSuccess::PackageInstalled { package_name, .. }
             | OperationSuccess::PackageValidated { package_name, .. }
-            | OperationSuccess::PackageInfoRetrieved { package_name, .. }
+            | OperationSuccess::SpecInfoRetrieved { package_name, .. }
+            | OperationSuccess::PackageStatusChecked { package_name, .. }
             | OperationSuccess::PackageCreated { package_name, .. }
             | OperationSuccess::PackageUpdated { package_name, .. }
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
@@ -1097,7 +1126,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageAudited { environment, .. }
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
-            | OperationSuccess::PackageInfoRetrieved { environment, .. }
+            | OperationSuccess::SpecInfoRetrieved { environment, .. }
+            | OperationSuccess::PackageStatusChecked { environment, .. }
             | OperationSuccess::PackageListGenerated { environment, .. }
             | OperationSuccess::PackageCreated { environment, .. }
             | OperationSuccess::PackageUpdated { environment, .. }
@@ -1122,7 +1152,10 @@ impl OperationSuccess {
             | OperationSuccess::PackageValidated {
                 steps_completed, ..
             }
-            | OperationSuccess::PackageInfoRetrieved {
+            | OperationSuccess::SpecInfoRetrieved {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackageStatusChecked {
                 steps_completed, ..
             }
             | OperationSuccess::PackageListGenerated {

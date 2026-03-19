@@ -1,5 +1,10 @@
 //!
-//! Helps break down the pieces of running the `package info` command.
+//! Helpers for spec info and package status operations.
+//!
+//! `handle_spec_info` — loads the package definition and emits `PackageInfoLoaded` (no runtime
+//! commands).
+//!
+//! `handle_status` — loads the package and checks installation status for the current environment.
 //!
 
 use tokio_util::sync::CancellationToken;
@@ -17,18 +22,17 @@ use crate::{
     },
 };
 
-pub(super) async fn handle_info<PR, CR>(
+/// Spec-only info: load package definition and emit `PackageInfoLoaded`.
+/// Does NOT execute any commands or check installation status.
+pub(super) async fn handle_spec_info<PR>(
     package_name: &str,
     repo: &PR,
     config: &SelfieConfig,
-    command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-    token: &CancellationToken,
 ) -> OperationResult
 where
     PR: PackageRepository,
-    CR: CommandRunner,
 {
     // Step 1: Fetch package
     progress.next(sender, "Loading package definition").await;
@@ -70,7 +74,47 @@ where
 
     sender.send_package_info(package_info).await;
 
-    // Step 3: Send environment status data
+    sender
+        .send_debug(format!("Spec info retrieved for: {package_name}"))
+        .await;
+
+    OperationResult::Success(OperationSuccess::spec_info_retrieved(
+        package_name.to_string(),
+        config.environment().to_string(),
+        (progress.current_step(), progress.total_steps()).into(),
+    ))
+}
+
+/// Runtime status: load package and check installation status for the current environment.
+pub(super) async fn handle_status<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
+) -> OperationResult
+where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    // Step 1: Fetch package
+    progress.next(sender, "Loading package definition").await;
+
+    let package_blob = match repo.get_package(package_name) {
+        Ok(pkg) => {
+            sender
+                .send_debug(format!("Successfully loaded package: {package_name}"))
+                .await;
+            pkg
+        }
+        Err(err) => {
+            return OperationResult::Failure(err.into());
+        }
+    };
+
+    // Step 2: Check installation status for environments
     progress
         .next(sender, "Checking installation status for environments")
         .await;
@@ -82,9 +126,9 @@ where
         let b_is_current = b.0 == config.environment();
 
         match (a_is_current, b_is_current) {
-            (true, false) => std::cmp::Ordering::Less, // a comes first
-            (false, true) => std::cmp::Ordering::Greater, // b comes first
-            _ => a.0.cmp(b.0),                         // alphabetical order
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(b.0),
         }
     });
 
@@ -108,12 +152,11 @@ where
         sender.send_environment_status(environment_status).await;
     }
 
-    // Send success message
     sender
-        .send_debug(format!("Package information retrieved for: {package_name}"))
+        .send_debug(format!("Package status checked for: {package_name}"))
         .await;
 
-    OperationResult::Success(OperationSuccess::package_info_retrieved(
+    OperationResult::Success(OperationSuccess::package_status_checked(
         package_name.to_string(),
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
@@ -125,9 +168,7 @@ async fn get_installation_status(
     command_runner: &impl CommandRunner,
     token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
-    // Only run check for current environment
     if let Some(check_cmd) = env_config.check() {
-        // Run the check command asynchronously
         if let Ok(output) = command_runner.execute(check_cmd, token).await {
             if output.is_success() {
                 Some(EnvironmentStatus::Installed)
@@ -135,11 +176,9 @@ async fn get_installation_status(
                 Some(EnvironmentStatus::NotInstalled)
             }
         } else {
-            // Error executing check command
             Some(EnvironmentStatus::Unknown("check failed".to_string()))
         }
     } else {
-        // No check command available
         Some(EnvironmentStatus::Unknown("no check command".to_string()))
     }
 }

@@ -1,6 +1,6 @@
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::package::{
-    EnvironmentConfig, PackageService,
+    EnvironmentConfig, SpecService,
     event::{OperationResult, OperationSuccess, PackageEvent},
     port::PackageRepository,
 };
@@ -20,7 +20,7 @@ enum PackageNameResult {
 }
 
 pub(crate) async fn handle_create(
-    service: &impl PackageService,
+    service: &impl SpecService,
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
@@ -432,7 +432,7 @@ fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<Stri
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use selfie::package::PackageService;
+    use selfie::package::SpecService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};
     use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;

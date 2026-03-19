@@ -2,7 +2,7 @@ use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
     event::{OperationResult, PackageEvent},
     port::PackageRepository,
-    service::PackageService,
+    service::SpecService,
 };
 
 use crate::config::CliConfig;
@@ -13,7 +13,7 @@ use tracing::info;
 use super::common;
 
 pub(crate) async fn handle_remove(
-    service: &impl PackageService,
+    service: &impl SpecService,
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,

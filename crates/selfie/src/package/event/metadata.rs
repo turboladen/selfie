@@ -8,10 +8,11 @@ pub enum OperationType {
     PackageAudit,
     PackageCheck,
     PackageCreate,
-    PackageInfo,
     PackageInstall,
     PackageList,
     PackageRemove,
+    PackageStatus,
     PackageUpdate,
     PackageValidate,
+    SpecInfo,
 }

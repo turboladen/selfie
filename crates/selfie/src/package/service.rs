@@ -1,12 +1,15 @@
 //! Package service implementation and core business logic
 //!
 //! This module provides the main service layer for package operations in the selfie library.
-//! It implements the hexagonal architecture pattern with the `PackageService` trait as the
-//! primary port for package management operations.
+//! It implements the hexagonal architecture pattern with two primary ports:
 //!
-//! The service handles all package lifecycle operations including installation, checking,
-//! validation, and information retrieval. It coordinates between the package repository,
-//! command execution, and event streaming to provide a complete package management experience.
+//! - [`SpecService`] — file/definition operations (create, validate, update, remove, spec_info)
+//!   that work with package YAML files but never execute commands.
+//! - [`PackageService`] — runtime operations (check, audit, install, list, status) that may
+//!   execute system commands via [`CommandRunner`](crate::commands::runner::CommandRunner).
+//!
+//! Both traits are implemented by [`PackageServiceImpl`], which coordinates between the package
+//! repository, command runner, and event streaming.
 
 mod audit;
 mod check;
@@ -98,141 +101,22 @@ impl ProgressTracker {
     }
 }
 
-/// Primary port for package operations (Hexagonal Architecture)
+/// Port for package definition (spec/file) operations (Hexagonal Architecture)
 ///
-/// This trait defines the main interface for all package management operations
-/// in the selfie library. It abstracts the business logic from UI concerns by
-/// providing an event-driven interface that streams operation progress and results.
-///
-/// All operations return an `EventStream` that allows real-time monitoring of
-/// progress, errors, and results. This enables different UI implementations
-/// (CLI, GUI, etc.) to provide appropriate user feedback.
+/// This trait defines the interface for operations on package definition files:
+/// creating, validating, updating, removing, and retrieving spec info. These
+/// operations do not run commands or check installation status.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
-pub trait PackageService: Send + Sync {
-    /// Check if a package is already installed
-    ///
-    /// Runs the package's configured check command to determine if it's already
-    /// installed in the current environment. This is useful before attempting
-    /// installation to avoid unnecessary work.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to check
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit progress events and the final check result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    fn check(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
-
-    /// Audit a package's installation sources and detect conflicts
-    fn audit(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
-
-    /// Audit all packages' installation sources and detect conflicts
-    fn audit_all(&self) -> impl Future<Output = EventStream> + Send;
-
-    /// Install a package using its configured installation method
-    ///
-    /// Executes the package's installation command for the current environment.
-    /// This includes dependency resolution, command validation, and installation
-    /// execution with progress tracking.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to install
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit progress events and the final installation result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site,
-    /// however, errors may be emitted through the event stream.
-    fn install(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
-
-    /// Get detailed information about a package
-    ///
-    /// Retrieves comprehensive information about a package including its
-    /// configuration, available environments, dependencies, and current
-    /// installation status.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to get information about
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit package information events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    fn info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+pub trait SpecService: Send + Sync {
+    /// Create a new package definition file
+    fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
 
     /// Validate a package definition file
-    ///
-    /// Performs comprehensive validation of a package definition including
-    /// schema validation, environment configuration checks, and command
-    /// syntax verification.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to validate
-    /// * `package_path` - Optional explicit path to the package file
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit validation results and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
     fn validate(
         &self,
         package_name: &str,
         package_path: Option<PathBuf>,
     ) -> impl Future<Output = EventStream> + Send;
-
-    /// List all available packages in the package directory
-    ///
-    /// Discovers and lists all package definition files in the configured
-    /// package directory, providing basic information about each package.
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit package list events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
-
-    /// Create a new package definition file
-    ///
-    /// Saves the provided package to the repository if no package with
-    /// the same name already exists.
-    ///
-    /// # Arguments
-    ///
-    /// * `package` - The fully constructed package to create
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit creation progress events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    fn create(&self, package: super::Package) -> impl Future<Output = EventStream> + Send;
 
     /// Update a package's fields
     fn update(
@@ -243,6 +127,35 @@ pub trait PackageService: Send + Sync {
 
     /// Remove a package from the repository
     fn remove(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// Get package definition info (no runtime status check)
+    fn spec_info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+}
+
+/// Port for runtime package operations (Hexagonal Architecture)
+///
+/// This trait defines the interface for operations that interact with the system
+/// at runtime: checking installation status, installing packages, auditing, and
+/// listing. These operations may execute commands.
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
+pub trait PackageService: Send + Sync {
+    /// Check if a package is already installed
+    fn check(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// Audit a package's installation sources and detect conflicts
+    fn audit(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// Audit all packages' installation sources and detect conflicts
+    fn audit_all(&self) -> impl Future<Output = EventStream> + Send;
+
+    /// Install a package using its configured installation method
+    fn install(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// List all available packages in the package directory
+    fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
+
+    /// Check installation status for a package in the current environment
+    fn status(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 }
 
 /// Concrete implementation of the `PackageService` trait
@@ -400,32 +313,111 @@ where
     }
 }
 
+impl<R, CR> SpecService for PackageServiceImpl<R, CR>
+where
+    R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
+    CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    #[instrument]
+    async fn create(&self, package: super::Package) -> EventStream {
+        let package_name = package.name().to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageCreate,
+            &package_name,
+            OperationContext::default(),
+            2, // Check existence + save
+            move |repo, _, config, sender, mut progress, _token| async move {
+                create::handle_create(package, &repo, &config, &sender, &mut progress).await
+            },
+        )
+    }
+
+    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream {
+        let context = OperationContext {
+            package_path,
+            target_environment: None,
+        };
+
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageValidate,
+            package_name,
+            context,
+            3, // load_package + validate_package + result processing
+            move |repo, _, config, sender, mut progress, _token| async move {
+                validate::handle_validate(
+                    &package_name_owned,
+                    &repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn update(
+        &self,
+        package_name: &str,
+        fields: super::event::PackageUpdateFields,
+    ) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageUpdate,
+            package_name,
+            OperationContext::default(),
+            3, // Load + apply changes + save
+            move |repo, _, config, sender, mut progress, _token| async move {
+                update::handle_update(
+                    &package_name_owned,
+                    fields,
+                    &repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
+            },
+        )
+    }
+
+    #[instrument]
+    async fn remove(&self, package_name: &str) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageRemove,
+            package_name,
+            OperationContext::default(),
+            3, // Load + check dependents + remove
+            move |repo, _, config, sender, mut progress, _token| async move {
+                remove::handle_remove(&package_name_owned, &repo, &config, &sender, &mut progress)
+                    .await
+            },
+        )
+    }
+
+    async fn spec_info(&self, package_name: &str) -> EventStream {
+        let package_name_owned = package_name.to_string();
+        self.execute_operation_with_deps(
+            OperationType::SpecInfo,
+            package_name,
+            OperationContext::default(),
+            2, // Load package + gather info
+            move |repo, _, config, sender, mut progress, _token| async move {
+                info::handle_spec_info(&package_name_owned, &repo, &config, &sender, &mut progress)
+                    .await
+            },
+        )
+    }
+}
+
 impl<R, CR> PackageService for PackageServiceImpl<R, CR>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    /// Check if a package is already installed
-    ///
-    /// Runs the package's configured check command to determine installation status.
-    /// This operation loads the package definition, validates the environment
-    /// configuration, and executes the check command if available.
-    ///
-    /// The check operation consists of:
-    /// 1. Loading the package definition from the repository
-    /// 2. Validating the current environment configuration
-    /// 3. Executing the package's check command (if configured)
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to check
-    ///
-    /// # Returns
-    ///
-    /// An event stream that emits:
-    /// - Progress events for each step
-    /// - Success/failure result with installation status
-    /// - Error events if the operation fails
     #[instrument]
     async fn check(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
@@ -493,29 +485,6 @@ where
         )
     }
 
-    /// Install a package using its configured installation method
-    ///
-    /// Executes the complete package installation process including dependency
-    /// resolution, environment validation, and command execution. This operation
-    /// will check if the package is already installed before proceeding.
-    ///
-    /// The installation operation consists of:
-    /// 1. Loading the package definition from the repository
-    /// 2. Validating the current environment configuration
-    /// 3. Resolving and checking dependencies
-    /// 4. Executing the package's installation command
-    /// 5. Verifying the installation was successful
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to install
-    ///
-    /// # Returns
-    ///
-    /// An event stream that emits:
-    /// - Progress events for each installation step
-    /// - Success/failure result with installation details
-    /// - Error events if the installation fails
     #[instrument]
     async fn install(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
@@ -539,78 +508,10 @@ where
         )
     }
 
-    /// Validate a package definition file
-    ///
-    /// Performs comprehensive validation of a package definition including
-    /// schema validation, environment configuration checks, command syntax
-    /// verification, and dependency validation.
-    ///
-    /// The validation operation consists of:
-    /// 1. Loading the package definition (from path or repository)
-    /// 2. Validating the package schema and required fields
-    /// 3. Checking environment configurations and commands
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to validate
-    /// * `package_path` - Optional explicit path to the package file
-    ///
-    /// # Returns
-    ///
-    /// An event stream with validation results including any issues found
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    async fn validate(&self, package_name: &str, package_path: Option<PathBuf>) -> EventStream {
-        let context = OperationContext {
-            package_path,
-            target_environment: None,
-        };
-
-        let package_name_owned = package_name.to_string();
-        self.execute_operation_with_deps(
-            OperationType::PackageValidate,
-            package_name,
-            context,
-            3, // load_package + validate_package + result processing
-            move |repo, _, config, sender, mut progress, _token| async move {
-                validate::handle_validate(
-                    &package_name_owned,
-                    &repo,
-                    &config,
-                    &sender,
-                    &mut progress,
-                )
-                .await
-            },
-        )
-    }
-
-    /// List all available packages in the package directory
-    ///
-    /// Discovers and lists all package definition files in the configured
-    /// package directory. For each package, provides basic information
-    /// including name, version, description, and available environments.
-    ///
-    /// The list operation consists of:
-    /// 1. Scanning the package directory for definition files
-    /// 2. Loading and parsing each package definition
-    /// 3. Collecting package metadata and status information
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit package list events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
     async fn list(&self, show_all: bool) -> EventStream {
         self.execute_operation_with_deps(
             OperationType::PackageList,
-            "", // No specific package for list operation
+            "",
             OperationContext::default(),
             2, // Load packages + check status
             move |repo, command_runner, config, sender, mut progress, token| async move {
@@ -628,39 +529,15 @@ where
         )
     }
 
-    /// Get detailed information about a package
-    ///
-    /// Retrieves comprehensive information about a package including its
-    /// configuration, available environments, dependencies, installation
-    /// status, and command details. This is useful for troubleshooting
-    /// and understanding package configurations.
-    ///
-    /// The info operation consists of:
-    /// 1. Loading the package definition from the repository
-    /// 2. Gathering package metadata and configuration details
-    /// 3. Checking current installation status (if check command available)
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to get information about
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit package information events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    async fn info(&self, package_name: &str) -> EventStream {
+    async fn status(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
         self.execute_operation_with_deps(
-            OperationType::PackageInfo,
+            OperationType::PackageStatus,
             package_name,
             OperationContext::default(),
-            3, // Load package + gather info + check status
+            2, // Load package + check status
             move |repo, command_runner, config, sender, mut progress, token| async move {
-                info::handle_info(
+                info::handle_status(
                     &package_name_owned,
                     &repo,
                     &config,
@@ -670,83 +547,6 @@ where
                     &token,
                 )
                 .await
-            },
-        )
-    }
-
-    /// Create a new package definition file
-    ///
-    /// Saves the provided package to the repository if no package with
-    /// the same name already exists. The operation checks for existing
-    /// packages and writes the new definition file.
-    ///
-    /// The create operation consists of:
-    /// 1. Checking if a package with the same name already exists
-    /// 2. Saving the package definition to the repository
-    ///
-    /// # Arguments
-    ///
-    /// * `package` - The fully constructed package to create
-    ///
-    /// # Returns
-    ///
-    /// An event stream that will emit creation progress events and the final result
-    ///
-    /// # Errors
-    ///
-    /// This method returns an `EventStream` directly and cannot fail at the call site.
-    /// However, errors may be emitted through the event stream.
-    #[instrument]
-    async fn create(&self, package: super::Package) -> EventStream {
-        let package_name = package.name().to_string();
-        self.execute_operation_with_deps(
-            OperationType::PackageCreate,
-            &package_name,
-            OperationContext::default(),
-            2, // Check existence + save
-            move |repo, _, config, sender, mut progress, _token| async move {
-                create::handle_create(package, &repo, &config, &sender, &mut progress).await
-            },
-        )
-    }
-
-    #[instrument]
-    async fn update(
-        &self,
-        package_name: &str,
-        fields: super::event::PackageUpdateFields,
-    ) -> EventStream {
-        let package_name_owned = package_name.to_string();
-        self.execute_operation_with_deps(
-            OperationType::PackageUpdate,
-            package_name,
-            OperationContext::default(),
-            3, // Load + apply changes + save
-            move |repo, _, config, sender, mut progress, _token| async move {
-                update::handle_update(
-                    &package_name_owned,
-                    fields,
-                    &repo,
-                    &config,
-                    &sender,
-                    &mut progress,
-                )
-                .await
-            },
-        )
-    }
-
-    #[instrument]
-    async fn remove(&self, package_name: &str) -> EventStream {
-        let package_name_owned = package_name.to_string();
-        self.execute_operation_with_deps(
-            OperationType::PackageRemove,
-            package_name,
-            OperationContext::default(),
-            3, // Load + check dependents + remove
-            move |repo, _, config, sender, mut progress, _token| async move {
-                remove::handle_remove(&package_name_owned, &repo, &config, &sender, &mut progress)
-                    .await
             },
         )
     }

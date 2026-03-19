@@ -10,7 +10,7 @@ use selfie::{
     commands::ShellCommandRunner,
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
-        GetPackage,
+        GetPackage, SpecService,
         port::PackageRepository,
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
@@ -141,7 +141,7 @@ pub(super) fn create_new_package(package_name: &str, config: &CliConfig) -> GetP
 pub(crate) fn create_package_service(
     config: &CliConfig,
     cancellation_token: CancellationToken,
-) -> impl PackageService {
+) -> impl PackageService + SpecService {
     let repo = create_package_repository(config);
     let command_runner = ShellCommandRunner::new(
         ShellCommandRunner::default_shell(),

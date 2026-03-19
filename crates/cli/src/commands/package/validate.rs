@@ -2,7 +2,7 @@ use comfy_table::{ContentArrangement, Table, modifiers, presets};
 use console::style;
 use selfie::package::{
     event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
-    service::PackageService,
+    service::SpecService,
 };
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(crate) async fn handle_validate(
-    service: &impl PackageService,
+    service: &impl SpecService,
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
