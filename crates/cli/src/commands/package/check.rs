@@ -25,6 +25,7 @@ pub(crate) async fn handle_check(
 
     // Track whether we handled an environment error in the Completed arm
     let mut env_error_handled = false;
+    let verbose = config.verbose();
 
     // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(display.clone());
@@ -32,21 +33,25 @@ pub(crate) async fn handle_check(
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::CheckResultCompleted { check_result, .. } => {
-                    if config.verbose() {
-                        display_check_result_card(check_result, config);
+                    if verbose {
+                        display_check_result_card(check_result, config, display);
                     } else {
-                        display_check_output_only(check_result, config);
+                        display_check_output_only(check_result, display);
                     }
                     true // Handled
                 }
                 PackageEvent::Progress { .. } => {
-                    true // Handled
+                    if verbose {
+                        false // Use default progress handling
+                    } else {
+                        true // Suppress in non-verbose mode
+                    }
                 }
                 PackageEvent::Completed { result, .. } => {
                     if let OperationResult::Failure(failure) = result
                         && failure.is_environment_error()
                     {
-                        display_environment_error(package_name, failure, config);
+                        display_environment_error(package_name, failure, config, display);
                         env_error_handled = true;
                         return true; // Handled
                     }
@@ -65,8 +70,13 @@ pub(crate) async fn handle_check(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
-fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
-    println!();
+fn display_environment_error(
+    package_name: &str,
+    failure: &OperationFailure,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,
@@ -78,6 +88,7 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
             config.environment(),
             available_environments,
             config,
+            display,
             "check",
         );
     } else {
@@ -85,29 +96,30 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
             package_name,
             config.environment(),
             config,
+            display,
             "check",
         );
     }
 }
 
-fn display_check_output_only(check_result: &CheckResultData, _config: &CliConfig) {
+fn display_check_output_only(check_result: &CheckResultData, display: &DisplayManager) {
     match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
             // Show stdout output if present
             if !stdout.trim().is_empty() {
-                println!("📋 Check output: {}", stdout.trim());
+                display.print_info(format!("Check output: {}", stdout.trim()));
             } else if !stderr.trim().is_empty() {
-                println!("📋 Check output: {}", stderr.trim());
+                display.print_info(format!("Check output: {}", stderr.trim()));
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
             // Show error output
             if !stderr.is_empty() {
-                println!("⚠️ Check failed: {}", stderr.trim());
+                display.print_error(format!("Check failed: {}", stderr.trim()));
             } else if !stdout.is_empty() {
-                println!("⚠️ Check failed: {}", stdout.trim());
+                display.print_error(format!("Check failed: {}", stdout.trim()));
             } else {
-                println!("⚠️ Check failed with no output");
+                display.print_error("Check failed with no output");
             }
         }
         _ => {
@@ -116,22 +128,30 @@ fn display_check_output_only(check_result: &CheckResultData, _config: &CliConfig
     }
 }
 
-fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig) {
-    println!();
-    println!("📋 Check Results:");
+fn display_check_result_card(
+    check_result: &CheckResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
+    display.print_section_header("Check Results");
 
     let format_key_fn =
         |field: &str| -> String { format!("   {}: ", format_key(field, config.use_colors())) };
 
-    println!("{}{}", format_key_fn("Package"), check_result.package_name);
-    println!(
+    display.println(format!(
+        "{}{}",
+        format_key_fn("Package"),
+        check_result.package_name
+    ));
+    display.println(format!(
         "{}{}",
         format_key_fn("Environment"),
         check_result.environment
-    );
+    ));
 
     if let Some(cmd) = &check_result.check_command {
-        println!("{}{}", format_key_fn("Command"), cmd);
+        display.println(format!("{}{}", format_key_fn("Command"), cmd));
     }
 
     let use_colors = config.use_colors();
@@ -221,5 +241,5 @@ fn display_check_result_card(check_result: &CheckResultData, config: &CliConfig)
         }
     };
 
-    println!("{status_line}");
+    display.println(status_line);
 }

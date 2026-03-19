@@ -24,15 +24,21 @@ pub(crate) async fn handle_list(
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| handle_spec_list_event(event, config))
+        .process_events(event_stream, |event| {
+            handle_spec_list_event(event, config, display)
+        })
         .await;
     result.exit_code
 }
 
-fn handle_spec_list_event(event: &PackageEvent, config: &CliConfig) -> bool {
+fn handle_spec_list_event(
+    event: &PackageEvent,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> bool {
     match event {
         PackageEvent::SpecListLoaded { spec_list, .. } => {
-            display_spec_list(spec_list, config);
+            display_spec_list(spec_list, config, display);
             true
         }
         PackageEvent::SpecListItemCompleted { .. } => {
@@ -45,11 +51,11 @@ fn handle_spec_list_event(event: &PackageEvent, config: &CliConfig) -> bool {
     }
 }
 
-fn display_spec_list(data: &SpecListData, config: &CliConfig) {
+fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayManager) {
     let use_colors = config.use_colors();
 
     if data.specs.is_empty() && data.invalid_packages.is_empty() {
-        println!("No specs found.");
+        display.print_info("No specs found.");
         return;
     }
 
@@ -70,7 +76,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig) {
             ]);
         }
 
-        println!("{table}");
+        display.println(format!("{table}"));
     }
 
     // Show invalid packages
@@ -84,7 +90,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig) {
         } else {
             format!("  Invalid: {} — {}", invalid.path, invalid.error)
         };
-        println!("{msg}");
+        display.println(msg);
     }
 
     // Summary
@@ -97,7 +103,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig) {
             data.current_environment,
         )
     };
-    println!("\n{summary}");
+    display.println(format!("\n{summary}"));
 }
 
 fn format_name(name: &str, use_colors: bool) -> String {
@@ -146,12 +152,14 @@ mod tests {
                 environments: vec!["macos".to_string()],
             },
         };
-        assert!(handle_spec_list_event(&event, &config));
+        let display = DisplayManager::new(false);
+        assert!(handle_spec_list_event(&event, &config, &display));
     }
 
     #[test]
     fn test_handle_spec_list_event_consumes_loaded() {
         let config = test_config();
+        let display = DisplayManager::new(false);
         let event = PackageEvent::SpecListLoaded {
             operation_info: test_op_info(),
             spec_list: SpecListData {
@@ -163,16 +171,17 @@ mod tests {
                 show_all: false,
             },
         };
-        assert!(handle_spec_list_event(&event, &config));
+        assert!(handle_spec_list_event(&event, &config, &display));
     }
 
     #[test]
     fn test_handle_spec_list_event_defers_other() {
         let config = test_config();
+        let display = DisplayManager::new(false);
         let event = PackageEvent::Debug {
             operation_info: test_op_info(),
             message: "some debug".to_string(),
         };
-        assert!(!handle_spec_list_event(&event, &config));
+        assert!(!handle_spec_list_event(&event, &config, &display));
     }
 }

@@ -25,6 +25,11 @@ pub(crate) fn format_installed(use_colors: bool) -> String {
     format_status_indicator("✓", "Installed", use_colors, |s| s.green())
 }
 
+/// Format a "valid" status indicator (for validation results)
+pub(crate) fn format_valid(use_colors: bool) -> String {
+    format_status_indicator("✓", "Valid", use_colors, |s| s.green())
+}
+
 /// Format a "not installed" status indicator
 pub(crate) fn format_not_installed(use_colors: bool) -> String {
     format_status_indicator("✗", "Not installed", use_colors, |s| s.cyan())

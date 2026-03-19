@@ -33,14 +33,14 @@ pub(crate) async fn handle_info(
             match event {
                 PackageEvent::PackageInfoLoaded { package_info, .. } => {
                     let table = create_package_info_table(package_info, config);
-                    println!("{table}");
+                    display.println(format!("{table}"));
                     true // Handled
                 }
                 PackageEvent::EnvironmentStatusChecked {
                     environment_status, ..
                 } => {
                     let table = create_environment_table(environment_status, config);
-                    println!("\n{table}");
+                    display.println(format!("\n{table}"));
                     true // Handled
                 }
                 PackageEvent::Progress { .. } => {
