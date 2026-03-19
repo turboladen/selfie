@@ -174,18 +174,34 @@ pub(crate) enum SpecSubcommands {
         package_name: String,
     },
 
-    /// Validate a package definition file
+    /// Validate package definition file(s)
     ///
-    /// Performs comprehensive validation of a package definition including
-    /// schema validation, environment configuration checks, and command
-    /// syntax verification.
+    /// Validates a single package definition, or all packages with --all.
+    /// Performs comprehensive validation including schema validation,
+    /// environment configuration checks, and command syntax verification.
     ///
     /// Example: `selfie spec validate node`
+    /// Example: `selfie spec validate --all`
     Validate {
-        /// Name of the package to validate
-        ///
-        /// Must correspond to a package definition file in the package directory.
-        package_name: String,
+        /// Name of the package to validate (required unless --all is used)
+        package_name: Option<String>,
+
+        /// Validate all packages for the current environment
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// List package definitions (specs) without checking runtime status
+    ///
+    /// Displays package names, versions, descriptions, and environments.
+    /// No commands are executed — this is a fast file-only operation.
+    ///
+    /// Example: `selfie spec list`
+    /// Example: `selfie spec list --all`
+    List {
+        /// Show all specs regardless of current environment relevance
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show detailed information about a package definition

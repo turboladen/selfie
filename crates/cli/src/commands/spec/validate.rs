@@ -20,10 +20,26 @@ pub(crate) async fn handle_validate(
 
     display.print_progress(format!("Validating {package_name}..."));
 
-    // Call the service's validate method to get an event stream
     let event_stream = service.validate(package_name, None).await;
 
-    // Process the event stream with custom handling for structured data
+    let processor = EventProcessor::new(display.clone());
+    let result = processor
+        .process_events(event_stream, |event| handle_validate_event(event, config))
+        .await;
+    result.exit_code
+}
+
+pub(crate) async fn handle_validate_all(
+    service: &impl SpecService,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> i32 {
+    tracing::debug!("Running validate --all command");
+
+    display.print_progress("Validating all packages...");
+
+    let event_stream = service.validate_all().await;
+
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| handle_validate_event(event, config))

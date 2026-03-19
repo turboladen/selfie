@@ -102,8 +102,18 @@ async fn dispatch_spec_command(
                 SpecSubcommands::Remove { package_name } => {
                     spec::remove::handle_remove(&service, package_name, config, &display).await
                 }
-                SpecSubcommands::Validate { package_name } => {
-                    spec::validate::handle_validate(&service, package_name, config, &display).await
+                SpecSubcommands::Validate { package_name, all } => {
+                    if *all {
+                        spec::validate::handle_validate_all(&service, config, &display).await
+                    } else if let Some(name) = package_name {
+                        spec::validate::handle_validate(&service, name, config, &display).await
+                    } else {
+                        display.print_error("Package name is required unless --all is used.");
+                        1
+                    }
+                }
+                SpecSubcommands::List { all } => {
+                    spec::list::handle_list(&service, config, &display, *all).await
                 }
                 SpecSubcommands::Info { package_name } => {
                     spec::info::handle_info(&service, package_name, config, &display).await

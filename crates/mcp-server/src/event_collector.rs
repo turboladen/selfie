@@ -121,6 +121,14 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 selfie::package::event::ConsoleOutput::Stderr(s) => s,
             },
         })),
+        PackageEvent::SpecListItemCompleted { spec_item, .. } => Some(serde_json::json!({
+            "type": "spec_list_item",
+            "name": &spec_item.name,
+            "version": &spec_item.version,
+            "description": &spec_item.description,
+            "environments": &spec_item.environments,
+        })),
+        PackageEvent::SpecListLoaded { .. } => None, // Summary handled by Completed event
         PackageEvent::Warning { message, .. } => Some(serde_json::json!({
             "type": "warning",
             "message": message,
@@ -321,6 +329,53 @@ mod tests {
         assert_eq!(result.data["data"][0]["status"], "installed");
         assert_eq!(result.data["data"][1]["name"], "missing-pkg");
         assert_eq!(result.data["data"][1]["status"], "not installed");
+    }
+
+    #[tokio::test]
+    async fn test_collect_spec_list_items() {
+        use selfie::package::event::SpecListItem;
+
+        let events = vec![
+            PackageEvent::SpecListItemCompleted {
+                operation_info: test_op_info(),
+                spec_item: SpecListItem {
+                    name: "ripgrep".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: Some("Fast search tool".to_string()),
+                    environments: vec!["macos".to_string(), "ubuntu".to_string()],
+                },
+            },
+            PackageEvent::SpecListLoaded {
+                operation_info: test_op_info(),
+                spec_list: selfie::package::event::SpecListData {
+                    specs: vec![],
+                    invalid_packages: vec![],
+                    current_environment: "macos".to_string(),
+                    package_directory: "/tmp/packages".to_string(),
+                    environment_stats: Default::default(),
+                },
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::spec_list_generated(
+                    1,
+                    0,
+                    "macos".to_string(),
+                    StepCount::new(2, 2),
+                )),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["data"].as_array().unwrap().len(), 1);
+        assert_eq!(result.data["data"][0]["type"], "spec_list_item");
+        assert_eq!(result.data["data"][0]["name"], "ripgrep");
+        assert_eq!(result.data["data"][0]["version"], "1.0.0");
+        assert_eq!(result.data["data"][0]["description"], "Fast search tool");
+        assert_eq!(result.data["data"][0]["environments"][0], "macos");
     }
 
     #[tokio::test]
