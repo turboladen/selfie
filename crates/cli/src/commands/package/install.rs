@@ -80,6 +80,9 @@ pub(crate) async fn handle_install(
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
                                 if is_stderr {
+                                    // Intentional: raw subprocess stderr goes
+                                    // directly to stderr, not through DisplayManager,
+                                    // to preserve the subprocess's output stream.
                                     eprintln!("{trimmed}");
                                 } else {
                                     display.println(trimmed);

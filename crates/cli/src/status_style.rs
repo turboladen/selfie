@@ -50,6 +50,16 @@ pub(crate) fn format_status_error(use_colors: bool) -> String {
     format_status_indicator("✗", "Error", use_colors, |s| s.red())
 }
 
+/// Format a "clean" audit status indicator
+pub(crate) fn format_audit_clean(use_colors: bool) -> String {
+    format_status_indicator("✓", "Clean", use_colors, |s| s.green())
+}
+
+/// Format a "conflicts detected" audit status indicator
+pub(crate) fn format_audit_conflicts(use_colors: bool) -> String {
+    format_status_indicator("⚠", "Conflicts Detected", use_colors, |s| s.red())
+}
+
 /// Format a check result as plain text status (no emoji prefix).
 ///
 /// Used in contexts where emoji prefixes are inappropriate, such as
@@ -130,14 +140,38 @@ mod tests {
     }
 
     #[test]
+    fn test_format_valid() {
+        let result = format_valid(false);
+        assert!(result.contains("Valid"));
+        assert!(result.contains("✓"));
+    }
+
+    #[test]
+    fn test_format_audit_clean() {
+        let result = format_audit_clean(false);
+        assert!(result.contains("Clean"));
+        assert!(result.contains("✓"));
+    }
+
+    #[test]
+    fn test_format_audit_conflicts() {
+        let result = format_audit_conflicts(false);
+        assert!(result.contains("Conflicts Detected"));
+        assert!(result.contains("⚠"));
+    }
+
+    #[test]
     fn test_all_formats_no_ansi_without_colors() {
         // Verify no ANSI escape codes when colors disabled
         let formats = vec![
             format_installed(false),
+            format_valid(false),
             format_not_installed(false),
             format_no_check(false),
             format_cmd_not_found(false),
             format_status_error(false),
+            format_audit_clean(false),
+            format_audit_conflicts(false),
         ];
         for f in formats {
             assert!(!f.contains("\x1b["), "Found ANSI codes in: {f}");

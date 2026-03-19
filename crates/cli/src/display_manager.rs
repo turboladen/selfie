@@ -257,6 +257,11 @@ impl DisplayManager {
 
     // ── Static output methods ──────────────────────────────────────────
     //
+    // Canonical symbol set:
+    //   ✓  success (green)      ✗  error/failure (red)
+    //   ⚠  warning (yellow)     ℹ  info (blue)
+    //   ✨ suggestion (yellow)   ── title ──  section header (bold)
+    //
     // Phase 1: These use println!/eprintln! directly to match expected
     // stdout/stderr conventions. Info, success, progress, and suggestion
     // go to stdout; errors and warnings go to stderr.

@@ -232,10 +232,6 @@ pub(crate) fn display_environment_summary(
     display: &DisplayManager,
     context: &str, // "check" or "install"
 ) {
-    display.print_suggestion(format!(
-        "Package '{package_name}' doesn't support environment '{current_environment}'."
-    ));
-
     if available_environments.is_empty() {
         display_generic_environment_suggestion(
             package_name,
@@ -245,6 +241,9 @@ pub(crate) fn display_environment_summary(
             context,
         );
     } else {
+        display.print_suggestion(format!(
+            "Package '{package_name}' doesn't support environment '{current_environment}'."
+        ));
         display.println("   Available environments for this package:");
 
         let mut table = create_formatted_table();

@@ -6,7 +6,7 @@ use selfie::package::{
 
 use crate::{
     commands::common, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor, formatters::format_key,
+    event_processor::EventProcessor, formatters::format_key, status_style,
 };
 
 pub(crate) async fn handle_audit(
@@ -250,15 +250,10 @@ fn display_audit_result_card(
 
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => {
-            let status = if use_colors {
-                console::style("✓ Clean").green().bold().to_string()
-            } else {
-                "✓ Clean".to_string()
-            };
             format!(
                 "{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_audit_clean(use_colors),
                 format_key_fn("Sources"),
                 sources.join(", ")
             )
@@ -266,14 +261,6 @@ fn display_audit_result_card(
         AuditResult::Conflicts {
             sources, expected, ..
         } => {
-            let status = if use_colors {
-                console::style("⚠ Conflicts Detected")
-                    .red()
-                    .bold()
-                    .to_string()
-            } else {
-                "⚠ Conflicts Detected".to_string()
-            };
             let unexpected: Vec<&String> = sources
                 .iter()
                 .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
@@ -281,7 +268,7 @@ fn display_audit_result_card(
             format!(
                 "{}{}\n{}{}\n{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_audit_conflicts(use_colors),
                 format_key_fn("All sources"),
                 sources.join(", "),
                 format_key_fn("Expected"),
@@ -295,31 +282,24 @@ fn display_audit_result_card(
             )
         }
         AuditResult::NotInstalled => {
-            let status = if use_colors {
-                console::style("Not Installed").yellow().to_string()
-            } else {
-                "Not Installed".to_string()
-            };
-            format!("{}{}", format_key_fn("Status"), status)
+            format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_not_installed(use_colors)
+            )
         }
         AuditResult::NoAuditCommand => {
-            let status = if use_colors {
-                console::style("No audit command defined").dim().to_string()
-            } else {
-                "No audit command defined".to_string()
-            };
-            format!("{}{}", format_key_fn("Status"), status)
+            format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_no_check(use_colors)
+            )
         }
         AuditResult::Error(err) => {
-            let status = if use_colors {
-                console::style("✗ Error").red().bold().to_string()
-            } else {
-                "✗ Error".to_string()
-            };
             format!(
                 "{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_status_error(use_colors),
                 format_key_fn("Details"),
                 err
             )

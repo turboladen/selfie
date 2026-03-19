@@ -24,7 +24,7 @@ pub(crate) async fn handle_status(
                 environment_status, ..
             } => {
                 let table = create_environment_table(environment_status, config);
-                println!("\n{table}");
+                display.println(format!("\n{table}"));
                 true
             }
             PackageEvent::Progress { .. } => true,
