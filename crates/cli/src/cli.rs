@@ -174,9 +174,9 @@ pub(crate) enum SpecSubcommands {
         package_name: String,
     },
 
-    /// Validate package definition file(s)
+    /// Validate spec file(s)
     ///
-    /// Validates a single package definition, or all packages with --all.
+    /// Validates a single spec, or all specs with --all.
     /// Performs comprehensive validation including schema validation,
     /// environment configuration checks, and command syntax verification.
     ///
@@ -192,9 +192,9 @@ pub(crate) enum SpecSubcommands {
         all: bool,
     },
 
-    /// List package definitions (specs) without checking runtime status
+    /// List specs without checking runtime status
     ///
-    /// Displays package names, versions, descriptions, and environments.
+    /// Displays spec names, versions, descriptions, and environments.
     /// No commands are executed — this is a fast file-only operation.
     ///
     /// Example: `selfie spec list`

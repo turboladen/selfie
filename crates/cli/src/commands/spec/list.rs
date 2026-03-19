@@ -18,7 +18,7 @@ pub(crate) async fn handle_list(
 ) -> i32 {
     tracing::debug!("Running spec list command (show_all={show_all})");
 
-    display.print_progress("Loading package definitions...");
+    display.print_progress("Loading specs...");
 
     let event_stream = service.list(show_all).await;
 
@@ -49,7 +49,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig) {
     let use_colors = config.use_colors();
 
     if data.specs.is_empty() && data.invalid_packages.is_empty() {
-        println!("No package definitions found.");
+        println!("No specs found.");
         return;
     }
 

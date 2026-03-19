@@ -133,10 +133,10 @@ pub trait SpecService: Send + Sync {
     /// Get package definition info (no runtime status check)
     fn spec_info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
-    /// List all package definitions (specs) without checking runtime status
+    /// List all specs without checking runtime status
     fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
 
-    /// Validate all package definitions for the current environment
+    /// Validate all specs for the current environment
     fn validate_all(&self) -> impl Future<Output = EventStream> + Send;
 }
 

@@ -151,7 +151,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package definition file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_config_get to check). Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e' to fail fast."
+        description = "Create a new spec file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_config_get to check). Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e' to fail fast."
     )]
     async fn spec_create(
         &self,
@@ -201,7 +201,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing package definition. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e'."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e'."
     )]
     async fn spec_update(
         &self,
@@ -245,7 +245,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple package definitions in a single call. Each entry in the updates array has the same fields as selfie_spec_update. Use this instead of calling selfie_spec_update repeatedly to avoid hitting tool call limits. Command conventions: check commands should use 'command -v X' not 'which X'. Multi-line install scripts should start with 'set -e'."
+        description = "Update multiple specs in a single call. Each entry in the updates array has the same fields as selfie_spec_update. Use this instead of calling selfie_spec_update repeatedly to avoid hitting tool call limits. Command conventions: check commands should use 'command -v X' not 'which X'. Multi-line install scripts should start with 'set -e'."
     )]
     async fn spec_update_batch(
         &self,
@@ -311,7 +311,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_remove",
-        description = "Remove a package definition file. Warning: this is permanent and may break dependent packages."
+        description = "Remove a spec file. Warning: this is permanent and may break dependent packages."
     )]
     async fn spec_remove(
         &self,
@@ -337,7 +337,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single package definition file for correctness. Returns validation issues (errors and warnings)."
+        description = "Validate a single spec file for correctness. Returns validation issues (errors and warnings)."
     )]
     async fn spec_validate(
         &self,
@@ -350,7 +350,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all package definitions (specs) for the current environment with name, version, description, and environments. Fast — no commands are executed. Use this instead of calling selfie_spec_info repeatedly."
+        description = "List all specs for the current environment with name, version, description, and environments. Fast — no commands are executed. Use this instead of calling selfie_spec_info repeatedly."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -360,7 +360,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all package definition files in the current environment for correctness. Returns validation issues (errors and warnings) per package. Fast — no commands are executed."
+        description = "Validate all spec files in the current environment for correctness. Returns validation issues (errors and warnings) per spec. Fast — no commands are executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;

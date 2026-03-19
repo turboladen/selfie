@@ -1,5 +1,5 @@
 //!
-//! Handles the `spec validate --all` operation — validates all package definitions.
+//! Handles the `spec validate --all` operation — validates all specs.
 //!
 
 use crate::{
@@ -24,7 +24,7 @@ where
     PR: PackageRepository,
 {
     // Step 1: Load all packages
-    progress.next(sender, "Loading package definitions").await;
+    progress.next(sender, "Loading specs").await;
 
     let list_output = match repo.list_packages() {
         Ok(output) => {

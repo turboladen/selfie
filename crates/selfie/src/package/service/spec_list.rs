@@ -1,5 +1,5 @@
 //!
-//! Handles the `spec list` operation — lists package definitions without runtime checks.
+//! Handles the `spec list` operation — lists specs without runtime checks.
 //!
 
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ where
     PR: PackageRepository,
 {
     // Step 1: Load and process packages
-    progress.next(sender, "Loading package definitions").await;
+    progress.next(sender, "Loading specs").await;
 
     let list_output = match repo.list_packages() {
         Ok(output) => {
