@@ -128,7 +128,20 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "description": &spec_item.description,
             "environments": &spec_item.environments,
         })),
-        PackageEvent::SpecListLoaded { .. } => None, // Summary handled by Completed event
+        PackageEvent::SpecListLoaded { spec_list, .. } => {
+            let invalid: Vec<Value> = spec_list
+                .invalid_packages
+                .iter()
+                .map(|ip| serde_json::json!({ "path": &ip.path, "error": &ip.error }))
+                .collect();
+            Some(serde_json::json!({
+                "type": "spec_list_summary",
+                "environment": &spec_list.current_environment,
+                "package_directory": &spec_list.package_directory,
+                "total_specs": spec_list.specs.len(),
+                "invalid_packages": invalid,
+            }))
+        }
         PackageEvent::Warning { message, .. } => Some(serde_json::json!({
             "type": "warning",
             "message": message,
@@ -371,12 +384,15 @@ mod tests {
         let result = collect_events(stream).await;
 
         assert!(result.success);
-        assert_eq!(result.data["data"].as_array().unwrap().len(), 1);
+        assert_eq!(result.data["data"].as_array().unwrap().len(), 2);
         assert_eq!(result.data["data"][0]["type"], "spec_list_item");
         assert_eq!(result.data["data"][0]["name"], "ripgrep");
         assert_eq!(result.data["data"][0]["version"], "1.0.0");
         assert_eq!(result.data["data"][0]["description"], "Fast search tool");
         assert_eq!(result.data["data"][0]["environments"][0], "macos");
+        assert_eq!(result.data["data"][1]["type"], "spec_list_summary");
+        assert_eq!(result.data["data"][1]["environment"], "macos");
+        assert_eq!(result.data["data"][1]["total_specs"], 0);
     }
 
     #[tokio::test]

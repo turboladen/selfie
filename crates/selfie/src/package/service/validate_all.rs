@@ -40,12 +40,24 @@ where
         .valid_packages()
         .filter(|p| p.environments().contains_key(config.environment()))
         .collect();
+    let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
+
+    // Emit warnings for invalid (unparseable) package files
+    for invalid in &invalid_packages {
+        sender
+            .send_warning(format!(
+                "Skipping invalid package file {}: {}",
+                invalid.package_path().display(),
+                invalid
+            ))
+            .await;
+    }
 
     // Step 2: Validate each package
     progress.next(sender, "Validating packages").await;
 
-    let mut has_errors = false;
-    let mut total_warnings: usize = 0;
+    let mut error_count: usize = 0;
+    let mut warning_count: usize = 0;
 
     for package in &valid_packages {
         let validation = package.validate(config.environment());
@@ -74,10 +86,10 @@ where
         }
 
         let status = if issues.has_errors() {
-            has_errors = true;
+            error_count += 1;
             ValidationStatus::HasErrors
         } else if issues.has_warnings() {
-            total_warnings += issues.warnings().len();
+            warning_count += 1;
             ValidationStatus::HasWarnings
         } else {
             ValidationStatus::Valid
@@ -93,26 +105,26 @@ where
         sender.send_validation_result(validation_result).await;
     }
 
-    if has_errors {
+    let total_errors = error_count + invalid_packages.len();
+
+    if total_errors > 0 {
         OperationResult::Failure(
             format!(
-                "One or more packages failed validation (completed {}/{} steps)",
+                "Validation failed: {} package(s) with errors, {} with warnings, {} unparseable (completed {}/{} steps)",
+                error_count,
+                warning_count,
+                invalid_packages.len(),
                 progress.current_step(),
                 progress.total_steps()
             )
             .into(),
         )
     } else {
-        let (status, warning_count) = if total_warnings > 0 {
-            (ValidationStatus::HasWarnings, Some(total_warnings))
-        } else {
-            (ValidationStatus::Valid, None)
-        };
-        OperationResult::Success(OperationSuccess::package_validated(
-            String::new(),
-            config.environment().to_string(),
-            status,
+        OperationResult::Success(OperationSuccess::specs_validated(
+            valid_packages.len(),
+            0,
             warning_count,
+            config.environment().to_string(),
             (progress.current_step(), progress.total_steps()).into(),
         ))
     }

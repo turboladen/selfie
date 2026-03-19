@@ -627,6 +627,14 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Bulk spec validation operation completed
+    SpecsValidated {
+        validated_count: usize,
+        error_count: usize,
+        warning_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -890,6 +898,24 @@ impl std::fmt::Display for OperationSuccess {
                 };
                 write!(f, "Spec listing completed {status} {steps_completed}")
             }
+            OperationSuccess::SpecsValidated {
+                validated_count,
+                error_count,
+                warning_count,
+                steps_completed,
+                ..
+            } => {
+                let status = if *error_count > 0 {
+                    format!(
+                        "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings"
+                    )
+                } else if *warning_count > 0 {
+                    format!("{validated_count} package(s) validated, {warning_count} with warnings")
+                } else {
+                    format!("{validated_count} package(s) validated successfully")
+                };
+                write!(f, "Spec validation completed: {status} {steps_completed}")
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -1041,6 +1067,24 @@ impl OperationSuccess {
         }
     }
 
+    /// Create a `SpecsValidated` success variant
+    #[must_use]
+    pub fn specs_validated(
+        validated_count: usize,
+        error_count: usize,
+        warning_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    ) -> Self {
+        OperationSuccess::SpecsValidated {
+            validated_count,
+            error_count,
+            warning_count,
+            environment,
+            steps_completed,
+        }
+    }
+
     /// Create a `SpecListGenerated` success variant
     #[must_use]
     pub fn spec_list_generated(
@@ -1172,6 +1216,7 @@ impl OperationSuccess {
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
             OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1188,6 +1233,7 @@ impl OperationSuccess {
             | OperationSuccess::PackageStatusChecked { environment, .. }
             | OperationSuccess::PackageListGenerated { environment, .. }
             | OperationSuccess::SpecListGenerated { environment, .. }
+            | OperationSuccess::SpecsValidated { environment, .. }
             | OperationSuccess::PackageCreated { environment, .. }
             | OperationSuccess::PackageUpdated { environment, .. }
             | OperationSuccess::PackageRemoved { environment, .. } => Some(environment),
@@ -1230,6 +1276,9 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::SpecListGenerated {
+                steps_completed, ..
+            }
+            | OperationSuccess::SpecsValidated {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,

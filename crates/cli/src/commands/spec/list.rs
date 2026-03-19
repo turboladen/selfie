@@ -5,7 +5,10 @@ use selfie::package::{
     service::SpecService,
 };
 
-use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
+use crate::{
+    commands::common::format_environment_names, config::CliConfig, display_manager::DisplayManager,
+    event_processor::EventProcessor,
+};
 
 pub(crate) async fn handle_list(
     service: &impl SpecService,
@@ -19,20 +22,17 @@ pub(crate) async fn handle_list(
 
     let event_stream = service.list(show_all).await;
 
-    let use_colors = config.use_colors();
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| {
-            handle_spec_list_event(event, use_colors)
-        })
+        .process_events(event_stream, |event| handle_spec_list_event(event, config))
         .await;
     result.exit_code
 }
 
-fn handle_spec_list_event(event: &PackageEvent, use_colors: bool) -> bool {
+fn handle_spec_list_event(event: &PackageEvent, config: &CliConfig) -> bool {
     match event {
         PackageEvent::SpecListLoaded { spec_list, .. } => {
-            display_spec_list(spec_list, use_colors);
+            display_spec_list(spec_list, config);
             true
         }
         PackageEvent::SpecListItemCompleted { .. } => {
@@ -45,7 +45,9 @@ fn handle_spec_list_event(event: &PackageEvent, use_colors: bool) -> bool {
     }
 }
 
-fn display_spec_list(data: &SpecListData, use_colors: bool) {
+fn display_spec_list(data: &SpecListData, config: &CliConfig) {
+    let use_colors = config.use_colors();
+
     if data.specs.is_empty() && data.invalid_packages.is_empty() {
         println!("No package definitions found.");
         return;
@@ -64,7 +66,7 @@ fn display_spec_list(data: &SpecListData, use_colors: bool) {
                 format_name(&spec.name, use_colors),
                 spec.version.clone(),
                 spec.description.clone().unwrap_or_default(),
-                format_environments(&spec.environments, &data.current_environment, use_colors),
+                format_environment_names(&spec.environments, &data.current_environment, config),
             ]);
         }
 
@@ -106,24 +108,13 @@ fn format_name(name: &str, use_colors: bool) -> String {
     }
 }
 
-fn format_environments(envs: &[String], current: &str, use_colors: bool) -> String {
-    envs.iter()
-        .map(|e| {
-            if e == current && use_colors {
-                style(e).green().bold().to_string()
-            } else {
-                e.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::event::{
-        OperationContext, OperationInfo, SpecListItem, metadata::OperationType,
+    use crate::config::CliConfig;
+    use selfie::{
+        config::SelfieConfigBuilder,
+        package::event::{OperationContext, OperationInfo, SpecListItem, metadata::OperationType},
     };
     use std::time::Instant;
     use uuid::Uuid;
@@ -139,8 +130,13 @@ mod tests {
         }
     }
 
+    fn test_config() -> CliConfig {
+        CliConfig::wrap_for_test(SelfieConfigBuilder::default().environment("test").build())
+    }
+
     #[test]
     fn test_handle_spec_list_event_consumes_item() {
+        let config = test_config();
         let event = PackageEvent::SpecListItemCompleted {
             operation_info: test_op_info(),
             spec_item: SpecListItem {
@@ -150,11 +146,12 @@ mod tests {
                 environments: vec!["macos".to_string()],
             },
         };
-        assert!(handle_spec_list_event(&event, false));
+        assert!(handle_spec_list_event(&event, &config));
     }
 
     #[test]
     fn test_handle_spec_list_event_consumes_loaded() {
+        let config = test_config();
         let event = PackageEvent::SpecListLoaded {
             operation_info: test_op_info(),
             spec_list: SpecListData {
@@ -166,15 +163,16 @@ mod tests {
                 show_all: false,
             },
         };
-        assert!(handle_spec_list_event(&event, false));
+        assert!(handle_spec_list_event(&event, &config));
     }
 
     #[test]
     fn test_handle_spec_list_event_defers_other() {
+        let config = test_config();
         let event = PackageEvent::Debug {
             operation_info: test_op_info(),
             message: "some debug".to_string(),
         };
-        assert!(!handle_spec_list_event(&event, false));
+        assert!(!handle_spec_list_event(&event, &config));
     }
 }
