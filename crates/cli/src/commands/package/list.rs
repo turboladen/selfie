@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use console::style;
 use selfie::package::{event, service::PackageService};
@@ -22,11 +21,9 @@ enum ListItemResult {
 /// Mutable state accumulated while processing list events.
 #[derive(Default)]
 struct ListState {
-    /// TTY: per-package spinners keyed by name, pre-allocated in sorted order.
-    spinners: HashMap<String, OperationHandle>,
-    /// TTY: trailing spinner showing "Checking (N/M)..." progress.
+    /// Single progress spinner showing "Checking (N/M)..." (TTY only).
     progress_spinner: Option<OperationHandle>,
-    /// Non-TTY: buffered (name, formatted_line) pairs for post-sort printing.
+    /// Buffered (name, formatted_line) pairs for sorted output at the end.
     buffered_lines: Vec<(String, String)>,
     max_name_len: usize,
     total_packages: usize,
@@ -75,9 +72,8 @@ impl ListCommand<'_> {
 
 /// Extract formatted content and result variant from a list item.
 ///
-/// Returns the result variant (for choosing finish method) and the content string
-/// **without** the prefix symbol — `finish_*_in_place` prepends its own prefix.
-/// The non-TTY path prepends a plain prefix separately.
+/// Returns the result variant (for choosing the prefix symbol) and the content
+/// string **without** the prefix — the caller prepends it via `plain_prefix()`.
 fn format_list_item(
     package_item: &event::PackageListItem,
     config: &CliConfig,
@@ -120,7 +116,7 @@ fn format_list_item(
     (result, content)
 }
 
-/// Build a plain-text prefix for non-TTY output.
+/// Build a plain-text prefix for buffered output.
 fn plain_prefix(result: &ListItemResult, use_colors: bool) -> Cow<'static, str> {
     match result {
         ListItemResult::Success => {
@@ -163,16 +159,10 @@ fn handle_list_event(
             state.checked_count = 0;
 
             if is_tty && !packages.is_empty() {
-                // Create one spinner per package. The sorted visual order comes
-                // from calling `start_list_spinner()` in sequence — MultiProgress
-                // preserves insertion order. The HashMap is only used for O(1)
-                // lookup by name when resolving spinners; it does not need to
-                // preserve order itself.
-                for pkg in packages {
-                    let handle = display.start_list_spinner(&pkg.name);
-                    state.spinners.insert(pkg.name.clone(), handle);
-                }
-                // Trailing progress counter spinner
+                // Single progress spinner — results are buffered and printed
+                // sorted after all checks complete. Using one spinner avoids
+                // the rendering issues that arise when 100+ spinners tick
+                // simultaneously in MultiProgress.
                 state.progress_spinner = Some(display.start_list_spinner(format!(
                     "Checking packages (0/{})...",
                     state.total_packages
@@ -191,38 +181,31 @@ fn handle_list_event(
                 state.max_name_len,
             );
 
-            if is_tty {
-                // Resolve the pre-allocated spinner in-place
-                if let Some(handle) = state.spinners.remove(&package_item.name) {
-                    match result {
-                        ListItemResult::Success => handle.finish_success_in_place(&content),
-                        ListItemResult::Failure => handle.finish_failure_in_place(&content),
-                        ListItemResult::Warning => handle.finish_warning_in_place(&content),
-                    }
-                }
-                // Update trailing progress counter
-                if let Some(ref progress) = state.progress_spinner {
-                    progress.set_message(format!(
-                        "Checking packages ({}/{})...",
-                        state.checked_count, state.total_packages
-                    ));
-                }
-            } else {
-                // Non-TTY: buffer for sorted output at the end
-                let prefix = plain_prefix(&result, use_colors);
-                let line = format!("{prefix} {content}");
-                state.buffered_lines.push((package_item.name.clone(), line));
+            // Buffer result for sorted output at the end
+            let prefix = plain_prefix(&result, use_colors);
+            let line = format!("{prefix} {content}");
+            state.buffered_lines.push((package_item.name.clone(), line));
+
+            // Update progress spinner (TTY only)
+            if let Some(ref progress) = state.progress_spinner {
+                progress.set_message(format!(
+                    "Checking packages ({}/{})...",
+                    state.checked_count, state.total_packages
+                ));
             }
             true
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Non-TTY: print buffered lines sorted by name
-            if !is_tty {
-                state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
-                for (_, line) in &state.buffered_lines {
-                    println!("{line}");
-                }
+            // Clear progress spinner before printing results
+            if let Some(handle) = state.progress_spinner.take() {
+                handle.finish_clear();
+            }
+
+            // Print buffered lines sorted by name
+            state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, line) in &state.buffered_lines {
+                println!("{line}");
             }
 
             // Print invalid packages inline with error status,
@@ -260,22 +243,8 @@ fn handle_list_event(
                         width = state.max_name_len
                     );
 
-                    if is_tty {
-                        if let Some(ref progress) = state.progress_spinner {
-                            progress.println(&line);
-                        }
-                    } else {
-                        println!("{line}");
-                    }
+                    println!("{line}");
                 }
-            }
-
-            // Clear remaining spinners (TTY)
-            if let Some(handle) = state.progress_spinner.take() {
-                handle.finish_clear();
-            }
-            for (_, handle) in state.spinners.drain() {
-                handle.finish_clear();
             }
 
             println!();
@@ -728,8 +697,8 @@ mod tests {
 
     #[test]
     fn test_handle_list_event_non_tty_skips_spinner() {
-        // When stdout is piped (is_tty=false), no spinners should be created,
-        // so output goes to buffered_lines instead of through MultiProgress.
+        // When stdout is piped (is_tty=false), no progress spinner should be
+        // created; output goes to buffered_lines printed at the end.
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = ListState::default();
 
@@ -748,19 +717,15 @@ mod tests {
         test_handle_event_with_tty(&event, &config, false, &mut state);
 
         assert!(
-            state.spinners.is_empty(),
-            "Non-TTY mode must not create spinners (output must go to stdout, not stderr)"
-        );
-        assert!(
             state.progress_spinner.is_none(),
             "Non-TTY mode must not create a progress spinner"
         );
     }
 
     #[test]
-    fn test_handle_list_event_tty_creates_spinner() {
+    fn test_handle_list_event_tty_creates_progress_spinner() {
         // When both stdout and stderr are terminals (is_tty=true),
-        // per-package spinners should be created in sorted order.
+        // a single progress spinner should be created for the checking phase.
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = ListState::default();
 
@@ -786,94 +751,18 @@ mod tests {
 
         test_handle_event_with_tty(&event, &config, true, &mut state);
 
-        assert_eq!(
-            state.spinners.len(),
-            2,
-            "TTY mode should create one spinner per package"
-        );
-        assert!(
-            state.spinners.contains_key("alpha"),
-            "Should have spinner for 'alpha'"
-        );
-        assert!(
-            state.spinners.contains_key("beta"),
-            "Should have spinner for 'beta'"
-        );
         assert!(
             state.progress_spinner.is_some(),
-            "TTY mode should create a trailing progress spinner"
+            "TTY mode should create a progress spinner"
         );
+        assert_eq!(state.total_packages, 2);
     }
 
-    #[test]
-    fn test_tty_removes_spinner_on_completion() {
-        // When a PackageListItemCompleted event arrives in TTY mode,
-        // the corresponding spinner should be removed from state.
+    /// Helper: send Ready + two out-of-order Completed events and return the state.
+    fn send_buffered_results(is_tty: bool) -> ListState {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = ListState::default();
 
-        // First, send PackageListReady to create spinners
-        let packages = vec![
-            PackageListItem {
-                name: "alpha".to_string(),
-                version: TEST_VERSION.to_string(),
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-            PackageListItem {
-                name: "beta".to_string(),
-                version: TEST_VERSION.to_string(),
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-        ];
-
-        let ready_event = event::PackageEvent::PackageListReady {
-            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
-            packages,
-        };
-        test_handle_event_with_tty(&ready_event, &config, true, &mut state);
-        assert_eq!(state.spinners.len(), 2);
-
-        // Now complete one item — its spinner should be removed
-        let completed_event = event::PackageEvent::PackageListItemCompleted {
-            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
-            package_item: PackageListItem {
-                name: "alpha".to_string(),
-                version: TEST_VERSION.to_string(),
-                environments: vec![TEST_ENV.to_string()],
-                status: Some(event::CheckResult::Success {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }),
-            },
-        };
-        test_handle_event_with_tty(&completed_event, &config, true, &mut state);
-
-        assert_eq!(
-            state.spinners.len(),
-            1,
-            "Completed spinner should be removed"
-        );
-        assert!(
-            !state.spinners.contains_key("alpha"),
-            "'alpha' spinner should be gone after completion"
-        );
-        assert!(
-            state.spinners.contains_key("beta"),
-            "'beta' spinner should still be present"
-        );
-        assert_eq!(state.checked_count, 1);
-    }
-
-    #[test]
-    fn test_non_tty_buffers_results() {
-        // In non-TTY mode, PackageListItemCompleted should buffer results
-        // rather than printing immediately.
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut state = ListState::default();
-
-        // Send Ready to initialize state
         let ready_event = event::PackageEvent::PackageListReady {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             packages: vec![
@@ -891,9 +780,8 @@ mod tests {
                 },
             ],
         };
-        test_handle_event_with_tty(&ready_event, &config, false, &mut state);
+        test_handle_event_with_tty(&ready_event, &config, is_tty, &mut state);
 
-        // Send completed items out of order
         let completed_zebra = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_item: PackageListItem {
@@ -906,7 +794,7 @@ mod tests {
                 }),
             },
         };
-        test_handle_event_with_tty(&completed_zebra, &config, false, &mut state);
+        test_handle_event_with_tty(&completed_zebra, &config, is_tty, &mut state);
 
         let completed_alpha = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
@@ -921,16 +809,63 @@ mod tests {
                 }),
             },
         };
-        test_handle_event_with_tty(&completed_alpha, &config, false, &mut state);
+        test_handle_event_with_tty(&completed_alpha, &config, is_tty, &mut state);
+
+        state
+    }
+
+    #[test]
+    fn test_non_tty_buffers_results() {
+        let state = send_buffered_results(false);
+
+        assert_eq!(state.buffered_lines.len(), 2, "Results should be buffered");
+        // Buffered in arrival order (zebra first, alpha second)
+        assert_eq!(state.buffered_lines[0].0, "zebra");
+        assert_eq!(state.buffered_lines[1].0, "alpha");
+        assert_eq!(state.checked_count, 2);
+    }
+
+    #[test]
+    fn test_tty_buffers_results() {
+        // The key change: TTY mode now buffers results too (instead of
+        // resolving per-package spinners in-place).
+        let state = send_buffered_results(true);
 
         assert_eq!(
             state.buffered_lines.len(),
             2,
-            "Non-TTY mode should buffer results"
+            "TTY mode must also buffer results"
         );
-        // Buffered in arrival order (zebra first, alpha second)
         assert_eq!(state.buffered_lines[0].0, "zebra");
         assert_eq!(state.buffered_lines[1].0, "alpha");
+        assert_eq!(state.checked_count, 2);
+    }
+
+    #[test]
+    fn test_package_list_loaded_sorts_buffered_lines() {
+        // Verify that PackageListLoaded sorts the buffered lines by name.
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let mut state = send_buffered_results(false);
+
+        // Confirm arrival order before PackageListLoaded
+        assert_eq!(state.buffered_lines[0].0, "zebra");
+        assert_eq!(state.buffered_lines[1].0, "alpha");
+
+        let loaded_event = event::PackageEvent::PackageListLoaded {
+            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
+            package_list: selfie::package::event::PackageListData {
+                valid_packages: vec![],
+                invalid_packages: vec![],
+                current_environment: TEST_ENV.to_string(),
+                package_directory: "/test/path".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+            },
+        };
+        test_handle_event_with_tty(&loaded_event, &config, false, &mut state);
+
+        // After PackageListLoaded, buffered lines must be sorted alphabetically
+        assert_eq!(state.buffered_lines[0].0, "alpha");
+        assert_eq!(state.buffered_lines[1].0, "zebra");
     }
 
     #[test]

@@ -52,3 +52,9 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+sync:
+  git-remote: ssh://git@github.com/turboladen/selfie.git
+
+dolt:
+  port: 53900
