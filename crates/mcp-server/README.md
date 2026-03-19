@@ -89,34 +89,35 @@ The MCP server handles two common issues with GUI-launched processes:
 
 ## Available Tools
 
-### Single package
+### Spec tools (definition operations)
 
-| Tool                      | Description                                                    |
-| ------------------------- | -------------------------------------------------------------- |
-| `selfie_get_package`      | Get detailed package info (environments, dependencies, status) |
-| `selfie_check_package`    | Check if a package is installed                                |
-| `selfie_validate_package` | Validate a package definition file                             |
-| `selfie_audit_package`    | Audit a package's installation sources and detect conflicts    |
+| Tool                       | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `selfie_spec_info`         | Get detailed definition info about a package |
+| `selfie_spec_list`         | List all specs for the current environment   |
+| `selfie_spec_validate`     | Validate a single spec file                  |
+| `selfie_spec_validate_all` | Validate all spec files                      |
+| `selfie_spec_create`       | Create a new spec file                       |
+| `selfie_spec_update`       | Update fields of an existing spec            |
+| `selfie_spec_update_batch` | Update multiple specs in a single call       |
+| `selfie_spec_remove`       | Remove a spec file                           |
 
-### Bulk (current environment)
+### Package tools (runtime operations)
 
-| Tool                   | Description                                                        |
-| ---------------------- | ------------------------------------------------------------------ |
-| `selfie_get_all_specs` | Get full definitions for all packages (fast, no commands executed) |
-| `selfie_list_packages` | List all packages with install status (runs check commands)        |
-| `selfie_audit_all`     | Audit all packages for installation source conflicts               |
-| `selfie_validate_all`  | Validate all package definitions (fast, no commands executed)      |
-| `selfie_get_config`    | Get current environment, package directory, and settings           |
+| Tool                       | Description                            |
+| -------------------------- | -------------------------------------- |
+| `selfie_package_check`     | Check if a package is installed        |
+| `selfie_package_status`    | Check runtime installation status      |
+| `selfie_package_list`      | List packages with installation status |
+| `selfie_package_install`   | Install a package                      |
+| `selfie_package_audit`     | Audit a package's installation sources |
+| `selfie_package_audit_all` | Audit all packages for conflicts       |
 
-### Mutating
+### Config tools
 
-| Tool                     | Description                                       |
-| ------------------------ | ------------------------------------------------- |
-| `selfie_install_package` | Install a package using its configured method     |
-| `selfie_create_package`  | Create a new package definition file              |
-| `selfie_update_package`  | Update a single package's fields                  |
-| `selfie_update_packages` | Update multiple packages in a single call (batch) |
-| `selfie_remove_package`  | Remove a package definition file                  |
+| Tool                | Description               |
+| ------------------- | ------------------------- |
+| `selfie_config_get` | Get current configuration |
 
 ## What AI Assistants Can Do
 

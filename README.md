@@ -173,7 +173,7 @@ selfie --help
 
 3. **Create your first package:**
    ```bash
-   selfie package create ripgrep --interactive
+   selfie spec create ripgrep --interactive
    ```
 
 4. **Install it:**
@@ -220,8 +220,9 @@ Every command has built-in help:
 
 ```bash
 selfie --help                    # Main help
-selfie package --help           # Package commands
-selfie package install --help   # Specific command help
+selfie spec --help               # Spec (definition) commands
+selfie package --help            # Package (runtime) commands
+selfie spec create --help        # Specific command help
 ```
 
 ### Debugging
@@ -236,7 +237,7 @@ selfie --verbose package install package-name
 
 - **Permission errors**: Check if install commands need `sudo`
 - **Command not found**: Verify PATH includes tool installation locations
-- **Package validation fails**: Use `selfie package validate package-name`
+- **Package validation fails**: Use `selfie spec validate package-name`
 - **Configuration issues**: Run `selfie config validate`
 
 ### Community
@@ -251,11 +252,11 @@ Selfie is actively developed and ready for daily use. Current features:
 
 - ✅ Package installation with environment-specific commands
 - ✅ Dependency resolution and installation
-- ✅ Package validation and listing
-- ✅ Interactive package creation and editing
+- ✅ Spec validation and package listing
+- ✅ Interactive spec creation and editing
 - ✅ Configuration management
 - ✅ Audit: detect installation sources and flag conflicts
-- ✅ Package update: structured field modifications via CLI and MCP
+- ✅ Spec update: structured field modifications via CLI and MCP
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ⏳ Advanced dependency resolution (in progress)
