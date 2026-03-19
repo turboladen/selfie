@@ -45,3 +45,4 @@ docker-compose.override.yaml
 
 # Claude
 .claude/settings.local.json
+.claude/worktrees/
