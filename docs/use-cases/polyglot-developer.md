@@ -406,10 +406,10 @@ When Alex discovers a new tool they want to use:
 
 ```bash
 # Create package definition
-selfie package create new-tool --interactive
+selfie spec create new-tool --interactive
 
 # Edit with preferred installation method
-selfie package edit new-tool
+selfie spec edit new-tool
 
 # Test installation
 selfie package install new-tool
@@ -439,11 +439,11 @@ done
 
 ```bash
 # Check which tools need updates (manual process)
-selfie package info typescript  # Check current version info
+selfie spec info typescript  # Check current version info
 npm outdated -g typescript      # Check if updates available
 
 # Update package definition if needed
-selfie package edit typescript
+selfie spec edit typescript
 
 # Reinstall if necessary
 selfie package install typescript

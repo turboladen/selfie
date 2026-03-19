@@ -122,7 +122,7 @@ from the CLI:
   phrases (`"successfully"`, `"with failures"`).
 - Bulk tools (`get_all_specs`, `validate_all`) bypass the service layer for fast file reads.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
-  to use each tool (e.g., "Use this instead of calling selfie_get_package repeatedly").
+  to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 
 ## Gotchas
 

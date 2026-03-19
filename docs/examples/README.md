@@ -11,7 +11,7 @@ Copy any of these examples to your package directory and customize them for your
 cp docs/examples/ripgrep.yaml ~/my-packages/
 
 # Edit to match your preferences
-selfie package edit ripgrep
+selfie spec edit ripgrep
 
 # Install the package
 selfie package install ripgrep
@@ -122,7 +122,7 @@ Test example packages in a clean environment:
 
 ```bash
 # Validate package syntax
-selfie package validate tool-name
+selfie spec validate tool-name
 
 # Test installation (use with caution)
 selfie package install tool-name

@@ -36,7 +36,7 @@ selfie config validate
 
 ### `EDITOR`
 
-Specifies which editor to use for the `selfie package edit` command. This environment variable is
+Specifies which editor to use for the `selfie spec edit` command. This environment variable is
 required when using package editing functionality.
 
 **Example:**
@@ -46,11 +46,11 @@ export EDITOR=code    # Use VS Code
 export EDITOR=vim     # Use Vim
 export EDITOR=nano    # Use Nano
 
-selfie package edit my-package
+selfie spec edit my-package
 ```
 
-If `EDITOR` is not set, the `selfie package edit` command will fail with an error message
-instructing you to set this environment variable.
+If `EDITOR` is not set, the `selfie spec edit` command will fail with an error message instructing
+you to set this environment variable.
 
 If no configuration file is found, selfie will create a default configuration at
 `~/.config/selfie/config.yml`.
@@ -264,7 +264,7 @@ export EDITOR=nano    # Nano
 echo 'export EDITOR=code' >> ~/.bashrc
 ```
 
-This environment variable is required for the `selfie package edit` command.
+This environment variable is required for the `selfie spec edit` command.
 
 ## Best Practices
 

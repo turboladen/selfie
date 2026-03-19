@@ -623,7 +623,7 @@ Error: Package 'package-name' not found
 Error: Package validation failed
 ```
 
-- Run `selfie package validate package-name` for detailed errors
+- Run `selfie spec validate package-name` for detailed errors
 - Check YAML syntax with a YAML validator
 - Ensure all required fields are present
 
@@ -653,7 +653,7 @@ Warning: Check command failed
 1. **Use verbose mode**: `selfie --verbose package install package-name`
 2. **Test commands manually**: Run install/check commands in your shell
 3. **Check dependencies**: Ensure all dependencies are properly installed
-4. **Validate syntax**: Use `selfie package validate package-name`
+4. **Validate syntax**: Use `selfie spec validate package-name`
 5. **Check permissions**: Ensure you have necessary permissions for installation paths
 6. **Review logs**: Check system logs for additional error information
 

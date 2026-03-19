@@ -124,20 +124,20 @@ Let's create a package for `ripgrep`, a popular text search tool.
 ### 1. Create the Package File
 
 ```bash
-selfie package create ripgrep --interactive
+selfie spec create ripgrep --interactive
 ```
 
 This will prompt you for package details and create a template file. Alternatively, create it
 manually:
 
 ```bash
-selfie package create ripgrep
+selfie spec create ripgrep
 ```
 
 ### 2. Edit the Package Definition
 
 ```bash
-selfie package edit ripgrep
+selfie spec edit ripgrep
 ```
 
 This opens the package file in your default editor. Update it with your preferred installation
@@ -172,7 +172,7 @@ environments:
 ### 3. Validate the Package
 
 ```bash
-selfie package validate ripgrep
+selfie spec validate ripgrep
 ```
 
 This checks your package definition for syntax errors and validates the structure.
@@ -195,22 +195,22 @@ Selfie will:
 
 ```bash
 # List all available packages
-selfie package list
+selfie spec list
 
 # Get detailed information about a package
-selfie package info ripgrep
+selfie spec info ripgrep
 
 # Check if a package is installed
 selfie package check ripgrep
 
 # Create a new package
-selfie package create my-tool
+selfie spec create my-tool
 
 # Edit an existing package
-selfie package edit my-tool
+selfie spec edit my-tool
 
 # Remove a package definition
-selfie package remove my-tool
+selfie spec remove my-tool
 ```
 
 ### Configuration
@@ -266,9 +266,9 @@ Create a few essential packages for your workflow:
 
 ```bash
 cd ~/my-selfie-packages
-selfie package create node
-selfie package create docker
-selfie package create kubectl
+selfie spec create node
+selfie spec create docker
+selfie spec create kubectl
 ```
 
 ### 4. Version Control
@@ -311,7 +311,7 @@ If you get permission errors during package installation:
 
 If package validation fails:
 
-1. Check YAML syntax with `selfie package validate package-name`
+1. Check YAML syntax with `selfie spec validate package-name`
 2. Ensure all required fields are present
 3. Verify environment names match your configuration
 4. Check that commands are appropriate for your system
