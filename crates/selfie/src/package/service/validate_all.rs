@@ -45,6 +45,7 @@ where
     progress.next(sender, "Validating packages").await;
 
     let mut has_errors = false;
+    let mut total_warnings: usize = 0;
 
     for package in &valid_packages {
         let validation = package.validate(config.environment());
@@ -76,6 +77,7 @@ where
             has_errors = true;
             ValidationStatus::HasErrors
         } else if issues.has_warnings() {
+            total_warnings += issues.warnings().len();
             ValidationStatus::HasWarnings
         } else {
             ValidationStatus::Valid
@@ -101,11 +103,16 @@ where
             .into(),
         )
     } else {
+        let (status, warning_count) = if total_warnings > 0 {
+            (ValidationStatus::HasWarnings, Some(total_warnings))
+        } else {
+            (ValidationStatus::Valid, None)
+        };
         OperationResult::Success(OperationSuccess::package_validated(
             String::new(),
             config.environment().to_string(),
-            ValidationStatus::Valid,
-            None,
+            status,
+            warning_count,
             (progress.current_step(), progress.total_steps()).into(),
         ))
     }

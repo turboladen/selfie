@@ -353,6 +353,7 @@ mod tests {
                     current_environment: "macos".to_string(),
                     package_directory: "/tmp/packages".to_string(),
                     environment_stats: Default::default(),
+                    show_all: false,
                 },
             },
             PackageEvent::Completed {

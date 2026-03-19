@@ -92,6 +92,7 @@ where
         current_environment: config.environment().to_string(),
         package_directory: config.package_directory().display().to_string(),
         environment_stats,
+        show_all,
     };
 
     sender.send_spec_list(spec_list_data).await;

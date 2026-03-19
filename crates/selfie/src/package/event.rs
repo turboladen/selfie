@@ -1618,6 +1618,7 @@ pub struct SpecListData {
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
+    pub show_all: bool,
 }
 
 /// Structured data for check results

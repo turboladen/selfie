@@ -86,11 +86,15 @@ fn display_spec_list(data: &SpecListData, use_colors: bool) {
     }
 
     // Summary
-    let summary = format!(
-        "{} spec(s) in environment '{}'",
-        data.specs.len(),
-        data.current_environment,
-    );
+    let summary = if data.show_all {
+        format!("{} spec(s) across all environments", data.specs.len())
+    } else {
+        format!(
+            "{} spec(s) in environment '{}'",
+            data.specs.len(),
+            data.current_environment,
+        )
+    };
     println!("\n{summary}");
 }
 
@@ -159,6 +163,7 @@ mod tests {
                 current_environment: "test".to_string(),
                 package_directory: "/tmp/packages".to_string(),
                 environment_stats: Default::default(),
+                show_all: false,
             },
         };
         assert!(handle_spec_list_event(&event, false));
