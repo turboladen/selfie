@@ -116,7 +116,10 @@ where
             tokio::spawn(async move {
                 let status = if let Some(ref cmd) = check_command {
                     // Acquire permit before spawning a subprocess
-                    let _permit = semaphore.acquire().await;
+                    let _permit = semaphore
+                        .acquire()
+                        .await
+                        .expect("semaphore is never closed");
                     let check_result = super::check::execute_check_command_quiet(
                         &package_name,
                         &current_env,
@@ -207,4 +210,164 @@ where
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        commands::runner::{CommandError, CommandOutput, CommandRunner},
+        config::SelfieConfigBuilder,
+        package::{PackageBuilder, port::MockPackageRepository},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    /// A cloneable command runner that tracks peak concurrency.
+    #[derive(Clone)]
+    struct ConcurrencyTrackingRunner {
+        current: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        delay: std::time::Duration,
+    }
+
+    impl ConcurrencyTrackingRunner {
+        fn new(delay: std::time::Duration) -> Self {
+            Self {
+                current: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                delay,
+            }
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CommandRunner for ConcurrencyTrackingRunner {
+        async fn is_command_available(&self, _command: &str) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _command: &str,
+            _token: &CancellationToken,
+        ) -> Result<CommandOutput, CommandError> {
+            let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+
+            tokio::time::sleep(self.delay).await;
+
+            self.current.fetch_sub(1, Ordering::SeqCst);
+
+            Ok(CommandOutput {
+                output: std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                duration: self.delay,
+            })
+        }
+
+        async fn execute_with_timeout(
+            &self,
+            command: &str,
+            _timeout: std::time::Duration,
+            token: &CancellationToken,
+        ) -> Result<CommandOutput, CommandError> {
+            self.execute(command, token).await
+        }
+
+        async fn execute_streaming(
+            &self,
+            _command: &str,
+            _timeout: std::time::Duration,
+            _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
+            _token: &CancellationToken,
+        ) -> Result<CommandOutput, CommandError> {
+            unimplemented!("not needed for list tests")
+        }
+    }
+
+    fn test_sender() -> (
+        EventSender,
+        mpsc::Receiver<crate::package::event::PackageEvent>,
+    ) {
+        let (tx, rx) = mpsc::channel(256);
+        let sender = EventSender::new_with_context(
+            tx,
+            crate::package::event::metadata::OperationType::PackageList,
+            String::new(),
+            "test".to_string(),
+            crate::package::event::OperationContext::default(),
+        );
+        (sender, rx)
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_checks_limited_by_semaphore() {
+        let max_parallel = 2;
+        let num_packages = 6;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .max_parallel_unchecked(max_parallel)
+            .build();
+
+        let packages: Vec<_> = (0..num_packages)
+            .map(|i| {
+                PackageBuilder::default()
+                    .name(&format!("pkg-{i}"))
+                    .version("1.0.0")
+                    .environment("test", |b| {
+                        b.install("echo install").check_some("echo check")
+                    })
+                    .path(temp_dir.path().join(format!("pkg-{i}.yml")))
+                    .build()
+            })
+            .collect();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let packages_clone = packages.clone();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(crate::package::port::ListPackagesOutput(
+                packages_clone.iter().cloned().map(Ok).collect(),
+            ))
+        });
+
+        let runner = ConcurrencyTrackingRunner::new(std::time::Duration::from_millis(50));
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_list(
+            &mock_repo,
+            &config,
+            &runner,
+            &sender,
+            &mut progress,
+            false,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        let peak_value = runner.peak();
+        assert!(
+            peak_value <= max_parallel,
+            "Peak concurrency {peak_value} exceeded limit {max_parallel}"
+        );
+        assert!(
+            peak_value > 1,
+            "Expected some parallelism (peak was {peak_value}), \
+             suggests semaphore might be too restrictive"
+        );
+    }
 }
