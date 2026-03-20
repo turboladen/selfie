@@ -1,0 +1,3 @@
+[default.extend-words]
+# gix API field name (short for "relative path")
+rela = "rela"
