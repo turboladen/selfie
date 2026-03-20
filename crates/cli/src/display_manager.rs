@@ -262,13 +262,13 @@ impl DisplayManager {
     //   ⚠  warning (yellow)     ℹ  info (blue)
     //   ✨ suggestion (yellow)   ── title ──  section header (bold)
     //
-    // Phase 1: These use println!/eprintln! directly to match expected
-    // stdout/stderr conventions. Info, success, progress, and suggestion
-    // go to stdout; errors and warnings go to stderr.
+    // These use println!/eprintln! directly to match expected stdout/stderr
+    // conventions. Info, success, progress, and suggestion go to stdout;
+    // errors and warnings go to stderr.
     //
-    // Phase 2 (when spinners are wired into event handlers): These should
-    // route through self.mp.println() / self.mp.eprintln() to avoid
-    // interleaving with active spinner output.
+    // Callers must finalize any active spinner before calling these methods
+    // to avoid visual interleaving. All event handlers currently follow
+    // this pattern (take spinner before displaying results).
 
     /// Print an informational message (stdout)
     pub(crate) fn print_info(&self, message: impl Display) {
@@ -348,9 +348,9 @@ impl DisplayManager {
 
     /// Print a plain line to stdout
     ///
-    /// Note: When spinners are active (Phase 2), this should route through
-    /// `self.mp.println()` to avoid visual corruption. Currently spinners
-    /// are not wired into event handlers, so direct println is safe.
+    /// Note: Callers must finalize any active spinner (via `OperationHandle::finish_*`
+    /// or `take()`) before calling this method. Direct `println!` would interleave
+    /// with spinner output. Currently all event handlers follow this pattern.
     pub(crate) fn println(&self, message: impl Display) {
         println!("{message}");
     }
@@ -391,7 +391,6 @@ impl DisplayManager {
     ///
     /// Returns an `OperationHandle` that can be used to update progress,
     /// show command output, and finalize the operation display.
-    #[allow(dead_code)]
     pub(crate) fn start_operation(&self, message: impl Display) -> OperationHandle {
         self.create_spinner(message, 5)
     }

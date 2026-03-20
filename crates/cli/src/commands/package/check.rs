@@ -5,8 +5,12 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor, formatters::format_key, status_style,
+    commands::common,
+    config::CliConfig,
+    display_manager::{DisplayManager, OperationHandle},
+    event_processor::EventProcessor,
+    formatters::format_key,
+    status_style,
 };
 
 pub(crate) async fn handle_check(
@@ -17,47 +21,66 @@ pub(crate) async fn handle_check(
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
 
-    // Create animated spinner for check operation
-    display.print_progress(format!("Checking {package_name}..."));
+    // Spinner for TTY; static fallback otherwise
+    let mut spinner: Option<OperationHandle> = if display.is_tty() {
+        Some(display.start_operation(format!("Checking {package_name}...")))
+    } else {
+        display.print_progress(format!("Checking {package_name}..."));
+        None
+    };
 
-    // Call the service's check method to get an event stream
     let event_stream = service.check(package_name).await;
 
-    // Track whether we handled an environment error in the Completed arm
     let mut env_error_handled = false;
     let verbose = config.verbose();
 
-    // Process the event stream with custom handling for structured data
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::CheckResultCompleted { check_result, .. } => {
+                    // Finalize spinner before displaying results
+                    if let Some(s) = spinner.take() {
+                        s.finish_clear();
+                    }
                     if verbose {
                         display_check_result_card(check_result, config, display);
                     } else {
                         display_check_output_only(check_result, display);
                     }
-                    true // Handled
+                    true
                 }
-                PackageEvent::Progress { .. } => {
+                PackageEvent::Progress {
+                    step,
+                    total_steps,
+                    message,
+                    ..
+                } => {
                     if verbose {
                         false // Use default progress handling
+                    } else if let Some(s) = spinner.as_ref() {
+                        s.update_progress(*step, *total_steps, message);
+                        true
                     } else {
-                        true // Suppress in non-verbose mode
+                        display.print_progress(message);
+                        true
                     }
                 }
                 PackageEvent::Completed { result, .. } => {
+                    // Finalize spinner on completion if not already done
+                    if let Some(s) = spinner.take() {
+                        s.finish_clear();
+                    }
                     if let OperationResult::Failure(failure) = result
                         && failure.is_environment_error()
                     {
                         display_environment_error(package_name, failure, config, display);
                         env_error_handled = true;
-                        return true; // Handled
+                        return true;
                     }
-                    false // Use default handling for other completion events
+                    false
                 }
-                _ => false, // Use default handling for other events
+                _ => false,
             }
         })
         .await;
