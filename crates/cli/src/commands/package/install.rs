@@ -6,7 +6,9 @@ use selfie::package::{
 use tracing::info;
 
 use crate::{
-    commands::common, config::CliConfig, display_manager::DisplayManager,
+    commands::common,
+    config::CliConfig,
+    display_manager::{DisplayManager, OperationHandle},
     event_processor::EventProcessor,
 };
 
@@ -18,15 +20,18 @@ pub(crate) async fn handle_install(
 ) -> i32 {
     info!("Installing package: {}", package_name);
 
-    // Call the service's install method to get an event stream
     let event_stream = service.install(package_name).await;
 
-    // Track whether we handled an environment error in the Completed arm
     let mut env_error_handled = false;
 
-    display.print_progress(format!("Installing {package_name}..."));
+    // Spinner for TTY; static fallback otherwise
+    let mut spinner: Option<OperationHandle> = if display.is_tty() {
+        Some(display.start_operation(format!("Installing {package_name}...")))
+    } else {
+        display.print_progress(format!("Installing {package_name}..."));
+        None
+    };
 
-    // Process the event stream with custom handling for install-specific events
     let processor = EventProcessor::new(display.clone());
     let verbose = config.verbose();
     let result = processor
@@ -38,9 +43,12 @@ pub(crate) async fn handle_install(
             } = event
                 && failure.is_environment_error()
             {
+                if let Some(s) = spinner.take() {
+                    s.finish_clear();
+                }
                 display_environment_error(package_name, failure, config, display);
                 env_error_handled = true;
-                return true; // Handled
+                return true;
             }
 
             #[allow(clippy::match_same_arms)]
@@ -64,14 +72,17 @@ pub(crate) async fn handle_install(
                             format!("Check error ({err}), proceeding with installation")
                         }
                     };
-                    display.print_progress(&message);
-                    true // Handled
+                    if let Some(s) = spinner.as_ref() {
+                        s.set_message(&message);
+                    } else {
+                        display.print_progress(&message);
+                    }
+                    true
                 }
                 PackageEvent::Info { output, .. } => {
                     if verbose {
                         false // Use default handler in verbose mode
                     } else {
-                        // In non-verbose mode, print trimmed lines preserving stream
                         let (lines, is_stderr) = match output {
                             selfie::package::event::ConsoleOutput::Stdout(line) => (line, false),
                             selfie::package::event::ConsoleOutput::Stderr(line) => (line, true),
@@ -79,28 +90,52 @@ pub(crate) async fn handle_install(
                         for line in lines.lines() {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
-                                if is_stderr {
-                                    // Intentional: raw subprocess stderr goes
-                                    // directly to stderr, not through DisplayManager,
-                                    // to preserve the subprocess's output stream.
+                                if let Some(s) = spinner.as_mut() {
+                                    s.add_output_line(trimmed);
+                                } else if is_stderr {
                                     eprintln!("{trimmed}");
                                 } else {
                                     display.println(trimmed);
                                 }
                             }
                         }
-                        true // Handled
+                        true
                     }
                 }
-                PackageEvent::Progress { message, .. } => {
+                PackageEvent::Progress {
+                    step,
+                    total_steps,
+                    message,
+                    ..
+                } => {
                     if verbose {
                         false // Use default progress handling
+                    } else if let Some(s) = spinner.as_ref() {
+                        s.update_progress(*step, *total_steps, message);
+                        true
                     } else {
                         display.print_progress(message);
-                        true // Handled
+                        true
                     }
                 }
-                _ => false, // Use default handling for other events
+                PackageEvent::Completed { result, .. } => {
+                    if let Some(s) = spinner.take() {
+                        match result {
+                            OperationResult::Success(_) => {
+                                s.finish_success(format!("{package_name} installed"));
+                                return true;
+                            }
+                            OperationResult::Failure(_) => {
+                                // Clear spinner but let default handler set exit_code
+                                // and print detailed error messages
+                                s.finish_clear();
+                                return false;
+                            }
+                        }
+                    }
+                    false
+                }
+                _ => false,
             }
         })
         .await;

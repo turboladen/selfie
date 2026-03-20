@@ -121,8 +121,8 @@ impl OperationHandle {
     }
 
     /// Add a line of command output below the spinner
-    pub(crate) fn add_output_line(&mut self, line: &str, is_stderr: bool) {
-        let prefix = if is_stderr { "  │ err: " } else { "  │ " };
+    pub(crate) fn add_output_line(&mut self, line: &str) {
+        let prefix = "  │ ";
         let formatted = if self.use_colors {
             format!("{}{}", prefix, style(line.trim()).dim())
         } else {
@@ -262,13 +262,13 @@ impl DisplayManager {
     //   ⚠  warning (yellow)     ℹ  info (blue)
     //   ✨ suggestion (yellow)   ── title ──  section header (bold)
     //
-    // Phase 1: These use println!/eprintln! directly to match expected
-    // stdout/stderr conventions. Info, success, progress, and suggestion
-    // go to stdout; errors and warnings go to stderr.
+    // These use println!/eprintln! directly to match expected stdout/stderr
+    // conventions. Info, success, progress, and suggestion go to stdout;
+    // errors and warnings go to stderr.
     //
-    // Phase 2 (when spinners are wired into event handlers): These should
-    // route through self.mp.println() / self.mp.eprintln() to avoid
-    // interleaving with active spinner output.
+    // Callers must finalize any active spinner before calling these methods
+    // to avoid visual interleaving. All event handlers currently follow
+    // this pattern (take spinner before displaying results).
 
     /// Print an informational message (stdout)
     pub(crate) fn print_info(&self, message: impl Display) {
@@ -348,9 +348,9 @@ impl DisplayManager {
 
     /// Print a plain line to stdout
     ///
-    /// Note: When spinners are active (Phase 2), this should route through
-    /// `self.mp.println()` to avoid visual corruption. Currently spinners
-    /// are not wired into event handlers, so direct println is safe.
+    /// Note: Callers must finalize any active spinner (via `OperationHandle::finish_*`
+    /// or `take()`) before calling this method. Direct `println!` would interleave
+    /// with spinner output. Currently all event handlers follow this pattern.
     pub(crate) fn println(&self, message: impl Display) {
         println!("{message}");
     }
@@ -369,13 +369,28 @@ impl DisplayManager {
         self.is_tty
     }
 
+    // ── Result card builder ─────────────────────────────────────────────
+
+    /// Create a structured result card (section header + key-value pairs)
+    ///
+    /// Usage:
+    /// ```ignore
+    /// display.result_card("Check Results")
+    ///     .field("Package", &package_name)
+    ///     .field("Environment", &environment)
+    ///     .field_if("Command", check_command.as_deref())
+    ///     .print();
+    /// ```
+    pub(crate) fn result_card(&self, title: impl Display) -> ResultCard<'_> {
+        ResultCard::new(self, title)
+    }
+
     // ── Dynamic output methods ─────────────────────────────────────────
 
     /// Start a new operation with a spinner
     ///
     /// Returns an `OperationHandle` that can be used to update progress,
     /// show command output, and finalize the operation display.
-    #[allow(dead_code)]
     pub(crate) fn start_operation(&self, message: impl Display) -> OperationHandle {
         self.create_spinner(message, 5)
     }
@@ -440,6 +455,54 @@ impl DisplayManager {
     #[allow(dead_code)]
     pub(crate) fn has_errors(&self) -> bool {
         self.errors.lock().map(|c| c.has_errors()).unwrap_or(false)
+    }
+}
+
+/// Builder for structured result cards (section header + key-value pairs)
+///
+/// Created by [`DisplayManager::result_card()`]. Call `.field()` / `.field_if()`
+/// to add rows, then `.print()` to render.
+pub(crate) struct ResultCard<'a> {
+    display: &'a DisplayManager,
+    title: String,
+    fields: Vec<(String, String)>,
+}
+
+impl<'a> ResultCard<'a> {
+    fn new(display: &'a DisplayManager, title: impl Display) -> Self {
+        Self {
+            display,
+            title: title.to_string(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Add a key-value field to the card
+    pub(crate) fn field(mut self, key: &str, value: impl Display) -> Self {
+        self.fields.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Add a field only if the value is `Some`
+    pub(crate) fn field_if(mut self, key: &str, value: Option<impl Display>) -> Self {
+        if let Some(v) = value {
+            self.fields.push((key.to_string(), v.to_string()));
+        }
+        self
+    }
+
+    /// Render the card to the display
+    pub(crate) fn print(self) {
+        use crate::formatters::format_key;
+
+        self.display.println("");
+        self.display.print_section_header(&self.title);
+
+        let use_colors = self.display.use_colors();
+        for (key, value) in &self.fields {
+            self.display
+                .println(format!("   {}: {}", format_key(key, use_colors), value));
+        }
     }
 }
 
@@ -511,13 +574,13 @@ mod tests {
     fn test_operation_handle_output_lines() {
         let dm = DisplayManager::new(false);
         let mut handle = dm.start_operation("Testing...");
-        handle.add_output_line("line 1", false);
-        handle.add_output_line("line 2", true);
+        handle.add_output_line("line 1");
+        handle.add_output_line("line 2");
         assert_eq!(handle.output_lines.len(), 2);
 
         // Add more than max to test rolling window
         for i in 0..10 {
-            handle.add_output_line(&format!("line {i}"), false);
+            handle.add_output_line(&format!("line {i}"));
         }
         assert_eq!(handle.output_lines.len(), handle.max_output_lines);
         handle.finish_clear();
@@ -620,6 +683,38 @@ mod tests {
 
         let h3 = dm.start_list_spinner("Test 3");
         h3.finish_warning_in_place("Warning result");
+    }
+
+    #[test]
+    fn test_result_card_basic() {
+        let dm = DisplayManager::new(false);
+        // Verify the builder API works without panicking
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field("Environment", "macos")
+            .print();
+    }
+
+    #[test]
+    fn test_result_card_with_colors() {
+        let dm = DisplayManager::new(true);
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field("Status", "valid")
+            .print();
+    }
+
+    #[test]
+    fn test_result_card_field_if() {
+        let dm = DisplayManager::new(false);
+        let cmd: Option<&str> = Some("brew install foo");
+        let missing: Option<&str> = None;
+
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field_if("Command", cmd)
+            .field_if("Missing", missing)
+            .print();
     }
 
     #[test]
