@@ -60,7 +60,7 @@ where
         Ok(dir_status) => Some(dir_status.status_for_file(package_blob.package.path())),
         Err(e) => {
             sender
-                .send_warning(format!("Could not determine git status: {e}"))
+                .send_warning(format!("Git status unavailable: {e}"))
                 .await;
             None
         }
@@ -341,7 +341,7 @@ mod tests {
                     found_info = true;
                 }
                 PackageEvent::Warning { message, .. } => {
-                    assert!(message.contains("git status"));
+                    assert!(message.contains("Git status unavailable"));
                     found_warning = true;
                 }
                 _ => {}

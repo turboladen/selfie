@@ -17,11 +17,16 @@ impl GitStatusProvider for GixGitStatusProvider {
     fn status_for_directory(&self, directory: &Path) -> Result<GitDirectoryStatus, GitStatusError> {
         let repo = match gix::discover(directory) {
             Ok(repo) => repo,
-            Err(_) => {
+            // Discovery failure (no repo found walking up parents) → not in repo
+            Err(gix::discover::Error::Discover(_)) => {
                 return Ok(GitDirectoryStatus {
                     in_repo: false,
                     files: HashMap::new(),
                 });
+            }
+            // Repo was found but couldn't be opened → surface the error
+            Err(other) => {
+                return Err(GitStatusError::StatusError(other.to_string()));
             }
         };
 

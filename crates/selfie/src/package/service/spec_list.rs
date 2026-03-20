@@ -63,14 +63,19 @@ where
         .filter(|package| show_all || package.environments().contains_key(config.environment()))
         .collect();
 
-    // Look up git status for the package directory (once for all files)
-    let git_dir_status = match git.status_for_directory(config.package_directory()) {
-        Ok(status) => Some(status),
-        Err(e) => {
-            sender
-                .send_warning(format!("Could not determine git status: {e}"))
-                .await;
-            None
+    // Look up git status for the package directory (once for all files),
+    // but only if there are packages to annotate.
+    let git_dir_status = if packages_to_show.is_empty() {
+        None
+    } else {
+        match git.status_for_directory(config.package_directory()) {
+            Ok(status) => Some(status),
+            Err(e) => {
+                sender
+                    .send_warning(format!("Git status unavailable: {e}"))
+                    .await;
+                None
+            }
         }
     };
 
