@@ -56,13 +56,16 @@ impl GitStatusProvider for GixGitStatusProvider {
                 gix::status::Item::IndexWorktree(iw_item) => {
                     use gix::status::index_worktree::Item;
                     match iw_item {
-                        Item::Modification { rela_path, .. } => {
+                        Item::Modification {
+                            rela_path: relative_path,
+                            ..
+                        } => {
                             // Any modification between index and worktree = unstaged change
-                            worktree_changes.insert(rela_path.to_string());
+                            worktree_changes.insert(relative_path.to_string());
                         }
                         Item::DirectoryContents { entry, .. } => {
                             if entry.status == gix::dir::entry::Status::Untracked {
-                                untracked.push(entry.rela_path.to_string());
+                                untracked.push(entry.rela_path.to_string()); // gix field name
                             }
                         }
                         // Renames are uncommon for selfie spec files; ignore for now
