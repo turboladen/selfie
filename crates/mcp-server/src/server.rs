@@ -45,6 +45,9 @@ pub struct PackageNameParam {
 pub struct InstallParam {
     /// Name of the package to install
     pub package: String,
+    /// Skip installing recommended (soft) dependencies
+    #[serde(default)]
+    pub skip_recommends: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -97,6 +100,9 @@ pub struct UpdateParam {
     /// Update dependencies (requires environment)
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
+    /// Update recommended (soft) dependencies (requires environment)
+    #[serde(default)]
+    pub recommends: Option<Vec<String>>,
     /// Add a new environment configuration
     #[serde(default)]
     pub add_environment: Option<AddEnvironmentParam>,
@@ -242,7 +248,7 @@ impl SelfieServer {
             check,
             audit,
             dependencies: params.dependencies,
-            recommends: None,
+            recommends: params.recommends,
             environment: params.environment,
             add_environment,
             remove_environment: params.remove_environment,
@@ -290,7 +296,7 @@ impl SelfieServer {
                 check,
                 audit,
                 dependencies: update.dependencies,
-                recommends: None,
+                recommends: update.recommends,
                 environment: update.environment,
                 add_environment,
                 remove_environment: update.remove_environment,
@@ -426,10 +432,10 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<InstallParam>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = self
-            .service
-            .install(&params.package, selfie::package::InstallOptions::default())
-            .await;
+        let options = selfie::package::InstallOptions {
+            skip_recommends: params.skip_recommends,
+        };
+        let stream = self.service.install(&params.package, options).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }

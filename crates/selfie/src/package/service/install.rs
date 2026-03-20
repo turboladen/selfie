@@ -81,16 +81,7 @@ where
 
     // After the main install succeeds, handle recommends (soft dependencies)
     if !options.skip_recommends {
-        install_recommends(
-            package_name,
-            repo,
-            config,
-            command_runner,
-            sender,
-            progress,
-            token,
-        )
-        .await;
+        install_recommends(package_name, repo, config, command_runner, sender, token).await;
     }
 
     last_result.unwrap_or_else(|| {
@@ -497,7 +488,6 @@ async fn install_recommends<PR, CR>(
     config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &mut ProgressTracker,
     token: &CancellationToken,
 ) where
     PR: PackageRepository + Sync,
@@ -526,6 +516,11 @@ async fn install_recommends<PR, CR>(
         ))
         .await;
 
+    // Recommends use a separate progress tracker so they don't overflow
+    // the parent operation's step count. Progress for recommends is communicated
+    // via RecommendStarted/Succeeded/Failed events instead.
+    let mut rec_progress = ProgressTracker::new(0);
+
     for recommend_name in &recommends {
         if token.is_cancelled() {
             break;
@@ -539,7 +534,7 @@ async fn install_recommends<PR, CR>(
             config,
             command_runner,
             sender,
-            progress,
+            &mut rec_progress,
             token,
         )
         .await

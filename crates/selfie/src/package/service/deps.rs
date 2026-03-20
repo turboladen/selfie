@@ -189,6 +189,11 @@ where
 /// Unlike `dfs`, this does NOT add packages to `install_order`. It only checks
 /// for cycles by examining `Visiting` state. Packages already `Visited` by
 /// the main DFS are safely skipped.
+///
+/// Note: This intentionally only traverses hard `dependencies` of the recommend,
+/// NOT recommends-of-recommends. Since recommends are one-level deep (we never
+/// install recommends of recommends), those transitive recommends can't create
+/// runtime cycles.
 fn check_recommend_cycles<'a, PR>(
     package_name: &'a str,
     repo: &'a PR,
