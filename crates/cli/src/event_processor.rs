@@ -46,7 +46,7 @@ use selfie::package::{
     port::{PackageError, PackageListError},
 };
 
-use crate::display_manager::DisplayManager;
+use crate::display_manager::{DisplayManager, ErrorDetail};
 
 /// Result of processing events, including metadata about what was encountered
 #[derive(Debug, Clone)]
@@ -168,20 +168,62 @@ impl EventProcessor {
                 // Warnings don't set failure exit code by default
             }
 
-            PackageEvent::Error { message, error, .. } => {
+            PackageEvent::Error {
+                operation_info,
+                message,
+                error,
+            } => {
+                self.display.collect_error(ErrorDetail {
+                    package_name: operation_info.package_name,
+                    operation: operation_info.operation_type.to_string(),
+                    command: None,
+                    exit_code: None,
+                    stderr: None,
+                    stdout: None,
+                    message: format!("{message}: {error}"),
+                });
                 self.display.print_error(format!("{message}: {error}"));
                 result.exit_code = 1;
                 result.had_errors = true;
             }
 
             PackageEvent::Completed {
-                result: op_result, ..
+                operation_info,
+                result: op_result,
             } => match op_result {
                 OperationResult::Success(success) => {
                     self.display.print_success(success.to_string());
                 }
                 OperationResult::Failure(err) => {
-                    use selfie::package::event::OperationFailure;
+                    use selfie::package::event::{CommandFailure, OperationFailure};
+
+                    // Collect structured error detail for end-of-operation summary
+                    let error_detail = match &err {
+                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+                            command,
+                            exit_code,
+                            stderr,
+                            stdout,
+                        }) => ErrorDetail {
+                            package_name: operation_info.package_name,
+                            operation: operation_info.operation_type.to_string(),
+                            command: Some(command.clone()),
+                            exit_code: *exit_code,
+                            stderr: Some(stderr.clone()),
+                            stdout: Some(stdout.clone()),
+                            message: err.to_string(),
+                        },
+                        _ => ErrorDetail {
+                            package_name: operation_info.package_name,
+                            operation: operation_info.operation_type.to_string(),
+                            command: None,
+                            exit_code: None,
+                            stderr: None,
+                            stdout: None,
+                            message: err.to_string(),
+                        },
+                    };
+                    self.display.collect_error(error_detail);
 
                     match err {
                         OperationFailure::Package(PackageError::PackageNotFound {
@@ -504,6 +546,82 @@ mod tests {
         assert!(result.had_errors);
         // Completed event after Canceled should not have been processed
         assert_eq!(events_after_cancel, 0);
+    }
+
+    #[tokio::test]
+    async fn test_error_event_collects_error_detail() {
+        use selfie::package::event::StreamedError;
+        use selfie::package::port::PackageRepoError;
+
+        let op = make_operation_info("broken-pkg");
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Error {
+            operation_info: op,
+            error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
+                selfie::fs::FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file missing",
+                ))),
+            )),
+            message: "Could not load".to_string(),
+        }];
+
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        processor.process_events(event_stream, |_event| false).await;
+
+        assert!(display_clone.has_errors());
+    }
+
+    #[tokio::test]
+    async fn test_completed_failure_collects_error_detail() {
+        use selfie::package::event::{CommandFailure, OperationFailure, OperationResult};
+
+        let op = make_operation_info("fail-pkg");
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
+            operation_info: op,
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::ExecutionFailed {
+                    command: "brew install fail-pkg".to_string(),
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: "not found".to_string(),
+                },
+            )),
+        }];
+
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        processor.process_events(event_stream, |_event| false).await;
+
+        assert!(display_clone.has_errors());
+    }
+
+    #[tokio::test]
+    async fn test_completed_generic_failure_collects_error_detail() {
+        use selfie::package::event::{OperationFailure, OperationResult};
+
+        let op = make_operation_info("generic-fail");
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
+            operation_info: op,
+            result: OperationResult::Failure(OperationFailure::Generic(
+                "something went wrong".to_string(),
+            )),
+        }];
+
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        processor.process_events(event_stream, |_event| false).await;
+
+        assert!(display_clone.has_errors());
     }
 
     #[test]

@@ -87,10 +87,16 @@ where
     let semaphore = Arc::new(Semaphore::new(config.max_parallel_installations().get()));
 
     // Create parallel tasks for status checking with order preservation
-    // Collect package names for JoinError handling (names move into spawned tasks)
-    let package_names: Vec<String> = packages_to_process
+    // Collect package metadata for JoinError handling (values move into spawned tasks)
+    let package_metadata: Vec<(String, String, Vec<String>)> = packages_to_process
         .iter()
-        .map(|p| p.name().to_string())
+        .map(|p| {
+            (
+                p.name().to_string(),
+                p.version().to_string(),
+                p.environments().keys().cloned().collect(),
+            )
+        })
         .collect();
 
     let check_futures: Vec<_> = packages_to_process
@@ -157,13 +163,14 @@ where
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
-                // Use the captured package name so the CLI can resolve the correct spinner
-                let name = package_names.get(i).cloned().unwrap_or_default();
+                // Use the captured metadata so the CLI can resolve the correct spinner
+                let (name, version, environments) =
+                    package_metadata.get(i).cloned().unwrap_or_default();
                 sender
                     .send_package_list_item(PackageListItem {
                         name,
-                        version: String::new(),
-                        environments: Vec::new(),
+                        version,
+                        environments,
                         status: Some(crate::package::event::CheckResult::Error(format!(
                             "Task failed: {e}"
                         ))),
