@@ -5,8 +5,12 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common, config::CliConfig, display_manager::{DisplayManager, INDENT},
-    event_processor::EventProcessor, formatters::format_key, status_style,
+    commands::common,
+    config::CliConfig,
+    display_manager::{DisplayManager, INDENT},
+    event_processor::EventProcessor,
+    formatters::format_key,
+    status_style,
 };
 
 pub(crate) async fn handle_audit(

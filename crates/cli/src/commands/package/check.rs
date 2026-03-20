@@ -7,7 +7,7 @@ use selfie::package::{
 use crate::{
     commands::common,
     config::CliConfig,
-    display_manager::{DisplayManager, OperationHandle, INDENT},
+    display_manager::{DisplayManager, INDENT, OperationHandle},
     event_processor::EventProcessor,
     formatters::format_key,
     status_style,

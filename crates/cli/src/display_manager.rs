@@ -504,8 +504,12 @@ impl<'a> ResultCard<'a> {
 
         let use_colors = self.display.use_colors();
         for (key, value) in &self.fields {
-            self.display
-                .println(format!("{}{}: {}", INDENT, format_key(key, use_colors), value));
+            self.display.println(format!(
+                "{}{}: {}",
+                INDENT,
+                format_key(key, use_colors),
+                value
+            ));
         }
     }
 }

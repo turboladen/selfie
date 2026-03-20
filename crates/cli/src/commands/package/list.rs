@@ -5,7 +5,7 @@ use selfie::package::{event, service::PackageService};
 
 use crate::{
     config::CliConfig,
-    display_manager::{DisplayManager, OperationHandle},
+    display_manager::{DisplayManager, INDENT, OperationHandle},
     status_style,
 };
 
@@ -375,12 +375,14 @@ fn display_environment_stats(
             console::style("--environment <env>").yellow()
         ));
         display.println(format!(
-            "   or: {} to see all packages regardless of environment",
+            "{INDENT}or: {} to see all packages regardless of environment",
             console::style("--all").yellow()
         ));
     } else {
         display.print_suggestion("--environment <env> to see packages for a different environment");
-        display.println("   or: --all to see all packages regardless of environment");
+        display.println(format!(
+            "{INDENT}or: --all to see all packages regardless of environment"
+        ));
     }
 }
 
