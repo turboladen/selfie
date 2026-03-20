@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::{
     config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
-    formatters::format_key, status_style,
+    formatters::format_key, git_style, status_style,
 };
 
 use crate::commands::common;
@@ -98,6 +98,13 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         format_key_fn("Environments"),
         format_value(&env_names),
     ]);
+
+    if let Some(git_status) = &package_info.git_status {
+        table.add_row(vec![
+            format_key_fn("Git Status"),
+            git_style::format_git_status_long(git_status, config.use_colors()),
+        ]);
+    }
 
     table
 }

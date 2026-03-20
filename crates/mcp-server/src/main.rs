@@ -7,7 +7,10 @@ use selfie::{
     commands::ShellCommandRunner,
     config::{YamlLoader, loader::ConfigLoader},
     fs::RealFileSystem,
-    package::{repository::yaml::YamlPackageRepository, service::PackageServiceImpl},
+    package::{
+        git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
+        service::PackageServiceImpl,
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -60,7 +63,13 @@ async fn async_main() -> Result<()> {
     // homebrew, fnm, etc. GUI-launched processes (like MCP servers started by
     // Claude Desktop) don't inherit the terminal's environment.
     let runner = ShellCommandRunner::login_shell(config.command_timeout());
-    let service = PackageServiceImpl::new(repo, runner, config.clone(), CancellationToken::new());
+    let service = PackageServiceImpl::new(
+        repo,
+        runner,
+        GixGitStatusProvider,
+        config.clone(),
+        CancellationToken::new(),
+    );
 
     let mcp_server = server::SelfieServer::new(service, config);
 

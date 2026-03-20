@@ -11,6 +11,7 @@ use selfie::{
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
         GetPackage, SpecService,
+        git_adapter::GixGitStatusProvider,
         port::PackageRepository,
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
@@ -150,6 +151,7 @@ pub(crate) fn create_package_service(
     PackageServiceImpl::new(
         repo,
         command_runner,
+        GixGitStatusProvider,
         config.selfie_config().clone(),
         cancellation_token,
     )

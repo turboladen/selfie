@@ -36,6 +36,7 @@ use super::{
         EventSender, EventStream, OperationContext, OperationResult, PackageEvent,
         metadata::OperationType,
     },
+    git::GitStatusProvider,
     port::PackageRepository,
 };
 
@@ -183,21 +184,24 @@ pub trait PackageService: Send + Sync {
 /// The implementation uses dependency injection through generic parameters to
 /// support different storage backends and command execution strategies.
 #[derive(Debug)]
-pub struct PackageServiceImpl<R, CR> {
+pub struct PackageServiceImpl<R, CR, G> {
     /// Repository for loading and managing package definitions
     package_repository: R,
     /// Command runner for executing system commands
     command_runner: CR,
+    /// Git status provider for annotating specs with git state
+    git_provider: G,
     /// Application configuration including environment and settings
     config: SelfieConfig,
     /// Token used to signal graceful cancellation of in-flight operations
     cancellation_token: CancellationToken,
 }
 
-impl<R, CR> PackageServiceImpl<R, CR>
+impl<R, CR, G> PackageServiceImpl<R, CR, G>
 where
     R: PackageRepository + Clone + 'static,
     CR: CommandRunner + Clone + 'static,
+    G: GitStatusProvider + Clone + 'static,
 {
     /// Create a new package service instance
     ///
@@ -205,16 +209,19 @@ where
     ///
     /// * `package_repository` - Repository implementation for package storage
     /// * `command_runner` - Command runner implementation for executing system commands
+    /// * `git_provider` - Git status provider for file status lookups
     /// * `config` - Application configuration
     pub fn new(
         package_repository: R,
         command_runner: CR,
+        git_provider: G,
         config: SelfieConfig,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             package_repository,
             command_runner,
+            git_provider,
             config,
             cancellation_token,
         }
@@ -329,10 +336,11 @@ where
     }
 }
 
-impl<R, CR> SpecService for PackageServiceImpl<R, CR>
+impl<R, CR, G> SpecService for PackageServiceImpl<R, CR, G>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    G: GitStatusProvider + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     #[instrument]
     async fn create(&self, package: super::Package) -> EventStream {
@@ -416,26 +424,36 @@ where
 
     async fn spec_info(&self, package_name: &str) -> EventStream {
         let package_name_owned = package_name.to_string();
+        let git = self.git_provider.clone();
         self.execute_operation_with_deps(
             OperationType::SpecInfo,
             package_name,
             OperationContext::default(),
             2, // Load package + gather info
             move |repo, _, config, sender, mut progress, _token| async move {
-                info::handle_spec_info(&package_name_owned, &repo, &config, &sender, &mut progress)
-                    .await
+                info::handle_spec_info(
+                    &package_name_owned,
+                    &repo,
+                    &config,
+                    &git,
+                    &sender,
+                    &mut progress,
+                )
+                .await
             },
         )
     }
 
     async fn list(&self, show_all: bool) -> EventStream {
+        let git = self.git_provider.clone();
         self.execute_operation_with_deps(
             OperationType::SpecList,
             "",
             OperationContext::default(),
             2, // Load packages + emit items
             move |repo, _, config, sender, mut progress, _token| async move {
-                spec_list::handle_spec_list(&repo, &config, &sender, &mut progress, show_all).await
+                spec_list::handle_spec_list(&repo, &config, &git, &sender, &mut progress, show_all)
+                    .await
             },
         )
     }
@@ -453,10 +471,11 @@ where
     }
 }
 
-impl<R, CR> PackageService for PackageServiceImpl<R, CR>
+impl<R, CR, G> PackageService for PackageServiceImpl<R, CR, G>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    G: GitStatusProvider + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     #[instrument]
     async fn check(&self, package_name: &str) -> EventStream {

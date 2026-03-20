@@ -71,6 +71,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "homepage": &package_info.homepage,
             "environments": &package_info.environments,
             "current_environment": &package_info.current_environment,
+            "git_status": git_status_label(package_info.git_status.as_ref()),
         })),
         PackageEvent::EnvironmentStatusChecked {
             environment_status, ..
@@ -127,6 +128,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "version": &spec_item.version,
             "description": &spec_item.description,
             "environments": &spec_item.environments,
+            "git_status": git_status_label(spec_item.git_status.as_ref()),
         })),
         PackageEvent::SpecListLoaded { spec_list, .. } => {
             let invalid: Vec<Value> = spec_list
@@ -147,6 +149,19 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "message": message,
         })),
         _ => None,
+    }
+}
+
+fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Value {
+    use selfie::package::git::GitFileStatus;
+    match status {
+        Some(GitFileStatus::Clean) => Value::String("clean".to_string()),
+        Some(GitFileStatus::Modified) => Value::String("modified".to_string()),
+        Some(GitFileStatus::Staged) => Value::String("staged".to_string()),
+        Some(GitFileStatus::StagedAndModified) => Value::String("staged_and_modified".to_string()),
+        Some(GitFileStatus::Untracked) => Value::String("untracked".to_string()),
+        Some(GitFileStatus::NotInRepo) => Value::String("not_in_repo".to_string()),
+        None => Value::Null,
     }
 }
 
@@ -356,6 +371,7 @@ mod tests {
                     version: "1.0.0".to_string(),
                     description: Some("Fast search tool".to_string()),
                     environments: vec!["macos".to_string(), "ubuntu".to_string()],
+                    git_status: None,
                 },
             },
             PackageEvent::SpecListLoaded {

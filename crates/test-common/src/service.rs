@@ -7,7 +7,10 @@ use selfie::{
     commands::shell::ShellCommandRunner,
     config::SelfieConfig,
     fs::real::RealFileSystem,
-    package::{repository::YamlPackageRepository, service::PackageServiceImpl},
+    package::{
+        git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+        service::PackageServiceImpl,
+    },
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -18,7 +21,11 @@ use tokio_util::sync::CancellationToken;
 #[must_use]
 pub fn create_test_service(
     temp_dir: &TempDir,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir(temp_dir.path());
     create_test_service_with_config(config)
 }
@@ -28,12 +35,22 @@ pub fn create_test_service(
 #[must_use]
 pub fn create_test_service_with_config(
     config: SelfieConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner =
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
+    PackageServiceImpl::new(
+        repo,
+        runner,
+        GixGitStatusProvider,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 /// Creates a test service with custom command timeout.
@@ -42,12 +59,22 @@ pub fn create_test_service_with_config(
 pub fn create_test_service_with_timeout(
     temp_dir: &TempDir,
     timeout: Duration,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir(temp_dir.path());
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
-    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
+    PackageServiceImpl::new(
+        repo,
+        runner,
+        GixGitStatusProvider,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 /// Creates a test service for a specific environment.
@@ -56,7 +83,11 @@ pub fn create_test_service_with_timeout(
 pub fn create_test_service_for_env(
     temp_dir: &TempDir,
     environment: &str,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir_and_env(temp_dir.path(), environment);
     create_test_service_with_config(config)
 }
@@ -66,7 +97,11 @@ pub fn create_test_service_for_env(
 #[must_use]
 pub fn create_cli_service(
     config: &SelfieConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
     let command_runner = ShellCommandRunner::new(
         ShellCommandRunner::default_shell(),
@@ -75,6 +110,7 @@ pub fn create_cli_service(
     PackageServiceImpl::new(
         repo,
         command_runner,
+        GixGitStatusProvider,
         config.clone(),
         CancellationToken::new(),
     )
@@ -85,7 +121,11 @@ pub fn create_cli_service(
 #[must_use]
 pub fn create_service_test_service(
     temp_dir: &TempDir,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = service_test_config_with_dir(temp_dir.path());
     create_test_service_with_config(config)
 }

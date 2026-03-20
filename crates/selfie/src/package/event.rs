@@ -1603,6 +1603,7 @@ pub struct PackageInfoData {
     pub homepage: Option<String>,
     pub environments: Vec<String>,
     pub current_environment: String,
+    pub git_status: Option<super::git::GitFileStatus>,
 }
 
 /// Structured data for environment status
@@ -1657,6 +1658,7 @@ pub struct SpecListItem {
     pub version: String,
     pub description: Option<String>,
     pub environments: Vec<String>,
+    pub git_status: Option<super::git::GitFileStatus>,
 }
 
 /// Structured data for spec list

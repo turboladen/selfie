@@ -29,6 +29,7 @@ mod config;
 mod display_manager;
 mod event_processor;
 mod formatters;
+mod git_style;
 mod status_style;
 mod tables;
 

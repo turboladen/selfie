@@ -1,0 +1,3 @@
+[default.extend-identifiers]
+# gix API field name (short for "relative path") — cannot be renamed
+rela_path = "rela_path"
