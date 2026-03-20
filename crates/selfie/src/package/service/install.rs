@@ -49,7 +49,9 @@ where
     let total_steps = 1 + (7 * num_packages);
     progress.set_total_steps(total_steps);
 
-    // Install each package in dependency order
+    // Install each package in dependency order.
+    // The last package is always the root (the one the user requested).
+    let mut last_result = None;
     for pkg_name in &dep_graph.install_order {
         // Check for cancellation between packages
         if token.is_cancelled() {
@@ -69,19 +71,21 @@ where
 
         match result {
             OperationResult::Success(_) => {
-                // Continue to next package
+                last_result = Some(result);
             }
             OperationResult::Failure(_) => return result,
         }
     }
 
-    OperationResult::Success(OperationSuccess::package_installed(
-        package_name.to_string(),
-        config.environment().to_string(),
-        false,
-        None,
-        (progress.current_step(), progress.total_steps()).into(),
-    ))
+    last_result.unwrap_or_else(|| {
+        OperationResult::Success(OperationSuccess::package_installed(
+            package_name.to_string(),
+            config.environment().to_string(),
+            false,
+            None,
+            (progress.current_step(), progress.total_steps()).into(),
+        ))
+    })
 }
 
 /// Install a single package (without dependency resolution).
@@ -205,7 +209,7 @@ async fn handle_already_installed_package<CR>(
     pre_install_check: &CheckResultData,
     command_runner: &CR,
     sender: &EventSender,
-    progress: &ProgressTracker,
+    progress: &mut ProgressTracker,
     config: &SelfieConfig,
     token: &CancellationToken,
 ) -> Option<OperationResult>
@@ -216,6 +220,10 @@ where
         sender
             .send_debug(format!("Package '{package_name}' is already installed"))
             .await;
+
+        // Reduce total steps by 4 (get_cmd, execute, verify, complete) since
+        // we're skipping the actual installation for this package.
+        progress.reduce_total_steps(4);
 
         let executable_path =
             find_executable_path(package_name, command_runner, sender, token).await;
