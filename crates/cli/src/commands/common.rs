@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::CliConfig;
 use std::{path::Path, process::Command};
 
-use crate::display_manager::DisplayManager;
+use crate::display_manager::{DisplayManager, INDENT};
 
 /// Create a package repository instance with the configured package directory
 pub(crate) fn create_package_repository(
@@ -244,7 +244,7 @@ pub(crate) fn display_environment_summary(
         display.print_suggestion(format!(
             "Package '{package_name}' doesn't support environment '{current_environment}'."
         ));
-        display.println("   Available environments for this package:");
+        display.println(format!("{INDENT}Available environments for this package:"));
 
         let mut table = create_formatted_table();
         table.set_header(vec!["Environment"]);
@@ -295,10 +295,10 @@ pub(crate) fn display_generic_environment_suggestion(
     display.print_suggestion(format!(
         "Package '{package_name}' doesn't support environment '{current_environment}'."
     ));
-    display.println("   Try one of these options:");
+    display.println(format!("{INDENT}Try one of these options:"));
     if config.use_colors() {
         display.println(format!(
-            "   • {} to {} with a different environment",
+            "{INDENT}• {} to {} with a different environment",
             console::style(format!(
                 "selfie package {context} --environment <env> <package>"
             ))
@@ -306,16 +306,16 @@ pub(crate) fn display_generic_environment_suggestion(
             context
         ));
         display.println(format!(
-            "   • {} to see which environments this package supports",
+            "{INDENT}• {} to see which environments this package supports",
             console::style("selfie spec info <package>").yellow()
         ));
     } else {
         display.println(format!(
-            "   • selfie package {context} --environment <env> <package> to {context} with a different environment"
+            "{INDENT}• selfie package {context} --environment <env> <package> to {context} with a different environment"
         ));
-        display.println(
-            "   • selfie spec info <package> to see which environments this package supports",
-        );
+        display.println(format!(
+            "{INDENT}• selfie spec info <package> to see which environments this package supports"
+        ));
     }
 }
 

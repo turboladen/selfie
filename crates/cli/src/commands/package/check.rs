@@ -7,7 +7,7 @@ use selfie::package::{
 use crate::{
     commands::common,
     config::CliConfig,
-    display_manager::{DisplayManager, OperationHandle},
+    display_manager::{DisplayManager, INDENT, OperationHandle},
     event_processor::EventProcessor,
     formatters::format_key,
     status_style,
@@ -169,7 +169,7 @@ fn display_check_result_card(
 
     // Status line stays inline — complex branching with conditional sub-fields
     let format_key_fn =
-        |field: &str| -> String { format!("   {}: ", format_key(field, use_colors)) };
+        |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
 
     let status_line = match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
