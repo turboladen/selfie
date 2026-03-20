@@ -91,14 +91,6 @@ impl CliConfig {
     pub(crate) fn command_timeout(&self) -> std::time::Duration {
         self.selfie.command_timeout()
     }
-
-    pub(crate) fn stop_on_error(&self) -> bool {
-        self.selfie.stop_on_error()
-    }
-
-    pub(crate) fn max_parallel_installations(&self) -> std::num::NonZeroUsize {
-        self.selfie.max_parallel_installations()
-    }
 }
 
 #[cfg(test)]
@@ -325,8 +317,8 @@ mod tests {
 
         let config = args.build_cli_config(selfie_config, CliSection::default());
         assert_eq!(config.command_timeout().as_secs(), 120);
-        assert!(!config.stop_on_error());
-        assert_eq!(config.max_parallel_installations().get(), 8);
+        assert!(!config.selfie_config().stop_on_error());
+        assert_eq!(config.selfie_config().max_parallel_installations().get(), 8);
     }
 
     #[test]

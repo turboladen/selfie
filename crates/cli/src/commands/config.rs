@@ -44,23 +44,24 @@ pub(crate) fn handle_validate(
         0
     } else {
         display.print_success("Configuration is valid.");
-        report_with_style(display, "environment:", config.environment());
+        report_with_style(display, "environment:", raw_config.environment());
         report_with_style(
             display,
             "package_directory:",
-            config.package_directory().display(),
+            raw_config.package_directory().display(),
         );
         report_with_style(
             display,
             "command_timeout:",
-            format!("{} seconds", config.command_timeout().as_secs()),
+            format!("{} seconds", raw_config.command_timeout().as_secs()),
         );
         report_with_style(
             display,
             "max_parallel_installations:",
-            config.max_parallel_installations().get(),
+            raw_config.max_parallel_installations().get(),
         );
-        report_with_style(display, "stop_on_error:", config.stop_on_error());
+        report_with_style(display, "stop_on_error:", raw_config.stop_on_error());
+        // verbose and use_colors are CLI-only settings, not in the on-disk config
         report_with_style(display, "verbose:", config.verbose());
         report_with_style(display, "use_colors:", config.use_colors());
 
