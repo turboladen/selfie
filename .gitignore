@@ -39,9 +39,11 @@ docker-compose.override.yaml
 .env.local
 .env.*.local
 
-# Dolt database files (added by bd init)
+# Beads, Dolt database files (added by bd init)
 .dolt/
 *.db
+.beads/metadata.json
+.beads/.beads-credential-key
 
 # Claude
 .claude/settings.local.json
