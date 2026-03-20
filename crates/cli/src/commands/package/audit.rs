@@ -5,7 +5,7 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common, config::CliConfig, display_manager::DisplayManager,
+    commands::common, config::CliConfig, display_manager::{DisplayManager, INDENT},
     event_processor::EventProcessor, formatters::format_key, status_style,
 };
 
@@ -237,7 +237,7 @@ fn display_audit_result_card(
 
     // Status line stays inline — variant-dependent sub-fields
     let format_key_fn =
-        |field: &str| -> String { format!("   {}: ", format_key(field, use_colors)) };
+        |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
 
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => {
