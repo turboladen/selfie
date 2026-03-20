@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+/// Standard indentation for key-value fields under section headers.
+/// Used by `ResultCard` and inline card-rendering code.
+pub(crate) const INDENT: &str = "   ";
+
 /// Structured error detail for the end-of-operation summary
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -501,7 +505,7 @@ impl<'a> ResultCard<'a> {
         let use_colors = self.display.use_colors();
         for (key, value) in &self.fields {
             self.display
-                .println(format!("   {}: {}", format_key(key, use_colors), value));
+                .println(format!("{}{}: {}", INDENT, format_key(key, use_colors), value));
         }
     }
 }
