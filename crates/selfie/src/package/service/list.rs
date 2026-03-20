@@ -169,15 +169,28 @@ where
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
-                // Use the captured metadata so the CLI can resolve the correct spinner
-                let meta = package_metadata
-                    .get(i)
-                    .expect("package_metadata and check_futures are built from the same source");
+                // Use the captured metadata so the CLI can resolve the correct spinner.
+                // Fallback to defaults if index is somehow out of bounds — this is
+                // error-recovery code and must not panic or mask the original failure.
+                let (name, version, environments) = match package_metadata.get(i) {
+                    Some(meta) => (
+                        meta.name.clone(),
+                        meta.version.clone(),
+                        meta.environments.clone(),
+                    ),
+                    None => {
+                        tracing::warn!(
+                            index = i,
+                            "package_metadata index out of bounds in JoinError handler"
+                        );
+                        (String::new(), String::new(), Vec::new())
+                    }
+                };
                 sender
                     .send_package_list_item(PackageListItem {
-                        name: meta.name.clone(),
-                        version: meta.version.clone(),
-                        environments: meta.environments.clone(),
+                        name,
+                        version,
+                        environments,
                         status: Some(crate::package::event::CheckResult::Error(format!(
                             "Task failed: {e}"
                         ))),
