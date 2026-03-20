@@ -572,7 +572,12 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         processor.process_events(event_stream, |_event| false).await;
 
-        assert!(display_clone.has_errors());
+        let errors = display_clone.collected_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].package_name, "broken-pkg");
+        assert_eq!(errors[0].operation, "package_check");
+        assert!(errors[0].message.contains("Could not load"));
+        assert!(errors[0].command.is_none());
     }
 
     #[tokio::test]
@@ -599,7 +604,13 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         processor.process_events(event_stream, |_event| false).await;
 
-        assert!(display_clone.has_errors());
+        let errors = display_clone.collected_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].package_name, "fail-pkg");
+        assert_eq!(errors[0].command.as_deref(), Some("brew install fail-pkg"));
+        assert_eq!(errors[0].exit_code, Some(1));
+        assert_eq!(errors[0].stderr.as_deref(), Some("not found"));
+        assert_eq!(errors[0].stdout.as_deref(), Some(""));
     }
 
     #[tokio::test]
@@ -621,7 +632,12 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         processor.process_events(event_stream, |_event| false).await;
 
-        assert!(display_clone.has_errors());
+        let errors = display_clone.collected_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].package_name, "generic-fail");
+        assert_eq!(errors[0].message, "something went wrong");
+        assert!(errors[0].command.is_none());
+        assert!(errors[0].exit_code.is_none());
     }
 
     #[test]

@@ -55,7 +55,7 @@
 
 sync:
   git-remote: ssh://git@github.com/turboladen/selfie.git
-  # mode: dolt-native
+  mode: dolt-native
 
-# dolt:
-#   port: 53900
+dolt:
+  port: 53900

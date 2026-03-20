@@ -467,6 +467,15 @@ impl DisplayManager {
     pub(crate) fn has_errors(&self) -> bool {
         self.errors.lock().map(|c| c.has_errors()).unwrap_or(false)
     }
+
+    /// Return a snapshot of all collected errors (test-only)
+    #[cfg(test)]
+    pub(crate) fn collected_errors(&self) -> Vec<ErrorDetail> {
+        self.errors
+            .lock()
+            .map(|c| c.errors.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// Builder for structured result cards (section header + key-value pairs)

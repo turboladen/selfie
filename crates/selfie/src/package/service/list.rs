@@ -21,6 +21,14 @@ use crate::{
     },
 };
 
+/// Lightweight snapshot of package identity for the JoinError fallback path.
+/// Captured before spawning tasks so we still have metadata if a task panics.
+struct PackageMetadata {
+    name: String,
+    version: String,
+    environments: Vec<String>,
+}
+
 pub(super) async fn handle_list<PR, CR>(
     repo: &PR,
     config: &SelfieConfig,
@@ -88,14 +96,12 @@ where
 
     // Create parallel tasks for status checking with order preservation
     // Collect package metadata for JoinError handling (values move into spawned tasks)
-    let package_metadata: Vec<(String, String, Vec<String>)> = packages_to_process
+    let package_metadata: Vec<PackageMetadata> = packages_to_process
         .iter()
-        .map(|p| {
-            (
-                p.name().to_string(),
-                p.version().to_string(),
-                p.environments().keys().cloned().collect(),
-            )
+        .map(|p| PackageMetadata {
+            name: p.name().to_string(),
+            version: p.version().to_string(),
+            environments: p.environments().keys().cloned().collect(),
         })
         .collect();
 
@@ -164,13 +170,14 @@ where
             Ok(result) => results.push(result),
             Err(e) => {
                 // Use the captured metadata so the CLI can resolve the correct spinner
-                let (name, version, environments) =
-                    package_metadata.get(i).cloned().unwrap_or_default();
+                let meta = package_metadata
+                    .get(i)
+                    .expect("package_metadata and check_futures are built from the same source");
                 sender
                     .send_package_list_item(PackageListItem {
-                        name,
-                        version,
-                        environments,
+                        name: meta.name.clone(),
+                        version: meta.version.clone(),
+                        environments: meta.environments.clone(),
                         status: Some(crate::package::event::CheckResult::Error(format!(
                             "Task failed: {e}"
                         ))),
