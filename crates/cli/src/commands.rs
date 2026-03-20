@@ -45,6 +45,7 @@ pub(crate) async fn dispatch_command(
     config: &CliConfig,
     display: DisplayManager,
     cancellation_token: CancellationToken,
+    fs: &impl selfie::fs::FileSystem,
 ) -> i32 {
     debug!("Dispatching command: {:?}", command);
 
@@ -57,7 +58,7 @@ pub(crate) async fn dispatch_command(
                 .await
         }
         ClapCommands::Config(config_cmd) => {
-            dispatch_config_command(&config_cmd.command, config, display)
+            dispatch_config_command(&config_cmd.command, config, display, fs)
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
@@ -169,10 +170,11 @@ fn dispatch_config_command(
     command: &ConfigSubcommands,
     config: &CliConfig,
     display: DisplayManager,
+    fs: &impl selfie::fs::FileSystem,
 ) -> i32 {
     debug!("Handling config command: {:?}", command);
 
     match command {
-        ConfigSubcommands::Validate => config::handle_validate(config, &display),
+        ConfigSubcommands::Validate => config::handle_validate(config, &display, fs),
     }
 }
