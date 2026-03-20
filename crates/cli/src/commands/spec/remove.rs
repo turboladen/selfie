@@ -45,8 +45,8 @@ pub(crate) async fn handle_remove(
     };
 
     let (prompt, default_answer) = if dependent_packages.is_empty() {
-        display.print_info(format!(
-            "✓ Package '{package_name}' is not a dependency of any other packages."
+        display.print_success(format!(
+            "Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
     } else {
