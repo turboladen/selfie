@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-/// Standard indentation for key-value fields under section headers.
-/// Used by `ResultCard` and inline card-rendering code.
+/// Standard indentation for structured CLI output (e.g., section content,
+/// result cards, list suggestions, and other indented fields).
 pub(crate) const INDENT: &str = "   ";
 
 /// Structured error detail for the end-of-operation summary
@@ -449,9 +449,17 @@ impl DisplayManager {
     /// Call this after all operations are complete (e.g., at the end of
     /// `EventProcessor::process_events`).
     pub(crate) fn finish(&self) {
-        if let Ok(collector) = self.errors.lock()
-            && let Some(summary) = collector.format_summary()
-        {
+        // Extract summary while holding the lock, then drop it before
+        // doing terminal I/O to avoid blocking concurrent collect_error() calls.
+        let summary = {
+            if let Ok(collector) = self.errors.lock() {
+                collector.format_summary()
+            } else {
+                None
+            }
+        };
+
+        if let Some(summary) = summary {
             self.mp.suspend(|| eprintln!("{summary}"));
         }
     }
