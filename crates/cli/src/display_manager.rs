@@ -121,8 +121,8 @@ impl OperationHandle {
     }
 
     /// Add a line of command output below the spinner
-    pub(crate) fn add_output_line(&mut self, line: &str, is_stderr: bool) {
-        let prefix = if is_stderr { "  │ err: " } else { "  │ " };
+    pub(crate) fn add_output_line(&mut self, line: &str) {
+        let prefix = "  │ ";
         let formatted = if self.use_colors {
             format!("{}{}", prefix, style(line.trim()).dim())
         } else {
@@ -574,13 +574,13 @@ mod tests {
     fn test_operation_handle_output_lines() {
         let dm = DisplayManager::new(false);
         let mut handle = dm.start_operation("Testing...");
-        handle.add_output_line("line 1", false);
-        handle.add_output_line("line 2", true);
+        handle.add_output_line("line 1");
+        handle.add_output_line("line 2");
         assert_eq!(handle.output_lines.len(), 2);
 
         // Add more than max to test rolling window
         for i in 0..10 {
-            handle.add_output_line(&format!("line {i}"), false);
+            handle.add_output_line(&format!("line {i}"));
         }
         assert_eq!(handle.output_lines.len(), handle.max_output_lines);
         handle.finish_clear();

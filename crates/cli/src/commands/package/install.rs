@@ -91,7 +91,7 @@ pub(crate) async fn handle_install(
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
                                 if let Some(s) = spinner.as_mut() {
-                                    s.add_output_line(trimmed, is_stderr);
+                                    s.add_output_line(trimmed);
                                 } else if is_stderr {
                                     eprintln!("{trimmed}");
                                 } else {
