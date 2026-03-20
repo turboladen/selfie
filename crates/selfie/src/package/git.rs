@@ -47,8 +47,11 @@ impl GitDirectoryStatus {
         if !self.in_repo {
             return GitFileStatus::NotInRepo;
         }
+        // Canonicalize the lookup path to match the canonicalized keys in the HashMap.
+        // This handles symlink mismatches (e.g., /tmp → /private/tmp on macOS).
+        let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.files
-            .get(path)
+            .get(&canonical)
             .cloned()
             .unwrap_or(GitFileStatus::Clean)
     }
@@ -65,6 +68,11 @@ pub enum GitStatusError {
 ///
 /// Implementations provide git status information for files in a directory,
 /// allowing the service layer to annotate spec/package data with git state.
+///
+/// Note: this trait is intentionally synchronous. The `gix` adapter does filesystem
+/// I/O which blocks the async executor thread briefly. For typical selfie package
+/// directories (small number of files), this is negligible. If profiling shows this
+/// is a bottleneck, wrap calls in `tokio::task::spawn_blocking` at the call site.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait GitStatusProvider: Send + Sync {
     /// Get the git status of all files in the given directory.

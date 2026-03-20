@@ -14,15 +14,19 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         EnvironmentConfig, Package, PackageService, SpecService, event::PackageUpdateFields,
-        repository::yaml::YamlPackageRepository, service::PackageServiceImpl,
+        git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
+        service::PackageServiceImpl,
     },
 };
 use serde::Deserialize;
 
 use crate::event_collector;
 
-type ConcreteService =
-    PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner>;
+type ConcreteService = PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+>;
 
 #[derive(Clone)]
 pub struct SelfieServer {

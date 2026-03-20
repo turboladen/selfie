@@ -2700,6 +2700,7 @@ name = "selfie"
 version = "0.1.0"
 dependencies = [
  "config",
+ "dunce",
  "etcetera",
  "futures",
  "gix",

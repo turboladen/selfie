@@ -25,10 +25,12 @@ impl GitStatusProvider for GixGitStatusProvider {
             }
         };
 
+        // Canonicalize workdir to avoid symlink mismatches (e.g., /tmp → /private/tmp on macOS).
+        // Package paths from the repository are typically canonical, so the HashMap keys must match.
         let workdir = repo
             .workdir()
-            .ok_or_else(|| GitStatusError::StatusError("bare repository".to_string()))?
-            .to_path_buf();
+            .ok_or_else(|| GitStatusError::StatusError("bare repository".to_string()))?;
+        let workdir = dunce::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
 
         let platform = repo
             .status(gix::progress::Discard)
@@ -58,6 +60,7 @@ impl GitStatusProvider for GixGitStatusProvider {
                                 untracked.push(entry.rela_path.to_string());
                             }
                         }
+                        // Renames are uncommon for selfie spec files; ignore for now
                         Item::Rewrite { .. } => {}
                     }
                 }

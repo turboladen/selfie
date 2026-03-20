@@ -184,7 +184,7 @@ pub trait PackageService: Send + Sync {
 /// The implementation uses dependency injection through generic parameters to
 /// support different storage backends and command execution strategies.
 #[derive(Debug)]
-pub struct PackageServiceImpl<R, CR, G = super::git_adapter::GixGitStatusProvider> {
+pub struct PackageServiceImpl<R, CR, G> {
     /// Repository for loading and managing package definitions
     package_repository: R,
     /// Command runner for executing system commands

@@ -21,7 +21,11 @@ use tokio_util::sync::CancellationToken;
 #[must_use]
 pub fn create_test_service(
     temp_dir: &TempDir,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir(temp_dir.path());
     create_test_service_with_config(config)
 }
@@ -31,7 +35,11 @@ pub fn create_test_service(
 #[must_use]
 pub fn create_test_service_with_config(
     config: SelfieConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner =
@@ -51,7 +59,11 @@ pub fn create_test_service_with_config(
 pub fn create_test_service_with_timeout(
     temp_dir: &TempDir,
     timeout: Duration,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir(temp_dir.path());
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
@@ -71,7 +83,11 @@ pub fn create_test_service_with_timeout(
 pub fn create_test_service_for_env(
     temp_dir: &TempDir,
     environment: &str,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = test_config_with_dir_and_env(temp_dir.path(), environment);
     create_test_service_with_config(config)
 }
@@ -81,7 +97,11 @@ pub fn create_test_service_for_env(
 #[must_use]
 pub fn create_cli_service(
     config: &SelfieConfig,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
     let command_runner = ShellCommandRunner::new(
         ShellCommandRunner::default_shell(),
@@ -101,7 +121,11 @@ pub fn create_cli_service(
 #[must_use]
 pub fn create_service_test_service(
     temp_dir: &TempDir,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, ShellCommandRunner> {
+) -> PackageServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    ShellCommandRunner,
+    GixGitStatusProvider,
+> {
     let config = service_test_config_with_dir(temp_dir.path());
     create_test_service_with_config(config)
 }
