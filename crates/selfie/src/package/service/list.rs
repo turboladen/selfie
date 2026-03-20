@@ -21,6 +21,14 @@ use crate::{
     },
 };
 
+/// Lightweight snapshot of package identity for the JoinError fallback path.
+/// Captured before spawning tasks so we still have metadata if a task panics.
+struct PackageMetadata {
+    name: String,
+    version: String,
+    environments: Vec<String>,
+}
+
 pub(super) async fn handle_list<PR, CR>(
     repo: &PR,
     config: &SelfieConfig,
@@ -87,10 +95,14 @@ where
     let semaphore = Arc::new(Semaphore::new(config.max_parallel_installations().get()));
 
     // Create parallel tasks for status checking with order preservation
-    // Collect package names for JoinError handling (names move into spawned tasks)
-    let package_names: Vec<String> = packages_to_process
+    // Collect package metadata for JoinError handling (values move into spawned tasks)
+    let package_metadata: Vec<PackageMetadata> = packages_to_process
         .iter()
-        .map(|p| p.name().to_string())
+        .map(|p| PackageMetadata {
+            name: p.name().to_string(),
+            version: p.version().to_string(),
+            environments: p.environments().keys().cloned().collect(),
+        })
         .collect();
 
     let check_futures: Vec<_> = packages_to_process
@@ -157,13 +169,28 @@ where
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
-                // Use the captured package name so the CLI can resolve the correct spinner
-                let name = package_names.get(i).cloned().unwrap_or_default();
+                // Use the captured metadata so the CLI can resolve the correct spinner.
+                // Fallback to defaults if index is somehow out of bounds — this is
+                // error-recovery code and must not panic or mask the original failure.
+                let (name, version, environments) = match package_metadata.get(i) {
+                    Some(meta) => (
+                        meta.name.clone(),
+                        meta.version.clone(),
+                        meta.environments.clone(),
+                    ),
+                    None => {
+                        tracing::warn!(
+                            index = i,
+                            "package_metadata index out of bounds in JoinError handler"
+                        );
+                        (String::new(), String::new(), Vec::new())
+                    }
+                };
                 sender
                     .send_package_list_item(PackageListItem {
                         name,
-                        version: String::new(),
-                        environments: Vec::new(),
+                        version,
+                        environments,
                         status: Some(crate::package::event::CheckResult::Error(format!(
                             "Task failed: {e}"
                         ))),

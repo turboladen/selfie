@@ -16,7 +16,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 pub(crate) const INDENT: &str = "   ";
 
 /// Structured error detail for the end-of-operation summary
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorDetail {
     pub package_name: String,
@@ -29,7 +28,6 @@ pub(crate) struct ErrorDetail {
 }
 
 /// Collects errors during an operation for summary display at the end
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ErrorCollector {
     errors: Vec<ErrorDetail>,
@@ -42,6 +40,7 @@ impl ErrorCollector {
     }
 
     /// Check if any errors have been collected
+    #[cfg(test)]
     pub(crate) fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
@@ -57,7 +56,7 @@ impl ErrorCollector {
         lines.push("── Errors ─────────────────────────────────────".to_string());
 
         for error in &self.errors {
-            lines.push(format!("✗ {}", error.package_name));
+            lines.push(format!("✗ {} ({})", error.package_name, error.operation));
             if !error.message.is_empty() {
                 lines.push(format!("  {}", error.message));
             }
@@ -437,7 +436,6 @@ impl DisplayManager {
     // ── Error collection ───────────────────────────────────────────────
 
     /// Collect a structured error for the end-of-operation summary
-    #[allow(dead_code)]
     pub(crate) fn collect_error(&self, error: ErrorDetail) {
         if let Ok(mut collector) = self.errors.lock() {
             collector.collect(error);
@@ -465,9 +463,18 @@ impl DisplayManager {
     }
 
     /// Check if any errors have been collected
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn has_errors(&self) -> bool {
         self.errors.lock().map(|c| c.has_errors()).unwrap_or(false)
+    }
+
+    /// Return a snapshot of all collected errors (test-only)
+    #[cfg(test)]
+    pub(crate) fn collected_errors(&self) -> Vec<ErrorDetail> {
+        self.errors
+            .lock()
+            .map(|c| c.errors.clone())
+            .unwrap_or_default()
     }
 }
 
