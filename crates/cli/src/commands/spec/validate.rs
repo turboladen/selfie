@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::{
     config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
-    formatters::format_key,
+    formatters::format_key, status_style,
 };
 
 pub(crate) async fn handle_validate(
@@ -24,7 +24,9 @@ pub(crate) async fn handle_validate(
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| handle_validate_event(event, config))
+        .process_events(event_stream, |event| {
+            handle_validate_event(event, config, display)
+        })
         .await;
     result.exit_code
 }
@@ -42,17 +44,23 @@ pub(crate) async fn handle_validate_all(
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| handle_validate_event(event, config))
+        .process_events(event_stream, |event| {
+            handle_validate_event(event, config, display)
+        })
         .await;
     result.exit_code
 }
 
-fn handle_validate_event(event: &PackageEvent, config: &CliConfig) -> bool {
+fn handle_validate_event(
+    event: &PackageEvent,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> bool {
     match event {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
-            display_validation_result(validation_result, config);
+            display_validation_result(validation_result, config, display);
             true // Handled
         }
         PackageEvent::Progress { .. } => {
@@ -62,57 +70,62 @@ fn handle_validate_event(event: &PackageEvent, config: &CliConfig) -> bool {
     }
 }
 
-fn display_validation_result(validation_result: &ValidationResultData, config: &CliConfig) {
+fn display_validation_result(
+    validation_result: &ValidationResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
     match validation_result.status {
         ValidationStatus::Valid => {
             // Show success card for valid packages
-            display_validation_success_card(validation_result, config);
+            display_validation_success_card(validation_result, config, display);
         }
         ValidationStatus::HasWarnings | ValidationStatus::HasErrors => {
             // Show table for packages with issues
-            display_validation_issues_table(validation_result, config);
+            display_validation_issues_table(validation_result, config, display);
         }
     }
 }
 
-fn display_validation_success_card(validation_result: &ValidationResultData, config: &CliConfig) {
-    println!();
-    println!("📋 Validation Results:");
+fn display_validation_success_card(
+    validation_result: &ValidationResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
+    display.print_section_header("Validation Results");
 
     let format_key_fn =
         |field: &str| -> String { format!("   {}: ", format_key(field, config.use_colors())) };
 
-    println!(
+    display.println(format!(
         "{}{}",
         format_key_fn("Package"),
         validation_result.package_name
-    );
-    println!(
+    ));
+    display.println(format!(
         "{}{}",
         format_key_fn("Environment"),
         validation_result.environment
-    );
+    ));
 
-    let status_key = if config.use_colors() {
-        style("Status").cyan().bold().to_string()
-    } else {
-        "Status".to_string()
-    };
-    let status_text = if config.use_colors() {
-        style("✓ Valid").green().to_string()
-    } else {
-        "✓ Valid".to_string()
-    };
-    let status = format!("   {}: {}", status_key, status_text);
-    println!("{status}");
+    display.println(format!(
+        "{}{}",
+        format_key_fn("Status"),
+        status_style::format_valid(config.use_colors())
+    ));
 }
 
-fn display_validation_issues_table(validation_result: &ValidationResultData, config: &CliConfig) {
+fn display_validation_issues_table(
+    validation_result: &ValidationResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
     if validation_result.issues.is_empty() {
         return;
     }
 
-    println!();
+    display.println("");
 
     // Show summary
     let error_count = validation_result
@@ -126,15 +139,15 @@ fn display_validation_issues_table(validation_result: &ValidationResultData, con
         .filter(|i| matches!(i.level, ValidationLevel::Warning))
         .count();
 
-    let summary = if error_count > 0 && warning_count > 0 {
-        format!("📋 Validation Issues ({error_count} error(s), {warning_count} warning(s)):")
+    let header = if error_count > 0 && warning_count > 0 {
+        format!("Validation Issues ({error_count} error(s), {warning_count} warning(s))")
     } else if error_count > 0 {
-        format!("📋 Validation Errors ({error_count}):")
+        format!("Validation Errors ({error_count})")
     } else {
-        format!("📋 Validation Warnings ({warning_count}):")
+        format!("Validation Warnings ({warning_count})")
     };
 
-    println!("{summary}");
+    display.print_section_header(header);
 
     let mut table = create_validation_table();
     table.set_header(vec!["Level", "Category", "Field", "Message", "Suggestion"]);
@@ -180,7 +193,7 @@ fn display_validation_issues_table(validation_result: &ValidationResultData, con
         ]);
     }
 
-    println!("{table}");
+    display.println(format!("{table}"));
 }
 
 fn create_validation_table() -> Table {

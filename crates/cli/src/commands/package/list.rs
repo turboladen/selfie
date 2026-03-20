@@ -205,7 +205,7 @@ fn handle_list_event(
             // Print buffered lines sorted by name
             state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
             for (_, line) in &state.buffered_lines {
-                println!("{line}");
+                display.println(line);
             }
 
             // Print invalid packages inline with error status,
@@ -243,29 +243,32 @@ fn handle_list_event(
                         width = state.max_name_len
                     );
 
-                    println!("{line}");
+                    display.println(line);
                 }
             }
 
-            println!();
-            println!("Package directory: {}", package_list.package_directory);
+            display.println("");
+            display.println(format!(
+                "Package directory: {}",
+                package_list.package_directory
+            ));
 
             let valid = package_list.valid_packages.len();
             let invalid = package_list.invalid_packages.len();
             let total = valid + invalid;
 
             if total == 0 && package_list.environment_stats.is_empty() {
-                println!("No packages found.");
+                display.println("No packages found.");
             } else if valid == 0 && invalid == 0 {
-                println!(
+                display.println(format!(
                     "No packages found for environment '{}'.",
                     config.environment()
-                );
-                display_environment_stats(&package_list.environment_stats, config);
+                ));
+                display_environment_stats(&package_list.environment_stats, config, display);
             } else if invalid > 0 {
-                println!("{valid} valid, {invalid} invalid");
+                display.println(format!("{valid} valid, {invalid} invalid"));
             } else {
-                println!("{valid} packages");
+                display.println(format!("{valid} packages"));
             }
             true
         }
@@ -324,13 +327,14 @@ fn clean_error_message(error: &str, file_path: &str) -> String {
 fn display_environment_stats(
     environment_stats: &std::collections::HashMap<String, usize>,
     config: &CliConfig,
+    display: &DisplayManager,
 ) {
     if environment_stats.is_empty() {
         return;
     }
 
-    println!();
-    println!("Packages by environment in this directory:");
+    display.println("");
+    display.println("Packages by environment in this directory:");
 
     // Sort environments by package count (descending), then by name
     let mut env_counts: Vec<(String, usize)> = environment_stats
@@ -363,20 +367,20 @@ fn display_environment_stats(
         table.add_row(vec![env_styled, count_styled]);
     }
 
-    println!("{table}");
+    display.println(format!("{table}"));
 
     if config.use_colors() {
-        println!(
-            "Try: {} to see packages for a different environment",
+        display.print_suggestion(format!(
+            "{} to see packages for a different environment",
             console::style("--environment <env>").yellow()
-        );
-        println!(
+        ));
+        display.println(format!(
             "   or: {} to see all packages regardless of environment",
             console::style("--all").yellow()
-        );
+        ));
     } else {
-        println!("Try: --environment <env> to see packages for a different environment");
-        println!("   or: --all to see all packages regardless of environment");
+        display.print_suggestion("--environment <env> to see packages for a different environment");
+        display.println("   or: --all to see all packages regardless of environment");
     }
 }
 

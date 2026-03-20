@@ -42,7 +42,7 @@ where
         .collect();
     let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
 
-    // Emit warnings for invalid (unparseable) package files
+    // Emit warnings for invalid (unparsable) package files
     for invalid in &invalid_packages {
         sender
             .send_warning(format!(
@@ -110,7 +110,7 @@ where
     if total_errors > 0 {
         OperationResult::Failure(
             format!(
-                "Validation failed: {} package(s) with errors, {} with warnings, {} unparseable (completed {}/{} steps)",
+                "Validation failed: {} package(s) with errors, {} with warnings, {} unparsable (completed {}/{} steps)",
                 error_count,
                 warning_count,
                 invalid_packages.len(),

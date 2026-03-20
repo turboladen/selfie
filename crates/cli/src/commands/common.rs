@@ -229,14 +229,22 @@ pub(crate) fn display_environment_summary(
     current_environment: &str,
     available_environments: &[String],
     config: &CliConfig,
+    display: &DisplayManager,
     context: &str, // "check" or "install"
 ) {
-    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
-
     if available_environments.is_empty() {
-        display_generic_environment_suggestion(package_name, current_environment, config, context);
+        display_generic_environment_suggestion(
+            package_name,
+            current_environment,
+            config,
+            display,
+            context,
+        );
     } else {
-        println!("   Available environments for this package:");
+        display.print_suggestion(format!(
+            "Package '{package_name}' doesn't support environment '{current_environment}'."
+        ));
+        display.println("   Available environments for this package:");
 
         let mut table = create_formatted_table();
         table.set_header(vec!["Environment"]);
@@ -258,20 +266,20 @@ pub(crate) fn display_environment_summary(
             table.add_row(vec![env_display]);
         }
 
-        println!("{table}");
+        display.println(format!("{table}"));
 
         if config.use_colors() {
-            println!(
-                "   💡 Try: {} with one of the environments above",
+            display.print_suggestion(format!(
+                "{} with one of the environments above",
                 console::style(format!(
                     "selfie package {context} --environment <env> <package>"
                 ))
                 .yellow()
-            );
+            ));
         } else {
-            println!(
-                "   💡 Try: selfie package {context} --environment <env> <package> with one of the environments above"
-            );
+            display.print_suggestion(format!(
+                "selfie package {context} --environment <env> <package> with one of the environments above"
+            ));
         }
     }
 }
@@ -281,28 +289,33 @@ pub(crate) fn display_generic_environment_suggestion(
     package_name: &str,
     current_environment: &str,
     config: &CliConfig,
+    display: &DisplayManager,
     context: &str, // "check" or "install"
 ) {
-    println!("💡 Package '{package_name}' doesn't support environment '{current_environment}'.");
-    println!("   Try one of these options:");
+    display.print_suggestion(format!(
+        "Package '{package_name}' doesn't support environment '{current_environment}'."
+    ));
+    display.println("   Try one of these options:");
     if config.use_colors() {
-        println!(
+        display.println(format!(
             "   • {} to {} with a different environment",
             console::style(format!(
                 "selfie package {context} --environment <env> <package>"
             ))
             .yellow(),
             context
-        );
-        println!(
+        ));
+        display.println(format!(
             "   • {} to see which environments this package supports",
             console::style("selfie spec info <package>").yellow()
-        );
+        ));
     } else {
-        println!(
+        display.println(format!(
             "   • selfie package {context} --environment <env> <package> to {context} with a different environment"
+        ));
+        display.println(
+            "   • selfie spec info <package> to see which environments this package supports",
         );
-        println!("   • selfie spec info <package> to see which environments this package supports");
     }
 }
 

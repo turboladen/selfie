@@ -257,6 +257,11 @@ impl DisplayManager {
 
     // ── Static output methods ──────────────────────────────────────────
     //
+    // Canonical symbol set:
+    //   ✓  success (green)      ✗  error/failure (red)
+    //   ⚠  warning (yellow)     ℹ  info (blue)
+    //   ✨ suggestion (yellow)   ── title ──  section header (bold)
+    //
     // Phase 1: These use println!/eprintln! directly to match expected
     // stdout/stderr conventions. Info, success, progress, and suggestion
     // go to stdout; errors and warnings go to stderr.
@@ -332,6 +337,15 @@ impl DisplayManager {
         }
     }
 
+    /// Print a section header (stdout)
+    pub(crate) fn print_section_header(&self, title: impl Display) {
+        if self.use_colors {
+            println!("── {} ──", style(&title).bold());
+        } else {
+            println!("── {title} ──");
+        }
+    }
+
     /// Print a plain line to stdout
     ///
     /// Note: When spinners are active (Phase 2), this should route through
@@ -363,28 +377,7 @@ impl DisplayManager {
     /// show command output, and finalize the operation display.
     #[allow(dead_code)]
     pub(crate) fn start_operation(&self, message: impl Display) -> OperationHandle {
-        let spinner_style = if self.use_colors {
-            ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-        } else {
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-        };
-
-        let bar = self.mp.add(ProgressBar::new_spinner());
-        bar.set_style(spinner_style);
-        bar.set_message(message.to_string());
-        bar.enable_steady_tick(std::time::Duration::from_millis(80));
-
-        OperationHandle {
-            bar,
-            use_colors: self.use_colors,
-            output_lines: VecDeque::new(),
-            max_output_lines: 5,
-            mp: self.mp.clone(),
-        }
+        self.create_spinner(message, 5)
     }
 
     /// Create a spinner for a list item (used by package list command)
@@ -392,6 +385,11 @@ impl DisplayManager {
     /// Unlike `start_operation()`, this creates a spinner optimized for
     /// sorted lists: the spinner resolves in-place to preserve ordering.
     pub(crate) fn start_list_spinner(&self, message: impl Display) -> OperationHandle {
+        self.create_spinner(message, 0)
+    }
+
+    /// Create a spinner with the given max output lines
+    fn create_spinner(&self, message: impl Display, max_output_lines: usize) -> OperationHandle {
         let spinner_style = if self.use_colors {
             ProgressStyle::with_template("{spinner:.cyan} {msg}")
                 .unwrap()
@@ -411,7 +409,7 @@ impl DisplayManager {
             bar,
             use_colors: self.use_colors,
             output_lines: VecDeque::new(),
-            max_output_lines: 0,
+            max_output_lines,
             mp: self.mp.clone(),
         }
     }
@@ -486,6 +484,7 @@ mod tests {
         dm.print_warning("test warning");
         dm.print_progress("test progress");
         dm.print_suggestion("test suggestion");
+        dm.print_section_header("test section");
         dm.println("test println");
         dm.print_field("key:", "value");
     }

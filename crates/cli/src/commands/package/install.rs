@@ -38,7 +38,7 @@ pub(crate) async fn handle_install(
             } = event
                 && failure.is_environment_error()
             {
-                display_environment_error(package_name, failure, config);
+                display_environment_error(package_name, failure, config, display);
                 env_error_handled = true;
                 return true; // Handled
             }
@@ -80,6 +80,9 @@ pub(crate) async fn handle_install(
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
                                 if is_stderr {
+                                    // Intentional: raw subprocess stderr goes
+                                    // directly to stderr, not through DisplayManager,
+                                    // to preserve the subprocess's output stream.
                                     eprintln!("{trimmed}");
                                 } else {
                                     display.println(trimmed);
@@ -110,8 +113,13 @@ pub(crate) async fn handle_install(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
-fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
-    println!();
+fn display_environment_error(
+    package_name: &str,
+    failure: &OperationFailure,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
 
     match failure {
         OperationFailure::Package(PackageError::EnvironmentNotFound {
@@ -123,6 +131,7 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
                 config.environment(),
                 available_environments,
                 config,
+                display,
                 "install",
             );
         }
@@ -131,15 +140,14 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
             other_envs_with_install,
             ..
         }) => {
-            println!(
-                "No install command defined for '{}' in environment '{}'.",
-                package_name, environment
-            );
+            display.print_info(format!(
+                "No install command defined for '{package_name}' in environment '{environment}'."
+            ));
             if !other_envs_with_install.is_empty() {
-                println!(
+                display.println(format!(
                     "Environments with install commands: {}",
                     other_envs_with_install.join(", ")
-                );
+                ));
             }
         }
         _ => {
@@ -147,6 +155,7 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
                 package_name,
                 config.environment(),
                 config,
+                display,
                 "install",
             );
         }

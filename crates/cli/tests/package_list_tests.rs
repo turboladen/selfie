@@ -516,7 +516,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("ubuntu"))
         .stdout(predicate::str::contains("windows"))
         .stdout(predicate::str::contains("debian"))
-        .stdout(predicate::str::contains("Try:"))
+        .stdout(predicate::str::contains("Suggestion"))
         .stdout(predicate::str::contains("--environment <env>"))
         .stdout(predicate::str::contains("--all"));
 }

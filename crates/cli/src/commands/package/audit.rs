@@ -6,7 +6,7 @@ use selfie::package::{
 
 use crate::{
     commands::common, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor, formatters::format_key,
+    event_processor::EventProcessor, formatters::format_key, status_style,
 };
 
 pub(crate) async fn handle_audit(
@@ -28,9 +28,9 @@ pub(crate) async fn handle_audit(
         .process_events(event_stream, |event| match event {
             PackageEvent::AuditResultCompleted { audit_result, .. } => {
                 if config.verbose() {
-                    display_audit_result_card(audit_result, config);
+                    display_audit_result_card(audit_result, config, display);
                 } else {
-                    display_audit_output_only(audit_result);
+                    display_audit_output_only(audit_result, display);
                 }
                 true
             }
@@ -39,7 +39,7 @@ pub(crate) async fn handle_audit(
                 if let OperationResult::Failure(failure) = result
                     && failure.is_environment_error()
                 {
-                    display_environment_error(package_name, failure, config);
+                    display_environment_error(package_name, failure, config, display);
                     env_error_handled = true;
                     return true;
                 }
@@ -71,7 +71,7 @@ pub(crate) async fn handle_audit_all(
     let result = processor
         .process_events(event_stream, |event| match event {
             PackageEvent::AuditResultCompleted { audit_result, .. } => {
-                display_audit_summary_line(audit_result, config);
+                display_audit_summary_line(audit_result, config, display);
                 true
             }
             PackageEvent::Progress { .. } => true,
@@ -82,8 +82,13 @@ pub(crate) async fn handle_audit_all(
     result.exit_code
 }
 
-fn display_environment_error(package_name: &str, failure: &OperationFailure, config: &CliConfig) {
-    println!();
+fn display_environment_error(
+    package_name: &str,
+    failure: &OperationFailure,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,
@@ -95,6 +100,7 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
             config.environment(),
             available_environments,
             config,
+            display,
             "audit",
         );
     } else {
@@ -102,19 +108,20 @@ fn display_environment_error(package_name: &str, failure: &OperationFailure, con
             package_name,
             config.environment(),
             config,
+            display,
             "audit",
         );
     }
 }
 
-fn display_audit_output_only(audit_result: &AuditResultData) {
+fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayManager) {
     match &audit_result.result {
         AuditResult::Clean { sources } => {
-            println!(
-                "✅ {} — clean ({})",
+            display.print_success(format!(
+                "{} — clean ({})",
                 audit_result.package_name,
                 sources.join(", ")
-            );
+            ));
         }
         AuditResult::Conflicts {
             sources, expected, ..
@@ -123,32 +130,36 @@ fn display_audit_output_only(audit_result: &AuditResultData) {
                 .iter()
                 .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
                 .collect();
-            println!(
-                "⚠️  {} — conflicts detected: unexpected source(s): {}",
+            display.print_warning(format!(
+                "{} — conflicts detected: unexpected source(s): {}",
                 audit_result.package_name,
                 unexpected
                     .iter()
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            ));
         }
         AuditResult::NotInstalled => {
-            println!("📦 {} — not installed", audit_result.package_name);
+            display.print_info(format!("{} — not installed", audit_result.package_name));
         }
         AuditResult::NoAuditCommand => {
-            println!(
-                "⏭️  {} — no audit command defined",
+            display.print_info(format!(
+                "{} — no audit command defined",
                 audit_result.package_name
-            );
+            ));
         }
         AuditResult::Error(err) => {
-            println!("❌ {} — error: {}", audit_result.package_name, err);
+            display.print_error(format!("{} — error: {}", audit_result.package_name, err));
         }
     }
 }
 
-fn display_audit_summary_line(audit_result: &AuditResultData, config: &CliConfig) {
+fn display_audit_summary_line(
+    audit_result: &AuditResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
     let use_colors = config.use_colors();
     let name = &audit_result.package_name;
 
@@ -206,40 +217,43 @@ fn display_audit_summary_line(audit_result: &AuditResultData, config: &CliConfig
         }
     };
 
-    println!("  {name}: {status}");
+    display.println(format!("  {name}: {status}"));
 }
 
-fn display_audit_result_card(audit_result: &AuditResultData, config: &CliConfig) {
-    println!();
-    println!("🔍 Audit Results:");
+fn display_audit_result_card(
+    audit_result: &AuditResultData,
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    display.println("");
+    display.print_section_header("Audit Results");
 
     let format_key_fn =
         |field: &str| -> String { format!("   {}: ", format_key(field, config.use_colors())) };
 
-    println!("{}{}", format_key_fn("Package"), audit_result.package_name);
-    println!(
+    display.println(format!(
+        "{}{}",
+        format_key_fn("Package"),
+        audit_result.package_name
+    ));
+    display.println(format!(
         "{}{}",
         format_key_fn("Environment"),
         audit_result.environment
-    );
+    ));
 
     if let Some(cmd) = &audit_result.audit_command {
-        println!("{}{}", format_key_fn("Command"), cmd);
+        display.println(format!("{}{}", format_key_fn("Command"), cmd));
     }
 
     let use_colors = config.use_colors();
 
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => {
-            let status = if use_colors {
-                console::style("✅ Clean").green().bold().to_string()
-            } else {
-                "Clean".to_string()
-            };
             format!(
                 "{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_audit_clean(use_colors),
                 format_key_fn("Sources"),
                 sources.join(", ")
             )
@@ -247,14 +261,6 @@ fn display_audit_result_card(audit_result: &AuditResultData, config: &CliConfig)
         AuditResult::Conflicts {
             sources, expected, ..
         } => {
-            let status = if use_colors {
-                console::style("⚠️  Conflicts Detected")
-                    .red()
-                    .bold()
-                    .to_string()
-            } else {
-                "Conflicts Detected".to_string()
-            };
             let unexpected: Vec<&String> = sources
                 .iter()
                 .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
@@ -262,7 +268,7 @@ fn display_audit_result_card(audit_result: &AuditResultData, config: &CliConfig)
             format!(
                 "{}{}\n{}{}\n{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_audit_conflicts(use_colors),
                 format_key_fn("All sources"),
                 sources.join(", "),
                 format_key_fn("Expected"),
@@ -276,36 +282,29 @@ fn display_audit_result_card(audit_result: &AuditResultData, config: &CliConfig)
             )
         }
         AuditResult::NotInstalled => {
-            let status = if use_colors {
-                console::style("📦 Not Installed").yellow().to_string()
-            } else {
-                "Not Installed".to_string()
-            };
-            format!("{}{}", format_key_fn("Status"), status)
+            format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_not_installed(use_colors)
+            )
         }
         AuditResult::NoAuditCommand => {
-            let status = if use_colors {
-                console::style("No audit command defined").dim().to_string()
-            } else {
-                "No audit command defined".to_string()
-            };
-            format!("{}{}", format_key_fn("Status"), status)
+            format!(
+                "{}{}",
+                format_key_fn("Status"),
+                status_style::format_no_audit(use_colors)
+            )
         }
         AuditResult::Error(err) => {
-            let status = if use_colors {
-                console::style("❌ Error").red().bold().to_string()
-            } else {
-                "Error".to_string()
-            };
             format!(
                 "{}{}\n{}{}",
                 format_key_fn("Status"),
-                status,
+                status_style::format_status_error(use_colors),
                 format_key_fn("Details"),
                 err
             )
         }
     };
 
-    println!("{status_line}");
+    display.println(status_line);
 }
