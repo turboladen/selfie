@@ -369,6 +369,22 @@ impl DisplayManager {
         self.is_tty
     }
 
+    // ── Result card builder ─────────────────────────────────────────────
+
+    /// Create a structured result card (section header + key-value pairs)
+    ///
+    /// Usage:
+    /// ```ignore
+    /// display.result_card("Check Results")
+    ///     .field("Package", &package_name)
+    ///     .field("Environment", &environment)
+    ///     .field_if("Command", check_command.as_deref())
+    ///     .print();
+    /// ```
+    pub(crate) fn result_card(&self, title: impl Display) -> ResultCard<'_> {
+        ResultCard::new(self, title)
+    }
+
     // ── Dynamic output methods ─────────────────────────────────────────
 
     /// Start a new operation with a spinner
@@ -440,6 +456,54 @@ impl DisplayManager {
     #[allow(dead_code)]
     pub(crate) fn has_errors(&self) -> bool {
         self.errors.lock().map(|c| c.has_errors()).unwrap_or(false)
+    }
+}
+
+/// Builder for structured result cards (section header + key-value pairs)
+///
+/// Created by [`DisplayManager::result_card()`]. Call `.field()` / `.field_if()`
+/// to add rows, then `.print()` to render.
+pub(crate) struct ResultCard<'a> {
+    display: &'a DisplayManager,
+    title: String,
+    fields: Vec<(String, String)>,
+}
+
+impl<'a> ResultCard<'a> {
+    fn new(display: &'a DisplayManager, title: impl Display) -> Self {
+        Self {
+            display,
+            title: title.to_string(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Add a key-value field to the card
+    pub(crate) fn field(mut self, key: &str, value: impl Display) -> Self {
+        self.fields.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Add a field only if the value is `Some`
+    pub(crate) fn field_if(mut self, key: &str, value: Option<impl Display>) -> Self {
+        if let Some(v) = value {
+            self.fields.push((key.to_string(), v.to_string()));
+        }
+        self
+    }
+
+    /// Render the card to the display
+    pub(crate) fn print(self) {
+        use crate::formatters::format_key;
+
+        self.display.println("");
+        self.display.print_section_header(&self.title);
+
+        let use_colors = self.display.use_colors();
+        for (key, value) in &self.fields {
+            self.display
+                .println(format!("   {}: {}", format_key(key, use_colors), value));
+        }
     }
 }
 
@@ -620,6 +684,38 @@ mod tests {
 
         let h3 = dm.start_list_spinner("Test 3");
         h3.finish_warning_in_place("Warning result");
+    }
+
+    #[test]
+    fn test_result_card_basic() {
+        let dm = DisplayManager::new(false);
+        // Verify the builder API works without panicking
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field("Environment", "macos")
+            .print();
+    }
+
+    #[test]
+    fn test_result_card_with_colors() {
+        let dm = DisplayManager::new(true);
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field("Status", "valid")
+            .print();
+    }
+
+    #[test]
+    fn test_result_card_field_if() {
+        let dm = DisplayManager::new(false);
+        let cmd: Option<&str> = Some("brew install foo");
+        let missing: Option<&str> = None;
+
+        dm.result_card("Test Results")
+            .field("Package", "test-pkg")
+            .field_if("Command", cmd)
+            .field_if("Missing", missing)
+            .print();
     }
 
     #[test]

@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::{
     config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
-    formatters::format_key, status_style,
+    status_style,
 };
 
 pub(crate) async fn handle_validate(
@@ -92,28 +92,12 @@ fn display_validation_success_card(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.println("");
-    display.print_section_header("Validation Results");
-
-    let format_key_fn =
-        |field: &str| -> String { format!("   {}: ", format_key(field, config.use_colors())) };
-
-    display.println(format!(
-        "{}{}",
-        format_key_fn("Package"),
-        validation_result.package_name
-    ));
-    display.println(format!(
-        "{}{}",
-        format_key_fn("Environment"),
-        validation_result.environment
-    ));
-
-    display.println(format!(
-        "{}{}",
-        format_key_fn("Status"),
-        status_style::format_valid(config.use_colors())
-    ));
+    display
+        .result_card("Validation Results")
+        .field("Package", &validation_result.package_name)
+        .field("Environment", &validation_result.environment)
+        .field("Status", status_style::format_valid(config.use_colors()))
+        .print();
 }
 
 fn display_validation_issues_table(

@@ -225,28 +225,19 @@ fn display_audit_result_card(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.println("");
-    display.print_section_header("Audit Results");
-
-    let format_key_fn =
-        |field: &str| -> String { format!("   {}: ", format_key(field, config.use_colors())) };
-
-    display.println(format!(
-        "{}{}",
-        format_key_fn("Package"),
-        audit_result.package_name
-    ));
-    display.println(format!(
-        "{}{}",
-        format_key_fn("Environment"),
-        audit_result.environment
-    ));
-
-    if let Some(cmd) = &audit_result.audit_command {
-        display.println(format!("{}{}", format_key_fn("Command"), cmd));
-    }
-
     let use_colors = config.use_colors();
+
+    // Common fields via ResultCard
+    display
+        .result_card("Audit Results")
+        .field("Package", &audit_result.package_name)
+        .field("Environment", &audit_result.environment)
+        .field_if("Command", audit_result.audit_command.as_deref())
+        .print();
+
+    // Status line stays inline — variant-dependent sub-fields
+    let format_key_fn =
+        |field: &str| -> String { format!("   {}: ", format_key(field, use_colors)) };
 
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => {
