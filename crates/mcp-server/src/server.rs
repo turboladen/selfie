@@ -120,6 +120,9 @@ pub struct AddEnvironmentParam {
     /// Optional dependencies
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Optional soft dependencies (installed after package, failures don't cascade)
+    #[serde(default)]
+    pub recommends: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -169,6 +172,7 @@ impl SelfieServer {
                 params.check,
                 params.audit,
                 params.dependencies,
+                Vec::new(),
             ),
         );
 
@@ -228,6 +232,7 @@ impl SelfieServer {
                     check: ae.check,
                     audit: ae.audit,
                     dependencies: ae.dependencies,
+                    recommends: ae.recommends,
                 });
 
         let fields = PackageUpdateFields {
@@ -237,6 +242,7 @@ impl SelfieServer {
             check,
             audit,
             dependencies: params.dependencies,
+            recommends: None,
             environment: params.environment,
             add_environment,
             remove_environment: params.remove_environment,
@@ -274,6 +280,7 @@ impl SelfieServer {
                         check: ae.check,
                         audit: ae.audit,
                         dependencies: ae.dependencies,
+                        recommends: ae.recommends,
                     });
 
             let fields = PackageUpdateFields {
@@ -283,6 +290,7 @@ impl SelfieServer {
                 check,
                 audit,
                 dependencies: update.dependencies,
+                recommends: None,
                 environment: update.environment,
                 add_environment,
                 remove_environment: update.remove_environment,
@@ -418,7 +426,10 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<InstallParam>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = self.service.install(&params.package).await;
+        let stream = self
+            .service
+            .install(&params.package, selfie::package::InstallOptions::default())
+            .await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }

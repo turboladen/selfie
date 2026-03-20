@@ -12,7 +12,7 @@ use crate::{
             OperationSuccess,
         },
         port::PackageRepository,
-        service::ProgressTracker,
+        service::{InstallOptions, ProgressTracker},
     },
 };
 
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{check, deps, steps};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_install<PR, CR>(
     package_name: &str,
     repo: &PR,
@@ -28,6 +29,7 @@ pub(super) async fn handle_install<PR, CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
+    options: &InstallOptions,
 ) -> OperationResult
 where
     PR: PackageRepository + Sync,
@@ -75,6 +77,20 @@ where
             }
             OperationResult::Failure(_) => return result,
         }
+    }
+
+    // After the main install succeeds, handle recommends (soft dependencies)
+    if !options.skip_recommends {
+        install_recommends(
+            package_name,
+            repo,
+            config,
+            command_runner,
+            sender,
+            progress,
+            token,
+        )
+        .await;
     }
 
     last_result.unwrap_or_else(|| {
@@ -468,4 +484,118 @@ async fn verify_installation<CR>(
             )
             .await;
     }
+}
+
+/// Install recommended (soft) dependencies for a package.
+///
+/// Recommends are one-level deep only — we do NOT follow recommends of recommends.
+/// Each recommend's hard dependencies ARE resolved and installed.
+/// Failures are emitted as `RecommendFailed` events but never propagate to the parent result.
+async fn install_recommends<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
+) where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    // Load the root package to read its recommends for the current environment
+    let package_blob = match repo.get_package(package_name) {
+        Ok(pkg) => pkg,
+        Err(_) => return, // Package was already installed; if we can't reload it, skip recommends
+    };
+
+    let recommends: Vec<String> = package_blob
+        .package
+        .environments()
+        .get(config.environment())
+        .map(|env| env.recommends().to_vec())
+        .unwrap_or_default();
+
+    if recommends.is_empty() {
+        return;
+    }
+
+    sender
+        .send_debug(format!(
+            "Package '{package_name}' recommends: {recommends:?}"
+        ))
+        .await;
+
+    for recommend_name in &recommends {
+        if token.is_cancelled() {
+            break;
+        }
+
+        sender.send_recommend_started(recommend_name).await;
+
+        match install_single_recommend(
+            recommend_name,
+            repo,
+            config,
+            command_runner,
+            sender,
+            progress,
+            token,
+        )
+        .await
+        {
+            Ok(()) => {
+                sender.send_recommend_succeeded(recommend_name).await;
+            }
+            Err(error) => {
+                sender.send_recommend_failed(recommend_name, &error).await;
+            }
+        }
+    }
+}
+
+/// Try to install a single recommended package (with its hard dependencies).
+///
+/// Returns `Ok(())` on success, or `Err(message)` describing the failure.
+async fn install_single_recommend<PR, CR>(
+    recommend_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
+) -> Result<(), String>
+where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    // Resolve hard dependencies for this recommend
+    let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
+        .await
+        .map_err(|f| f.to_string())?;
+
+    // Install each package in dependency order
+    for pkg_name in &dep_graph.install_order {
+        if token.is_cancelled() {
+            return Err("cancelled".to_string());
+        }
+
+        let result = install_single_package(
+            pkg_name,
+            repo,
+            config,
+            command_runner,
+            sender,
+            progress,
+            token,
+        )
+        .await;
+
+        if let OperationResult::Failure(failure) = result {
+            return Err(failure.to_string());
+        }
+    }
+
+    Ok(())
 }

@@ -144,10 +144,7 @@ pub(crate) fn create_package_service(
     cancellation_token: CancellationToken,
 ) -> impl PackageService + SpecService {
     let repo = create_package_repository(config);
-    let command_runner = ShellCommandRunner::new(
-        ShellCommandRunner::default_shell(),
-        config.command_timeout(),
-    );
+    let command_runner = ShellCommandRunner::login_shell(config.command_timeout());
     PackageServiceImpl::new(
         repo,
         command_runner,

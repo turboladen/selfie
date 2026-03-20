@@ -8,7 +8,7 @@ pub mod service;
 pub mod validate;
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
-pub use self::service::{PackageService, SpecService};
+pub use self::service::{InstallOptions, PackageService, SpecService};
 
 // Core package entity and related types
 use std::{collections::HashMap, path::PathBuf};
@@ -138,6 +138,14 @@ pub struct EnvironmentConfig {
     /// Dependencies that must be installed before this package
     #[serde(default)]
     pub(crate) dependencies: Vec<String>,
+
+    /// Soft dependencies that are installed after this package but don't cascade failure
+    ///
+    /// Unlike `dependencies`, a failed recommend does not cause the parent package to fail.
+    /// Recommends are installed sequentially after the parent succeeds, with individual
+    /// success/failure reported via events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recommends: Vec<String>,
 }
 
 impl EnvironmentConfig {
@@ -148,12 +156,14 @@ impl EnvironmentConfig {
         check: Option<String>,
         audit: Option<String>,
         dependencies: Vec<String>,
+        recommends: Vec<String>,
     ) -> Self {
         Self {
             install,
             check,
             audit,
             dependencies,
+            recommends,
         }
     }
 
@@ -179,6 +189,12 @@ impl EnvironmentConfig {
     #[must_use]
     pub fn dependencies(&self) -> &[String] {
         &self.dependencies
+    }
+
+    /// Get the list of recommended (soft) dependencies for this environment
+    #[must_use]
+    pub fn recommends(&self) -> &[String] {
+        &self.recommends
     }
 }
 
@@ -221,6 +237,7 @@ impl Package {
                 check: Some(format!("# TODO: Add check command for {name}")),
                 audit: None,
                 dependencies: Vec::new(),
+                recommends: Vec::new(),
             },
         );
 

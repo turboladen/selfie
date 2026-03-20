@@ -23,7 +23,7 @@ use test_common::{
 
 use selfie::package::{
     event::{OperationResult, PackageEvent},
-    service::{PackageService, SpecService},
+    service::{InstallOptions, PackageService, SpecService},
 };
 
 fn create_test_package_file(dir: &TempDir, name: &str, has_check: bool) -> std::path::PathBuf {
@@ -114,7 +114,9 @@ async fn test_service_install_success() {
     let service = create_service_test_service(&temp_dir);
 
     // Act
-    let stream = service.install("install-package").await;
+    let stream = service
+        .install("install-package", InstallOptions::default())
+        .await;
     let events = collect_events(stream).await;
 
     // Assert
@@ -343,7 +345,7 @@ async fn test_service_install_single_dependency() {
     let _ = create_service_test_package_file_with_deps(&temp_dir, "dep-a", &["dep-b"]);
     let service = create_service_test_service(&temp_dir);
 
-    let stream = service.install("dep-a").await;
+    let stream = service.install("dep-a", InstallOptions::default()).await;
     let events = collect_events(stream).await;
 
     assert_successful_operation(&events);
@@ -357,7 +359,7 @@ async fn test_service_install_chain_dependencies() {
     create_dependency_chain(&temp_dir, &["chain-a", "chain-b", "chain-c"]);
     let service = create_service_test_service(&temp_dir);
 
-    let stream = service.install("chain-a").await;
+    let stream = service.install("chain-a", InstallOptions::default()).await;
     let events = collect_events(stream).await;
 
     assert_successful_operation(&events);
@@ -373,7 +375,9 @@ async fn test_service_install_missing_dependency() {
         create_service_test_package_file_with_deps(&temp_dir, "missing-dep-a", &["nonexistent"]);
     let service = create_service_test_service(&temp_dir);
 
-    let stream = service.install("missing-dep-a").await;
+    let stream = service
+        .install("missing-dep-a", InstallOptions::default())
+        .await;
     let events = collect_events(stream).await;
 
     let result = get_operation_result(&events).expect("Should have an operation result");
@@ -395,7 +399,7 @@ async fn test_service_install_circular_dependency() {
     create_circular_dependency(&temp_dir, &["cycle-a", "cycle-b"]);
     let service = create_service_test_service(&temp_dir);
 
-    let stream = service.install("cycle-a").await;
+    let stream = service.install("cycle-a", InstallOptions::default()).await;
     let events = collect_events(stream).await;
 
     let result = get_operation_result(&events).expect("Should have an operation result");
@@ -426,12 +430,16 @@ async fn test_service_install_already_installed_dependency() {
     let service = create_service_test_service(&temp_dir);
 
     // Install B first
-    let stream = service.install("installed-b").await;
+    let stream = service
+        .install("installed-b", InstallOptions::default())
+        .await;
     let events = collect_events(stream).await;
     assert_successful_operation(&events);
 
     // Now install A — B should be detected as already installed
-    let stream = service.install("installed-a").await;
+    let stream = service
+        .install("installed-a", InstallOptions::default())
+        .await;
     let events = collect_events(stream).await;
     assert_successful_operation(&events);
 }

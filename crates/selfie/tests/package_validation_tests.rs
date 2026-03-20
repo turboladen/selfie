@@ -89,3 +89,58 @@ environments:
     assert!(!url_errors.is_empty());
     assert_eq!(url_errors[0].level(), ValidationLevel::Error);
 }
+
+#[test]
+fn test_parse_package_with_recommends() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let package_yaml = r#"
+name: test-package
+version: 1.0.0
+environments:
+  test-env:
+    install: echo "install"
+    check: echo "check"
+    dependencies:
+      - dep-a
+    recommends:
+      - rec-b
+      - rec-c
+"#;
+
+    create_test_package(temp_dir.path(), "test-package", package_yaml);
+
+    let fs = RealFileSystem;
+    let repo_path = temp_dir.path().join("packages");
+    let repo = YamlPackageRepository::new(fs, repo_path);
+
+    let package = repo.get_package("test-package").unwrap();
+    let env = package.package().environments().get("test-env").unwrap();
+
+    assert_eq!(env.dependencies(), &["dep-a"]);
+    assert_eq!(env.recommends(), &["rec-b", "rec-c"]);
+}
+
+#[test]
+fn test_parse_package_without_recommends_defaults_to_empty() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let package_yaml = r#"
+name: test-package
+version: 1.0.0
+environments:
+  test-env:
+    install: echo "install"
+"#;
+
+    create_test_package(temp_dir.path(), "test-package", package_yaml);
+
+    let fs = RealFileSystem;
+    let repo_path = temp_dir.path().join("packages");
+    let repo = YamlPackageRepository::new(fs, repo_path);
+
+    let package = repo.get_package("test-package").unwrap();
+    let env = package.package().environments().get("test-env").unwrap();
+
+    assert!(env.recommends().is_empty());
+}

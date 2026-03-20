@@ -144,6 +144,7 @@ mod tests {
                 Some("echo 'check target'".to_string()),
                 None,
                 Vec::new(),
+                Vec::new(),
             ),
         );
         let target_package = Package::new(
@@ -163,6 +164,7 @@ mod tests {
                 Some("echo 'check dependent'".to_string()),
                 None,
                 vec!["target-package".to_string()],
+                Vec::new(),
             ),
         );
         let dependent_package = Package::new(

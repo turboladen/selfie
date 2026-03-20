@@ -197,6 +197,7 @@ fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::packa
         Some(format!("# TODO: Add check command for {package_name}")),
         None,
         Vec::new(),
+        Vec::new(),
     );
 
     environments.insert(env_name.to_string(), env_config);
@@ -308,7 +309,8 @@ fn prompt_environments(
         let check_cmd = prompt_check_command(package_name, display)?;
         let dependencies = prompt_dependencies(config, display)?;
 
-        let env_config = EnvironmentConfig::new(install_cmd, check_cmd, None, dependencies);
+        let env_config =
+            EnvironmentConfig::new(install_cmd, check_cmd, None, dependencies, Vec::new());
         environments.insert(env_name, env_config);
 
         if !prompt_add_another_environment(display)? {
@@ -480,6 +482,7 @@ mod tests {
             Some("command -v test".to_string()),
             None,
             vec!["dependency1".to_string(), "dependency2".to_string()],
+            Vec::new(),
         );
 
         assert_eq!(env_config.install(), "brew install test");

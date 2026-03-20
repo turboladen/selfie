@@ -477,6 +477,7 @@ mod tests {
             check: None,
             audit: None,
             dependencies: vec![],
+            recommends: vec![],
         };
 
         package

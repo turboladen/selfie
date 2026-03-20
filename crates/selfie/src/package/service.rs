@@ -27,6 +27,16 @@ mod validate_all;
 
 use std::{future::Future, path::PathBuf};
 
+/// Options controlling package installation behavior.
+///
+/// Used to pass optional flags (like `--no-recommends`) into the install flow
+/// without bloating the method signature as more options are added.
+#[derive(Debug, Clone, Default)]
+pub struct InstallOptions {
+    /// When `true`, skip installing recommended (soft) dependencies.
+    pub skip_recommends: bool,
+}
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -166,7 +176,11 @@ pub trait PackageService: Send + Sync {
     fn audit_all(&self) -> impl Future<Output = EventStream> + Send;
 
     /// Install a package using its configured installation method
-    fn install(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+    fn install(
+        &self,
+        package_name: &str,
+        options: InstallOptions,
+    ) -> impl Future<Output = EventStream> + Send;
 
     /// List all available packages in the package directory
     fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
@@ -545,7 +559,7 @@ where
     }
 
     #[instrument]
-    async fn install(&self, package_name: &str) -> EventStream {
+    async fn install(&self, package_name: &str, options: InstallOptions) -> EventStream {
         let package_name_owned = package_name.to_string();
         self.execute_operation_with_deps(
             OperationType::PackageInstall,
@@ -561,6 +575,7 @@ where
                     &sender,
                     &mut progress,
                     &token,
+                    &options,
                 )
                 .await
             },

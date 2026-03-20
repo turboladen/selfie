@@ -250,6 +250,13 @@ pub(crate) enum PackageSubcommands {
         /// Must correspond to a package definition file in the package directory.
         /// The package name should match the filename (without extension).
         package_name: String,
+
+        /// Skip installing recommended (soft) dependencies
+        ///
+        /// By default, selfie installs a package's recommended dependencies after
+        /// the main install succeeds. Use this flag to skip them.
+        #[arg(long)]
+        no_recommends: bool,
     },
 
     /// Check if a package is already installed
