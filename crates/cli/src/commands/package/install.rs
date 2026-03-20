@@ -123,12 +123,15 @@ pub(crate) async fn handle_install(
                         match result {
                             OperationResult::Success(_) => {
                                 s.finish_success(format!("{package_name} installed"));
+                                return true;
                             }
                             OperationResult::Failure(_) => {
-                                s.finish_failure(format!("{package_name} installation failed"));
+                                // Clear spinner but let default handler set exit_code
+                                // and print detailed error messages
+                                s.finish_clear();
+                                return false;
                             }
                         }
-                        return true;
                     }
                     false
                 }
