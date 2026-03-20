@@ -227,7 +227,6 @@ impl OperationHandle {
 /// interleaving and visual corruption.
 #[derive(Clone)]
 pub struct DisplayManager {
-    #[allow(dead_code)]
     mp: MultiProgress,
     use_colors: bool,
     is_tty: bool,
@@ -266,105 +265,107 @@ impl DisplayManager {
     //   ⚠  warning (yellow)     ℹ  info (blue)
     //   ✨ suggestion (yellow)   ── title ──  section header (bold)
     //
-    // These use println!/eprintln! directly to match expected stdout/stderr
-    // conventions. Info, success, progress, and suggestion go to stdout;
-    // errors and warnings go to stderr.
-    //
-    // Callers must finalize any active spinner before calling these methods
-    // to avoid visual interleaving. All event handlers currently follow
-    // this pattern (take spinner before displaying results).
+    // All output routes through mp.suspend() to avoid interleaving with
+    // active spinners. This pauses the draw target, writes to the correct
+    // stream (stdout or stderr), then resumes. Safe when no spinners are active.
 
     /// Print an informational message (stdout)
     pub(crate) fn print_info(&self, message: impl Display) {
         if self.use_colors {
-            println!("{} {}", style("ℹ").blue(), style(message).blue());
+            self.mp
+                .suspend(|| println!("{} {}", style("ℹ").blue(), style(message).blue()));
         } else {
-            println!("ℹ {message}");
+            self.mp.suspend(|| println!("ℹ {message}"));
         }
     }
 
     /// Print an error message (stderr)
     pub(crate) fn print_error(&self, message: impl Display) {
         if self.use_colors {
-            eprintln!(
-                "{} {}",
-                style("✗").red().bold(),
-                style(message).red().bold()
-            );
+            self.mp.suspend(|| {
+                eprintln!(
+                    "{} {}",
+                    style("✗").red().bold(),
+                    style(message).red().bold()
+                )
+            });
         } else {
-            eprintln!("✗ {message}");
+            self.mp.suspend(|| eprintln!("✗ {message}"));
         }
     }
 
     /// Print a success message (stdout)
     pub(crate) fn print_success(&self, message: impl Display) {
         if self.use_colors {
-            println!("{} {}", style("✓").green().bold(), style(message).green());
+            self.mp
+                .suspend(|| println!("{} {}", style("✓").green().bold(), style(message).green()));
         } else {
-            println!("✓ {message}");
+            self.mp.suspend(|| println!("✓ {message}"));
         }
     }
 
     /// Print a warning message (stderr)
     pub(crate) fn print_warning(&self, message: impl Display) {
         if self.use_colors {
-            eprintln!(
-                "{} {}",
-                style("⚠").yellow().bold(),
-                style(message).yellow().bold()
-            );
+            self.mp.suspend(|| {
+                eprintln!(
+                    "{} {}",
+                    style("⚠").yellow().bold(),
+                    style(message).yellow().bold()
+                )
+            });
         } else {
-            eprintln!("⚠ {message}");
+            self.mp.suspend(|| eprintln!("⚠ {message}"));
         }
     }
 
     /// Print a progress/status message (stdout)
     pub(crate) fn print_progress(&self, message: impl Display) {
         if self.use_colors {
-            println!("  {}", style(message).dim());
+            self.mp.suspend(|| println!("  {}", style(message).dim()));
         } else {
-            println!("  {message}");
+            self.mp.suspend(|| println!("  {message}"));
         }
     }
 
     /// Print a suggestion message (stdout)
     pub(crate) fn print_suggestion(&self, message: impl Display) {
         if self.use_colors {
-            println!(
-                "{} {}: {}",
-                style("✨").bold(),
-                style("Suggestion").yellow().bold(),
-                message
-            );
+            self.mp.suspend(|| {
+                println!(
+                    "{} {}: {}",
+                    style("✨").bold(),
+                    style("Suggestion").yellow().bold(),
+                    message
+                )
+            });
         } else {
-            println!("✨ Suggestion: {message}");
+            self.mp.suspend(|| println!("✨ Suggestion: {message}"));
         }
     }
 
     /// Print a section header (stdout)
     pub(crate) fn print_section_header(&self, title: impl Display) {
         if self.use_colors {
-            println!("── {} ──", style(&title).bold());
+            self.mp
+                .suspend(|| println!("── {} ──", style(&title).bold()));
         } else {
-            println!("── {title} ──");
+            self.mp.suspend(|| println!("── {title} ──"));
         }
     }
 
     /// Print a plain line to stdout
-    ///
-    /// Note: Callers must finalize any active spinner (via `OperationHandle::finish_*`
-    /// or `take()`) before calling this method. Direct `println!` would interleave
-    /// with spinner output. Currently all event handlers follow this pattern.
     pub(crate) fn println(&self, message: impl Display) {
-        println!("{message}");
+        self.mp.suspend(|| println!("{message}"));
     }
 
     /// Print a styled key-value pair (stdout, for config display, etc.)
     pub(crate) fn print_field(&self, key: impl Display, value: impl Display) {
         if self.use_colors {
-            println!("  {} {}", style(key).italic().dim(), style(value).bold());
+            self.mp
+                .suspend(|| println!("  {} {}", style(key).italic().dim(), style(value).bold()));
         } else {
-            println!("  {key} {value}");
+            self.mp.suspend(|| println!("  {key} {value}"));
         }
     }
 
@@ -451,7 +452,7 @@ impl DisplayManager {
         if let Ok(collector) = self.errors.lock()
             && let Some(summary) = collector.format_summary()
         {
-            eprintln!("{summary}");
+            self.mp.suspend(|| eprintln!("{summary}"));
         }
     }
 
@@ -723,6 +724,23 @@ mod tests {
             .field_if("Command", cmd)
             .field_if("Missing", missing)
             .print();
+    }
+
+    #[test]
+    fn test_static_output_during_active_spinner() {
+        let dm = DisplayManager::new(false);
+        let handle = dm.start_operation("Working...");
+        // These should not panic even with an active spinner
+        dm.print_info("info during spinner");
+        dm.print_warning("warning during spinner");
+        dm.print_error("error during spinner");
+        dm.print_success("success during spinner");
+        dm.println("plain during spinner");
+        dm.print_section_header("header during spinner");
+        dm.print_progress("progress during spinner");
+        dm.print_suggestion("suggestion during spinner");
+        dm.print_field("key:", "value");
+        handle.finish_clear();
     }
 
     #[test]
