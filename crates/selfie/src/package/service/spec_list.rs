@@ -11,20 +11,23 @@ use crate::{
             EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, SpecListData,
             SpecListItem,
         },
+        git::GitStatusProvider,
         port::PackageRepository,
         service::ProgressTracker,
     },
 };
 
-pub(super) async fn handle_spec_list<PR>(
+pub(super) async fn handle_spec_list<PR, G>(
     repo: &PR,
     config: &SelfieConfig,
+    git: &G,
     sender: &EventSender,
     progress: &mut ProgressTracker,
     show_all: bool,
 ) -> OperationResult
 where
     PR: PackageRepository,
+    G: GitStatusProvider,
 {
     // Step 1: Load and process packages
     progress.next(sender, "Loading specs").await;
@@ -60,16 +63,31 @@ where
         .filter(|package| show_all || package.environments().contains_key(config.environment()))
         .collect();
 
+    // Look up git status for the package directory (once for all files)
+    let git_dir_status = match git.status_for_directory(config.package_directory()) {
+        Ok(status) => Some(status),
+        Err(e) => {
+            sender
+                .send_warning(format!("Could not determine git status: {e}"))
+                .await;
+            None
+        }
+    };
+
     // Step 2: Emit individual items and summary
     progress.next(sender, "Emitting spec definitions").await;
 
     let mut spec_items = Vec::new();
     for package in &packages_to_show {
+        let file_git_status = git_dir_status
+            .as_ref()
+            .map(|s| s.status_for_file(package.path()));
         let item = SpecListItem {
             name: package.name().to_string(),
             version: package.version().to_string(),
             description: package.description().map(String::from),
             environments: package.environments().keys().cloned().collect(),
+            git_status: file_git_status,
         };
         sender.send_spec_list_item(item.clone()).await;
         spec_items.push(item);
@@ -110,9 +128,23 @@ mod tests {
     use super::*;
     use crate::{
         config::SelfieConfigBuilder,
-        package::{PackageBuilder, event::PackageEvent, port::MockPackageRepository},
+        package::{
+            PackageBuilder, event::PackageEvent, git::MockGitStatusProvider,
+            port::MockPackageRepository,
+        },
     };
     use tokio::sync::mpsc;
+
+    fn mock_git_not_in_repo() -> MockGitStatusProvider {
+        let mut mock = MockGitStatusProvider::new();
+        mock.expect_status_for_directory().returning(|_| {
+            Ok(crate::package::git::GitDirectoryStatus {
+                in_repo: false,
+                files: std::collections::HashMap::new(),
+            })
+        });
+        mock
+    }
 
     fn test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
         let (tx, rx) = mpsc::channel(256);
@@ -160,7 +192,16 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        let result = handle_spec_list(&mock_repo, &config, &sender, &mut progress, false).await;
+        let mock_git = mock_git_not_in_repo();
+        let result = handle_spec_list(
+            &mock_repo,
+            &config,
+            &mock_git,
+            &sender,
+            &mut progress,
+            false,
+        )
+        .await;
 
         assert!(matches!(result, OperationResult::Success(_)));
 
@@ -212,7 +253,9 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        let result = handle_spec_list(&mock_repo, &config, &sender, &mut progress, true).await;
+        let mock_git = mock_git_not_in_repo();
+        let result =
+            handle_spec_list(&mock_repo, &config, &mock_git, &sender, &mut progress, true).await;
 
         assert!(matches!(result, OperationResult::Success(_)));
 
@@ -259,7 +302,16 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        let result = handle_spec_list(&mock_repo, &config, &sender, &mut progress, false).await;
+        let mock_git = mock_git_not_in_repo();
+        let result = handle_spec_list(
+            &mock_repo,
+            &config,
+            &mock_git,
+            &sender,
+            &mut progress,
+            false,
+        )
+        .await;
 
         assert!(matches!(
             result,

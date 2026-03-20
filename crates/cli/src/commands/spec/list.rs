@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::{
     commands::common::format_environment_names, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor,
+    event_processor::EventProcessor, git_style,
 };
 
 pub(crate) async fn handle_list(
@@ -65,14 +65,26 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             .load_preset(presets::UTF8_FULL_CONDENSED)
             .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
             .set_content_arrangement(ContentArrangement::Dynamic);
-        table.set_header(vec!["Name", "Version", "Description", "Environments"]);
+        table.set_header(vec![
+            "Name",
+            "Version",
+            "Description",
+            "Environments",
+            "Git",
+        ]);
 
         for spec in &data.specs {
+            let git_col = spec
+                .git_status
+                .as_ref()
+                .map(|s| git_style::format_git_status_short(s, use_colors))
+                .unwrap_or_default();
             table.add_row(vec![
                 format_name(&spec.name, use_colors),
                 spec.version.clone(),
                 spec.description.clone().unwrap_or_default(),
                 format_environment_names(&spec.environments, &data.current_environment, config),
+                git_col,
             ]);
         }
 
@@ -150,6 +162,7 @@ mod tests {
                 version: "20.0.0".to_string(),
                 description: Some("Node.js runtime".to_string()),
                 environments: vec!["macos".to_string()],
+                git_status: None,
             },
         };
         let display = DisplayManager::new(false);

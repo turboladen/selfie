@@ -17,6 +17,7 @@ use crate::{
             EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult,
             OperationSuccess, PackageInfoData,
         },
+        git::GitStatusProvider,
         port::PackageRepository,
         service::ProgressTracker,
     },
@@ -24,15 +25,17 @@ use crate::{
 
 /// Spec-only info: load package definition and emit `PackageInfoLoaded`.
 /// Does NOT execute any commands or check installation status.
-pub(super) async fn handle_spec_info<PR>(
+pub(super) async fn handle_spec_info<PR, G>(
     package_name: &str,
     repo: &PR,
     config: &SelfieConfig,
+    git: &G,
     sender: &EventSender,
     progress: &mut ProgressTracker,
 ) -> OperationResult
 where
     PR: PackageRepository,
+    G: GitStatusProvider,
 {
     // Step 1: Fetch package
     progress.next(sender, "Loading package definition").await;
@@ -52,6 +55,17 @@ where
     // Step 2: Send package information data
     progress.next(sender, "Gathering package information").await;
 
+    // Look up git status for the package file
+    let file_git_status = match git.status_for_directory(config.package_directory()) {
+        Ok(dir_status) => Some(dir_status.status_for_file(package_blob.package.path())),
+        Err(e) => {
+            sender
+                .send_warning(format!("Could not determine git status: {e}"))
+                .await;
+            None
+        }
+    };
+
     let package_info = PackageInfoData {
         name: package_blob.package.name().to_string(),
         version: package_blob.package.version().to_string(),
@@ -70,6 +84,7 @@ where
             .cloned()
             .collect(),
         current_environment: config.environment().to_string(),
+        git_status: file_git_status,
     };
 
     sender.send_package_info(package_info).await;

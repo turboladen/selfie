@@ -7,7 +7,10 @@ use selfie::{
     commands::shell::ShellCommandRunner,
     config::SelfieConfig,
     fs::real::RealFileSystem,
-    package::{repository::YamlPackageRepository, service::PackageServiceImpl},
+    package::{
+        git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+        service::PackageServiceImpl,
+    },
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -33,7 +36,13 @@ pub fn create_test_service_with_config(
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner =
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
+    PackageServiceImpl::new(
+        repo,
+        runner,
+        GixGitStatusProvider,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 /// Creates a test service with custom command timeout.
@@ -47,7 +56,13 @@ pub fn create_test_service_with_timeout(
     let fs = RealFileSystem;
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
-    PackageServiceImpl::new(repo, runner, config, CancellationToken::new())
+    PackageServiceImpl::new(
+        repo,
+        runner,
+        GixGitStatusProvider,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 /// Creates a test service for a specific environment.
@@ -75,6 +90,7 @@ pub fn create_cli_service(
     PackageServiceImpl::new(
         repo,
         command_runner,
+        GixGitStatusProvider,
         config.clone(),
         CancellationToken::new(),
     )
