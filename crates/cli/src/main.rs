@@ -133,7 +133,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Dispatch and execute the requested command
-    let exit_code = dispatch_command(&args.command, &config, display, cancellation_token).await;
+    let exit_code =
+        dispatch_command(&args.command, &config, display, cancellation_token, &fs).await;
 
     process::exit(exit_code)
 }

@@ -101,6 +101,14 @@ impl ProgressTracker {
     pub(crate) fn set_total_steps(&mut self, total: usize) {
         self.total_steps = total;
     }
+
+    /// Reduce the total number of steps by the given amount
+    ///
+    /// Used when an early return skips steps (e.g., a package is already
+    /// installed and skips the install/verify/complete steps).
+    pub(crate) fn reduce_total_steps(&mut self, by: usize) {
+        self.total_steps = self.total_steps.saturating_sub(by);
+    }
 }
 
 /// Port for package definition (spec/file) operations (Hexagonal Architecture)
