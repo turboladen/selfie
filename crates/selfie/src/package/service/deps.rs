@@ -190,10 +190,9 @@ where
 /// for cycles by examining `Visiting` state. Packages already `Visited` by
 /// the main DFS are safely skipped.
 ///
-/// Note: This intentionally only traverses hard `dependencies` of the recommend,
-/// NOT recommends-of-recommends. Since recommends are one-level deep (we never
-/// install recommends of recommends), those transitive recommends can't create
-/// runtime cycles.
+/// Traverses both hard `dependencies` AND `recommends` of the recommended package
+/// to catch cycles formed entirely through recommend edges (e.g., A recommends B,
+/// B recommends A).
 fn check_recommend_cycles<'a, PR>(
     package_name: &'a str,
     repo: &'a PR,
@@ -233,24 +232,34 @@ where
         // Mark visiting for cycle detection
         visit_state.insert(package_name.to_string(), VisitState::Visiting);
 
-        // Try loading the package — if it doesn't exist, silently skip
-        // (the recommend will fail gracefully at install time)
+        // Try loading the package — if it doesn't exist, silently skip.
+        // Clean up the temporary visit_state entry so we don't mask a later
+        // hard dependency on the same package.
         let Ok(package_blob) = repo.get_package(package_name) else {
-            visit_state.insert(package_name.to_string(), VisitState::Visited);
+            visit_state.remove(package_name);
             return Ok(());
         };
 
-        // Check hard dependencies of this recommend for cycles
-        let deps: Vec<String> = package_blob
+        // Extract both deps and recommends from the environment config
+        let (deps, recs) = package_blob
             .package
             .environments()
             .get(config_environment)
-            .map(|env| env.dependencies.clone())
+            .map(|env| (env.dependencies.clone(), env.recommends().to_vec()))
             .unwrap_or_default();
 
+        // Check hard dependencies of this recommend for cycles
         for dep in &deps {
             path.push(dep.clone());
             check_recommend_cycles(dep, repo, config_environment, _sender, visit_state, path)
+                .await?;
+            path.pop();
+        }
+
+        // Also walk recommends to catch cycles formed entirely through recommend edges
+        for rec in &recs {
+            path.push(rec.clone());
+            check_recommend_cycles(rec, repo, config_environment, _sender, visit_state, path)
                 .await?;
             path.pop();
         }
@@ -572,6 +581,76 @@ mod tests {
 
         // Only hard deps + root in install_order; recommend pkg-b excluded
         assert_eq!(graph.install_order, vec!["pkg-a"]);
+    }
+
+    #[tokio::test]
+    async fn test_recommend_recommend_cycle_detected() {
+        // A recommends B, B recommends A → cycle through recommend edges only
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-a")
+            .returning(|_| Ok(mock_package_with_recommends("pkg-a", &[], &["pkg-b"])));
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-b")
+            .returning(|_| Ok(mock_package_with_recommends("pkg-b", &[], &["pkg-a"])));
+
+        let sender = make_sender();
+        let result = resolve_dependencies("pkg-a", &repo, "test", &sender).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_dependency_error());
+        match err.dependency_failure().unwrap() {
+            crate::package::event::DependencyFailure::CircularDependency { cycle, .. } => {
+                assert_eq!(cycle, &["pkg-a", "pkg-b", "pkg-a"]);
+            }
+            _ => panic!("Expected CircularDependency"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_recommend_does_not_mask_hard_dependency() {
+        // A recommends missing-pkg, B depends on missing-pkg
+        // The missing recommend should NOT prevent B from getting a MissingDependency error
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-a")
+            .returning(|_| {
+                Ok(mock_package_with_recommends(
+                    "pkg-a",
+                    &["pkg-b"],
+                    &["missing-pkg"],
+                ))
+            });
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-b")
+            .returning(|_| Ok(mock_package("pkg-b", &["missing-pkg"])));
+        repo.expect_get_package()
+            .withf(|name| name == "missing-pkg")
+            .returning(|_| {
+                Err(crate::package::port::PackageError::PackageNotFound {
+                    name: "missing-pkg".to_string(),
+                    packages_path: std::path::PathBuf::from("/tmp"),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            });
+
+        let sender = make_sender();
+        let result = resolve_dependencies("pkg-a", &repo, "test", &sender).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_dependency_error());
+        match err.dependency_failure().unwrap() {
+            crate::package::event::DependencyFailure::MissingDependency {
+                dependency_name, ..
+            } => {
+                assert_eq!(dependency_name, "missing-pkg");
+            }
+            _ => panic!("Expected MissingDependency"),
+        }
     }
 
     #[tokio::test]

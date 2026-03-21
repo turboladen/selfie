@@ -496,7 +496,14 @@ async fn install_recommends<PR, CR>(
     // Load the root package to read its recommends for the current environment
     let package_blob = match repo.get_package(package_name) {
         Ok(pkg) => pkg,
-        Err(_) => return, // Package was already installed; if we can't reload it, skip recommends
+        Err(err) => {
+            sender
+                .send_debug(format!(
+                    "Skipping recommends for '{package_name}': failed to reload package: {err}"
+                ))
+                .await;
+            return;
+        }
     };
 
     let recommends: Vec<String> = package_blob
@@ -517,9 +524,11 @@ async fn install_recommends<PR, CR>(
         .await;
 
     // Recommends use a separate progress tracker so they don't overflow
-    // the parent operation's step count. Progress for recommends is communicated
-    // via RecommendStarted/Succeeded/Failed events instead.
-    let mut rec_progress = ProgressTracker::new(0);
+    // the parent operation's step count. Each package uses ~7 steps in
+    // install_single_package (fetch, env check, pre-install check, get_cmd,
+    // execute, verify, complete).
+    let rec_total_steps = 7 * recommends.len();
+    let mut rec_progress = ProgressTracker::new(rec_total_steps);
 
     for recommend_name in &recommends {
         if token.is_cancelled() {
