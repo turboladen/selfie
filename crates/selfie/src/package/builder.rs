@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use super::{EnvironmentConfig, Package};
+use super::{ConfigEntry, EnvironmentConfig, Package};
 
 #[derive(Default)]
 pub struct PackageBuilder {
@@ -8,6 +8,8 @@ pub struct PackageBuilder {
     version: String,
     homepage: Option<String>,
     description: Option<String>,
+    configs: Vec<ConfigEntry>,
+    post_install_note: Option<String>,
     environments: HashMap<String, EnvironmentConfig>,
     path: PathBuf,
 }
@@ -57,6 +59,20 @@ impl PackageBuilder {
         self
     }
 
+    /// Set the config file mappings for this package
+    #[must_use]
+    pub fn configs(mut self, configs: Vec<ConfigEntry>) -> Self {
+        self.configs = configs;
+        self
+    }
+
+    /// Set the post-install note for this package
+    #[must_use]
+    pub fn post_install_note(mut self, note: &str) -> Self {
+        self.post_install_note = Some(note.to_string());
+        self
+    }
+
     #[must_use]
     pub fn environment<T, F>(mut self, name: T, env_builder: F) -> Self
     where
@@ -90,6 +106,8 @@ impl PackageBuilder {
             self.version,
             self.homepage,
             self.description,
+            self.configs,
+            self.post_install_note,
             self.environments,
             self.path,
         )

@@ -152,6 +152,8 @@ mod tests {
             "1.0.0".to_string(),
             None,
             None,
+            Vec::new(),
+            None,
             target_envs,
             PathBuf::from("/test/packages/target-package.yml"),
         );
@@ -171,6 +173,8 @@ mod tests {
             "dependent-package".to_string(),
             "1.0.0".to_string(),
             None,
+            None,
+            Vec::new(),
             None,
             dependent_envs,
             PathBuf::from("/test/packages/dependent-package.yml"),

@@ -307,7 +307,7 @@ impl EventProcessor {
             } => {
                 self.display
                     .print_warning(format!("  ⚠ Conflict: {source} → {target}"));
-                self.display.print_info(format!("{diff}"));
+                self.display.print_info(diff.to_string());
             }
 
             PackageEvent::ConfigDriftDetected {

@@ -204,6 +204,8 @@ impl SelfieServer {
             "0.1.0".to_string(),
             params.homepage,
             params.description,
+            Vec::new(),
+            None,
             environments,
             file_path,
         );
