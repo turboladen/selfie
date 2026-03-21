@@ -87,6 +87,12 @@ pub(crate) enum ClapCommands {
     /// of packages. These execute configured commands on the system.
     Package(PackageCommands),
 
+    /// Deploy config files from packages to target locations
+    ///
+    /// Deploys configuration files defined in package YAML files to their
+    /// target locations on the system. Detects conflicts and drift.
+    Apply(ApplyArgs),
+
     /// Configuration management operations
     ///
     /// Commands for validating and managing the selfie configuration file.
@@ -346,4 +352,22 @@ pub(crate) enum ConfigSubcommands {
     ///
     /// Example: `selfie config validate`
     Validate,
+}
+
+/// Arguments for the apply command
+///
+/// Controls how config file deployment behaves, including dry-run mode
+/// for previewing changes and auto-accept for non-interactive use.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ApplyArgs {
+    /// Specific package name (deploys all if omitted)
+    pub(crate) name: Option<String>,
+
+    /// Show what would change without writing
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Auto-accept overwrite for conflicts (non-interactive mode)
+    #[arg(long, short)]
+    pub(crate) yes: bool,
 }
