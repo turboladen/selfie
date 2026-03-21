@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono.workspace = true
 config = { version = "0.15.9", features = ["yaml"] }
 dunce.workspace = true
 etcetera = "0.11"
@@ -16,7 +17,9 @@ semver = "1.0"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 shellexpand = "3.1"
+similar.workspace = true
 strum.workspace = true
 thiserror = "2.0"
 tokio-util.workspace = true
