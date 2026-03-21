@@ -527,3 +527,397 @@ environments:
         other => panic!("Expected ConfigApplied success, got: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_apply_rejects_path_traversal() {
+    let dirs = TestDirs::new();
+
+    let target_file = dirs.target_dir.join("secret.txt");
+
+    // Source uses "../" to escape the configs directory — should be caught by
+    // validate_source_path's normalize_path logic before any file I/O.
+    create_package_with_configs(
+        &dirs.package_dir,
+        "evil-pkg",
+        &[("../../etc/passwd", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    // Should get a warning specifically about path traversal
+    let has_traversal_warning = events.iter().any(|e| {
+        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes configs directory"))
+    });
+    assert!(
+        has_traversal_warning,
+        "Should emit a warning about path escaping configs directory"
+    );
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            skipped_count,
+            ..
+        }) => {
+            assert_eq!(*skipped_count, 1);
+            assert_eq!(*deployed_count, 0);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_apply_missing_source_warns_and_skips() {
+    let dirs = TestDirs::new();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    // Source file "nonexistent/config.toml" does not exist in configs_dir
+    create_package_with_configs(
+        &dirs.package_dir,
+        "missing-src",
+        &[("nonexistent/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let has_warning = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::Warning { .. }));
+    assert!(has_warning, "Should emit a warning about missing source");
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            skipped_count,
+            ..
+        }) => {
+            assert_eq!(*skipped_count, 1);
+            assert_eq!(*deployed_count, 0);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_apply_source_only_change_redeploys() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+
+    // First deploy
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Change ONLY the source file (target still matches last deploy)
+    std::fs::write(source_dir.join("config.toml"), "key = \"updated\"").unwrap();
+
+    // Apply again — should redeploy (RepoChanged drift), not conflict
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            conflict_count,
+            ..
+        }) => {
+            assert_eq!(*deployed_count, 1);
+            assert_eq!(*conflict_count, 0);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+
+    let content = std::fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "key = \"updated\"");
+}
+
+#[tokio::test]
+async fn test_apply_nonexistent_package_name() {
+    let dirs = TestDirs::new();
+
+    // Create a real package, but we'll apply a non-existent one
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let stream = service.apply("no-such-pkg", ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            skipped_count,
+            conflict_count,
+            ..
+        }) => {
+            assert_eq!(*deployed_count, 0);
+            assert_eq!(*skipped_count, 0);
+            assert_eq!(*conflict_count, 0);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+
+    assert!(
+        !target_file.exists(),
+        "Target file should NOT be deployed for non-matching package"
+    );
+}
+
+#[tokio::test]
+async fn test_deploy_state_persists_across_service_instances() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    // Deploy with first service instance
+    let service1 = dirs.service();
+    let stream = service1.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Create a FRESH service instance and apply again
+    let service2 = dirs.service();
+    let stream = service2.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    // Should skip (up to date), proving state was read from disk
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied { skipped_count, .. }) => {
+            assert_eq!(*skipped_count, 1);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_dry_run_does_not_persist_state() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    // Dry-run apply
+    let service1 = dirs.service();
+    let options = ApplyOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let stream = service1.apply_all(options).await;
+    let _ = collect_events(stream).await;
+
+    // Create fresh service and do a real apply
+    let service2 = dirs.service();
+    let stream = service2.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    // Should deploy (not skip), proving dry run didn't write state
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 1);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_apply_multiple_configs_in_one_package() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value1\"").unwrap();
+    std::fs::write(source_dir.join("settings.yml"), "setting: true").unwrap();
+
+    let target_file1 = dirs.target_dir.join("config.toml");
+    let target_file2 = dirs.target_dir.join("settings.yml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[
+            ("myapp/config.toml", target_file1.to_str().unwrap()),
+            ("myapp/settings.yml", target_file2.to_str().unwrap()),
+        ],
+    );
+
+    let service = dirs.service();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 2);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+
+    assert!(target_file1.exists(), "First config should be deployed");
+    assert!(target_file2.exists(), "Second config should be deployed");
+}
+
+#[tokio::test]
+async fn test_apply_target_parent_dir_is_file() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    // Create a regular file where the parent directory should be, making it
+    // impossible to create the target path (a file can't also be a directory)
+    let blocker = dirs.target_dir.join("not-a-dir");
+    std::fs::write(&blocker, "I am a file, not a directory").unwrap();
+
+    let target_file = blocker.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let has_warning = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::Warning { .. }));
+    assert!(
+        has_warning,
+        "Should emit a warning about write failure when parent path is a file"
+    );
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            skipped_count,
+            ..
+        }) => {
+            assert_eq!(*skipped_count, 1);
+            assert_eq!(*deployed_count, 0);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_apply_corrupt_state_file_recovers() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    // Write garbage to the state file
+    let state_file = dirs.state_dir.join("deploy-state.yml");
+    std::fs::write(&state_file, "{{{{not valid yaml!!! garbage $$$").unwrap();
+
+    let service = dirs.service();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 1);
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
+
+    assert!(
+        target_file.exists(),
+        "Config should be deployed despite corrupt state"
+    );
+}
+
+#[tokio::test]
+async fn test_check_drift_with_no_prior_deploys() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    // Create target manually (not via selfie) so there's no deploy state
+    std::fs::write(&target_file, "key = \"value\"").unwrap();
+
+    let service = dirs.service();
+    let stream = service.check_drift().await;
+    let events = collect_events(stream).await;
+
+    let has_drift = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::ConfigDriftDetected { .. }));
+    assert!(
+        has_drift,
+        "Should detect drift when target exists but wasn't tracked"
+    );
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigDriftChecked { drift_count, .. }) => {
+            assert_eq!(*drift_count, 1);
+        }
+        other => panic!("Expected ConfigDriftChecked success, got: {other:?}"),
+    }
+}

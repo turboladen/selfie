@@ -166,17 +166,41 @@ fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
 ///
 /// Prevents path traversal attacks where a malicious package YAML could use
 /// `../` sequences to read files outside the configs directory.
+///
+/// Uses a component-level normalization that resolves `..` without requiring
+/// the path to exist on disk (unlike `canonicalize`).
 fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
-    // Normalize both paths by resolving as much as possible
-    // Use starts_with on the joined path components
     match (
         std::path::absolute(source_path),
         std::path::absolute(configs_dir),
     ) {
-        (Ok(abs_source), Ok(abs_configs)) => abs_source.starts_with(&abs_configs),
-        // If we can't resolve absolute paths safely, treat the path as invalid
+        (Ok(abs_source), Ok(abs_configs)) => {
+            normalize_path(&abs_source).starts_with(&normalize_path(&abs_configs))
+        }
         _ => false,
     }
+}
+
+/// Normalize a path by resolving `.` and `..` components without touching the filesystem.
+///
+/// Unlike `canonicalize`, this works on paths that don't exist yet. It processes
+/// components left-to-right, popping on `..` and skipping `.`.
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut parts: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                // Only pop Normal components; don't pop past root/prefix
+                if matches!(parts.last(), Some(Component::Normal(_))) {
+                    parts.pop();
+                }
+            }
+            Component::CurDir => {} // skip "."
+            other => parts.push(other),
+        }
+    }
+    parts.iter().collect()
 }
 
 impl<R, F> ConfigService for ConfigServiceImpl<R, F>
@@ -575,4 +599,60 @@ where
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total_count, total_count),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::RealFileSystem;
+    use std::path::Path;
+
+    #[test]
+    fn test_validate_source_path_valid() {
+        assert!(validate_source_path(
+            Path::new("/configs/app/file.toml"),
+            Path::new("/configs")
+        ));
+    }
+
+    #[test]
+    fn test_validate_source_path_traversal() {
+        assert!(!validate_source_path(
+            Path::new("/configs/../etc/passwd"),
+            Path::new("/configs")
+        ));
+    }
+
+    #[test]
+    fn test_validate_source_path_within_nested() {
+        assert!(validate_source_path(
+            Path::new("/configs/deep/nested/file"),
+            Path::new("/configs")
+        ));
+    }
+
+    #[test]
+    fn test_expand_target_path_absolute() {
+        let fs = RealFileSystem;
+        let result = expand_target_path(&fs, "/tmp/some/file");
+        // Should be an absolute path starting with /tmp
+        assert!(result.is_absolute());
+        assert!(result.starts_with("/tmp"));
+    }
+
+    #[test]
+    fn test_expand_target_path_tilde() {
+        let fs = RealFileSystem;
+        let result = expand_target_path(&fs, "~/test-file");
+        // Should start with the actual home directory, not literal "~"
+        assert!(result.is_absolute());
+        assert!(
+            !result.starts_with("~"),
+            "Tilde should be expanded to actual home directory"
+        );
+        assert!(
+            result.to_string_lossy().contains("test-file"),
+            "Should preserve the filename after tilde expansion"
+        );
+    }
 }
