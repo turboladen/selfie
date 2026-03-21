@@ -669,10 +669,10 @@ mod tests {
         let package = PackageBuilder::default()
             .name("good-config")
             .version("1.0.0")
+            .environment("test-env", |b| b.install("echo hi"))
             .configs(vec![ConfigEntry::new("src/file.txt", "~/.config/file.txt")])
             .build();
         let result = package.validate("test-env");
-        // No config-related issues (there will be an env warning since "test-env" isn't configured)
         assert!(!result.issues().has_errors());
     }
 
