@@ -82,6 +82,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "install_command": &environment_status.install_command,
             "check_command": &environment_status.check_command,
             "dependencies": &environment_status.dependencies,
+            "recommends": &environment_status.recommends,
             "status": environment_status.status.as_ref().map(|s| match s {
                 selfie::package::event::EnvironmentStatus::Installed => "installed",
                 selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
@@ -144,6 +145,23 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "invalid_packages": invalid,
             }))
         }
+        PackageEvent::RecommendStarted { recommend_name, .. } => Some(serde_json::json!({
+            "type": "recommend_started",
+            "package": recommend_name,
+        })),
+        PackageEvent::RecommendSucceeded { recommend_name, .. } => Some(serde_json::json!({
+            "type": "recommend_succeeded",
+            "package": recommend_name,
+        })),
+        PackageEvent::RecommendFailed {
+            recommend_name,
+            error,
+            ..
+        } => Some(serde_json::json!({
+            "type": "recommend_failed",
+            "package": recommend_name,
+            "error": error,
+        })),
         PackageEvent::Warning { message, .. } => Some(serde_json::json!({
             "type": "warning",
             "message": message,

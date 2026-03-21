@@ -452,6 +452,7 @@ mod tests {
                         None,
                         None,
                         vec!["target-package".to_string()],
+                        Vec::new(),
                     ),
                 );
 
@@ -463,6 +464,7 @@ mod tests {
                         None,
                         None,
                         vec!["target-package".to_string()],
+                        Vec::new(),
                     ),
                 );
 

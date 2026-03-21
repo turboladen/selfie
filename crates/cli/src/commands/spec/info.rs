@@ -167,6 +167,13 @@ pub(crate) fn create_environment_table(
         ]);
     }
 
+    if !env_status.recommends.is_empty() {
+        env_table.add_row(vec![
+            format_env_key("Recommends"),
+            format_env_value(&env_status.recommends.join(", ")),
+        ]);
+    }
+
     env_table
 }
 

@@ -394,6 +394,41 @@ impl EventSender {
         .await;
     }
 
+    /// Send a recommend-started event
+    pub(crate) async fn send_recommend_started(&self, recommend_name: impl fmt::Display) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RecommendStarted {
+            operation_info,
+            recommend_name: recommend_name.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a recommend-succeeded event
+    pub(crate) async fn send_recommend_succeeded(&self, recommend_name: impl fmt::Display) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RecommendSucceeded {
+            operation_info,
+            recommend_name: recommend_name.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a recommend-failed event
+    pub(crate) async fn send_recommend_failed(
+        &self,
+        recommend_name: impl fmt::Display,
+        error: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RecommendFailed {
+            operation_info,
+            recommend_name: recommend_name.to_string(),
+            error: error.to_string(),
+        })
+        .await;
+    }
+
     /// Send individual spec list item data (for streaming)
     pub(crate) async fn send_spec_list_item(&self, spec_item: SpecListItem) {
         let operation_info = self.touch_operation_info();
@@ -1592,6 +1627,25 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         spec_list: SpecListData,
     },
+
+    /// A recommended (soft) dependency install is starting
+    RecommendStarted {
+        operation_info: OperationInfo,
+        recommend_name: String,
+    },
+
+    /// A recommended (soft) dependency installed successfully
+    RecommendSucceeded {
+        operation_info: OperationInfo,
+        recommend_name: String,
+    },
+
+    /// A recommended (soft) dependency failed to install (non-fatal)
+    RecommendFailed {
+        operation_info: OperationInfo,
+        recommend_name: String,
+        error: String,
+    },
 }
 
 /// Structured data for package information
@@ -1614,6 +1668,7 @@ pub struct EnvironmentStatusData {
     pub install_command: String,
     pub check_command: Option<String>,
     pub dependencies: Vec<String>,
+    pub recommends: Vec<String>,
     pub status: Option<EnvironmentStatus>,
 }
 
@@ -1796,6 +1851,8 @@ pub struct PackageUpdateFields {
     pub audit: Option<Option<String>>,
     /// Environment-scoped: update dependencies (requires environment)
     pub dependencies: Option<Vec<String>>,
+    /// Environment-scoped: update recommends (requires environment)
+    pub recommends: Option<Vec<String>>,
     /// Target environment for environment-scoped fields
     pub environment: Option<String>,
     /// Add a new environment configuration
@@ -1812,6 +1869,7 @@ pub struct AddEnvironment {
     pub check: Option<String>,
     pub audit: Option<String>,
     pub dependencies: Vec<String>,
+    pub recommends: Vec<String>,
 }
 
 #[cfg(test)]

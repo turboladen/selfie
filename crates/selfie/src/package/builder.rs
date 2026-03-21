@@ -102,6 +102,7 @@ pub struct EnvironmentConfigBuilder {
     check: Option<String>,
     audit: Option<String>,
     dependencies: Vec<String>,
+    recommends: Vec<String>,
 }
 impl EnvironmentConfigBuilder {
     /// Create a new environment configuration builder
@@ -148,6 +149,15 @@ impl EnvironmentConfigBuilder {
         self
     }
 
+    #[must_use]
+    pub fn recommends<T: AsRef<str>>(mut self, recommends: Vec<T>) -> Self {
+        self.recommends = recommends
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
+        self
+    }
+
     /// Build the final `EnvironmentConfig` instance
     ///
     /// Constructs an `EnvironmentConfig` with all the configured values.
@@ -158,6 +168,7 @@ impl EnvironmentConfigBuilder {
             check: self.check,
             audit: self.audit,
             dependencies: self.dependencies,
+            recommends: self.recommends,
         }
     }
 }

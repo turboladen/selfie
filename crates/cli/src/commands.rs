@@ -139,8 +139,15 @@ async fn dispatch_package_command(
     let service = create_package_service(config, cancellation_token);
 
     match command {
-        PackageSubcommands::Install { package_name } => {
-            package::install::handle_install(&service, package_name, config, &display).await
+        PackageSubcommands::Install {
+            package_name,
+            no_recommends,
+        } => {
+            let options = selfie::package::service::InstallOptions {
+                skip_recommends: *no_recommends,
+            };
+            package::install::handle_install(&service, package_name, options, config, &display)
+                .await
         }
         PackageSubcommands::Check { package_name } => {
             package::check::handle_check(&service, package_name, config, &display).await

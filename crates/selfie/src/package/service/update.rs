@@ -50,11 +50,12 @@ where
     let has_env_scoped_fields = fields.install.is_some()
         || fields.check.is_some()
         || fields.audit.is_some()
-        || fields.dependencies.is_some();
+        || fields.dependencies.is_some()
+        || fields.recommends.is_some();
 
     if has_env_scoped_fields && fields.environment.is_none() {
         return OperationResult::Failure(
-            "Environment-scoped fields (install, check, audit, dependencies) require an environment target".into(),
+            "Environment-scoped fields (install, check, audit, dependencies, recommends) require an environment target".into(),
         );
     }
 
@@ -78,6 +79,9 @@ where
             }
             if let Some(dependencies) = fields.dependencies {
                 env_config.dependencies = dependencies;
+            }
+            if let Some(recommends) = fields.recommends {
+                env_config.recommends = recommends;
             }
         } else {
             return OperationResult::Failure(
@@ -106,6 +110,7 @@ where
                 add_env.check,
                 add_env.audit,
                 add_env.dependencies,
+                add_env.recommends,
             ),
         );
     }
@@ -332,6 +337,7 @@ mod tests {
                 check: Some("dpkg -l test".to_string()),
                 audit: None,
                 dependencies: vec![],
+                recommends: vec![],
             }),
             ..Default::default()
         };

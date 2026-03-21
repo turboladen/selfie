@@ -161,6 +161,7 @@ where
             install_command: env_config.install().to_string(),
             check_command: env_config.check().map(std::string::ToString::to_string),
             dependencies: env_config.dependencies().to_vec(),
+            recommends: env_config.recommends().to_vec(),
             status,
         };
 

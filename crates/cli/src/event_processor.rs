@@ -266,6 +266,24 @@ impl EventProcessor {
                 return true; // Stop processing after cancellation
             }
 
+            PackageEvent::RecommendStarted { recommend_name, .. } => {
+                self.display
+                    .print_info(format!("  Installing recommended: {recommend_name}..."));
+            }
+
+            PackageEvent::RecommendSucceeded { recommend_name, .. } => {
+                self.display.print_success(format!("  ✓ {recommend_name}"));
+            }
+
+            PackageEvent::RecommendFailed {
+                recommend_name,
+                error,
+                ..
+            } => {
+                self.display
+                    .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
+            }
+
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
             | PackageEvent::PackageListReady { .. }

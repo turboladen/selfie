@@ -45,6 +45,9 @@ pub struct PackageNameParam {
 pub struct InstallParam {
     /// Name of the package to install
     pub package: String,
+    /// Skip installing recommended (soft) dependencies
+    #[serde(default)]
+    pub skip_recommends: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -97,6 +100,9 @@ pub struct UpdateParam {
     /// Update dependencies (requires environment)
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
+    /// Update recommended (soft) dependencies (requires environment)
+    #[serde(default)]
+    pub recommends: Option<Vec<String>>,
     /// Add a new environment configuration
     #[serde(default)]
     pub add_environment: Option<AddEnvironmentParam>,
@@ -120,6 +126,9 @@ pub struct AddEnvironmentParam {
     /// Optional dependencies
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Optional soft dependencies (installed after package, failures don't cascade)
+    #[serde(default)]
+    pub recommends: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -169,6 +178,7 @@ impl SelfieServer {
                 params.check,
                 params.audit,
                 params.dependencies,
+                Vec::new(),
             ),
         );
 
@@ -228,6 +238,7 @@ impl SelfieServer {
                     check: ae.check,
                     audit: ae.audit,
                     dependencies: ae.dependencies,
+                    recommends: ae.recommends,
                 });
 
         let fields = PackageUpdateFields {
@@ -237,6 +248,7 @@ impl SelfieServer {
             check,
             audit,
             dependencies: params.dependencies,
+            recommends: params.recommends,
             environment: params.environment,
             add_environment,
             remove_environment: params.remove_environment,
@@ -274,6 +286,7 @@ impl SelfieServer {
                         check: ae.check,
                         audit: ae.audit,
                         dependencies: ae.dependencies,
+                        recommends: ae.recommends,
                     });
 
             let fields = PackageUpdateFields {
@@ -283,6 +296,7 @@ impl SelfieServer {
                 check,
                 audit,
                 dependencies: update.dependencies,
+                recommends: update.recommends,
                 environment: update.environment,
                 add_environment,
                 remove_environment: update.remove_environment,
@@ -418,7 +432,10 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<InstallParam>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = self.service.install(&params.package).await;
+        let options = selfie::package::InstallOptions {
+            skip_recommends: params.skip_recommends,
+        };
+        let stream = self.service.install(&params.package, options).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }

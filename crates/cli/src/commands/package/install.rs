@@ -1,7 +1,7 @@
 use selfie::package::{
     event::{OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
-    service::PackageService,
+    service::{InstallOptions, PackageService},
 };
 use tracing::info;
 
@@ -15,12 +15,13 @@ use crate::{
 pub(crate) async fn handle_install(
     service: &impl PackageService,
     package_name: &str,
+    options: InstallOptions,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> i32 {
     info!("Installing package: {}", package_name);
 
-    let event_stream = service.install(package_name).await;
+    let event_stream = service.install(package_name, options).await;
 
     let mut env_error_handled = false;
 
@@ -229,7 +230,14 @@ mod tests {
         let display = create_display();
 
         // This will fail without proper setup, but tests that the function can be called
-        let _result = handle_install(&service, "test-package", &config, &display).await;
+        let _result = handle_install(
+            &service,
+            "test-package",
+            InstallOptions::default(),
+            &config,
+            &display,
+        )
+        .await;
     }
 
     #[test]
