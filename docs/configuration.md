@@ -78,8 +78,8 @@ package_directory: ~/.config/selfie/packages
 # Directory containing config source files for selfie apply (default: sibling of package_directory)
 configs_directory: ~/.config/selfie/configs
 
-# Directory for deploy state tracking (default: ~/.config/selfie)
-state_directory: ~/.config/selfie
+# Directory for deploy state tracking (default: ~/.local/state/selfie)
+state_directory: ~/.local/state/selfie
 
 # Verbosity level (default: false)
 verbose: false
@@ -164,10 +164,12 @@ This directory holds the source files referenced by the `configs` field in packa
 #### `state_directory`
 
 Path where selfie stores deploy state (checksums of deployed files, used for conflict and drift
-detection). Defaults to `~/.config/selfie`.
+detection). Defaults to `~/.local/state/selfie`, following the
+[XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/)
+(`XDG_STATE_HOME`).
 
 ```yaml
-state_directory: ~/.config/selfie
+state_directory: ~/.local/state/selfie
 ```
 
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine

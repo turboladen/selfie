@@ -91,15 +91,19 @@ fn deploy_state_path<F: FileSystem>(
         return Ok(state_dir.join(DEPLOY_STATE_FILENAME));
     }
 
+    // Default to XDG_STATE_HOME/selfie (~/.local/state/selfie) per the XDG Base
+    // Directory Specification. Deploy state is per-machine, non-portable data —
+    // exactly what XDG_STATE_HOME is designed for.
+    //
     // expand_path canonicalizes, which fails if the directory doesn't exist yet.
-    // To avoid requiring ~/.config/selfie to already exist on first run, expand
-    // just "~" (which should always exist) and join the rest.
+    // To avoid requiring ~/.local/state/selfie to already exist on first run,
+    // expand just "~" (which should always exist) and join the rest.
     let home = filesystem.expand_path(&PathBuf::from("~")).map_err(|_| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
             "Cannot determine home directory for deploy state file",
         )))
     })?;
-    let parent = home.join(".config").join("selfie");
+    let parent = home.join(".local").join("state").join("selfie");
     Ok(parent.join(DEPLOY_STATE_FILENAME))
 }
 
