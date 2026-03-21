@@ -5,7 +5,7 @@
 //! the file system (for reading/writing config files), and the application config
 //! to perform config deployment operations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
 
@@ -30,9 +30,6 @@ use super::port::{ApplyOptions, ConfigService};
 
 /// Default deploy state filename
 const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
-
-/// Default path for deploy state file (relative to home)
-const DEPLOY_STATE_RELATIVE_PATH: &str = ".config/selfie/deploy-state.yml";
 
 /// Concrete implementation of the [`ConfigService`] trait
 ///
@@ -77,22 +74,41 @@ where
     }
 }
 
-/// Resolve the deploy state file path
-fn deploy_state_path<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> PathBuf {
+/// Resolve the deploy state file path.
+///
+/// Uses the configured `state_directory` if available, otherwise resolves
+/// `~/.config/selfie/deploy-state.yml` via the filesystem abstraction.
+///
+/// # Errors
+///
+/// Returns `FileSystemError` if the home directory cannot be resolved.
+fn deploy_state_path<F: FileSystem>(
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> Result<PathBuf, FileSystemError> {
     // Use configured state directory if available
     if let Some(state_dir) = config.state_directory() {
-        return state_dir.join(DEPLOY_STATE_FILENAME);
+        return Ok(state_dir.join(DEPLOY_STATE_FILENAME));
     }
 
-    let tilde_path = PathBuf::from("~").join(DEPLOY_STATE_RELATIVE_PATH);
-    filesystem
-        .expand_path(&tilde_path)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/selfie-deploy-state.yml"))
+    // Resolve via filesystem (uses shellexpand for tilde, then canonicalize).
+    // expand_path canonicalizes, which fails if the file doesn't exist. Instead,
+    // expand just the parent directory (~/.config/selfie) and append the filename.
+    let tilde_parent = PathBuf::from("~/.config/selfie");
+    let parent = filesystem.expand_path(&tilde_parent).map_err(|_| {
+        FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
+            "Cannot determine home directory for deploy state file",
+        )))
+    })?;
+    Ok(parent.join(DEPLOY_STATE_FILENAME))
 }
 
 /// Load the deploy state from disk, or return an empty state
 fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> DeployState {
-    let path = deploy_state_path(filesystem, config);
+    let path = match deploy_state_path(filesystem, config) {
+        Ok(p) => p,
+        Err(_) => return DeployState::empty(),
+    };
     if !filesystem.path_exists(&path) {
         return DeployState::empty();
     }
@@ -108,18 +124,18 @@ fn save_deploy_state<F: FileSystem>(
     config: &SelfieConfig,
     state: &DeployState,
 ) -> Result<(), FileSystemError> {
-    let path = deploy_state_path(filesystem, config);
+    let path = deploy_state_path(filesystem, config)?;
     let yaml = serde_yaml::to_string(state).map_err(|e| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
     })?;
     filesystem.write_file(&path, yaml.as_bytes())
 }
 
-/// Expand a target path, handling tilde expansion.
+/// Expand a target path, handling tilde expansion via the filesystem abstraction.
 ///
-/// Tries `expand_path` (which canonicalizes) first. If that fails (e.g., the target
-/// doesn't exist yet), falls back to canonicalizing the parent directory and appending
-/// the filename. If even that fails, does simple tilde replacement.
+/// Tries `expand_path` (which does tilde expansion + canonicalize) first. If that
+/// fails (e.g., target doesn't exist yet), expands just the tilde prefix using the
+/// filesystem and constructs the rest of the path without requiring it to exist.
 fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = PathBuf::from(target);
 
@@ -128,34 +144,43 @@ fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
         return p;
     }
 
-    // Try canonicalizing just the parent (works if parent dir exists)
-    if let (Some(parent), Some(filename)) = (raw.parent(), raw.file_name()) {
-        // Expand tilde in parent first
-        let expanded_parent = if target.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(format!("{}{}", home, &parent.to_string_lossy()[1..]))
-            } else {
-                parent.to_path_buf()
-            }
-        } else {
-            parent.to_path_buf()
-        };
-
-        if let Ok(canonical_parent) = filesystem.canonicalize(&expanded_parent) {
-            return canonical_parent.join(filename);
+    // For tilde paths, expand just "~" to get the home directory via filesystem
+    if let Some(rest) = target.strip_prefix("~/") {
+        let tilde_only = PathBuf::from("~");
+        if let Ok(home) = filesystem.expand_path(&tilde_only) {
+            return home.join(rest);
         }
-
-        // Parent doesn't exist either — return the tilde-expanded path
-        return expanded_parent.join(filename);
     }
 
-    // Last resort: simple tilde replacement
-    if target.starts_with("~/")
-        && let Ok(home) = std::env::var("HOME")
+    // Try canonicalizing just the parent (works if parent dir exists)
+    if let (Some(parent), Some(filename)) = (raw.parent(), raw.file_name())
+        && let Ok(canonical_parent) = filesystem.expand_path(parent)
     {
-        return PathBuf::from(format!("{}{}", home, &target[1..]));
+        return canonical_parent.join(filename);
     }
+
     raw
+}
+
+/// Validate that a resolved source path doesn't escape the configs directory.
+///
+/// Prevents path traversal attacks where a malicious package YAML could use
+/// `../` sequences to read files outside the configs directory.
+fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
+    // Normalize both paths by resolving as much as possible
+    // Use starts_with on the joined path components
+    match (
+        std::path::absolute(source_path),
+        std::path::absolute(configs_dir),
+    ) {
+        (Ok(abs_source), Ok(abs_configs)) => abs_source.starts_with(abs_configs),
+        _ => {
+            // If we can't resolve absolute paths, fall back to string check
+            let source_str = source_path.to_string_lossy();
+            let configs_str = configs_dir.to_string_lossy();
+            source_str.starts_with(configs_str.as_ref())
+        }
+    }
 }
 
 impl<R, F> ConfigService for ConfigServiceImpl<R, F>
@@ -231,6 +256,50 @@ where
     }
 }
 
+/// Describes a single config file deployment operation
+struct DeployUnit<'a> {
+    source_path: &'a Path,
+    target_path: &'a Path,
+    source_content: &'a str,
+    source_checksum: &'a str,
+    source_key: &'a str,
+}
+
+/// Deploy a single config file to its target path, updating state and emitting events.
+async fn perform_deploy<F: FileSystem>(
+    filesystem: &F,
+    deploy_state: &mut DeployState,
+    sender: &EventSender,
+    unit: &DeployUnit<'_>,
+    dry_run: bool,
+) -> Result<(), ()> {
+    sender
+        .send_config_deploying(unit.source_path.display(), unit.target_path.display())
+        .await;
+
+    if !dry_run {
+        if let Err(e) = filesystem.write_file(unit.target_path, unit.source_content.as_bytes()) {
+            sender
+                .send_warning(format!(
+                    "Failed to write '{}': {e}",
+                    unit.target_path.display()
+                ))
+                .await;
+            return Err(());
+        }
+        deploy_state.record_deployment(
+            unit.source_key,
+            &unit.target_path.to_string_lossy(),
+            unit.source_checksum,
+        );
+    }
+
+    sender
+        .send_config_deployed(unit.source_path.display(), unit.target_path.display())
+        .await;
+    Ok(())
+}
+
 /// Core logic for applying config files
 async fn handle_apply<R, F>(
     repo: &R,
@@ -276,6 +345,19 @@ where
 
         for entry in configs {
             let source_path = resolve_source_path(&configs_dir, entry.source());
+
+            // Runtime path traversal guard: verify resolved path stays within configs_dir
+            if !validate_source_path(&source_path, &configs_dir) {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{}': source path escapes configs directory",
+                        entry.source()
+                    ))
+                    .await;
+                skipped_count += 1;
+                continue;
+            }
+
             let target_path = expand_target_path(filesystem, entry.target());
 
             // Read source file
@@ -311,36 +393,30 @@ where
                 deploy_state.detect_drift(entry.source(), &source_checksum, &target_checksum);
             let decision = deploy_decision(&drift, target_exists);
 
+            let unit = DeployUnit {
+                source_path: &source_path,
+                target_path: &target_path,
+                source_content: &source_content,
+                source_checksum: &source_checksum,
+                source_key: entry.source(),
+            };
+
             match decision {
                 DeployDecision::Deploy => {
-                    sender
-                        .send_config_deploying(source_path.display(), target_path.display())
-                        .await;
-
-                    if !options.dry_run {
-                        if let Err(e) =
-                            filesystem.write_file(&target_path, source_content.as_bytes())
-                        {
-                            sender
-                                .send_warning(format!(
-                                    "Failed to write '{}': {e}",
-                                    target_path.display()
-                                ))
-                                .await;
-                            skipped_count += 1;
-                            continue;
-                        }
-                        deploy_state.record_deployment(
-                            entry.source(),
-                            &target_path.to_string_lossy(),
-                            &source_checksum,
-                        );
+                    if perform_deploy(
+                        filesystem,
+                        &mut deploy_state,
+                        sender,
+                        &unit,
+                        options.dry_run,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        deployed_count += 1;
+                    } else {
+                        skipped_count += 1;
                     }
-
-                    sender
-                        .send_config_deployed(source_path.display(), target_path.display())
-                        .await;
-                    deployed_count += 1;
                 }
                 DeployDecision::Skip(reason) => {
                     sender
@@ -350,35 +426,20 @@ where
                 }
                 DeployDecision::Conflict => {
                     if options.auto_accept {
-                        // Deploy anyway when --yes is used
-                        sender
-                            .send_config_deploying(source_path.display(), target_path.display())
-                            .await;
-
-                        if !options.dry_run {
-                            if let Err(e) =
-                                filesystem.write_file(&target_path, source_content.as_bytes())
-                            {
-                                sender
-                                    .send_warning(format!(
-                                        "Failed to write '{}': {e}",
-                                        target_path.display()
-                                    ))
-                                    .await;
-                                skipped_count += 1;
-                                continue;
-                            }
-                            deploy_state.record_deployment(
-                                entry.source(),
-                                &target_path.to_string_lossy(),
-                                &source_checksum,
-                            );
+                        if perform_deploy(
+                            filesystem,
+                            &mut deploy_state,
+                            sender,
+                            &unit,
+                            options.dry_run,
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            deployed_count += 1;
+                        } else {
+                            skipped_count += 1;
                         }
-
-                        sender
-                            .send_config_deployed(source_path.display(), target_path.display())
-                            .await;
-                        deployed_count += 1;
                     } else {
                         // Emit conflict with diff
                         let target_content = filesystem.read_file(&target_path).unwrap_or_default();
@@ -455,10 +516,18 @@ where
             let source_path = resolve_source_path(&configs_dir, entry.source());
             let target_path = expand_target_path(filesystem, entry.target());
 
-            // Read source
+            // Read source — emit warning if missing instead of silently skipping
             let source_content = match filesystem.read_file(&source_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(e) => {
+                    sender
+                        .send_warning(format!(
+                            "Cannot read source '{}' for drift check: {e}",
+                            source_path.display()
+                        ))
+                        .await;
+                    continue;
+                }
             };
             let source_checksum = compute_checksum(source_content.as_bytes());
 

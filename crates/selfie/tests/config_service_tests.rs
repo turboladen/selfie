@@ -444,6 +444,53 @@ async fn test_check_drift_no_drift_when_up_to_date() {
 }
 
 #[tokio::test]
+async fn test_check_drift_missing_source_emits_warning() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.configs_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_configs(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+
+    // First deploy
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Delete the source file
+    std::fs::remove_file(source_dir.join("config.toml")).unwrap();
+
+    // Check drift — should emit a warning about missing source, not panic
+    let stream = service.check_drift().await;
+    let events = collect_events(stream).await;
+
+    let has_warning = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::Warning { .. }));
+    assert!(
+        has_warning,
+        "Should emit a warning when source file is missing during drift check"
+    );
+
+    // Should still complete successfully
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    assert!(
+        matches!(
+            result,
+            OperationResult::Success(OperationSuccess::ConfigDriftChecked { .. })
+        ),
+        "Should still complete with ConfigDriftChecked even with missing source"
+    );
+}
+
+#[tokio::test]
 async fn test_apply_all_no_configs_packages() {
     let dirs = TestDirs::new();
 

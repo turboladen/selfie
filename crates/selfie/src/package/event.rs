@@ -480,7 +480,6 @@ impl EventSender {
     }
 
     /// Send a config-deploying event
-    #[allow(dead_code)]
     pub(crate) async fn send_config_deploying(
         &self,
         source: impl fmt::Display,
@@ -496,7 +495,6 @@ impl EventSender {
     }
 
     /// Send a config-deployed event
-    #[allow(dead_code)]
     pub(crate) async fn send_config_deployed(
         &self,
         source: impl fmt::Display,
@@ -512,7 +510,6 @@ impl EventSender {
     }
 
     /// Send a config-skipped event
-    #[allow(dead_code)]
     pub(crate) async fn send_config_skipped(
         &self,
         source: impl fmt::Display,
@@ -530,7 +527,6 @@ impl EventSender {
     }
 
     /// Send a config-conflict event
-    #[allow(dead_code)]
     pub(crate) async fn send_config_conflict(
         &self,
         source: impl fmt::Display,
@@ -548,7 +544,6 @@ impl EventSender {
     }
 
     /// Send a config-drift-detected event
-    #[allow(dead_code)]
     pub(crate) async fn send_config_drift_detected(
         &self,
         target: impl fmt::Display,

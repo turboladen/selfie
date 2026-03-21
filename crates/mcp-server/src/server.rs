@@ -29,9 +29,13 @@ type ConcreteService = PackageServiceImpl<
     GixGitStatusProvider,
 >;
 
+type ConcreteConfigService =
+    ConfigServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem>;
+
 #[derive(Clone)]
 pub struct SelfieServer {
     service: Arc<ConcreteService>,
+    config_service: Arc<ConcreteConfigService>,
     config: SelfieConfig,
     tool_router: ToolRouter<Self>,
 }
@@ -173,8 +177,12 @@ fn default_true() -> bool {
 #[tool_router]
 impl SelfieServer {
     pub fn new(service: ConcreteService, config: SelfieConfig) -> Self {
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
+        let config_service = ConfigServiceImpl::new(repo, RealFileSystem, config.clone());
         Self {
             service: Arc::new(service),
+            config_service: Arc::new(config_service),
             config,
             tool_router: Self::tool_router(),
         }
@@ -513,12 +521,6 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<ApplyParam>,
     ) -> Result<CallToolResult, McpError> {
-        let repo = YamlPackageRepository::new(
-            RealFileSystem,
-            self.config.package_directory().to_path_buf(),
-        );
-        let config_service = ConfigServiceImpl::new(repo, RealFileSystem, self.config.clone());
-
         let options = ApplyOptions {
             dry_run: params.dry_run,
             auto_accept: params.auto_accept,
@@ -526,9 +528,9 @@ impl SelfieServer {
 
         use selfie::config_service::port::ConfigService;
         let stream = if let Some(name) = &params.name {
-            config_service.apply(name, options).await
+            self.config_service.apply(name, options).await
         } else {
-            config_service.apply_all(options).await
+            self.config_service.apply_all(options).await
         };
 
         let result = event_collector::collect_events(stream).await;
