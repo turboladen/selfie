@@ -1,3 +1,16 @@
+//! Per-machine deploy state persistence and drift detection.
+//!
+//! Each time selfie deploys a config file, it records the source and target
+//! checksums in a [`DeployState`] file (typically `~/.config/selfie/deploy-state.yml`).
+//! On subsequent runs, these stored checksums are compared against the current
+//! file contents to classify changes as one of four [`DriftType`] variants —
+//! enabling the service layer to decide whether to deploy, skip, or flag a
+//! conflict.
+//!
+//! The state file is intentionally per-machine and not version-controlled: it
+//! reflects what was deployed *here*, which may differ from other machines
+//! sharing the same config repository.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

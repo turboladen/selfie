@@ -1,3 +1,10 @@
+//! Unified diff generation for config conflict display.
+//!
+//! When a config file has diverged on both the source and target sides, selfie
+//! shows the user a diff so they can understand the conflict before deciding
+//! what to do. This module wraps the [`similar`] crate's line-level diff engine
+//! with selfie-specific labeling conventions (source path vs target path).
+
 use similar::TextDiff;
 
 /// Produce a unified diff between two strings, labeled with source/target paths.
