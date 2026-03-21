@@ -25,6 +25,10 @@ pub struct SelfieConfig {
     pub(crate) environment: String,
     pub(crate) package_directory: PathBuf,
 
+    // Optional override for configs directory (defaults to sibling of package_directory)
+    #[serde(default)]
+    configs_directory: Option<PathBuf>,
+
     // Execution settings
     #[serde(default = "default_command_timeout")]
     pub(crate) command_timeout: NonZeroU64,
@@ -61,6 +65,21 @@ impl SelfieConfig {
     #[must_use]
     pub fn package_directory(&self) -> &PathBuf {
         &self.package_directory
+    }
+
+    /// Get the configs directory path.
+    ///
+    /// Defaults to a sibling `configs` directory next to `package_directory`.
+    /// For example, if `package_directory` is `~/selfie/packages`, this returns
+    /// `~/selfie/configs`. Can be overridden in config.
+    #[must_use]
+    pub fn configs_directory(&self) -> PathBuf {
+        self.configs_directory.clone().unwrap_or_else(|| {
+            self.package_directory
+                .parent()
+                .map(|p| p.join("configs"))
+                .unwrap_or_else(|| self.package_directory.join("configs"))
+        })
     }
 
     /// Get the command execution timeout duration
@@ -100,6 +119,7 @@ impl SelfieConfig {
 pub struct SelfieConfigBuilder {
     environment: String,
     package_directory: PathBuf,
+    configs_directory: Option<PathBuf>,
     command_timeout: Option<NonZeroU64>,
     max_parallel: Option<NonZeroUsize>,
     stop_on_error: Option<bool>,
@@ -118,6 +138,12 @@ impl SelfieConfigBuilder {
         D: AsRef<std::ffi::OsStr>,
     {
         self.package_directory = PathBuf::from(package_directory.as_ref());
+        self
+    }
+
+    #[must_use]
+    pub fn configs_directory(mut self, path: PathBuf) -> Self {
+        self.configs_directory = Some(path);
         self
     }
 
@@ -150,6 +176,7 @@ impl SelfieConfigBuilder {
         SelfieConfig {
             environment: self.environment,
             package_directory: self.package_directory,
+            configs_directory: self.configs_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
             max_parallel_installations: self.max_parallel.unwrap_or(default_max_parallel()),
             stop_on_error: self.stop_on_error.unwrap_or(STOP_ON_ERROR_DEFAULT),
@@ -160,7 +187,7 @@ impl SelfieConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{path::Path, time::Duration};
 
     #[test]
     fn test_selfie_config_builder() {
@@ -281,6 +308,26 @@ mod tests {
         assert_eq!(config.command_timeout.get(), 60); // Default
         assert!(config.max_parallel_installations.get() > 0); // Default based on CPUs
         assert!(config.stop_on_error); // Default
+    }
+
+    #[test]
+    fn test_configs_directory_defaults_to_sibling_of_package_directory() {
+        let config = SelfieConfigBuilder::default()
+            .package_directory("/home/user/selfie-packages/packages")
+            .build();
+        assert_eq!(
+            config.configs_directory(),
+            Path::new("/home/user/selfie-packages/configs")
+        );
+    }
+
+    #[test]
+    fn test_configs_directory_can_be_overridden() {
+        let config = SelfieConfigBuilder::default()
+            .package_directory("/home/user/selfie-packages/packages")
+            .configs_directory(PathBuf::from("/custom/configs"))
+            .build();
+        assert_eq!(config.configs_directory(), Path::new("/custom/configs"));
     }
 
     #[test]
