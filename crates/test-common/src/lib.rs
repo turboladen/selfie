@@ -22,9 +22,10 @@ pub use events::{
 pub use fixtures::{
     TestPackageBehavior, create_circular_dependency, create_dependency_chain,
     create_invalid_package_file, create_package_file_with_check,
-    create_service_install_test_package_file, create_service_invalid_package_file,
-    create_service_test_package_file, create_service_test_package_file_with_behavior,
-    create_service_test_package_file_with_deps, create_test_package_file,
+    create_service_install_test_package_file, create_service_install_test_package_file_with_note,
+    create_service_invalid_package_file, create_service_test_package_file,
+    create_service_test_package_file_with_behavior, create_service_test_package_file_with_deps,
+    create_test_package_file,
 };
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use service::{

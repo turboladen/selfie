@@ -464,6 +464,21 @@ impl EventSender {
         .await;
     }
 
+    /// Send config cleanup info event (during package removal)
+    pub(crate) async fn send_config_cleanup_info(
+        &self,
+        package_name: String,
+        config_targets: Vec<String>,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigCleanupInfo {
+            operation_info,
+            package_name,
+            config_targets,
+        })
+        .await;
+    }
+
     /// Send a config-deploying event
     #[allow(dead_code)]
     pub(crate) async fn send_config_deploying(
@@ -549,7 +564,6 @@ impl EventSender {
     }
 
     /// Send a post-install note event
-    #[allow(dead_code)]
     pub(crate) async fn send_post_install_note(
         &self,
         package_name: impl fmt::Display,
@@ -1714,6 +1728,13 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         package_name: String,
         dependent_packages: Vec<String>,
+    },
+
+    /// Info about config files that may need cleanup after package removal
+    ConfigCleanupInfo {
+        operation_info: OperationInfo,
+        package_name: String,
+        config_targets: Vec<String>,
     },
 
     /// Individual spec list item completed (for streaming)

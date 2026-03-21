@@ -321,6 +321,23 @@ impl EventProcessor {
                 self.display.print_info(format!("\n📋 {note}"));
             }
 
+            PackageEvent::ConfigCleanupInfo {
+                package_name,
+                config_targets,
+                ..
+            } => {
+                self.display.print_info(format!(
+                    "\nPackage '{}' has deployed config files:",
+                    package_name
+                ));
+                for target in &config_targets {
+                    self.display.print_info(format!("  - {}", target));
+                }
+                self.display.print_info(
+                    "  These files were NOT removed. Delete them manually if no longer needed.",
+                );
+            }
+
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
             | PackageEvent::PackageListReady { .. }
