@@ -784,6 +784,21 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Config apply operation completed
+    ConfigApplied {
+        deployed_count: usize,
+        skipped_count: usize,
+        conflict_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    },
+    /// Config drift check operation completed
+    ConfigDriftChecked {
+        drift_count: usize,
+        total_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -1064,6 +1079,29 @@ impl std::fmt::Display for OperationSuccess {
                     format!("{validated_count} package(s) validated successfully")
                 };
                 write!(f, "Spec validation completed: {status} {steps_completed}")
+            }
+            OperationSuccess::ConfigApplied {
+                deployed_count,
+                skipped_count,
+                conflict_count,
+                steps_completed,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Config apply completed: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s) {steps_completed}"
+                )
+            }
+            OperationSuccess::ConfigDriftChecked {
+                drift_count,
+                total_count,
+                steps_completed,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Config drift check completed: {drift_count} drifted out of {total_count} {steps_completed}"
+                )
             }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
@@ -1366,6 +1404,8 @@ impl OperationSuccess {
             OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::ConfigApplied { .. }
+            | OperationSuccess::ConfigDriftChecked { .. }
             | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1385,7 +1425,9 @@ impl OperationSuccess {
             | OperationSuccess::SpecsValidated { environment, .. }
             | OperationSuccess::PackageCreated { environment, .. }
             | OperationSuccess::PackageUpdated { environment, .. }
-            | OperationSuccess::PackageRemoved { environment, .. } => Some(environment),
+            | OperationSuccess::PackageRemoved { environment, .. }
+            | OperationSuccess::ConfigApplied { environment, .. }
+            | OperationSuccess::ConfigDriftChecked { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -1428,6 +1470,12 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::SpecsValidated {
+                steps_completed, ..
+            }
+            | OperationSuccess::ConfigApplied {
+                steps_completed, ..
+            }
+            | OperationSuccess::ConfigDriftChecked {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,

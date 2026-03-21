@@ -29,6 +29,10 @@ pub struct SelfieConfig {
     #[serde(default)]
     configs_directory: Option<PathBuf>,
 
+    // Optional override for deploy state directory (defaults to ~/.config/selfie)
+    #[serde(default)]
+    state_directory: Option<PathBuf>,
+
     // Execution settings
     #[serde(default = "default_command_timeout")]
     pub(crate) command_timeout: NonZeroU64,
@@ -82,6 +86,14 @@ impl SelfieConfig {
         })
     }
 
+    /// Get the deploy state directory path.
+    ///
+    /// Defaults to `~/.config/selfie`. Can be overridden in config.
+    #[must_use]
+    pub fn state_directory(&self) -> Option<&PathBuf> {
+        self.state_directory.as_ref()
+    }
+
     /// Get the command execution timeout duration
     #[must_use]
     pub fn command_timeout(&self) -> Duration {
@@ -120,6 +132,7 @@ pub struct SelfieConfigBuilder {
     environment: String,
     package_directory: PathBuf,
     configs_directory: Option<PathBuf>,
+    state_directory: Option<PathBuf>,
     command_timeout: Option<NonZeroU64>,
     max_parallel: Option<NonZeroUsize>,
     stop_on_error: Option<bool>,
@@ -172,11 +185,18 @@ impl SelfieConfigBuilder {
     }
 
     #[must_use]
+    pub fn state_directory(mut self, path: PathBuf) -> Self {
+        self.state_directory = Some(path);
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> SelfieConfig {
         SelfieConfig {
             environment: self.environment,
             package_directory: self.package_directory,
             configs_directory: self.configs_directory,
+            state_directory: self.state_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
             max_parallel_installations: self.max_parallel.unwrap_or(default_max_parallel()),
             stop_on_error: self.stop_on_error.unwrap_or(STOP_ON_ERROR_DEFAULT),

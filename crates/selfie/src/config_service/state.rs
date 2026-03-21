@@ -24,6 +24,18 @@ pub enum DriftType {
     NotTracked,
 }
 
+impl std::fmt::Display for DriftType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriftType::None => write!(f, "none"),
+            DriftType::RepoChanged => write!(f, "repo changed"),
+            DriftType::TargetChanged => write!(f, "target changed"),
+            DriftType::BothChanged => write!(f, "both changed"),
+            DriftType::NotTracked => write!(f, "not tracked"),
+        }
+    }
+}
+
 impl DeployState {
     pub fn empty() -> Self {
         Self::default()
