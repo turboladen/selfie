@@ -415,12 +415,24 @@ impl Package {
                 ));
             }
 
-            if source.contains("..") {
+            if std::path::Path::new(source)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
                     &format!("configs[{i}].source"),
                     "Config source path must not contain '..' (path traversal)",
                     Some("Use a relative path without parent directory references."),
+                ));
+            }
+
+            if source.starts_with('/') || source.starts_with('~') {
+                issues.push(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("configs[{i}].source"),
+                    "Config source path must be relative",
+                    Some("Use a path relative to the configs directory, e.g., 'pkg/config.toml'."),
                 ));
             }
 

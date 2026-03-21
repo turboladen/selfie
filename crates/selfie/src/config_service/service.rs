@@ -91,15 +91,15 @@ fn deploy_state_path<F: FileSystem>(
         return Ok(state_dir.join(DEPLOY_STATE_FILENAME));
     }
 
-    // Resolve via filesystem (uses shellexpand for tilde, then canonicalize).
-    // expand_path canonicalizes, which fails if the file doesn't exist. Instead,
-    // expand just the parent directory (~/.config/selfie) and append the filename.
-    let tilde_parent = PathBuf::from("~/.config/selfie");
-    let parent = filesystem.expand_path(&tilde_parent).map_err(|_| {
+    // expand_path canonicalizes, which fails if the directory doesn't exist yet.
+    // To avoid requiring ~/.config/selfie to already exist on first run, expand
+    // just "~" (which should always exist) and join the rest.
+    let home = filesystem.expand_path(&PathBuf::from("~")).map_err(|_| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
             "Cannot determine home directory for deploy state file",
         )))
     })?;
+    let parent = home.join(".config").join("selfie");
     Ok(parent.join(DEPLOY_STATE_FILENAME))
 }
 
@@ -173,13 +173,9 @@ fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
         std::path::absolute(source_path),
         std::path::absolute(configs_dir),
     ) {
-        (Ok(abs_source), Ok(abs_configs)) => abs_source.starts_with(abs_configs),
-        _ => {
-            // If we can't resolve absolute paths, fall back to string check
-            let source_str = source_path.to_string_lossy();
-            let configs_str = configs_dir.to_string_lossy();
-            source_str.starts_with(configs_str.as_ref())
-        }
+        (Ok(abs_source), Ok(abs_configs)) => abs_source.starts_with(&abs_configs),
+        // If we can't resolve absolute paths safely, treat the path as invalid
+        _ => false,
     }
 }
 
@@ -273,26 +269,35 @@ async fn perform_deploy<F: FileSystem>(
     unit: &DeployUnit<'_>,
     dry_run: bool,
 ) -> Result<(), ()> {
+    if dry_run {
+        sender
+            .send_config_skipped(
+                unit.source_path.display(),
+                unit.target_path.display(),
+                "dry run",
+            )
+            .await;
+        return Ok(());
+    }
+
     sender
         .send_config_deploying(unit.source_path.display(), unit.target_path.display())
         .await;
 
-    if !dry_run {
-        if let Err(e) = filesystem.write_file(unit.target_path, unit.source_content.as_bytes()) {
-            sender
-                .send_warning(format!(
-                    "Failed to write '{}': {e}",
-                    unit.target_path.display()
-                ))
-                .await;
-            return Err(());
-        }
-        deploy_state.record_deployment(
-            unit.source_key,
-            &unit.target_path.to_string_lossy(),
-            unit.source_checksum,
-        );
+    if let Err(e) = filesystem.write_file(unit.target_path, unit.source_content.as_bytes()) {
+        sender
+            .send_warning(format!(
+                "Failed to write '{}': {e}",
+                unit.target_path.display()
+            ))
+            .await;
+        return Err(());
     }
+    deploy_state.record_deployment(
+        unit.source_key,
+        &unit.target_path.to_string_lossy(),
+        unit.source_checksum,
+    );
 
     sender
         .send_config_deployed(unit.source_path.display(), unit.target_path.display())
@@ -515,6 +520,17 @@ where
 
             let source_path = resolve_source_path(&configs_dir, entry.source());
             let target_path = expand_target_path(filesystem, entry.target());
+
+            // Runtime path traversal guard (same as handle_apply)
+            if !validate_source_path(&source_path, &configs_dir) {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{}': source path escapes configs directory",
+                        entry.source()
+                    ))
+                    .await;
+                continue;
+            }
 
             // Read source — emit warning if missing instead of silently skipping
             let source_content = match filesystem.read_file(&source_path) {

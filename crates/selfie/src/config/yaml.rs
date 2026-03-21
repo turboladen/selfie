@@ -85,9 +85,19 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // Convert to our type
         let mut selfie_config: SelfieConfig = config.try_deserialize()?;
 
-        // Special handling for package_directory ~ expansion
+        // Special handling for ~ expansion on path fields
         if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
             selfie_config.package_directory = expanded;
+        }
+        if let Some(ref configs_dir) = selfie_config.configs_directory
+            && let Ok(expanded) = self.fs.expand_path(configs_dir)
+        {
+            selfie_config.configs_directory = Some(expanded);
+        }
+        if let Some(ref state_dir) = selfie_config.state_directory
+            && let Ok(expanded) = self.fs.expand_path(state_dir)
+        {
+            selfie_config.state_directory = Some(expanded);
         }
 
         Ok(selfie_config)

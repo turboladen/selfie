@@ -222,13 +222,18 @@ async fn test_apply_dry_run_does_not_write() {
     let stream = service.apply_all(options).await;
     let events = collect_events(stream).await;
 
+    let has_skipped_dry_run = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::ConfigSkipped { reason, .. } if reason == "dry run"));
+    assert!(
+        has_skipped_dry_run,
+        "Should emit ConfigSkipped with 'dry run' reason"
+    );
+
     let has_deploying = events
         .iter()
         .any(|e| matches!(e, PackageEvent::ConfigDeploying { .. }));
-    assert!(
-        has_deploying,
-        "Should emit ConfigDeploying event in dry run"
-    );
+    assert!(!has_deploying, "Should NOT emit ConfigDeploying in dry run");
 
     assert!(
         !target_file.exists(),

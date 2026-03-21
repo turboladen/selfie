@@ -170,7 +170,7 @@ detection). Defaults to `~/.config/selfie`.
 state_directory: ~/.config/selfie
 ```
 
-The state file (`deploy_state.json`) is per-machine — it tracks what was deployed on _this_ machine
+The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
 
 ### Global Behavior
