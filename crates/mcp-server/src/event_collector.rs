@@ -166,6 +166,52 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "type": "warning",
             "message": message,
         })),
+        PackageEvent::ConfigDeploying { source, target, .. } => Some(serde_json::json!({
+            "type": "config_deploying",
+            "source": source,
+            "target": target,
+        })),
+        PackageEvent::ConfigDeployed { source, target, .. } => Some(serde_json::json!({
+            "type": "config_deployed",
+            "source": source,
+            "target": target,
+        })),
+        PackageEvent::ConfigSkipped {
+            source,
+            target,
+            reason,
+            ..
+        } => Some(serde_json::json!({
+            "type": "config_skipped",
+            "source": source,
+            "target": target,
+            "reason": reason,
+        })),
+        PackageEvent::ConfigConflict {
+            source,
+            target,
+            diff,
+            ..
+        } => Some(serde_json::json!({
+            "type": "config_conflict",
+            "source": source,
+            "target": target,
+            "diff": diff,
+        })),
+        PackageEvent::ConfigDriftDetected {
+            target, drift_type, ..
+        } => Some(serde_json::json!({
+            "type": "config_drift_detected",
+            "target": target,
+            "drift_type": drift_type,
+        })),
+        PackageEvent::PostInstallNote {
+            package_name, note, ..
+        } => Some(serde_json::json!({
+            "type": "post_install_note",
+            "package": package_name,
+            "note": note,
+        })),
         _ => None,
     }
 }

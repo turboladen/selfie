@@ -464,6 +464,106 @@ impl EventSender {
         .await;
     }
 
+    /// Send a config-deploying event
+    #[allow(dead_code)]
+    pub(crate) async fn send_config_deploying(
+        &self,
+        source: impl fmt::Display,
+        target: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigDeploying {
+            operation_info,
+            source: source.to_string(),
+            target: target.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a config-deployed event
+    #[allow(dead_code)]
+    pub(crate) async fn send_config_deployed(
+        &self,
+        source: impl fmt::Display,
+        target: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigDeployed {
+            operation_info,
+            source: source.to_string(),
+            target: target.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a config-skipped event
+    #[allow(dead_code)]
+    pub(crate) async fn send_config_skipped(
+        &self,
+        source: impl fmt::Display,
+        target: impl fmt::Display,
+        reason: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigSkipped {
+            operation_info,
+            source: source.to_string(),
+            target: target.to_string(),
+            reason: reason.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a config-conflict event
+    #[allow(dead_code)]
+    pub(crate) async fn send_config_conflict(
+        &self,
+        source: impl fmt::Display,
+        target: impl fmt::Display,
+        diff: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigConflict {
+            operation_info,
+            source: source.to_string(),
+            target: target.to_string(),
+            diff: diff.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a config-drift-detected event
+    #[allow(dead_code)]
+    pub(crate) async fn send_config_drift_detected(
+        &self,
+        target: impl fmt::Display,
+        drift_type: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::ConfigDriftDetected {
+            operation_info,
+            target: target.to_string(),
+            drift_type: drift_type.to_string(),
+        })
+        .await;
+    }
+
+    /// Send a post-install note event
+    #[allow(dead_code)]
+    pub(crate) async fn send_post_install_note(
+        &self,
+        package_name: impl fmt::Display,
+        note: impl fmt::Display,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::PostInstallNote {
+            operation_info,
+            package_name: package_name.to_string(),
+            note: note.to_string(),
+        })
+        .await;
+    }
+
     fn touch_operation_info(&self) -> OperationInfo {
         let mut info = self.operation_info.clone();
         info.timestamp = Instant::now();
@@ -1645,6 +1745,50 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         recommend_name: String,
         error: String,
+    },
+
+    /// A config file is about to be deployed
+    ConfigDeploying {
+        operation_info: OperationInfo,
+        source: String,
+        target: String,
+    },
+
+    /// A config file was deployed successfully
+    ConfigDeployed {
+        operation_info: OperationInfo,
+        source: String,
+        target: String,
+    },
+
+    /// A config file was skipped (already current or user declined)
+    ConfigSkipped {
+        operation_info: OperationInfo,
+        source: String,
+        target: String,
+        reason: String,
+    },
+
+    /// A conflict was detected between repo and deployed version
+    ConfigConflict {
+        operation_info: OperationInfo,
+        source: String,
+        target: String,
+        diff: String,
+    },
+
+    /// Drift detected between deployed file and repo source
+    ConfigDriftDetected {
+        operation_info: OperationInfo,
+        target: String,
+        drift_type: String,
+    },
+
+    /// Post-install note to display to user
+    PostInstallNote {
+        operation_info: OperationInfo,
+        package_name: String,
+        note: String,
     },
 }
 

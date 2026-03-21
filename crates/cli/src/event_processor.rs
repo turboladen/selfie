@@ -284,6 +284,43 @@ impl EventProcessor {
                     .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
             }
 
+            PackageEvent::ConfigDeploying { source, target, .. } => {
+                self.display
+                    .print_info(format!("  Deploying {source} → {target}"));
+            }
+
+            PackageEvent::ConfigDeployed { source, target, .. } => {
+                self.display
+                    .print_success(format!("  ✓ {source} → {target}"));
+            }
+
+            PackageEvent::ConfigSkipped { source, reason, .. } => {
+                self.display
+                    .print_info(format!("  ⊘ {source} skipped: {reason}"));
+            }
+
+            PackageEvent::ConfigConflict {
+                source,
+                target,
+                diff,
+                ..
+            } => {
+                self.display
+                    .print_warning(format!("  ⚠ Conflict: {source} → {target}"));
+                self.display.print_info(format!("{diff}"));
+            }
+
+            PackageEvent::ConfigDriftDetected {
+                target, drift_type, ..
+            } => {
+                self.display
+                    .print_warning(format!("  ⚠ Drift in {target}: {drift_type}"));
+            }
+
+            PackageEvent::PostInstallNote { note, .. } => {
+                self.display.print_info(format!("\n📋 {note}"));
+            }
+
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
             | PackageEvent::PackageListReady { .. }
