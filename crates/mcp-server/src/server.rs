@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use selfie::{
     commands::ShellCommandRunner,
     config::SelfieConfig,
+    config_service::{port::ApplyOptions, service::ConfigServiceImpl},
     fs::RealFileSystem,
     package::{
         EnvironmentConfig, Package, PackageService, SpecService, event::PackageUpdateFields,
@@ -148,6 +149,23 @@ pub struct ListParam {
     /// Show all packages regardless of environment
     #[serde(default)]
     pub all: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ApplyParam {
+    /// Specific package or config name (deploys all if omitted)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Show what would change without writing files
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Auto-accept overwrite for conflicts. MCP always defaults to true since there's no interactive prompt.
+    #[serde(default = "default_true")]
+    pub auto_accept: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ─── Spec (definition) tools ───────────────────────────────────────────────
@@ -428,7 +446,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured installation method for the current environment"
+        description = "Install a package using its configured installation method for the current environment. If the package has a 'configs' section, run selfie_apply_config afterward to deploy its configuration files."
     )]
     async fn package_install(
         &self,
@@ -483,6 +501,38 @@ impl SelfieServer {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&config_data).unwrap_or_default(),
         )]))
+    }
+
+    // ─── Config deploy tools ──────────────────────────────────────────────
+
+    #[tool(
+        name = "selfie_apply_config",
+        description = "Deploy configuration files defined in package YAML files to their target locations. Detects conflicts and drift between repo source files and deployed targets. Use after installing a package that has a 'configs' section, or run without a name to deploy all config files."
+    )]
+    async fn selfie_apply_config(
+        &self,
+        Parameters(params): Parameters<ApplyParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            self.config.package_directory().to_path_buf(),
+        );
+        let config_service = ConfigServiceImpl::new(repo, RealFileSystem, self.config.clone());
+
+        let options = ApplyOptions {
+            dry_run: params.dry_run,
+            auto_accept: params.auto_accept,
+        };
+
+        use selfie::config_service::port::ConfigService;
+        let stream = if let Some(name) = &params.name {
+            config_service.apply(name, options).await
+        } else {
+            config_service.apply_all(options).await
+        };
+
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
     }
 }
 
