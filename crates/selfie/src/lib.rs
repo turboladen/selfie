@@ -29,6 +29,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod config_service;
 pub mod fs;
 pub mod package;
 pub mod validation;
