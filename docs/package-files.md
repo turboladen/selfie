@@ -18,6 +18,11 @@ name: package-name
 version: 1.0.0
 description: (optional) Brief description of what this package provides
 homepage: (optional) https://example.com
+post_install_note: (optional) Note displayed after first-time install
+
+configs:
+  - source: package-name/config.toml
+    target: ~/.config/package-name/config.toml
 
 environments:
   environment-name:
@@ -26,6 +31,8 @@ environments:
     dependencies:
       - dependency-package-1
       - dependency-package-2
+    recommends:
+      - optional-companion-tool
 
   another-environment:
     install: different installation command
@@ -80,9 +87,49 @@ URL to the package's homepage or repository.
 homepage: https://github.com/BurntSushi/ripgrep
 ```
 
+### `configs`
+
+A list of config file mappings that define files to deploy from your configs repository to their
+target locations. Unlike environment-specific fields, `configs` is a top-level field that applies
+across all environments.
+
+Each entry has two fields:
+
+- `source` — Relative path within your configs directory (see
+  [Configuration Guide](configuration.md) for `configs_directory`)
+- `target` — Absolute destination path (supports `~` for home directory)
+
+```yaml
+configs:
+  - source: fnm/fish-conf.fish
+    target: ~/.config/fish/conf.d/fnm.fish
+  - source: fnm/zsh-conf.zsh
+    target: ~/.config/zsh/conf.d/fnm.zsh
+```
+
+Config files are deployed with `selfie apply`, not during `selfie package install`. This separation
+keeps installation fast and gives you explicit control over when config files are written to disk.
+
+See [Config Deployment](#config-deployment) below for the full workflow.
+
+### `post_install_note`
+
+An optional message displayed to the user after a fresh install. Use this for important setup steps
+that can't be automated, like adding shell integrations or restarting services.
+
+```yaml
+post_install_note: |
+  Add this to your shell profile to activate fnm:
+    eval "$(fnm env --use-on-cd)"
+```
+
+The note is only shown on first-time installs, not on subsequent runs where the check command
+already passes.
+
 ## Environment Configuration
 
-Each environment must have an `install` command and optionally a `check` command and `dependencies`.
+Each environment must have an `install` command and optionally a `check` command, `dependencies`,
+and `recommends`.
 
 ### `install`
 
@@ -171,6 +218,35 @@ dependencies:
 
 Dependencies are installed in the order listed, and selfie will recursively install their
 dependencies first.
+
+### `recommends`
+
+Optional list of packages to install as soft dependencies. Unlike `dependencies`, a recommend
+failure does **not** prevent the parent package from succeeding.
+
+```yaml
+recommends:
+  - node # Useful companion, but fnm works without it
+  - yarn # Nice to have alongside
+```
+
+**Key differences from `dependencies`:**
+
+| Behavior         | `dependencies` | `recommends`      |
+| ---------------- | -------------- | ----------------- |
+| Install order    | Before parent  | After parent      |
+| Failure handling | Parent fails   | Warning only      |
+| Depth            | Recursive      | One level only    |
+| Skip flag        | —              | `--no-recommends` |
+
+Recommends are installed by default. To skip them:
+
+```bash
+selfie package install fnm --no-recommends
+```
+
+Recommends are only one level deep — a recommended package's own recommends are not followed. This
+keeps installation predictable and avoids deep recursive recommend chains.
 
 ## Command Execution
 
@@ -286,6 +362,105 @@ install: |
 
   echo "Docker is ready!"
 ```
+
+## Config Deployment
+
+Packages can declare config files that should be deployed to specific locations on your system. This
+is useful for shell integrations, editor configs, tool settings, and anything that lives outside the
+package directory.
+
+### How It Works
+
+1. **Define** config mappings in your package YAML (the `configs` field)
+2. **Store** config source files in your configs directory (a sibling of your package directory by
+   default — see [Configuration Guide](configuration.md) for `configs_directory`)
+3. **Deploy** with `selfie apply`
+
+### Directory Structure
+
+```
+~/.selfie/
+├── packages/              # Package definitions (package_directory)
+│   ├── fnm.yaml
+│   └── starship.yaml
+└── configs/               # Config source files (configs_directory)
+    ├── fnm/
+    │   ├── fish-conf.fish
+    │   └── zsh-conf.zsh
+    └── starship/
+        └── starship.toml
+```
+
+### Example Package with Configs
+
+```yaml
+name: starship
+version: 1.0.0
+description: Cross-shell prompt
+homepage: https://starship.rs
+
+post_install_note: |
+  Restart your shell or source your profile to activate starship.
+
+configs:
+  - source: starship/starship.toml
+    target: ~/.config/starship.toml
+
+environments:
+  macos:
+    install: brew install starship
+    check: which starship
+    recommends:
+      - nerd-fonts
+```
+
+### Deploying Configs
+
+```bash
+# Deploy all config files from all packages
+selfie apply
+
+# Deploy configs for a specific package only
+selfie apply starship
+
+# Preview what would change without writing files
+selfie apply --dry-run
+
+# Overwrite even if target was modified locally
+selfie apply --yes
+```
+
+### Conflict Detection
+
+Selfie tracks checksums of deployed files. If you modify a deployed file locally _and_ the source
+file changes, selfie detects this as a conflict:
+
+```
+⚠ Conflict: ~/.config/starship.toml
+  Source and target both changed since last deploy.
+  Use --yes to overwrite, or resolve manually.
+```
+
+Without `--yes`, conflicts are reported but the target file is left untouched.
+
+### Drift Detection
+
+Check whether deployed config files have been modified since they were last deployed:
+
+```bash
+selfie apply --dry-run
+```
+
+This shows which files are up to date, which have drifted, and which need deploying — without
+writing anything.
+
+### Validation Rules for Configs
+
+- `source` must not be empty
+- `source` must not contain path traversal sequences (`../`)
+- `target` must be an absolute path (or start with `~`)
+
+Selfie validates these rules when you run `selfie spec validate`.
 
 ## Common Patterns
 

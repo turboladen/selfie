@@ -1026,6 +1026,8 @@ environments:
             "1.0.0".to_string(),
             None,
             None,
+            Vec::new(),
+            None,
             HashMap::new(),
             package_path.clone(),
         );
@@ -1051,6 +1053,8 @@ environments:
             "test-package".to_string(),
             "1.0.0".to_string(),
             None,
+            None,
+            Vec::new(),
             None,
             HashMap::new(),
             package_path.clone(),

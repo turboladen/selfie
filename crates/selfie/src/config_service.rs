@@ -1,0 +1,24 @@
+//! Config file deployment subsystem.
+//!
+//! This module tree implements `selfie apply` — deploying config files from a
+//! source repository to their target locations on the user's machine. It follows
+//! the same hexagonal architecture as the package subsystem: a port trait
+//! ([`port::ConfigService`]) defines operations, and a concrete adapter
+//! ([`service::ConfigServiceImpl`]) wires together the package repository, file
+//! system, and deploy state.
+//!
+//! ## Module layout
+//!
+//! - [`port`] — The `ConfigService` trait and `ApplyOptions` request type
+//! - [`service`] — Concrete implementation: apply, conflict resolution, drift checking
+//! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
+//! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
+//! - [`diff`] — Unified diff generation for conflict display
+//! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
+
+pub mod deploy;
+pub mod diff;
+pub mod port;
+pub mod semantic;
+pub mod service;
+pub mod state;

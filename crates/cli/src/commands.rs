@@ -19,6 +19,7 @@
 //! - 2: Validation/usage error
 //! - Other codes: Command-specific errors
 
+pub(crate) mod apply;
 pub(crate) mod common;
 pub(crate) mod completion;
 pub(crate) mod config;
@@ -36,6 +37,7 @@ use crate::{
     cli::{ClapCommands, ConfigSubcommands, PackageSubcommands, SpecSubcommands},
     display_manager::DisplayManager,
 };
+use apply::handle_apply;
 
 use completion::generate_completion;
 
@@ -50,6 +52,7 @@ pub(crate) async fn dispatch_command(
     debug!("Dispatching command: {:?}", command);
 
     match command {
+        ClapCommands::Apply(args) => handle_apply(args, config, &display).await,
         ClapCommands::Spec(spec_cmd) => {
             dispatch_spec_command(&spec_cmd.command, config, display, cancellation_token).await
         }
@@ -100,8 +103,9 @@ async fn dispatch_spec_command(
                     )
                     .await
                 }
-                SpecSubcommands::Remove { package_name } => {
-                    spec::remove::handle_remove(&service, package_name, config, &display).await
+                SpecSubcommands::Remove { package_name, yes } => {
+                    spec::remove::handle_remove(&service, package_name, config, &display, *yes)
+                        .await
                 }
                 SpecSubcommands::Validate { package_name, all } => {
                     if *all {

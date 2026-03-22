@@ -225,6 +225,8 @@ mod tests {
             "1.0.0".to_string(),
             Some("Test package for editing".to_string()),
             None,
+            Vec::new(),
+            None,
             HashMap::new(),
             PathBuf::from("/test/packages/edit-test.yml"),
         );

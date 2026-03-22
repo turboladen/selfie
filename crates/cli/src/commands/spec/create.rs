@@ -207,6 +207,8 @@ fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::packa
         "0.1.0".to_string(),
         None,
         None,
+        Vec::new(),
+        None,
         environments,
         config
             .package_directory()
@@ -233,6 +235,8 @@ fn create_package_interactive(
         version,
         homepage,
         description,
+        Vec::new(),
+        None,
         environments,
         config.package_directory().join(format!("{file_name}.yml")),
     ))

@@ -253,6 +253,42 @@ pub fn create_circular_dependency(dir: &TempDir, cycle: &[&str]) {
     }
 }
 
+/// Creates a service test package for install testing that includes a `post_install_note`.
+///
+/// Uses `InstallFlow` behavior (check fails before install, succeeds after).
+#[must_use]
+pub fn create_service_install_test_package_file_with_note(
+    dir: &TempDir,
+    name: &str,
+    note: &str,
+) -> PathBuf {
+    let unique_id = std::process::id();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let unique_file = format!("/tmp/{name}-{unique_id}-{timestamp}-installed");
+
+    let content = format!(
+        r#"name: "{name}"
+version: "{TEST_VERSION}"
+description: "Test package with post_install_note"
+homepage: "https://example.com/{name}"
+post_install_note: "{note}"
+
+environments:
+  {SERVICE_TEST_ENV}:
+    install: "echo 'installing {name}' && touch {unique_file}"
+    check: "test -f {unique_file}"
+    dependencies: []
+"#
+    );
+
+    let file_path = dir.path().join(format!("{name}.yml"));
+    fs::write(&file_path, content).unwrap();
+    file_path
+}
+
 /// Creates an invalid package file for service tests using the correct "test" environment.
 ///
 /// # Panics

@@ -206,6 +206,7 @@ where
         env_config,
         config,
         pre_install_check: &pre_install_check,
+        post_install_note: package_blob.package.post_install_note(),
     };
 
     execute_installation_and_verification(context, command_runner, sender, progress, token).await
@@ -330,6 +331,7 @@ struct InstallationContext<'a> {
     env_config: &'a EnvironmentConfig,
     config: &'a SelfieConfig,
     pre_install_check: &'a CheckResultData,
+    post_install_note: Option<&'a str>,
 }
 
 async fn execute_installation_and_verification<CR>(
@@ -378,6 +380,17 @@ where
 
     let executable_path =
         find_executable_path(context.package_name, command_runner, sender, token).await;
+
+    // Emit post-install note if this was a fresh install and the package has one
+    if !matches!(
+        context.pre_install_check.result,
+        CheckResult::Success { .. }
+    ) && let Some(note) = context.post_install_note
+    {
+        sender
+            .send_post_install_note(context.package_name, note)
+            .await;
+    }
 
     // Final step: Report success
     progress

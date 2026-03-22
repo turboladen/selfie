@@ -53,6 +53,10 @@ name: ripgrep
 description: Fast text search tool
 homepage: https://github.com/BurntSushi/ripgrep
 
+configs:
+  - source: ripgrep/ripgreprc
+    target: ~/.config/ripgrep/config
+
 environments:
   macos:
     install: brew install ripgrep
@@ -60,6 +64,7 @@ environments:
     audit: |
       brew list ripgrep 2>/dev/null && echo "homebrew"
     dependencies: [homebrew]
+    recommends: [bat] # nice companion tool
 
   arch-linux:
     install: sudo pacman -S ripgrep
@@ -181,6 +186,11 @@ selfie --help
    selfie package install ripgrep
    ```
 
+5. **Deploy config files** (if your package has a `configs` section):
+   ```bash
+   selfie apply ripgrep
+   ```
+
 ## Documentation
 
 ### Complete Documentation
@@ -222,6 +232,7 @@ Every command has built-in help:
 selfie --help                    # Main help
 selfie spec --help               # Spec (definition) commands
 selfie package --help            # Package (runtime) commands
+selfie apply --help              # Config deployment commands
 selfie spec create --help        # Specific command help
 ```
 
@@ -252,6 +263,8 @@ Selfie is actively developed and ready for daily use. Current features:
 
 - ✅ Package installation with environment-specific commands
 - ✅ Dependency resolution and installation
+- ✅ Soft dependencies (`recommends`) with `--no-recommends` flag
+- ✅ Config file deployment (`selfie apply`) with conflict and drift detection
 - ✅ Spec validation and package listing
 - ✅ Interactive spec creation and editing
 - ✅ Configuration management
@@ -259,7 +272,9 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Spec update: structured field modifications via CLI and MCP
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
-- ⏳ Advanced dependency resolution (in progress)
+- ✅ Login shell execution for install/check/audit commands
+- 📋 Config tracking (`selfie dotfiles track`) (planned)
+- 📋 Git-backed sync (`selfie sync push/pull`) (planned)
 - 📋 Package groups and bulk operations (planned)
 
 ## Contributing

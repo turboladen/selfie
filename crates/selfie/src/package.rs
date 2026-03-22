@@ -94,6 +94,33 @@ impl GetPackage {
     }
 }
 
+/// A config file mapping from repo source to deployment target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigEntry {
+    source: String,
+    target: String,
+}
+
+impl ConfigEntry {
+    /// Create a new config entry with source and target paths.
+    pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+        }
+    }
+
+    /// Get the source path (relative path within the configs repository).
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Get the target path (deployment destination, may use `~` for home directory).
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+
 /// Core package entity representing a package definition
 ///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +138,14 @@ pub struct Package {
     /// Optional package description
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+
+    /// Config file mappings (source → target); applies regardless of environment
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) configs: Vec<ConfigEntry>,
+
+    /// Optional note displayed to the user after a fresh install
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) post_install_note: Option<String>,
 
     /// Map of environment configurations
     #[serde(default)]
@@ -201,11 +236,14 @@ impl EnvironmentConfig {
 impl Package {
     /// Create a new package with the specified attributes. See `PackageBuilder`.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         version: String,
         homepage: Option<String>,
         description: Option<String>,
+        configs: Vec<ConfigEntry>,
+        post_install_note: Option<String>,
         environments: HashMap<String, EnvironmentConfig>,
         path: PathBuf,
     ) -> Self {
@@ -214,6 +252,8 @@ impl Package {
             version,
             homepage,
             description,
+            configs,
+            post_install_note,
             environments,
             path,
         }
@@ -246,6 +286,8 @@ impl Package {
             version: "0.1.0".to_string(),
             homepage: None,
             description: None,
+            configs: Vec::new(),
+            post_install_note: None,
             environments,
             path: PathBuf::new(), // Will be set by GetPackage::new
         }
@@ -273,6 +315,18 @@ impl Package {
     #[must_use]
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    /// Get the list of config file mappings for this package
+    #[must_use]
+    pub fn configs(&self) -> &[ConfigEntry] {
+        &self.configs
+    }
+
+    /// Get the optional post-install note for this package
+    #[must_use]
+    pub fn post_install_note(&self) -> Option<&str> {
+        self.post_install_note.as_deref()
     }
 
     /// Get the environment configurations

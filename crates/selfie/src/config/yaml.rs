@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -85,9 +85,22 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // Convert to our type
         let mut selfie_config: SelfieConfig = config.try_deserialize()?;
 
-        // Special handling for package_directory ~ expansion
+        // Special handling for ~ expansion on path fields
         if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
             selfie_config.package_directory = expanded;
+        }
+        // For configs_directory and state_directory, expand ~ without canonicalizing.
+        // These directories may not exist yet (especially state_directory on first run),
+        // so canonicalize() would fail. Instead, resolve just "~" and join the rest.
+        if let Some(ref configs_dir) = selfie_config.configs_directory
+            && let Some(expanded) = expand_tilde_only(self.fs, configs_dir)
+        {
+            selfie_config.configs_directory = Some(expanded);
+        }
+        if let Some(ref state_dir) = selfie_config.state_directory
+            && let Some(expanded) = expand_tilde_only(self.fs, state_dir)
+        {
+            selfie_config.state_directory = Some(expanded);
         }
 
         Ok(selfie_config)
@@ -127,6 +140,25 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         }
 
         Ok(paths)
+    }
+}
+
+/// Expand `~` in a path without canonicalizing. Returns the expanded path if the
+/// input starts with `~`, or `None` if it doesn't need expansion. This avoids
+/// the failure mode of `expand_path` (which canonicalizes) when the target
+/// directory doesn't exist yet.
+fn expand_tilde_only(fs: &impl FileSystem, path: &Path) -> Option<PathBuf> {
+    let path_str = path.to_string_lossy();
+    if !path_str.starts_with('~') {
+        return None;
+    }
+    // Expand just "~" to get the home directory, then join the remainder
+    let home = fs.expand_path(&PathBuf::from("~")).ok()?;
+    let rest = path_str.strip_prefix("~/").unwrap_or(&path_str[1..]);
+    if rest.is_empty() {
+        Some(home)
+    } else {
+        Some(home.join(rest))
     }
 }
 

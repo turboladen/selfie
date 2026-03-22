@@ -17,6 +17,7 @@ pub(crate) async fn handle_remove(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
+    skip_confirm: bool,
 ) -> i32 {
     info!("Removing package: {}", package_name);
 
@@ -62,20 +63,22 @@ pub(crate) async fn handle_remove(
         )
     };
 
-    let confirm_removal = Confirm::with_theme(&SimpleTheme)
-        .with_prompt(prompt)
-        .default(default_answer)
-        .interact();
+    if !skip_confirm {
+        let confirm_removal = Confirm::with_theme(&SimpleTheme)
+            .with_prompt(prompt)
+            .default(default_answer)
+            .interact();
 
-    match confirm_removal {
-        Ok(true) => {}
-        Ok(false) => {
-            display.print_info("Package removal cancelled.");
-            return 0;
-        }
-        Err(_) => {
-            display.print_error("Failed to read user input.");
-            return 1;
+        match confirm_removal {
+            Ok(true) => {}
+            Ok(false) => {
+                display.print_info("Package removal cancelled.");
+                return 0;
+            }
+            Err(_) => {
+                display.print_error("Failed to read user input.");
+                return 1;
+            }
         }
     }
 
@@ -152,6 +155,8 @@ mod tests {
             "1.0.0".to_string(),
             None,
             None,
+            Vec::new(),
+            None,
             target_envs,
             PathBuf::from("/test/packages/target-package.yml"),
         );
@@ -171,6 +176,8 @@ mod tests {
             "dependent-package".to_string(),
             "1.0.0".to_string(),
             None,
+            None,
+            Vec::new(),
             None,
             dependent_envs,
             PathBuf::from("/test/packages/dependent-package.yml"),

@@ -49,6 +49,24 @@ pub struct ClapCli {
     #[clap(long, short = 'p', global = true)]
     pub(crate) package_directory: Option<PathBuf>,
 
+    /// Override the configs directory from configuration file
+    ///
+    /// Specifies the directory containing config source files for `selfie apply`.
+    /// This overrides the `configs_directory` setting in the config file.
+    ///
+    /// Example: --configs-directory=/path/to/configs
+    #[clap(long, global = true)]
+    pub(crate) configs_directory: Option<PathBuf>,
+
+    /// Override the state directory from configuration file
+    ///
+    /// Specifies the directory for deploy state tracking (checksums, drift detection).
+    /// This overrides the `state_directory` setting in the config file.
+    ///
+    /// Example: --state-directory=/path/to/state
+    #[clap(long, global = true)]
+    pub(crate) state_directory: Option<PathBuf>,
+
     /// Enable verbose output for debugging and detailed information
     ///
     /// Shows additional debug information including command execution details,
@@ -86,6 +104,12 @@ pub(crate) enum ClapCommands {
     /// Commands for installing, checking, listing, and querying runtime status
     /// of packages. These execute configured commands on the system.
     Package(PackageCommands),
+
+    /// Deploy config files from packages to target locations
+    ///
+    /// Deploys configuration files defined in package YAML files to their
+    /// target locations on the system. Detects conflicts and drift.
+    Apply(ApplyArgs),
 
     /// Configuration management operations
     ///
@@ -172,6 +196,10 @@ pub(crate) enum SpecSubcommands {
         /// The package definition file will be permanently deleted from the
         /// package directory. This operation cannot be undone.
         package_name: String,
+
+        /// Skip confirmation prompt (non-interactive mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Validate spec file(s)
@@ -346,4 +374,22 @@ pub(crate) enum ConfigSubcommands {
     ///
     /// Example: `selfie config validate`
     Validate,
+}
+
+/// Arguments for the apply command
+///
+/// Controls how config file deployment behaves, including dry-run mode
+/// for previewing changes and auto-accept for non-interactive use.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ApplyArgs {
+    /// Specific package name (deploys all if omitted)
+    pub(crate) name: Option<String>,
+
+    /// Show what would change without writing
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Auto-accept overwrite for conflicts (non-interactive mode)
+    #[arg(long, short)]
+    pub(crate) yes: bool,
 }

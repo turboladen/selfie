@@ -284,6 +284,60 @@ impl EventProcessor {
                     .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
             }
 
+            PackageEvent::ConfigDeploying { source, target, .. } => {
+                self.display
+                    .print_info(format!("  Deploying {source} → {target}"));
+            }
+
+            PackageEvent::ConfigDeployed { source, target, .. } => {
+                self.display
+                    .print_success(format!("  ✓ {source} → {target}"));
+            }
+
+            PackageEvent::ConfigSkipped { source, reason, .. } => {
+                self.display
+                    .print_info(format!("  ⊘ {source} skipped: {reason}"));
+            }
+
+            PackageEvent::ConfigConflict {
+                source,
+                target,
+                diff,
+                ..
+            } => {
+                self.display
+                    .print_warning(format!("  ⚠ Conflict: {source} → {target}"));
+                self.display.print_info(diff.to_string());
+            }
+
+            PackageEvent::ConfigDriftDetected {
+                target, drift_type, ..
+            } => {
+                self.display
+                    .print_warning(format!("  ⚠ Drift in {target}: {drift_type}"));
+            }
+
+            PackageEvent::PostInstallNote { note, .. } => {
+                self.display.print_info(format!("\n📋 {note}"));
+            }
+
+            PackageEvent::ConfigCleanupInfo {
+                package_name,
+                config_targets,
+                ..
+            } => {
+                self.display.print_info(format!(
+                    "\nPackage '{}' has deployed config files:",
+                    package_name
+                ));
+                for target in &config_targets {
+                    self.display.print_info(format!("  - {}", target));
+                }
+                self.display.print_info(
+                    "  These files were NOT removed. Delete them manually if no longer needed.",
+                );
+            }
+
             PackageEvent::PackageInfoLoaded { .. }
             | PackageEvent::EnvironmentStatusChecked { .. }
             | PackageEvent::PackageListReady { .. }

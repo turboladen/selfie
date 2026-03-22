@@ -17,8 +17,9 @@ use tempfile::TempDir;
 use test_common::{
     assert_failed_operation, assert_successful_operation, collect_events,
     create_circular_dependency, create_dependency_chain, create_service_install_test_package_file,
-    create_service_invalid_package_file, create_service_test_package_file,
-    create_service_test_package_file_with_deps, create_service_test_service, get_operation_result,
+    create_service_install_test_package_file_with_note, create_service_invalid_package_file,
+    create_service_test_package_file, create_service_test_package_file_with_deps,
+    create_service_test_service, get_operation_result,
 };
 
 use selfie::package::{
@@ -502,4 +503,87 @@ async fn test_package_list_ready_emitted_before_item_completed() {
         "No PackageListItemCompleted should appear after PackageListLoaded"
     );
     assert_eq!(ready_count, 2, "PackageListReady should contain 2 packages");
+}
+
+/// Test that PostInstallNote is emitted during a fresh install when the package has a note
+#[tokio::test]
+async fn test_service_install_emits_post_install_note() {
+    // Arrange
+    let temp_dir = TempDir::new().unwrap();
+    let _ = create_service_install_test_package_file_with_note(
+        &temp_dir,
+        "noted-package",
+        "Run 'source ~/.bashrc' to activate",
+    );
+    let service = create_service_test_service(&temp_dir);
+
+    // Act
+    let stream = service
+        .install("noted-package", InstallOptions::default())
+        .await;
+    let events = collect_events(stream).await;
+
+    // Assert
+    assert_successful_operation(&events);
+
+    // Verify PostInstallNote event was emitted
+    let note_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::PostInstallNote { .. }))
+        .collect();
+    assert_eq!(
+        note_events.len(),
+        1,
+        "Should emit exactly one PostInstallNote event"
+    );
+
+    if let PackageEvent::PostInstallNote {
+        package_name, note, ..
+    } = &note_events[0]
+    {
+        assert_eq!(package_name, "noted-package");
+        assert_eq!(note, "Run 'source ~/.bashrc' to activate");
+    } else {
+        panic!("Expected PostInstallNote event");
+    }
+}
+
+/// Test that PostInstallNote is NOT emitted when package is already installed
+#[tokio::test]
+async fn test_service_install_no_post_install_note_when_already_installed() {
+    // Arrange
+    let temp_dir = TempDir::new().unwrap();
+    let _ = create_service_install_test_package_file_with_note(
+        &temp_dir,
+        "already-noted",
+        "This note should not appear on reinstall",
+    );
+    let service = create_service_test_service(&temp_dir);
+
+    // First install — should emit the note
+    let stream = service
+        .install("already-noted", InstallOptions::default())
+        .await;
+    let events = collect_events(stream).await;
+    assert_successful_operation(&events);
+    let note_count = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::PostInstallNote { .. }))
+        .count();
+    assert_eq!(note_count, 1, "First install should emit PostInstallNote");
+
+    // Second install — package is already installed, should NOT emit the note
+    let stream = service
+        .install("already-noted", InstallOptions::default())
+        .await;
+    let events = collect_events(stream).await;
+    assert_successful_operation(&events);
+    let note_count = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::PostInstallNote { .. }))
+        .count();
+    assert_eq!(
+        note_count, 0,
+        "Second install should NOT emit PostInstallNote since package is already installed"
+    );
 }
