@@ -75,7 +75,7 @@ environment: macos
 # Directory containing package definition files
 package_directory: ~/.config/selfie/packages
 
-# Directory containing dotfile source files for selfie apply (default: sibling of package_directory)
+# Directory for standalone dotfile definitions (default: sibling of package_directory)
 dotfiles_directory: ~/.config/selfie/dotfiles
 
 # Directory for deploy state tracking (default: ~/.local/state/selfie)
@@ -144,8 +144,9 @@ package_directory: ${SELFIE_PACKAGES:-~/.config/selfie/packages}
 
 #### `dotfiles_directory`
 
-Path to the directory containing dotfile source files for `selfie apply`. If not set, selfie looks
-for a `dotfiles` directory as a sibling of `package_directory`.
+Path to the directory containing standalone dotfile definitions — YAML files and their associated
+source files for dotfiles not tied to any package. If not set, selfie looks for a `dotfiles`
+directory as a sibling of `package_directory`.
 
 ```yaml
 dotfiles_directory: ~/.config/selfie/dotfiles
@@ -158,7 +159,8 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
 
-This directory holds the source files referenced by the `dotfiles` field in package definitions. See
+Standalone dotfiles live here with their source files colocated alongside their YAML definitions.
+Package dotfiles live alongside their package YAML in `package_directory` instead. See
 [Package Files Reference](package-files.md#dotfile-deployment) for details.
 
 #### `state_directory`
