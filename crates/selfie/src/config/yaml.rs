@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -92,15 +92,15 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // For configs_directory and state_directory, expand ~ without canonicalizing.
         // These directories may not exist yet (especially state_directory on first run),
         // so canonicalize() would fail. Instead, resolve just "~" and join the rest.
-        if let Some(ref configs_dir) = selfie_config.configs_directory {
-            if let Some(expanded) = expand_tilde_only(&self.fs, configs_dir) {
-                selfie_config.configs_directory = Some(expanded);
-            }
+        if let Some(ref configs_dir) = selfie_config.configs_directory
+            && let Some(expanded) = expand_tilde_only(self.fs, configs_dir)
+        {
+            selfie_config.configs_directory = Some(expanded);
         }
-        if let Some(ref state_dir) = selfie_config.state_directory {
-            if let Some(expanded) = expand_tilde_only(&self.fs, state_dir) {
-                selfie_config.state_directory = Some(expanded);
-            }
+        if let Some(ref state_dir) = selfie_config.state_directory
+            && let Some(expanded) = expand_tilde_only(self.fs, state_dir)
+        {
+            selfie_config.state_directory = Some(expanded);
         }
 
         Ok(selfie_config)
@@ -147,7 +147,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
 /// input starts with `~`, or `None` if it doesn't need expansion. This avoids
 /// the failure mode of `expand_path` (which canonicalizes) when the target
 /// directory doesn't exist yet.
-fn expand_tilde_only<F: FileSystem>(fs: &F, path: &Path) -> Option<PathBuf> {
+fn expand_tilde_only(fs: &impl FileSystem, path: &Path) -> Option<PathBuf> {
     let path_str = path.to_string_lossy();
     if !path_str.starts_with('~') {
         return None;
