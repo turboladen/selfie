@@ -446,7 +446,11 @@ where
                     .await
                     .is_ok()
                     {
-                        deployed_count += 1;
+                        if options.dry_run {
+                            skipped_count += 1;
+                        } else {
+                            deployed_count += 1;
+                        }
                     } else {
                         skipped_count += 1;
                     }
@@ -469,7 +473,11 @@ where
                         .await
                         .is_ok()
                         {
-                            deployed_count += 1;
+                            if options.dry_run {
+                                skipped_count += 1;
+                            } else {
+                                deployed_count += 1;
+                            }
                         } else {
                             skipped_count += 1;
                         }

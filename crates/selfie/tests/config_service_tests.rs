@@ -239,6 +239,23 @@ async fn test_apply_dry_run_does_not_write() {
         !target_file.exists(),
         "Target file should NOT exist in dry run"
     );
+
+    // Verify completion counts: deployed should be 0, skipped should include the dry-run skip
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::ConfigApplied {
+            deployed_count,
+            skipped_count,
+            ..
+        }) => {
+            assert_eq!(*deployed_count, 0, "deployed_count should be 0 in dry run");
+            assert_eq!(
+                *skipped_count, 1,
+                "skipped_count should include the dry-run skip"
+            );
+        }
+        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
