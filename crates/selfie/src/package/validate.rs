@@ -398,7 +398,7 @@ impl Package {
     /// Checks each dotfile entry for:
     /// - Empty source path (error)
     /// - Path traversal in source via `..` (error)
-    /// - Target path that is not absolute and doesn't start with `~` (warning)
+    /// - Target path that is not absolute and doesn't start with `~` (error)
     pub(crate) fn validate_dotfiles(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 

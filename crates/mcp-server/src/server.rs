@@ -454,7 +454,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured installation method for the current environment. If the package has a 'configs' section, run selfie_apply_config afterward to deploy its dotfiles."
+        description = "Install a package using its configured installation method for the current environment. If the package has a 'dotfiles' section, run selfie_apply_config afterward to deploy its dotfiles."
     )]
     async fn package_install(
         &self,
@@ -515,7 +515,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_config",
-        description = "Deploy dotfiles defined in package YAML files to their target locations. Detects conflicts and drift between repo source files and deployed targets. Use after installing a package that has a 'configs' section, or run without a name to deploy all dotfiles."
+        description = "Deploy dotfiles defined in package YAML files to their target locations. Detects conflicts and drift between repo source files and deployed targets. Use after installing a package that has a 'dotfiles' section, or run without a name to deploy all dotfiles."
     )]
     async fn selfie_apply_config(
         &self,

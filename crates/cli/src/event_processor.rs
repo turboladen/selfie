@@ -327,7 +327,7 @@ impl EventProcessor {
                 ..
             } => {
                 self.display.print_info(format!(
-                    "\nPackage '{}' has deployed config files:",
+                    "\nPackage '{}' has deployed dotfiles:",
                     package_name
                 ));
                 for target in &dotfile_targets {

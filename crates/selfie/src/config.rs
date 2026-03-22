@@ -73,16 +73,16 @@ impl SelfieConfig {
 
     /// Get the dotfiles directory path.
     ///
-    /// Defaults to a sibling `configs` directory next to `package_directory`.
+    /// Defaults to a sibling `dotfiles` directory next to `package_directory`.
     /// For example, if `package_directory` is `~/selfie/packages`, this returns
-    /// `~/selfie/configs`. Can be overridden in config.
+    /// `~/selfie/dotfiles`. Can be overridden in config.
     #[must_use]
     pub fn dotfiles_directory(&self) -> PathBuf {
         self.dotfiles_directory.clone().unwrap_or_else(|| {
             self.package_directory
                 .parent()
-                .map(|p| p.join("configs"))
-                .unwrap_or_else(|| self.package_directory.join("configs"))
+                .map(|p| p.join("dotfiles"))
+                .unwrap_or_else(|| self.package_directory.join("dotfiles"))
         })
     }
 
@@ -347,7 +347,7 @@ mod tests {
             .build();
         assert_eq!(
             config.dotfiles_directory(),
-            Path::new("/home/user/selfie-packages/configs")
+            Path::new("/home/user/selfie-packages/dotfiles")
         );
     }
 
@@ -355,9 +355,9 @@ mod tests {
     fn test_dotfiles_directory_can_be_overridden() {
         let config = SelfieConfigBuilder::default()
             .package_directory("/home/user/selfie-packages/packages")
-            .dotfiles_directory(PathBuf::from("/custom/configs"))
+            .dotfiles_directory(PathBuf::from("/custom/dotfiles"))
             .build();
-        assert_eq!(config.dotfiles_directory(), Path::new("/custom/configs"));
+        assert_eq!(config.dotfiles_directory(), Path::new("/custom/dotfiles"));
     }
 
     #[test]
