@@ -10,6 +10,7 @@ use selfie::{
         service::DotfileServiceImpl,
     },
     fs::real::RealFileSystem,
+    package::repository::yaml::YamlPackageRepository,
 };
 use tracing::info;
 
@@ -21,8 +22,10 @@ use crate::{
 /// Handle the apply command
 ///
 /// Creates a `DotfileServiceImpl` and delegates to `apply_all` or `apply`
-/// based on whether a package name was given. Events are processed through
-/// the standard `EventProcessor`.
+/// based on whether a package name was given. When a `dotfiles/` directory
+/// exists (sibling of `package_directory`), it's added as a second source
+/// so standalone dotfiles are included in the apply. Events are processed
+/// through the standard `EventProcessor`.
 pub(crate) async fn handle_apply(
     args: &ApplyArgs,
     config: &CliConfig,
@@ -35,7 +38,14 @@ pub(crate) async fn handle_apply(
 
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+
+    // Add standalone dotfiles repository if the directory exists
+    let dotfiles_dir = config.selfie_config().dotfiles_directory();
+    if dotfiles_dir.is_dir() {
+        let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+        service = service.with_dotfiles_repository(dotfiles_repo);
+    }
 
     let event_stream = if let Some(name) = &args.name {
         info!("Applying dotfiles for package: {}", name);

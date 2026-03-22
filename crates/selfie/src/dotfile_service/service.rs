@@ -18,6 +18,7 @@ use crate::{
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
+        Package,
         event::{
             EventSender, EventStream, OperationContext, OperationResult, OperationSuccess,
             PackageEvent, StepCount, metadata::OperationType,
@@ -35,9 +36,14 @@ const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 ///
 /// Coordinates between the package repository, file system, and application
 /// configuration to deploy dotfiles and check for drift.
+///
+/// Supports an optional second repository for standalone dotfiles (the `dotfiles/`
+/// directory). When present, both repositories are scanned during apply and drift
+/// operations.
 #[derive(Debug, Clone)]
 pub struct DotfileServiceImpl<R, F> {
     package_repository: R,
+    dotfiles_repository: Option<R>,
     filesystem: F,
     config: SelfieConfig,
 }
@@ -51,9 +57,44 @@ where
     pub fn new(package_repository: R, filesystem: F, config: SelfieConfig) -> Self {
         Self {
             package_repository,
+            dotfiles_repository: None,
             filesystem,
             config,
         }
+    }
+
+    /// Add a standalone dotfiles repository for the `dotfiles/` directory.
+    ///
+    /// When set, `apply` and `check_drift` operations will scan both the main
+    /// package repository and this dotfiles repository.
+    #[must_use]
+    pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
+        self.dotfiles_repository = Some(repo);
+        self
+    }
+
+    /// Collect packages from both the main package repository and the optional
+    /// dotfiles repository, returning a combined list.
+    fn collect_all_packages(
+        package_repo: &R,
+        dotfiles_repo: Option<&R>,
+    ) -> Result<Vec<Package>, String> {
+        let mut packages = match package_repo.list_packages() {
+            Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
+            Err(e) => return Err(format!("Failed to load packages: {e}")),
+        };
+
+        if let Some(dotfiles) = dotfiles_repo {
+            match dotfiles.list_packages() {
+                Ok(output) => packages.extend(output.valid_packages().cloned()),
+                Err(e) => {
+                    tracing::warn!("Failed to load standalone dotfiles: {e}");
+                    // Non-fatal: standalone dotfiles directory might not exist yet
+                }
+            }
+        }
+
+        Ok(packages)
     }
 
     /// Create an event stream from an async operation
@@ -213,7 +254,8 @@ where
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
-        let repo = self.package_repository.clone();
+        let packages =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
 
@@ -228,14 +270,22 @@ where
 
             sender.send_started().await;
 
-            let result = handle_apply(&repo, &fs, &config, &sender, &options, None).await;
+            let result = match packages {
+                Ok(packages) => {
+                    handle_apply(&packages, &fs, &config, &sender, &options, None).await
+                }
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
-        let repo = self.package_repository.clone();
+        let packages =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
         let name = name.to_string();
@@ -251,14 +301,22 @@ where
 
             sender.send_started().await;
 
-            let result = handle_apply(&repo, &fs, &config, &sender, &options, Some(&name)).await;
+            let result = match packages {
+                Ok(packages) => {
+                    handle_apply(&packages, &fs, &config, &sender, &options, Some(&name)).await
+                }
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
     }
 
     async fn check_drift(&self) -> EventStream {
-        let repo = self.package_repository.clone();
+        let packages =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
 
@@ -273,7 +331,12 @@ where
 
             sender.send_started().await;
 
-            let result = handle_check_drift(&repo, &fs, &config, &sender).await;
+            let result = match packages {
+                Ok(packages) => handle_check_drift(&packages, &fs, &config, &sender).await,
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
@@ -334,8 +397,8 @@ async fn perform_deploy<F: FileSystem>(
 }
 
 /// Core logic for applying config files
-async fn handle_apply<R, F>(
-    repo: &R,
+async fn handle_apply<F>(
+    packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
@@ -343,26 +406,15 @@ async fn handle_apply<R, F>(
     filter_name: Option<&str>,
 ) -> OperationResult
 where
-    R: PackageRepository,
     F: FileSystem,
 {
-    // Load packages
-    let packages = match repo.list_packages() {
-        Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
-        Err(e) => {
-            return OperationResult::Failure(crate::package::event::OperationFailure::Generic(
-                format!("Failed to load packages: {e}"),
-            ));
-        }
-    };
-
     let mut deploy_state = load_deploy_state(filesystem, config);
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut conflict_count: usize = 0;
 
-    for package in &packages {
+    for package in packages {
         // If filtering by name, skip non-matching packages
         if let Some(name) = filter_name
             && package.name() != name
@@ -546,32 +598,21 @@ where
 }
 
 /// Core logic for checking drift
-async fn handle_check_drift<R, F>(
-    repo: &R,
+async fn handle_check_drift<F>(
+    packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
 ) -> OperationResult
 where
-    R: PackageRepository,
     F: FileSystem,
 {
     let deploy_state = load_deploy_state(filesystem, config);
 
-    // Also scan packages to find all dotfile entries
-    let packages = match repo.list_packages() {
-        Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
-        Err(e) => {
-            return OperationResult::Failure(crate::package::event::OperationFailure::Generic(
-                format!("Failed to load packages: {e}"),
-            ));
-        }
-    };
-
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
 
-    for package in &packages {
+    for package in packages {
         // Source paths resolve relative to the YAML file's parent directory
         let base_dir = package
             .path()
