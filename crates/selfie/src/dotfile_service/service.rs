@@ -356,7 +356,6 @@ where
         }
     };
 
-    let configs_dir = config.dotfiles_directory();
     let mut deploy_state = load_deploy_state(filesystem, config);
 
     let mut deployed_count: usize = 0;
@@ -376,11 +375,19 @@ where
             continue;
         }
 
-        for entry in dotfiles {
-            let source_path = resolve_source_path(&configs_dir, entry.source());
+        // Source paths resolve relative to the YAML file's parent directory,
+        // so packages/fnm.yaml with source "fnm/init.fish" → packages/fnm/init.fish
+        let base_dir = package
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
 
-            // Runtime path traversal guard: verify resolved path stays within configs_dir
-            if !validate_source_path(&source_path, &configs_dir) {
+        for entry in dotfiles {
+            let source_path = resolve_source_path(&base_dir, entry.source());
+
+            // Runtime path traversal guard: verify resolved path stays within base_dir
+            if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
                         "Skipping '{}': source path escapes dotfiles directory",
@@ -549,10 +556,9 @@ where
     R: PackageRepository,
     F: FileSystem,
 {
-    let configs_dir = config.dotfiles_directory();
     let deploy_state = load_deploy_state(filesystem, config);
 
-    // Also scan packages to find all config entries
+    // Also scan packages to find all dotfile entries
     let packages = match repo.list_packages() {
         Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
         Err(e) => {
@@ -566,10 +572,17 @@ where
     let mut total_count: usize = 0;
 
     for package in &packages {
+        // Source paths resolve relative to the YAML file's parent directory
+        let base_dir = package
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
         for entry in package.dotfiles() {
             total_count += 1;
 
-            let source_path = resolve_source_path(&configs_dir, entry.source());
+            let source_path = resolve_source_path(&base_dir, entry.source());
             let target_path = expand_target_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
@@ -585,7 +598,7 @@ where
             }
 
             // Runtime path traversal guard (same as handle_apply)
-            if !validate_source_path(&source_path, &configs_dir) {
+            if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
                         "Skipping '{}': source path escapes dotfiles directory",

@@ -108,7 +108,7 @@ async fn test_apply_all_deploys_new_dotfile() {
     let dirs = TestDirs::new();
 
     // Create a dotfile source file
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -156,7 +156,7 @@ async fn test_apply_all_deploys_new_dotfile() {
 async fn test_apply_all_skips_when_up_to_date() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -203,7 +203,7 @@ async fn test_apply_all_skips_when_up_to_date() {
 async fn test_apply_dry_run_does_not_write() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -265,8 +265,8 @@ async fn test_apply_dry_run_does_not_write() {
 async fn test_apply_specific_package() {
     let dirs = TestDirs::new();
 
-    let source_dir_a = dirs.dotfiles_dir.join("app-a");
-    let source_dir_b = dirs.dotfiles_dir.join("app-b");
+    let source_dir_a = dirs.package_dir.join("app-a");
+    let source_dir_b = dirs.package_dir.join("app-b");
     std::fs::create_dir_all(&source_dir_a).unwrap();
     std::fs::create_dir_all(&source_dir_b).unwrap();
     std::fs::write(source_dir_a.join("a.conf"), "config-a").unwrap();
@@ -306,7 +306,7 @@ async fn test_apply_specific_package() {
 async fn test_apply_conflict_detected() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"new-value\"").unwrap();
 
@@ -344,7 +344,7 @@ async fn test_apply_conflict_detected() {
 async fn test_apply_conflict_auto_accept() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
 
@@ -386,7 +386,7 @@ async fn test_apply_conflict_auto_accept() {
 async fn test_check_drift_detects_target_change() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -433,7 +433,7 @@ async fn test_check_drift_detects_target_change() {
 async fn test_check_drift_no_drift_when_up_to_date() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -472,7 +472,7 @@ async fn test_check_drift_no_drift_when_up_to_date() {
 async fn test_check_drift_missing_source_emits_warning() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -628,7 +628,7 @@ async fn test_apply_missing_source_warns_and_skips() {
 async fn test_apply_source_only_change_redeploys() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
 
@@ -674,7 +674,7 @@ async fn test_apply_nonexistent_package_name() {
     let dirs = TestDirs::new();
 
     // Create a real package, but we'll apply a non-existent one
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -714,7 +714,7 @@ async fn test_apply_nonexistent_package_name() {
 async fn test_deploy_state_persists_across_service_instances() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -749,7 +749,7 @@ async fn test_deploy_state_persists_across_service_instances() {
 async fn test_dry_run_does_not_persist_state() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -788,7 +788,7 @@ async fn test_dry_run_does_not_persist_state() {
 async fn test_apply_multiple_dotfiles_in_one_package() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value1\"").unwrap();
     std::fs::write(source_dir.join("settings.yml"), "setting: true").unwrap();
@@ -824,7 +824,7 @@ async fn test_apply_multiple_dotfiles_in_one_package() {
 async fn test_apply_target_parent_dir_is_file() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -870,7 +870,7 @@ async fn test_apply_target_parent_dir_is_file() {
 async fn test_apply_corrupt_state_file_recovers() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -907,7 +907,7 @@ async fn test_apply_corrupt_state_file_recovers() {
 async fn test_check_drift_with_no_prior_deploys() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.dotfiles_dir.join("myapp");
+    let source_dir = dirs.package_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
