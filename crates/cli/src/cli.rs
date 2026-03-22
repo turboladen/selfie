@@ -49,6 +49,24 @@ pub struct ClapCli {
     #[clap(long, short = 'p', global = true)]
     pub(crate) package_directory: Option<PathBuf>,
 
+    /// Override the configs directory from configuration file
+    ///
+    /// Specifies the directory containing config source files for `selfie apply`.
+    /// This overrides the `configs_directory` setting in the config file.
+    ///
+    /// Example: --configs-directory=/path/to/configs
+    #[clap(long, global = true)]
+    pub(crate) configs_directory: Option<PathBuf>,
+
+    /// Override the state directory from configuration file
+    ///
+    /// Specifies the directory for deploy state tracking (checksums, drift detection).
+    /// This overrides the `state_directory` setting in the config file.
+    ///
+    /// Example: --state-directory=/path/to/state
+    #[clap(long, global = true)]
+    pub(crate) state_directory: Option<PathBuf>,
+
     /// Enable verbose output for debugging and detailed information
     ///
     /// Shows additional debug information including command execution details,
@@ -178,6 +196,10 @@ pub(crate) enum SpecSubcommands {
         /// The package definition file will be permanently deleted from the
         /// package directory. This operation cannot be undone.
         package_name: String,
+
+        /// Skip confirmation prompt (non-interactive mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Validate spec file(s)

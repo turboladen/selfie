@@ -103,8 +103,9 @@ async fn dispatch_spec_command(
                     )
                     .await
                 }
-                SpecSubcommands::Remove { package_name } => {
-                    spec::remove::handle_remove(&service, package_name, config, &display).await
+                SpecSubcommands::Remove { package_name, yes } => {
+                    spec::remove::handle_remove(&service, package_name, config, &display, *yes)
+                        .await
                 }
                 SpecSubcommands::Validate { package_name, all } => {
                     if *all {
