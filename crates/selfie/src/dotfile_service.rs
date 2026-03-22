@@ -1,15 +1,15 @@
-//! Config file deployment subsystem.
+//! Dotfile deployment subsystem.
 //!
-//! This module tree implements `selfie apply` — deploying config files from a
+//! This module tree implements `selfie apply` — deploying dotfiles from a
 //! source repository to their target locations on the user's machine. It follows
 //! the same hexagonal architecture as the package subsystem: a port trait
-//! ([`port::ConfigService`]) defines operations, and a concrete adapter
-//! ([`service::ConfigServiceImpl`]) wires together the package repository, file
+//! ([`port::DotfileService`]) defines operations, and a concrete adapter
+//! ([`service::DotfileServiceImpl`]) wires together the package repository, file
 //! system, and deploy state.
 //!
 //! ## Module layout
 //!
-//! - [`port`] — The `ConfigService` trait and `ApplyOptions` request type
+//! - [`port`] — The `DotfileService` trait and `ApplyOptions` request type
 //! - [`service`] — Concrete implementation: apply, conflict resolution, drift checking
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection

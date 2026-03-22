@@ -465,28 +465,28 @@ impl EventSender {
     }
 
     /// Send config cleanup info event (during package removal)
-    pub(crate) async fn send_config_cleanup_info(
+    pub(crate) async fn send_dotfile_cleanup_info(
         &self,
         package_name: String,
-        config_targets: Vec<String>,
+        dotfile_targets: Vec<String>,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigCleanupInfo {
+        self.send(PackageEvent::DotfileCleanupInfo {
             operation_info,
             package_name,
-            config_targets,
+            dotfile_targets,
         })
         .await;
     }
 
     /// Send a config-deploying event
-    pub(crate) async fn send_config_deploying(
+    pub(crate) async fn send_dotfile_deploying(
         &self,
         source: impl fmt::Display,
         target: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigDeploying {
+        self.send(PackageEvent::DotfileDeploying {
             operation_info,
             source: source.to_string(),
             target: target.to_string(),
@@ -495,13 +495,13 @@ impl EventSender {
     }
 
     /// Send a config-deployed event
-    pub(crate) async fn send_config_deployed(
+    pub(crate) async fn send_dotfile_deployed(
         &self,
         source: impl fmt::Display,
         target: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigDeployed {
+        self.send(PackageEvent::DotfileDeployed {
             operation_info,
             source: source.to_string(),
             target: target.to_string(),
@@ -510,14 +510,14 @@ impl EventSender {
     }
 
     /// Send a config-skipped event
-    pub(crate) async fn send_config_skipped(
+    pub(crate) async fn send_dotfile_skipped(
         &self,
         source: impl fmt::Display,
         target: impl fmt::Display,
         reason: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigSkipped {
+        self.send(PackageEvent::DotfileSkipped {
             operation_info,
             source: source.to_string(),
             target: target.to_string(),
@@ -527,14 +527,14 @@ impl EventSender {
     }
 
     /// Send a config-conflict event
-    pub(crate) async fn send_config_conflict(
+    pub(crate) async fn send_dotfile_conflict(
         &self,
         source: impl fmt::Display,
         target: impl fmt::Display,
         diff: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigConflict {
+        self.send(PackageEvent::DotfileConflict {
             operation_info,
             source: source.to_string(),
             target: target.to_string(),
@@ -544,13 +544,13 @@ impl EventSender {
     }
 
     /// Send a config-drift-detected event
-    pub(crate) async fn send_config_drift_detected(
+    pub(crate) async fn send_dotfile_drift_detected(
         &self,
         target: impl fmt::Display,
         drift_type: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
-        self.send(PackageEvent::ConfigDriftDetected {
+        self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
             target: target.to_string(),
             drift_type: drift_type.to_string(),
@@ -780,7 +780,7 @@ pub enum OperationSuccess {
         steps_completed: StepCount,
     },
     /// Config apply operation completed
-    ConfigApplied {
+    DotfilesApplied {
         deployed_count: usize,
         skipped_count: usize,
         conflict_count: usize,
@@ -788,7 +788,7 @@ pub enum OperationSuccess {
         steps_completed: StepCount,
     },
     /// Config drift check operation completed
-    ConfigDriftChecked {
+    DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
         environment: String,
@@ -1075,7 +1075,7 @@ impl std::fmt::Display for OperationSuccess {
                 };
                 write!(f, "Spec validation completed: {status} {steps_completed}")
             }
-            OperationSuccess::ConfigApplied {
+            OperationSuccess::DotfilesApplied {
                 deployed_count,
                 skipped_count,
                 conflict_count,
@@ -1087,7 +1087,7 @@ impl std::fmt::Display for OperationSuccess {
                     "Config apply completed: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s) {steps_completed}"
                 )
             }
-            OperationSuccess::ConfigDriftChecked {
+            OperationSuccess::DotfileDriftChecked {
                 drift_count,
                 total_count,
                 steps_completed,
@@ -1399,8 +1399,8 @@ impl OperationSuccess {
             OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
-            | OperationSuccess::ConfigApplied { .. }
-            | OperationSuccess::ConfigDriftChecked { .. }
+            | OperationSuccess::DotfilesApplied { .. }
+            | OperationSuccess::DotfileDriftChecked { .. }
             | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1421,8 +1421,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageCreated { environment, .. }
             | OperationSuccess::PackageUpdated { environment, .. }
             | OperationSuccess::PackageRemoved { environment, .. }
-            | OperationSuccess::ConfigApplied { environment, .. }
-            | OperationSuccess::ConfigDriftChecked { environment, .. } => Some(environment),
+            | OperationSuccess::DotfilesApplied { environment, .. }
+            | OperationSuccess::DotfileDriftChecked { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -1467,10 +1467,10 @@ impl OperationSuccess {
             | OperationSuccess::SpecsValidated {
                 steps_completed, ..
             }
-            | OperationSuccess::ConfigApplied {
+            | OperationSuccess::DotfilesApplied {
                 steps_completed, ..
             }
-            | OperationSuccess::ConfigDriftChecked {
+            | OperationSuccess::DotfileDriftChecked {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
@@ -1774,10 +1774,10 @@ pub enum PackageEvent {
     },
 
     /// Info about config files that may need cleanup after package removal
-    ConfigCleanupInfo {
+    DotfileCleanupInfo {
         operation_info: OperationInfo,
         package_name: String,
-        config_targets: Vec<String>,
+        dotfile_targets: Vec<String>,
     },
 
     /// Individual spec list item completed (for streaming)
@@ -1812,21 +1812,21 @@ pub enum PackageEvent {
     },
 
     /// A config file is about to be deployed
-    ConfigDeploying {
+    DotfileDeploying {
         operation_info: OperationInfo,
         source: String,
         target: String,
     },
 
     /// A config file was deployed successfully
-    ConfigDeployed {
+    DotfileDeployed {
         operation_info: OperationInfo,
         source: String,
         target: String,
     },
 
     /// A config file was skipped (already current or user declined)
-    ConfigSkipped {
+    DotfileSkipped {
         operation_info: OperationInfo,
         source: String,
         target: String,
@@ -1834,7 +1834,7 @@ pub enum PackageEvent {
     },
 
     /// A conflict was detected between repo and deployed version
-    ConfigConflict {
+    DotfileConflict {
         operation_info: OperationInfo,
         source: String,
         target: String,
@@ -1842,7 +1842,7 @@ pub enum PackageEvent {
     },
 
     /// Drift detected between deployed file and repo source
-    ConfigDriftDetected {
+    DotfileDriftDetected {
         operation_info: OperationInfo,
         target: String,
         drift_type: String,

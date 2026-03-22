@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use super::{ConfigEntry, EnvironmentConfig, Package};
+use super::{DotfileEntry, EnvironmentConfig, Package};
 
 #[derive(Default)]
 pub struct PackageBuilder {
@@ -8,7 +8,7 @@ pub struct PackageBuilder {
     version: String,
     homepage: Option<String>,
     description: Option<String>,
-    configs: Vec<ConfigEntry>,
+    dotfiles: Vec<DotfileEntry>,
     post_install_note: Option<String>,
     environments: HashMap<String, EnvironmentConfig>,
     path: PathBuf,
@@ -59,10 +59,10 @@ impl PackageBuilder {
         self
     }
 
-    /// Set the config file mappings for this package
+    /// Set the dotfile mappings for this package
     #[must_use]
-    pub fn configs(mut self, configs: Vec<ConfigEntry>) -> Self {
-        self.configs = configs;
+    pub fn dotfiles(mut self, dotfiles: Vec<DotfileEntry>) -> Self {
+        self.dotfiles = dotfiles;
         self
     }
 
@@ -106,7 +106,7 @@ impl PackageBuilder {
             self.version,
             self.homepage,
             self.description,
-            self.configs,
+            self.dotfiles,
             self.post_install_note,
             self.environments,
             self.path,

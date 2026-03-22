@@ -88,7 +88,7 @@ decide how to display information about that event to the user in the current UI
 
 ### Key Abstractions
 
-- **Ports (traits):** `PackageService`, `ConfigService`, `PackageRepository`, `CommandRunner`,
+- **Ports (traits):** `PackageService`, `DotfileService`, `PackageRepository`, `CommandRunner`,
   `FileSystem`
 - **Adapters:** `PackageServiceImpl<R, CR>`, `YamlPackageRepository<F>`, `ShellCommandRunner`,
   `RealFileSystem`
@@ -159,11 +159,11 @@ glorified command runner, scoped to user-defined environments.
 ### Packages
 
 Package files are YAML, represented by `selfie::package::Package`. Each package file defines
-per-environment install and check commands. Packages may also declare `configs` (config file
-mappings deployed via `selfie apply`), `post_install_note` (first-install guidance), and
-per-environment `recommends` (soft dependencies that warn on failure instead of failing the parent).
-Example: `bash-language-server` might use Homebrew on macOS and `npm` on Ubuntu -- the user decides
-per environment, then just runs `selfie install bash-language-server` regardless of which machine
+per-environment install and check commands. Packages may also declare `dotfiles` (dotfile mappings
+deployed via `selfie apply`), `post_install_note` (first-install guidance), and per-environment
+`recommends` (soft dependencies that warn on failure instead of failing the parent). Example:
+`bash-language-server` might use Homebrew on macOS and `npm` on Ubuntu -- the user decides per
+environment, then just runs `selfie install bash-language-server` regardless of which machine
 they're on.
 
 Package operations:
@@ -173,7 +173,7 @@ Package operations:
 - **Audit**: Run the user-defined audit command to detect installation sources and conflicts.
 - **List**: List all YAML files in the configured package directory.
 - **Create / Edit / Info / Update / Remove**: CRUD for package files in `package_directory`.
-- **Apply**: Deploy config files defined in a package's `configs` field to their target locations.
+- **Apply**: Deploy dotfiles defined in a package's `dotfiles` field to their target locations.
 
 ### Environments
 
@@ -189,7 +189,7 @@ Core settings (top-level, read by `SelfieConfig`):
 
 - `environment`: The current environment label.
 - `package_directory`: Directory containing selfie package files.
-- `configs_directory`: Directory containing config source files for `selfie apply`.
+- `dotfiles_directory`: Directory containing dotfile source files for `selfie apply`.
 - `state_directory`: Directory for deploy state tracking (checksums, drift detection).
 - `command_timeout`, `stop_on_error`, `max_parallel_installations`: Execution settings.
 

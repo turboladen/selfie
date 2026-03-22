@@ -75,8 +75,8 @@ environment: macos
 # Directory containing package definition files
 package_directory: ~/.config/selfie/packages
 
-# Directory containing config source files for selfie apply (default: sibling of package_directory)
-configs_directory: ~/.config/selfie/configs
+# Directory containing dotfile source files for selfie apply (default: sibling of package_directory)
+dotfiles_directory: ~/.config/selfie/dotfiles
 
 # Directory for deploy state tracking (default: ~/.local/state/selfie)
 state_directory: ~/.local/state/selfie
@@ -140,26 +140,26 @@ package_directory: ${SELFIE_PACKAGES:-~/.config/selfie/packages}
 
 ## Optional Settings
 
-### Config Deployment
+### Dotfile Deployment
 
-#### `configs_directory`
+#### `dotfiles_directory`
 
-Path to the directory containing config source files for `selfie apply`. If not set, selfie looks
-for a `configs` directory as a sibling of `package_directory`.
+Path to the directory containing dotfile source files for `selfie apply`. If not set, selfie looks
+for a `dotfiles` directory as a sibling of `package_directory`.
 
 ```yaml
-configs_directory: ~/.config/selfie/configs
+dotfiles_directory: ~/.config/selfie/dotfiles
 ```
 
 **Default behavior without this setting:**
 
 ```
 # If package_directory is ~/.selfie/packages,
-# configs_directory defaults to ~/.selfie/configs
+# dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
 
-This directory holds the source files referenced by the `configs` field in package definitions. See
-[Package Files Reference](package-files.md#config-deployment) for details.
+This directory holds the source files referenced by the `dotfiles` field in package definitions. See
+[Package Files Reference](package-files.md#dotfile-deployment) for details.
 
 #### `state_directory`
 
@@ -283,7 +283,7 @@ Error: Configuration contains unknown fields
 # Validate configuration
 selfie config validate
 
-# Supported fields: environment, package_directory, configs_directory,
+# Supported fields: environment, package_directory, dotfiles_directory,
 # state_directory, verbose, use_colors, command_timeout, stop_on_error,
 # max_parallel_installations
 ```

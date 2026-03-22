@@ -49,14 +49,14 @@ pub struct ClapCli {
     #[clap(long, short = 'p', global = true)]
     pub(crate) package_directory: Option<PathBuf>,
 
-    /// Override the configs directory from configuration file
+    /// Override the dotfiles directory from configuration file
     ///
-    /// Specifies the directory containing config source files for `selfie apply`.
-    /// This overrides the `configs_directory` setting in the config file.
+    /// Specifies the directory containing dotfile source files for `selfie apply`.
+    /// This overrides the `dotfiles_directory` setting in the config file.
     ///
-    /// Example: --configs-directory=/path/to/configs
+    /// Example: --dotfiles-directory=/path/to/dotfiles
     #[clap(long, global = true)]
-    pub(crate) configs_directory: Option<PathBuf>,
+    pub(crate) dotfiles_directory: Option<PathBuf>,
 
     /// Override the state directory from configuration file
     ///

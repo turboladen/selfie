@@ -53,7 +53,7 @@ name: ripgrep
 description: Fast text search tool
 homepage: https://github.com/BurntSushi/ripgrep
 
-configs:
+dotfiles:
   - source: ripgrep/ripgreprc
     target: ~/.config/ripgrep/config
 
@@ -186,7 +186,7 @@ selfie --help
    selfie package install ripgrep
    ```
 
-5. **Deploy config files** (if your package has a `configs` section):
+5. **Deploy dotfiles** (if your package has a `dotfiles` section):
    ```bash
    selfie apply ripgrep
    ```
@@ -232,7 +232,7 @@ Every command has built-in help:
 selfie --help                    # Main help
 selfie spec --help               # Spec (definition) commands
 selfie package --help            # Package (runtime) commands
-selfie apply --help              # Config deployment commands
+selfie apply --help              # Dotfile deployment commands
 selfie spec create --help        # Specific command help
 ```
 
@@ -264,7 +264,7 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Package installation with environment-specific commands
 - ✅ Dependency resolution and installation
 - ✅ Soft dependencies (`recommends`) with `--no-recommends` flag
-- ✅ Config file deployment (`selfie apply`) with conflict and drift detection
+- ✅ Dotfile deployment (`selfie apply`) with conflict and drift detection
 - ✅ Spec validation and package listing
 - ✅ Interactive spec creation and editing
 - ✅ Configuration management
@@ -273,7 +273,7 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ✅ Login shell execution for install/check/audit commands
-- 📋 Config tracking (`selfie dotfiles track`) (planned)
+- 📋 Dotfile tracking (`selfie dotfiles track`) (planned)
 - 📋 Git-backed sync (`selfie sync push/pull`) (planned)
 - 📋 Package groups and bulk operations (planned)
 

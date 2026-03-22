@@ -1,6 +1,6 @@
-//! Integration tests for the config service layer
+//! Integration tests for the dotfile service layer
 //!
-//! These tests verify config deployment operations using real filesystem
+//! These tests verify dotfile deployment operations using real filesystem
 //! and repository implementations with temporary directories.
 
 use std::path::PathBuf;
@@ -10,9 +10,9 @@ use tempfile::TempDir;
 
 use selfie::{
     config::SelfieConfigBuilder,
-    config_service::{
-        port::{ApplyOptions, ConfigService},
-        service::ConfigServiceImpl,
+    dotfile_service::{
+        port::{ApplyOptions, DotfileService},
+        service::DotfileServiceImpl,
     },
     fs::RealFileSystem,
     package::{
@@ -34,15 +34,15 @@ fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     })
 }
 
-/// Helper to create a package YAML file with a configs section
-fn create_package_with_configs(
+/// Helper to create a package YAML file with a dotfiles section
+fn create_package_with_dotfiles(
     package_dir: &std::path::Path,
     name: &str,
-    configs: &[(&str, &str)],
+    dotfiles: &[(&str, &str)],
 ) -> PathBuf {
-    let mut configs_yaml = String::from("configs:\n");
-    for (source, target) in configs {
-        configs_yaml.push_str(&format!(
+    let mut dotfiles_yaml = String::from("dotfiles:\n");
+    for (source, target) in dotfiles {
+        dotfiles_yaml.push_str(&format!(
             "  - source: \"{source}\"\n    target: \"{target}\"\n"
         ));
     }
@@ -53,7 +53,7 @@ version: "1.0"
 environments:
   test:
     install: "echo installed"
-{configs_yaml}"#
+{dotfiles_yaml}"#
     );
 
     let file_path = package_dir.join(format!("{name}.yml"));
@@ -65,7 +65,7 @@ environments:
 struct TestDirs {
     _temp: TempDir,
     package_dir: PathBuf,
-    configs_dir: PathBuf,
+    dotfiles_dir: PathBuf,
     target_dir: PathBuf,
     state_dir: PathBuf,
 }
@@ -74,46 +74,46 @@ impl TestDirs {
     fn new() -> Self {
         let temp = TempDir::new().unwrap();
         let package_dir = temp.path().join("packages");
-        let configs_dir = temp.path().join("configs");
+        let dotfiles_dir = temp.path().join("dotfiles");
         let target_dir = temp.path().join("target");
         let state_dir = temp.path().join("state");
         std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::create_dir_all(&configs_dir).unwrap();
+        std::fs::create_dir_all(&dotfiles_dir).unwrap();
         std::fs::create_dir_all(&target_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
         Self {
             _temp: temp,
             package_dir,
-            configs_dir,
+            dotfiles_dir,
             target_dir,
             state_dir,
         }
     }
 
-    fn service(&self) -> ConfigServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+    fn service(&self) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(&self.package_dir)
-            .configs_directory(self.configs_dir.clone())
+            .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        ConfigServiceImpl::new(repo, fs, config)
+        DotfileServiceImpl::new(repo, fs, config)
     }
 }
 
 #[tokio::test]
-async fn test_apply_all_deploys_new_config_file() {
+async fn test_apply_all_deploys_new_dotfile() {
     let dirs = TestDirs::new();
 
-    // Create a config source file
-    let source_dir = dirs.configs_dir.join("myapp");
+    // Create a dotfile source file
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -125,12 +125,12 @@ async fn test_apply_all_deploys_new_config_file() {
 
     let has_deploying = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDeploying { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. }));
     let has_deployed = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDeployed { .. }));
-    assert!(has_deploying, "Should emit ConfigDeploying event");
-    assert!(has_deployed, "Should emit ConfigDeployed event");
+        .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }));
+    assert!(has_deploying, "Should emit DotfileDeploying event");
+    assert!(has_deployed, "Should emit DotfileDeployed event");
 
     assert!(target_file.exists(), "Target file should be created");
     let content = std::fs::read_to_string(&target_file).unwrap();
@@ -138,7 +138,7 @@ async fn test_apply_all_deploys_new_config_file() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             conflict_count,
@@ -148,7 +148,7 @@ async fn test_apply_all_deploys_new_config_file() {
             assert_eq!(*skipped_count, 0);
             assert_eq!(*conflict_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -156,12 +156,12 @@ async fn test_apply_all_deploys_new_config_file() {
 async fn test_apply_all_skips_when_up_to_date() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -179,15 +179,15 @@ async fn test_apply_all_skips_when_up_to_date() {
 
     let has_skipped = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigSkipped { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileSkipped { .. }));
     assert!(
         has_skipped,
-        "Should emit ConfigSkipped event on second apply"
+        "Should emit DotfileSkipped event on second apply"
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             ..
@@ -195,7 +195,7 @@ async fn test_apply_all_skips_when_up_to_date() {
             assert_eq!(*deployed_count, 0);
             assert_eq!(*skipped_count, 1);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -203,12 +203,12 @@ async fn test_apply_all_skips_when_up_to_date() {
 async fn test_apply_dry_run_does_not_write() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -224,16 +224,19 @@ async fn test_apply_dry_run_does_not_write() {
 
     let has_skipped_dry_run = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigSkipped { reason, .. } if reason == "dry run"));
+        .any(|e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run"));
     assert!(
         has_skipped_dry_run,
-        "Should emit ConfigSkipped with 'dry run' reason"
+        "Should emit DotfileSkipped with 'dry run' reason"
     );
 
     let has_deploying = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDeploying { .. }));
-    assert!(!has_deploying, "Should NOT emit ConfigDeploying in dry run");
+        .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. }));
+    assert!(
+        !has_deploying,
+        "Should NOT emit DotfileDeploying in dry run"
+    );
 
     assert!(
         !target_file.exists(),
@@ -243,7 +246,7 @@ async fn test_apply_dry_run_does_not_write() {
     // Verify completion counts: deployed should be 0, skipped should include the dry-run skip
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             ..
@@ -254,7 +257,7 @@ async fn test_apply_dry_run_does_not_write() {
                 "skipped_count should include the dry-run skip"
             );
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -262,8 +265,8 @@ async fn test_apply_dry_run_does_not_write() {
 async fn test_apply_specific_package() {
     let dirs = TestDirs::new();
 
-    let source_dir_a = dirs.configs_dir.join("app-a");
-    let source_dir_b = dirs.configs_dir.join("app-b");
+    let source_dir_a = dirs.dotfiles_dir.join("app-a");
+    let source_dir_b = dirs.dotfiles_dir.join("app-b");
     std::fs::create_dir_all(&source_dir_a).unwrap();
     std::fs::create_dir_all(&source_dir_b).unwrap();
     std::fs::write(source_dir_a.join("a.conf"), "config-a").unwrap();
@@ -272,12 +275,12 @@ async fn test_apply_specific_package() {
     let target_a = dirs.target_dir.join("a.conf");
     let target_b = dirs.target_dir.join("b.conf");
 
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "app-a",
         &[("app-a/a.conf", target_a.to_str().unwrap())],
     );
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "app-b",
         &[("app-b/b.conf", target_b.to_str().unwrap())],
@@ -289,26 +292,26 @@ async fn test_apply_specific_package() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
             assert_eq!(*deployed_count, 1);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 
-    assert!(target_a.exists(), "app-a config should be deployed");
-    assert!(!target_b.exists(), "app-b config should NOT be deployed");
+    assert!(target_a.exists(), "app-a dotfile should be deployed");
+    assert!(!target_b.exists(), "app-b dotfile should NOT be deployed");
 }
 
 #[tokio::test]
 async fn test_apply_conflict_detected() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"new-value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -330,8 +333,8 @@ async fn test_apply_conflict_detected() {
 
     let has_conflict = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigConflict { .. }));
-    assert!(has_conflict, "Should emit ConfigConflict event");
+        .any(|e| matches!(e, PackageEvent::DotfileConflict { .. }));
+    assert!(has_conflict, "Should emit DotfileConflict event");
 
     let content = std::fs::read_to_string(&target_file).unwrap();
     assert_eq!(content, "key = \"user-modified\"");
@@ -341,12 +344,12 @@ async fn test_apply_conflict_detected() {
 async fn test_apply_conflict_auto_accept() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -372,7 +375,7 @@ async fn test_apply_conflict_auto_accept() {
 
     let has_deployed = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDeployed { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }));
     assert!(has_deployed, "Should deploy with auto_accept");
 
     let content = std::fs::read_to_string(&target_file).unwrap();
@@ -383,12 +386,12 @@ async fn test_apply_conflict_auto_accept() {
 async fn test_check_drift_detects_target_change() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -409,12 +412,12 @@ async fn test_check_drift_detects_target_change() {
 
     let has_drift = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDriftDetected { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }));
     assert!(has_drift, "Should detect drift after target modification");
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigDriftChecked {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked {
             drift_count,
             total_count,
             ..
@@ -422,7 +425,7 @@ async fn test_check_drift_detects_target_change() {
             assert_eq!(*drift_count, 1);
             assert_eq!(*total_count, 1);
         }
-        other => panic!("Expected ConfigDriftChecked success, got: {other:?}"),
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
 }
 
@@ -430,12 +433,12 @@ async fn test_check_drift_detects_target_change() {
 async fn test_check_drift_no_drift_when_up_to_date() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -453,15 +456,15 @@ async fn test_check_drift_no_drift_when_up_to_date() {
 
     let has_drift = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDriftDetected { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }));
     assert!(!has_drift, "Should not detect drift when up to date");
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigDriftChecked { drift_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked { drift_count, .. }) => {
             assert_eq!(*drift_count, 0);
         }
-        other => panic!("Expected ConfigDriftChecked success, got: {other:?}"),
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
 }
 
@@ -469,12 +472,12 @@ async fn test_check_drift_no_drift_when_up_to_date() {
 async fn test_check_drift_missing_source_emits_warning() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -506,14 +509,14 @@ async fn test_check_drift_missing_source_emits_warning() {
     assert!(
         matches!(
             result,
-            OperationResult::Success(OperationSuccess::ConfigDriftChecked { .. })
+            OperationResult::Success(OperationSuccess::DotfileDriftChecked { .. })
         ),
-        "Should still complete with ConfigDriftChecked even with missing source"
+        "Should still complete with DotfileDriftChecked even with missing source"
     );
 }
 
 #[tokio::test]
-async fn test_apply_all_no_configs_packages() {
+async fn test_apply_all_no_dotfiles_packages() {
     let dirs = TestDirs::new();
 
     let yaml = r#"name: no-config-pkg
@@ -531,7 +534,7 @@ environments:
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             conflict_count,
@@ -541,7 +544,7 @@ environments:
             assert_eq!(*skipped_count, 0);
             assert_eq!(*conflict_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -551,9 +554,9 @@ async fn test_apply_rejects_path_traversal() {
 
     let target_file = dirs.target_dir.join("secret.txt");
 
-    // Source uses "../" to escape the configs directory — should be caught by
+    // Source uses "../" to escape the dotfiles directory — should be caught by
     // validate_source_path's normalize_path logic before any file I/O.
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "evil-pkg",
         &[("../../etc/passwd", target_file.to_str().unwrap())],
@@ -565,16 +568,16 @@ async fn test_apply_rejects_path_traversal() {
 
     // Should get a warning specifically about path traversal
     let has_traversal_warning = events.iter().any(|e| {
-        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes configs directory"))
+        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes dotfiles directory"))
     });
     assert!(
         has_traversal_warning,
-        "Should emit a warning about path escaping configs directory"
+        "Should emit a warning about path escaping dotfiles directory"
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             ..
@@ -582,7 +585,7 @@ async fn test_apply_rejects_path_traversal() {
             assert_eq!(*skipped_count, 1);
             assert_eq!(*deployed_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -591,8 +594,8 @@ async fn test_apply_missing_source_warns_and_skips() {
     let dirs = TestDirs::new();
 
     let target_file = dirs.target_dir.join("config.toml");
-    // Source file "nonexistent/config.toml" does not exist in configs_dir
-    create_package_with_configs(
+    // Source file "nonexistent/config.toml" does not exist in dotfiles_dir
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "missing-src",
         &[("nonexistent/config.toml", target_file.to_str().unwrap())],
@@ -609,7 +612,7 @@ async fn test_apply_missing_source_warns_and_skips() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             ..
@@ -617,7 +620,7 @@ async fn test_apply_missing_source_warns_and_skips() {
             assert_eq!(*skipped_count, 1);
             assert_eq!(*deployed_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -625,12 +628,12 @@ async fn test_apply_missing_source_warns_and_skips() {
 async fn test_apply_source_only_change_redeploys() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -651,7 +654,7 @@ async fn test_apply_source_only_change_redeploys() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             conflict_count,
             ..
@@ -659,7 +662,7 @@ async fn test_apply_source_only_change_redeploys() {
             assert_eq!(*deployed_count, 1);
             assert_eq!(*conflict_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 
     let content = std::fs::read_to_string(&target_file).unwrap();
@@ -671,12 +674,12 @@ async fn test_apply_nonexistent_package_name() {
     let dirs = TestDirs::new();
 
     // Create a real package, but we'll apply a non-existent one
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -688,7 +691,7 @@ async fn test_apply_nonexistent_package_name() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             conflict_count,
@@ -698,7 +701,7 @@ async fn test_apply_nonexistent_package_name() {
             assert_eq!(*skipped_count, 0);
             assert_eq!(*conflict_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 
     assert!(
@@ -711,12 +714,12 @@ async fn test_apply_nonexistent_package_name() {
 async fn test_deploy_state_persists_across_service_instances() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -735,10 +738,10 @@ async fn test_deploy_state_persists_across_service_instances() {
     // Should skip (up to date), proving state was read from disk
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied { skipped_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { skipped_count, .. }) => {
             assert_eq!(*skipped_count, 1);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -746,12 +749,12 @@ async fn test_deploy_state_persists_across_service_instances() {
 async fn test_dry_run_does_not_persist_state() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -774,25 +777,25 @@ async fn test_dry_run_does_not_persist_state() {
     // Should deploy (not skip), proving dry run didn't write state
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
             assert_eq!(*deployed_count, 1);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_apply_multiple_configs_in_one_package() {
+async fn test_apply_multiple_dotfiles_in_one_package() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value1\"").unwrap();
     std::fs::write(source_dir.join("settings.yml"), "setting: true").unwrap();
 
     let target_file1 = dirs.target_dir.join("config.toml");
     let target_file2 = dirs.target_dir.join("settings.yml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[
@@ -807,21 +810,21 @@ async fn test_apply_multiple_configs_in_one_package() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
             assert_eq!(*deployed_count, 2);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 
-    assert!(target_file1.exists(), "First config should be deployed");
-    assert!(target_file2.exists(), "Second config should be deployed");
+    assert!(target_file1.exists(), "First dotfile should be deployed");
+    assert!(target_file2.exists(), "Second dotfile should be deployed");
 }
 
 #[tokio::test]
 async fn test_apply_target_parent_dir_is_file() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
@@ -831,7 +834,7 @@ async fn test_apply_target_parent_dir_is_file() {
     std::fs::write(&blocker, "I am a file, not a directory").unwrap();
 
     let target_file = blocker.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -851,7 +854,7 @@ async fn test_apply_target_parent_dir_is_file() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
             ..
@@ -859,7 +862,7 @@ async fn test_apply_target_parent_dir_is_file() {
             assert_eq!(*skipped_count, 1);
             assert_eq!(*deployed_count, 0);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
@@ -867,12 +870,12 @@ async fn test_apply_target_parent_dir_is_file() {
 async fn test_apply_corrupt_state_file_recovers() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -888,15 +891,15 @@ async fn test_apply_corrupt_state_file_recovers() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigApplied { deployed_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
             assert_eq!(*deployed_count, 1);
         }
-        other => panic!("Expected ConfigApplied success, got: {other:?}"),
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 
     assert!(
         target_file.exists(),
-        "Config should be deployed despite corrupt state"
+        "Dotfile should be deployed despite corrupt state"
     );
 }
 
@@ -904,12 +907,12 @@ async fn test_apply_corrupt_state_file_recovers() {
 async fn test_check_drift_with_no_prior_deploys() {
     let dirs = TestDirs::new();
 
-    let source_dir = dirs.configs_dir.join("myapp");
+    let source_dir = dirs.dotfiles_dir.join("myapp");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
 
     let target_file = dirs.target_dir.join("config.toml");
-    create_package_with_configs(
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "myapp",
         &[("myapp/config.toml", target_file.to_str().unwrap())],
@@ -924,7 +927,7 @@ async fn test_check_drift_with_no_prior_deploys() {
 
     let has_drift = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::ConfigDriftDetected { .. }));
+        .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }));
     assert!(
         has_drift,
         "Should detect drift when target exists but wasn't tracked"
@@ -932,9 +935,9 @@ async fn test_check_drift_with_no_prior_deploys() {
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
-        OperationResult::Success(OperationSuccess::ConfigDriftChecked { drift_count, .. }) => {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked { drift_count, .. }) => {
             assert_eq!(*drift_count, 1);
         }
-        other => panic!("Expected ConfigDriftChecked success, got: {other:?}"),
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
 }

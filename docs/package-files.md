@@ -20,7 +20,7 @@ description: (optional) Brief description of what this package provides
 homepage: (optional) https://example.com
 post_install_note: (optional) Note displayed after first-time install
 
-configs:
+dotfiles:
   - source: package-name/config.toml
     target: ~/.config/package-name/config.toml
 
@@ -87,30 +87,30 @@ URL to the package's homepage or repository.
 homepage: https://github.com/BurntSushi/ripgrep
 ```
 
-### `configs`
+### `dotfiles`
 
-A list of config file mappings that define files to deploy from your configs repository to their
-target locations. Unlike environment-specific fields, `configs` is a top-level field that applies
-across all environments.
+A list of dotfile mappings that define files to deploy from your dotfiles repository to their target
+locations. Unlike environment-specific fields, `dotfiles` is a top-level field that applies across
+all environments.
 
 Each entry has two fields:
 
-- `source` — Relative path within your configs directory (see
-  [Configuration Guide](configuration.md) for `configs_directory`)
+- `source` — Relative path within your dotfiles directory (see
+  [Configuration Guide](configuration.md) for `dotfiles_directory`)
 - `target` — Absolute destination path (supports `~` for home directory)
 
 ```yaml
-configs:
+dotfiles:
   - source: fnm/fish-conf.fish
     target: ~/.config/fish/conf.d/fnm.fish
   - source: fnm/zsh-conf.zsh
     target: ~/.config/zsh/conf.d/fnm.zsh
 ```
 
-Config files are deployed with `selfie apply`, not during `selfie package install`. This separation
-keeps installation fast and gives you explicit control over when config files are written to disk.
+Dotfiles are deployed with `selfie apply`, not during `selfie package install`. This separation
+keeps installation fast and gives you explicit control over when dotfiles are written to disk.
 
-See [Config Deployment](#config-deployment) below for the full workflow.
+See [Dotfile Deployment](#dotfile-deployment) below for the full workflow.
 
 ### `post_install_note`
 
@@ -363,17 +363,17 @@ install: |
   echo "Docker is ready!"
 ```
 
-## Config Deployment
+## Dotfile Deployment
 
-Packages can declare config files that should be deployed to specific locations on your system. This
-is useful for shell integrations, editor configs, tool settings, and anything that lives outside the
+Packages can declare dotfiles that should be deployed to specific locations on your system. This is
+useful for shell integrations, editor configs, tool settings, and anything that lives outside the
 package directory.
 
 ### How It Works
 
-1. **Define** config mappings in your package YAML (the `configs` field)
-2. **Store** config source files in your configs directory (a sibling of your package directory by
-   default — see [Configuration Guide](configuration.md) for `configs_directory`)
+1. **Define** dotfile mappings in your package YAML (the `dotfiles` field)
+2. **Store** dotfile source files in your dotfiles directory (a sibling of your package directory by
+   default — see [Configuration Guide](configuration.md) for `dotfiles_directory`)
 3. **Deploy** with `selfie apply`
 
 ### Directory Structure
@@ -383,7 +383,7 @@ package directory.
 ├── packages/              # Package definitions (package_directory)
 │   ├── fnm.yaml
 │   └── starship.yaml
-└── configs/               # Config source files (configs_directory)
+└── dotfiles/              # Dotfile source files (dotfiles_directory)
     ├── fnm/
     │   ├── fish-conf.fish
     │   └── zsh-conf.zsh
@@ -391,7 +391,7 @@ package directory.
         └── starship.toml
 ```
 
-### Example Package with Configs
+### Example Package with Dotfiles
 
 ```yaml
 name: starship
@@ -402,7 +402,7 @@ homepage: https://starship.rs
 post_install_note: |
   Restart your shell or source your profile to activate starship.
 
-configs:
+dotfiles:
   - source: starship/starship.toml
     target: ~/.config/starship.toml
 
@@ -414,13 +414,13 @@ environments:
       - nerd-fonts
 ```
 
-### Deploying Configs
+### Deploying Dotfiles
 
 ```bash
-# Deploy all config files from all packages
+# Deploy all dotfiles from all packages
 selfie apply
 
-# Deploy configs for a specific package only
+# Deploy dotfiles for a specific package only
 selfie apply starship
 
 # Preview what would change without writing files
@@ -445,7 +445,7 @@ Without `--yes`, conflicts are reported but the target file is left untouched.
 
 ### Drift Detection
 
-Check whether deployed config files have been modified since they were last deployed:
+Check whether deployed dotfiles have been modified since they were last deployed:
 
 ```bash
 selfie apply --dry-run
@@ -454,7 +454,7 @@ selfie apply --dry-run
 This shows which files are up to date, which have drifted, and which need deploying — without
 writing anything.
 
-### Validation Rules for Configs
+### Validation Rules for Dotfiles
 
 - `source` must not be empty
 - `source` must not contain path traversal sequences (`../`)

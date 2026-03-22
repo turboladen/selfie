@@ -1,9 +1,9 @@
-//! ConfigService implementation
+//! DotfileService implementation
 //!
-//! This module provides the concrete implementation of the [`ConfigService`] trait.
-//! It coordinates between the package repository (for loading package configs),
-//! the file system (for reading/writing config files), and the application config
-//! to perform config deployment operations.
+//! This module provides the concrete implementation of the [`DotfileService`] trait.
+//! It coordinates between the package repository (for loading package dotfiles),
+//! the file system (for reading/writing dotfiles), and the application config
+//! to perform dotfile deployment operations.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::SelfieConfig,
-    config_service::{
+    dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
         state::{DeployState, DriftType},
@@ -26,28 +26,28 @@ use crate::{
     },
 };
 
-use super::port::{ApplyOptions, ConfigService};
+use super::port::{ApplyOptions, DotfileService};
 
 /// Default deploy state filename
 const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 
-/// Concrete implementation of the [`ConfigService`] trait
+/// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
-/// configuration to deploy config files and check for drift.
+/// configuration to deploy dotfiles and check for drift.
 #[derive(Debug, Clone)]
-pub struct ConfigServiceImpl<R, F> {
+pub struct DotfileServiceImpl<R, F> {
     package_repository: R,
     filesystem: F,
     config: SelfieConfig,
 }
 
-impl<R, F> ConfigServiceImpl<R, F>
+impl<R, F> DotfileServiceImpl<R, F>
 where
     R: PackageRepository + Clone + Send + Sync + 'static,
     F: FileSystem + Clone + Send + Sync + 'static,
 {
-    /// Create a new config service instance
+    /// Create a new dotfile service instance
     pub fn new(package_repository: R, filesystem: F, config: SelfieConfig) -> Self {
         Self {
             package_repository,
@@ -207,7 +207,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     parts.iter().collect()
 }
 
-impl<R, F> ConfigService for ConfigServiceImpl<R, F>
+impl<R, F> DotfileService for DotfileServiceImpl<R, F>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -220,7 +220,7 @@ where
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
                 tx,
-                OperationType::ConfigApply,
+                OperationType::DotfileApply,
                 String::new(),
                 config.environment().to_string(),
                 OperationContext::default(),
@@ -243,7 +243,7 @@ where
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
                 tx,
-                OperationType::ConfigApply,
+                OperationType::DotfileApply,
                 name.clone(),
                 config.environment().to_string(),
                 OperationContext::default(),
@@ -265,7 +265,7 @@ where
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
                 tx,
-                OperationType::ConfigDrift,
+                OperationType::DotfileDrift,
                 String::new(),
                 config.environment().to_string(),
                 OperationContext::default(),
@@ -299,7 +299,7 @@ async fn perform_deploy<F: FileSystem>(
 ) -> Result<(), ()> {
     if dry_run {
         sender
-            .send_config_skipped(
+            .send_dotfile_skipped(
                 unit.source_path.display(),
                 unit.target_path.display(),
                 "dry run",
@@ -309,7 +309,7 @@ async fn perform_deploy<F: FileSystem>(
     }
 
     sender
-        .send_config_deploying(unit.source_path.display(), unit.target_path.display())
+        .send_dotfile_deploying(unit.source_path.display(), unit.target_path.display())
         .await;
 
     if let Err(e) = filesystem.write_file(unit.target_path, unit.source_content.as_bytes()) {
@@ -328,7 +328,7 @@ async fn perform_deploy<F: FileSystem>(
     );
 
     sender
-        .send_config_deployed(unit.source_path.display(), unit.target_path.display())
+        .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
         .await;
     Ok(())
 }
@@ -356,7 +356,7 @@ where
         }
     };
 
-    let configs_dir = config.configs_directory();
+    let configs_dir = config.dotfiles_directory();
     let mut deploy_state = load_deploy_state(filesystem, config);
 
     let mut deployed_count: usize = 0;
@@ -371,19 +371,19 @@ where
             continue;
         }
 
-        let configs = package.configs();
-        if configs.is_empty() {
+        let dotfiles = package.dotfiles();
+        if dotfiles.is_empty() {
             continue;
         }
 
-        for entry in configs {
+        for entry in dotfiles {
             let source_path = resolve_source_path(&configs_dir, entry.source());
 
             // Runtime path traversal guard: verify resolved path stays within configs_dir
             if !validate_source_path(&source_path, &configs_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes configs directory",
+                        "Skipping '{}': source path escapes dotfiles directory",
                         entry.source()
                     ))
                     .await;
@@ -472,7 +472,7 @@ where
                 }
                 DeployDecision::Skip(reason) => {
                     sender
-                        .send_config_skipped(source_path.display(), target_path.display(), &reason)
+                        .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
                     skipped_count += 1;
                 }
@@ -506,7 +506,7 @@ where
                             &source_path.to_string_lossy(),
                         );
                         sender
-                            .send_config_conflict(
+                            .send_dotfile_conflict(
                                 source_path.display(),
                                 target_path.display(),
                                 &diff,
@@ -529,7 +529,7 @@ where
     }
 
     let total = deployed_count + skipped_count + conflict_count;
-    OperationResult::Success(OperationSuccess::ConfigApplied {
+    OperationResult::Success(OperationSuccess::DotfilesApplied {
         deployed_count,
         skipped_count,
         conflict_count,
@@ -549,7 +549,7 @@ where
     R: PackageRepository,
     F: FileSystem,
 {
-    let configs_dir = config.configs_directory();
+    let configs_dir = config.dotfiles_directory();
     let deploy_state = load_deploy_state(filesystem, config);
 
     // Also scan packages to find all config entries
@@ -566,7 +566,7 @@ where
     let mut total_count: usize = 0;
 
     for package in &packages {
-        for entry in package.configs() {
+        for entry in package.dotfiles() {
             total_count += 1;
 
             let source_path = resolve_source_path(&configs_dir, entry.source());
@@ -588,7 +588,7 @@ where
             if !validate_source_path(&source_path, &configs_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes configs directory",
+                        "Skipping '{}': source path escapes dotfiles directory",
                         entry.source()
                     ))
                     .await;
@@ -625,14 +625,14 @@ where
 
             if drift != DriftType::None {
                 sender
-                    .send_config_drift_detected(target_path.display(), &drift)
+                    .send_dotfile_drift_detected(target_path.display(), &drift)
                     .await;
                 drift_count += 1;
             }
         }
     }
 
-    OperationResult::Success(OperationSuccess::ConfigDriftChecked {
+    OperationResult::Success(OperationSuccess::DotfileDriftChecked {
         drift_count,
         total_count,
         environment: config.environment().to_string(),
