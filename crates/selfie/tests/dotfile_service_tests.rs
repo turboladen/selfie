@@ -2,6 +2,16 @@
 //!
 //! These tests verify dotfile deployment operations using real filesystem
 //! and repository implementations with temporary directories.
+//!
+//! ## Directory layout
+//!
+//! Source paths resolve relative to the YAML file's parent directory, so:
+//!
+//! - Package dotfiles: YAML lives in `packages/`, source files in `packages/<name>/`
+//! - Standalone dotfiles: YAML lives in `dotfiles/`, source files in `dotfiles/<name>/`
+//!
+//! This is why most tests create source files under `dirs.package_dir` — the
+//! package YAML files are there, so that's the resolution base.
 
 use std::path::PathBuf;
 
@@ -90,6 +100,7 @@ impl TestDirs {
         }
     }
 
+    /// Create a service backed only by the packages directory.
     fn service(&self) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
@@ -100,6 +111,22 @@ impl TestDirs {
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
         DotfileServiceImpl::new(repo, fs, config)
+    }
+
+    /// Create a service backed by both `packages/` and `dotfiles/` directories.
+    fn service_with_dotfiles(
+        &self,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+        let fs = RealFileSystem;
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .build();
+        let package_repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+        let dotfiles_repo = YamlPackageRepository::new(fs, self.dotfiles_dir.clone());
+        DotfileServiceImpl::new(package_repo, fs, config).with_dotfiles_repository(dotfiles_repo)
     }
 }
 
@@ -594,7 +621,7 @@ async fn test_apply_missing_source_warns_and_skips() {
     let dirs = TestDirs::new();
 
     let target_file = dirs.target_dir.join("config.toml");
-    // Source file "nonexistent/config.toml" does not exist in dotfiles_dir
+    // Source file "nonexistent/config.toml" does not exist alongside the YAML
     create_package_with_dotfiles(
         &dirs.package_dir,
         "missing-src",
@@ -931,6 +958,138 @@ async fn test_check_drift_with_no_prior_deploys() {
     assert!(
         has_drift,
         "Should detect drift when target exists but wasn't tracked"
+    );
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked { drift_count, .. }) => {
+            assert_eq!(*drift_count, 1);
+        }
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
+    }
+}
+
+// ─── Dual-repository tests (packages/ + dotfiles/) ─────────────────────────
+
+#[tokio::test]
+async fn test_apply_deploys_from_both_packages_and_dotfiles_dirs() {
+    let dirs = TestDirs::new();
+
+    // Package dotfile: YAML + source in packages/
+    let pkg_source_dir = dirs.package_dir.join("starship");
+    std::fs::create_dir_all(&pkg_source_dir).unwrap();
+    std::fs::write(pkg_source_dir.join("starship.toml"), "format = \"bold\"").unwrap();
+
+    let pkg_target = dirs.target_dir.join("starship.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "starship",
+        &[("starship/starship.toml", pkg_target.to_str().unwrap())],
+    );
+
+    // Standalone dotfile: YAML + source in dotfiles/
+    let dot_source_dir = dirs.dotfiles_dir.join("dprint");
+    std::fs::create_dir_all(&dot_source_dir).unwrap();
+    std::fs::write(dot_source_dir.join("dprint.jsonc"), "{\"lineWidth\": 80}").unwrap();
+
+    let dot_target = dirs.target_dir.join("dprint.jsonc");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "dprint",
+        &[("dprint/dprint.jsonc", dot_target.to_str().unwrap())],
+    );
+
+    // Use the dual-repo service
+    let service = dirs.service_with_dotfiles();
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 2, "Should deploy from both repos");
+        }
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
+    }
+
+    assert!(pkg_target.exists(), "Package dotfile should be deployed");
+    assert!(dot_target.exists(), "Standalone dotfile should be deployed");
+    assert_eq!(
+        std::fs::read_to_string(&pkg_target).unwrap(),
+        "format = \"bold\""
+    );
+    assert_eq!(
+        std::fs::read_to_string(&dot_target).unwrap(),
+        "{\"lineWidth\": 80}"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_specific_name_finds_standalone_dotfile() {
+    let dirs = TestDirs::new();
+
+    // Only a standalone dotfile in dotfiles/, nothing in packages/
+    let dot_source_dir = dirs.dotfiles_dir.join("dprint");
+    std::fs::create_dir_all(&dot_source_dir).unwrap();
+    std::fs::write(dot_source_dir.join("dprint.jsonc"), "{\"lineWidth\": 80}").unwrap();
+
+    let dot_target = dirs.target_dir.join("dprint.jsonc");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "dprint",
+        &[("dprint/dprint.jsonc", dot_target.to_str().unwrap())],
+    );
+
+    let service = dirs.service_with_dotfiles();
+    let stream = service.apply("dprint", ApplyOptions::default()).await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 1);
+        }
+        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
+    }
+
+    assert!(dot_target.exists(), "Standalone dotfile should be deployed");
+}
+
+#[tokio::test]
+async fn test_check_drift_covers_standalone_dotfiles() {
+    let dirs = TestDirs::new();
+
+    // Standalone dotfile in dotfiles/
+    let dot_source_dir = dirs.dotfiles_dir.join("dprint");
+    std::fs::create_dir_all(&dot_source_dir).unwrap();
+    std::fs::write(dot_source_dir.join("dprint.jsonc"), "{\"lineWidth\": 80}").unwrap();
+
+    let dot_target = dirs.target_dir.join("dprint.jsonc");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "dprint",
+        &[("dprint/dprint.jsonc", dot_target.to_str().unwrap())],
+    );
+
+    let service = dirs.service_with_dotfiles();
+
+    // Deploy first
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Modify the target externally
+    std::fs::write(&dot_target, "{\"lineWidth\": 120}").unwrap();
+
+    // Drift check should detect the standalone dotfile change
+    let stream = service.check_drift().await;
+    let events = collect_events(stream).await;
+
+    let has_drift = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }));
+    assert!(
+        has_drift,
+        "Should detect drift in standalone dotfile after target modification"
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
