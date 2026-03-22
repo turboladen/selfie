@@ -70,11 +70,6 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         format_key_fn("Name"),
         format_value(&package_info.name),
     ]);
-    table.add_row(vec![
-        format_key_fn("Version"),
-        format_value(&package_info.version),
-    ]);
-
     if let Some(desc) = &package_info.description {
         table.add_row(vec![format_key_fn("Description"), format_value(desc)]);
     }

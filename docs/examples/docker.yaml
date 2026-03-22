@@ -1,5 +1,4 @@
 name: docker
-version: 1.0.0
 description: Docker container platform for building and running applications
 homepage: https://www.docker.com
 

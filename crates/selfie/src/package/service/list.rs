@@ -25,7 +25,6 @@ use crate::{
 /// Captured before spawning tasks so we still have metadata if a task panics.
 struct PackageMetadata {
     name: String,
-    version: String,
     environments: Vec<String>,
 }
 
@@ -81,7 +80,6 @@ where
         .iter()
         .map(|package| PackageListItem {
             name: package.name().to_string(),
-            version: package.version().to_string(),
             environments: package.environments().keys().cloned().collect(),
             status: None,
         })
@@ -100,7 +98,6 @@ where
         .iter()
         .map(|p| PackageMetadata {
             name: p.name().to_string(),
-            version: p.version().to_string(),
             environments: p.environments().keys().cloned().collect(),
         })
         .collect();
@@ -110,7 +107,6 @@ where
         .enumerate()
         .map(|(index, package)| {
             let package_name = package.name().to_string();
-            let package_version = package.version().to_string();
             let package_environments: Vec<String> =
                 package.environments().keys().cloned().collect();
             let current_env = config.environment().to_string();
@@ -150,7 +146,6 @@ where
                 // Create the package list item
                 let package_item = PackageListItem {
                     name: package_name,
-                    version: package_version,
                     environments: package_environments,
                     status,
                 };
@@ -172,24 +167,19 @@ where
                 // Use the captured metadata so the CLI can resolve the correct spinner.
                 // Fallback to defaults if index is somehow out of bounds — this is
                 // error-recovery code and must not panic or mask the original failure.
-                let (name, version, environments) = match package_metadata.get(i) {
-                    Some(meta) => (
-                        meta.name.clone(),
-                        meta.version.clone(),
-                        meta.environments.clone(),
-                    ),
+                let (name, environments) = match package_metadata.get(i) {
+                    Some(meta) => (meta.name.clone(), meta.environments.clone()),
                     None => {
                         tracing::warn!(
                             index = i,
                             "package_metadata index out of bounds in JoinError handler"
                         );
-                        (String::new(), String::new(), Vec::new())
+                        (String::new(), Vec::new())
                     }
                 };
                 sender
                     .send_package_list_item(PackageListItem {
                         name,
-                        version,
                         environments,
                         status: Some(crate::package::event::CheckResult::Error(format!(
                             "Task failed: {e}"
@@ -350,7 +340,6 @@ mod tests {
             .map(|i| {
                 PackageBuilder::default()
                     .name(&format!("pkg-{i}"))
-                    .version("1.0.0")
                     .environment("test", |b| {
                         b.install("echo install").check_some("echo check")
                     })

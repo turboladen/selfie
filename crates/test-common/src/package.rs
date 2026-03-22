@@ -1,6 +1,6 @@
 //! Package creation helpers for tests to eliminate repetitive `PackageBuilder` usage.
 
-use crate::constants::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
+use crate::constants::{ALT_TEST_ENV, TEST_ENV};
 use selfie::package::{Package, PackageBuilder};
 
 /// Creates a simple test package with just a name and install command.
@@ -9,7 +9,6 @@ use selfie::package::{Package, PackageBuilder};
 pub fn simple_test_package(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| b.install("echo 'Installing package'"))
         .build()
 }
@@ -20,7 +19,6 @@ pub fn simple_test_package(name: &str) -> Package {
 pub fn test_package_with_check(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| {
             b.install("echo 'Installing package'")
                 .check_some("echo 'Checking package'")
@@ -33,7 +31,6 @@ pub fn test_package_with_check(name: &str) -> Package {
 pub fn test_package_with_check_for_env(name: &str, environment: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(environment, |b| {
             b.install("echo 'Installing package'")
                 .check_some("echo 'Checking package'")
@@ -47,7 +44,6 @@ pub fn test_package_with_check_for_env(name: &str, environment: &str) -> Package
 pub fn multi_env_test_package(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| {
             b.install("echo 'Installing in test env'")
                 .check_some("echo 'Checking in test env'")
@@ -65,20 +61,9 @@ pub fn multi_env_test_package(name: &str) -> Package {
 pub fn failing_check_package(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| {
             b.install("echo 'Installing package'").check_some("exit 1") // This will fail
         })
-        .build()
-}
-
-/// Creates a test package with a custom version.
-#[must_use]
-pub fn test_package_with_version(name: &str, version: &str) -> Package {
-    PackageBuilder::default()
-        .name(name)
-        .version(version)
-        .environment(TEST_ENV, |b| b.install("echo 'Installing package'"))
         .build()
 }
 
@@ -88,7 +73,6 @@ pub fn test_package_with_version(name: &str, version: &str) -> Package {
 pub fn timeout_check_package(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| {
             b.install("echo 'Installing package'")
                 .check_some("sleep 10") // This will timeout with default settings
@@ -102,7 +86,6 @@ pub fn timeout_check_package(name: &str) -> Package {
 pub fn no_check_package(name: &str) -> Package {
     PackageBuilder::default()
         .name(name)
-        .version(TEST_VERSION)
         .environment(TEST_ENV, |b| b.install("echo 'Installing package'"))
         .build()
 }

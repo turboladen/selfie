@@ -471,7 +471,6 @@ mod tests {
                 Ok(vec![
                     Package::new(
                         "dependent1".to_string(),
-                        "1.0.0".to_string(),
                         None,
                         None,
                         Vec::new(),
@@ -481,7 +480,6 @@ mod tests {
                     ),
                     Package::new(
                         "dependent2".to_string(),
-                        "1.0.0".to_string(),
                         None,
                         None,
                         Vec::new(),

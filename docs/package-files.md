@@ -15,7 +15,6 @@ Package files follow this basic structure:
 
 ```yaml
 name: package-name
-version: 1.0.0
 description: (optional) Brief description of what this package provides
 homepage: (optional) https://example.com
 post_install_note: (optional) Note displayed after first-time install
@@ -47,14 +46,6 @@ The package name, which must match the filename (without `.yaml` extension).
 
 ```yaml
 name: ripgrep # for file ripgrep.yaml
-```
-
-### `version`
-
-Semantic version of your package definition (not the tool version).
-
-```yaml
-version: 1.2.0
 ```
 
 ### `environments`
@@ -395,7 +386,6 @@ package directory.
 
 ```yaml
 name: starship
-version: 1.0.0
 description: Cross-shell prompt
 homepage: https://starship.rs
 

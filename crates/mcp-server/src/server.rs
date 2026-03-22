@@ -227,7 +227,6 @@ impl SelfieServer {
 
         let package = Package::new(
             params.package,
-            "0.1.0".to_string(),
             params.homepage,
             params.description,
             Vec::new(),
@@ -396,7 +395,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, version, description, and environments. Fast — no commands are executed. Use this instead of calling selfie_spec_info repeatedly."
+        description = "List all specs for the current environment with name, description, and environments. Fast — no commands are executed. Use this instead of calling selfie_spec_info repeatedly."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;

@@ -301,7 +301,6 @@ mod tests {
         let check_cmd = format!("echo 'checking {name}'");
         let pkg = PackageBuilder::default()
             .name(name)
-            .version("1.0.0")
             .environment("test", move |b| {
                 b.install(&install_cmd)
                     .check(Some(&check_cmd))

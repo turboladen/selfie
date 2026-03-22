@@ -12,9 +12,6 @@ pub const SERVICE_TEST_ENV: &str = "test";
 /// Default test package directory path
 pub const TEST_PACKAGE_DIR: &str = "/tmp/test-packages";
 
-/// Default test package version
-pub const TEST_VERSION: &str = "1.0.0";
-
 /// Test package name prefix for generated packages
 pub const TEST_PACKAGE_PREFIX: &str = "test-package";
 

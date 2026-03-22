@@ -152,7 +152,6 @@ mod tests {
         );
         let target_package = Package::new(
             "target-package".to_string(),
-            "1.0.0".to_string(),
             None,
             None,
             Vec::new(),
@@ -174,7 +173,6 @@ mod tests {
         );
         let dependent_package = Package::new(
             "dependent-package".to_string(),
-            "1.0.0".to_string(),
             None,
             None,
             Vec::new(),

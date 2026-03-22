@@ -1,5 +1,4 @@
 name: node
-version: 1.0.0
 description: Node.js runtime via fnm version manager
 homepage: https://nodejs.org
 

@@ -1,6 +1,6 @@
 //! Test package file creation helpers to eliminate duplication in service tests.
 
-use crate::constants::{SERVICE_TEST_ENV, TEST_ENV, TEST_VERSION};
+use crate::constants::{SERVICE_TEST_ENV, TEST_ENV};
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 
@@ -47,7 +47,7 @@ pub fn create_package_file_with_check(dir: &TempDir, name: &str, has_check: bool
 
     let content = format!(
         r#"name: "{name}"
-version: "{TEST_VERSION}"
+
 description: "Test package for service layer testing"
 homepage: "https://example.com/{name}"
 
@@ -79,7 +79,6 @@ environments:
 pub fn create_invalid_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = r#"# Invalid YAML - syntax error
 name: "invalid-package"
-version: "1.0.0"
 environments:
   test:
     install: "echo 'test'
@@ -155,7 +154,7 @@ pub fn create_service_test_package_file_with_behavior(
 
     let content = format!(
         r#"name: "{name}"
-version: "{TEST_VERSION}"
+
 description: "Test package for service layer testing"
 homepage: "https://example.com/{name}"
 
@@ -207,7 +206,7 @@ pub fn create_service_test_package_file_with_deps(
 
     let content = format!(
         r#"name: "{name}"
-version: "{TEST_VERSION}"
+
 description: "Test package with dependencies"
 homepage: "https://example.com/{name}"
 
@@ -271,7 +270,7 @@ pub fn create_service_install_test_package_file_with_note(
 
     let content = format!(
         r#"name: "{name}"
-version: "{TEST_VERSION}"
+
 description: "Test package with post_install_note"
 homepage: "https://example.com/{name}"
 post_install_note: "{note}"
@@ -298,7 +297,6 @@ environments:
 pub fn create_service_invalid_package_file(dir: &TempDir, name: &str) -> PathBuf {
     let content = r#"# Invalid YAML - syntax error
 name: "invalid-package"
-version: "1.0.0"
 environments:
   test:
     install: "echo 'test'

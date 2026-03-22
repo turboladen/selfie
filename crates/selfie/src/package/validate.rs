@@ -71,7 +71,6 @@ impl Package {
     ///
     /// Checks for the presence and validity of essential package fields:
     /// - Package name (non-empty, valid characters)
-    /// - Package version (semantic version format)
     /// - At least one environment configuration
     ///
     /// All validation issues are collected and returned as a vector of `ValidationIssue`.
@@ -80,11 +79,6 @@ impl Package {
 
         // Check name
         if let Err(issue) = self.validate_name() {
-            issues.push(issue);
-        }
-
-        // Check version
-        if let Err(issue) = self.validate_version() {
             issues.push(issue);
         }
 
@@ -138,36 +132,6 @@ impl Package {
                 "name",
                 "Package name contains invalid characters",
                 Some("Use only alphanumeric characters, hyphens, and underscores."),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Validate the package version format
-    ///
-    /// Checks that the version follows the SemVer 2.0.0 spec (major.minor.patch,
-    /// with optional pre-release and build metadata). Uses the `semver` crate.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `ValidationIssue` if:
-    /// - Version is empty (error)
-    /// - Version doesn't follow semantic versioning format (warning)
-    fn validate_version(&self) -> Result<(), ValidationIssue> {
-        if self.version.is_empty() {
-            return Err(ValidationIssue::error(
-                ValidationErrorCategory::RequiredField,
-                "version",
-                "Package version is required",
-                Some("Add 'version: \"0.1.0\"' to the package file."),
-            ));
-        } else if semver::Version::parse(&self.version).is_err() {
-            return Err(ValidationIssue::warning(
-                ValidationErrorCategory::InvalidValue,
-                "version",
-                "Package version should follow semantic versioning",
-                Some("Consider using a semantic version like '1.0.0'."),
             ));
         }
 
@@ -463,7 +427,6 @@ mod tests {
     fn test_validate_valid_package() {
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("test install"))
             .build();
 
@@ -475,7 +438,6 @@ mod tests {
         // Test invalid URL
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .homepage("not-a-valid-url")
             .environment("test-env", |b| b.install("test install"))
             .build();
@@ -487,7 +449,6 @@ mod tests {
         // Test valid URL but wrong scheme (ftp)
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .homepage("ftp://example.com")
             .environment("test-env", |b| b.install("test install"))
             .build();
@@ -500,7 +461,6 @@ mod tests {
         // Test valid URL with correct scheme
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .homepage("https://example.com")
             .environment("test-env", |b| b.install("test install"))
             .build();
@@ -514,7 +474,6 @@ mod tests {
         // Test missing current environment
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("other-env", |b| b.install("test install"))
             .build();
 
@@ -524,10 +483,7 @@ mod tests {
         assert!(issues[0].message.contains("not configured"));
 
         // Test empty install command
-        let mut package = PackageBuilder::default()
-            .name("test-package")
-            .version("1.0.0")
-            .build();
+        let mut package = PackageBuilder::default().name("test-package").build();
 
         let env_config = EnvironmentConfig {
             install: String::new(),
@@ -552,7 +508,6 @@ mod tests {
         // Test unmatched quote
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("echo 'unmatched"))
             .build();
 
@@ -564,7 +519,6 @@ mod tests {
         // Test invalid pipe
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("echo test | | grep test"))
             .build();
 
@@ -576,7 +530,6 @@ mod tests {
         // Test backticks (warning)
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("echo `date`"))
             .build();
 
@@ -587,64 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_version_valid_semver() {
-        for version in ["1.0.0", "0.1.0", "1.2.3-beta", "1.0.0+build.123"] {
-            let package = PackageBuilder::default()
-                .name("test-package")
-                .version(version)
-                .environment("test-env", |b| b.install("echo test"))
-                .build();
-
-            let issues = package.validate_required_fields();
-            let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
-            assert!(
-                version_issues.is_empty(),
-                "Expected no issues for valid version '{version}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_version_invalid_warns() {
-        for version in ["1.0", "1", "abc", "1.2.3.4"] {
-            let package = PackageBuilder::default()
-                .name("test-package")
-                .version(version)
-                .environment("test-env", |b| b.install("echo test"))
-                .build();
-
-            let issues = package.validate_required_fields();
-            let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
-            assert_eq!(
-                version_issues.len(),
-                1,
-                "Expected one warning for invalid version '{version}'"
-            );
-            assert_eq!(version_issues[0].level(), ValidationLevel::Warning);
-        }
-    }
-
-    #[test]
-    fn test_validate_version_empty_errors() {
-        let package = PackageBuilder::default()
-            .name("test-package")
-            .version("")
-            .environment("test-env", |b| b.install("echo test"))
-            .build();
-
-        let issues = package.validate_required_fields();
-        let version_issues: Vec<_> = issues.iter().filter(|i| i.field == "version").collect();
-        assert_eq!(version_issues.len(), 1);
-        assert_eq!(version_issues[0].level(), ValidationLevel::Error);
-        assert!(version_issues[0].message.contains("required"));
-    }
-
-    #[test]
     fn test_full_validate() {
         // Test a valid package
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .homepage("https://example.com")
             .description("A test package")
             .environment("test-env", |b| b.install("echo test"))
@@ -656,20 +555,18 @@ mod tests {
         // Test an invalid package with multiple issues
         let package = PackageBuilder::default()
             .name("")
-            .version("")
             .homepage("invalid-url")
             .environment("other-env", |b| b.install("echo `test`"))
             .build();
 
         let result = package.validate("test-env");
-        assert!(result.issues().all_issues().len() >= 4); // At least 4 issues should be found
+        assert!(result.issues().all_issues().len() >= 3); // At least 3 issues should be found
     }
 
     #[test]
     fn test_validate_dotfile_relative_target_errors() {
         let package = PackageBuilder::default()
             .name("bad-config")
-            .version("1.0.0")
             .dotfiles(vec![DotfileEntry::new("src/file.txt", "relative/path.txt")])
             .build();
         let result = package.validate("test-env");
@@ -680,7 +577,6 @@ mod tests {
     fn test_validate_dotfile_absolute_target_passes() {
         let package = PackageBuilder::default()
             .name("good-config")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("echo hi"))
             .dotfiles(vec![DotfileEntry::new(
                 "src/file.txt",
@@ -695,7 +591,6 @@ mod tests {
     fn test_validate_dotfile_empty_source_errors() {
         let package = PackageBuilder::default()
             .name("bad-source")
-            .version("1.0.0")
             .dotfiles(vec![DotfileEntry::new("", "~/.config/file.txt")])
             .build();
         let result = package.validate("test-env");
@@ -706,7 +601,6 @@ mod tests {
     fn test_validate_dotfile_path_traversal_errors() {
         let package = PackageBuilder::default()
             .name("bad-traversal")
-            .version("1.0.0")
             .dotfiles(vec![DotfileEntry::new(
                 "../etc/passwd",
                 "~/.config/file.txt",

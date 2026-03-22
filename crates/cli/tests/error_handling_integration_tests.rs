@@ -148,10 +148,10 @@ fn test_package_file_missing_required_fields_error() {
     let temp_dir = setup_default_test_config();
     let packages_dir = temp_dir.path().join("packages");
 
-    // Create package file missing required fields
+    // Create package file with name but no environments for the current env
     let invalid_yaml = r#"
 name: "incomplete-package"
-# Missing version and environments
+# No environments defined
 "#;
     let invalid_package_path = packages_dir.join("incomplete-package.yaml");
     fs::write(&invalid_package_path, invalid_yaml).unwrap();
@@ -159,9 +159,14 @@ name: "incomplete-package"
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
+    // Package parses but has no matching environment — list succeeds but
+    // the package shouldn't appear in the default (env-filtered) output
     cmd.assert()
-        .success() // List continues but reports errors inline
-        .stdout(predicate::str::contains("incomplete-package"));
+        .success()
+        .stdout(predicate::str::contains("No packages found").or(
+            // If other packages exist, incomplete-package shouldn't show
+            predicate::str::contains("incomplete-package").not(),
+        ));
 }
 
 #[test]
@@ -212,7 +217,6 @@ fn test_package_check_command_failure() {
     // Create package with failing check command
     let package = PackageBuilder::default()
         .name("failing-check-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| {
             builder.install("echo 'installed'").check_some("exit 1") // This command will fail
         })
@@ -235,7 +239,6 @@ fn test_package_check_command_timeout() {
     // Create package with slow check command that will timeout
     let package = PackageBuilder::default()
         .name("timeout-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| {
             builder.install("echo 'installed'").check_some("sleep 10") // This will timeout with default 5s timeout
         })
@@ -256,7 +259,6 @@ fn test_package_install_missing_environment_error() {
     // Create package without the current environment
     let package = PackageBuilder::default()
         .name("wrong-env-package")
-        .version("1.0.0")
         .environment("different-env", |builder| {
             builder.install("echo 'installed'")
         })
@@ -356,13 +358,11 @@ fn test_duplicate_package_names_error() {
     // Create two files with the same package name
     let package1 = PackageBuilder::default()
         .name("duplicate-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'v1'"))
         .build();
 
     let package2 = PackageBuilder::default()
         .name("duplicate-package")
-        .version("2.0.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'v2'"))
         .build();
 
@@ -488,7 +488,6 @@ fn test_broken_terminal_output_handling() {
 
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'test'"))
         .build();
 
@@ -513,7 +512,6 @@ fn test_partial_package_directory_corruption() {
     // Add some valid packages
     let valid_package = PackageBuilder::default()
         .name("valid-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'valid'"))
         .build();
 
@@ -557,7 +555,6 @@ fn test_mixed_error_scenarios_resilience() {
     // Create a mix of valid, invalid, and problematic packages
     let valid_package = PackageBuilder::default()
         .name("working-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'works'"))
         .build();
 

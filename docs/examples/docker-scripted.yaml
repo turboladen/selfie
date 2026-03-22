@@ -1,5 +1,4 @@
 name: docker-scripted
-version: 1.0.0
 description: Docker container platform (using external scripts for complex installations)
 homepage: https://www.docker.com
 

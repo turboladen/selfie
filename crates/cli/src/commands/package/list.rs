@@ -82,7 +82,6 @@ fn format_list_item(
     max_name_len: usize,
 ) -> (ListItemResult, String) {
     let status_text = status_style::format_check_result(package_item.status.as_ref(), use_colors);
-    let version = format!("v{}", package_item.version);
 
     let result = match &package_item.status {
         Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
@@ -99,16 +98,14 @@ fn format_list_item(
             config,
         );
         format!(
-            "{:<width$}  {:<10}  {status_text}  ({envs})",
+            "{:<width$}  {status_text}  ({envs})",
             package_item.name,
-            version,
             width = max_name_len
         )
     } else {
         format!(
-            "{:<width$}  {:<10}  {status_text}",
+            "{:<width$}  {status_text}",
             package_item.name,
-            version,
             width = max_name_len
         )
     };
@@ -237,9 +234,8 @@ fn handle_list_event(
                     };
 
                     let line = format!(
-                        "{prefix} {:<width$}  {:<10}  {error_text}",
+                        "{prefix} {:<width$}  {error_text}",
                         filename,
-                        "",
                         width = state.max_name_len
                     );
 
@@ -390,7 +386,7 @@ fn display_environment_stats(
 mod tests {
     use super::*;
     use selfie::package::event::PackageListItem;
-    use test_common::{ALT_TEST_ENV, TEST_ENV, TEST_VERSION};
+    use test_common::{ALT_TEST_ENV, TEST_ENV};
 
     /// Helper to call handle_list_event with test defaults (non-TTY, no spinners)
     fn test_handle_event(event: &event::PackageEvent, config: &CliConfig, show_all: bool) -> bool {
@@ -578,7 +574,7 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::Success {
                 stdout: String::new(),
@@ -638,7 +634,7 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
             name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::Success {
                 stdout: String::new(),
@@ -679,13 +675,13 @@ mod tests {
         let packages = vec![
             PackageListItem {
                 name: "alpha".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: None,
             },
             PackageListItem {
                 name: "beta".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: None,
             },
@@ -710,7 +706,7 @@ mod tests {
 
         let packages = vec![PackageListItem {
             name: "alpha".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: None,
         }];
@@ -738,13 +734,13 @@ mod tests {
         let packages = vec![
             PackageListItem {
                 name: "alpha".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: None,
             },
             PackageListItem {
                 name: "beta".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: None,
             },
@@ -774,13 +770,13 @@ mod tests {
             packages: vec![
                 PackageListItem {
                     name: "zebra".to_string(),
-                    version: TEST_VERSION.to_string(),
+
                     environments: vec![TEST_ENV.to_string()],
                     status: None,
                 },
                 PackageListItem {
                     name: "alpha".to_string(),
-                    version: TEST_VERSION.to_string(),
+
                     environments: vec![TEST_ENV.to_string()],
                     status: None,
                 },
@@ -792,7 +788,7 @@ mod tests {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_item: PackageListItem {
                 name: "zebra".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: Some(event::CheckResult::Success {
                     stdout: String::new(),
@@ -806,7 +802,7 @@ mod tests {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_item: PackageListItem {
                 name: "alpha".to_string(),
-                version: TEST_VERSION.to_string(),
+
                 environments: vec![TEST_ENV.to_string()],
                 status: Some(event::CheckResult::Failed {
                     stdout: String::new(),
@@ -881,7 +877,7 @@ mod tests {
         // Success variant
         let success_item = PackageListItem {
             name: "ripgrep".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::Success {
                 stdout: String::new(),
@@ -896,7 +892,7 @@ mod tests {
         // Failure variant
         let failure_item = PackageListItem {
             name: "missing-pkg".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::Failed {
                 stdout: String::new(),
@@ -912,7 +908,7 @@ mod tests {
         // Warning variant (no check command)
         let warning_item = PackageListItem {
             name: "no-check".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::NoCheckCommand),
         };
@@ -924,7 +920,7 @@ mod tests {
         // N/A variant (status is None)
         let na_item = PackageListItem {
             name: "pending".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: None,
         };
@@ -937,7 +933,7 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = PackageListItem {
             name: "test-package".to_string(),
-            version: TEST_VERSION.to_string(),
+
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::Success {
                 stdout: String::new(),

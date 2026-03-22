@@ -65,13 +65,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             .load_preset(presets::UTF8_FULL_CONDENSED)
             .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
             .set_content_arrangement(ContentArrangement::Dynamic);
-        table.set_header(vec![
-            "Name",
-            "Version",
-            "Description",
-            "Environments",
-            "Git",
-        ]);
+        table.set_header(vec!["Name", "Description", "Environments", "Git"]);
 
         for spec in &data.specs {
             let git_col = spec
@@ -81,7 +75,6 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
                 .unwrap_or_default();
             table.add_row(vec![
                 format_name(&spec.name, use_colors),
-                spec.version.clone(),
                 spec.description.clone().unwrap_or_default(),
                 format_environment_names(&spec.environments, &data.current_environment, config),
                 git_col,
@@ -159,7 +152,6 @@ mod tests {
             operation_info: test_op_info(),
             spec_item: SpecListItem {
                 name: "node".to_string(),
-                version: "20.0.0".to_string(),
                 description: Some("Node.js runtime".to_string()),
                 environments: vec!["macos".to_string()],
                 git_status: None,
