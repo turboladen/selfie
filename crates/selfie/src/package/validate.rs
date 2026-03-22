@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_relative_target_errors() {
+    fn test_validate_dotfile_relative_target_errors() {
         let package = PackageBuilder::default()
             .name("bad-config")
             .version("1.0.0")
@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_absolute_target_passes() {
+    fn test_validate_dotfile_absolute_target_passes() {
         let package = PackageBuilder::default()
             .name("good-config")
             .version("1.0.0")
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_empty_source_errors() {
+    fn test_validate_dotfile_empty_source_errors() {
         let package = PackageBuilder::default()
             .name("bad-source")
             .version("1.0.0")
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_path_traversal_errors() {
+    fn test_validate_dotfile_path_traversal_errors() {
         let package = PackageBuilder::default()
             .name("bad-traversal")
             .version("1.0.0")

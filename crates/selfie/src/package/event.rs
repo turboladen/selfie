@@ -464,7 +464,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send config cleanup info event (during package removal)
+    /// Send dotfile cleanup info event (during package removal)
     pub(crate) async fn send_dotfile_cleanup_info(
         &self,
         package_name: String,
@@ -479,7 +479,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send a config-deploying event
+    /// Send a dotfile-deploying event
     pub(crate) async fn send_dotfile_deploying(
         &self,
         source: impl fmt::Display,
@@ -494,7 +494,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send a config-deployed event
+    /// Send a dotfile-deployed event
     pub(crate) async fn send_dotfile_deployed(
         &self,
         source: impl fmt::Display,
@@ -509,7 +509,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send a config-skipped event
+    /// Send a dotfile-skipped event
     pub(crate) async fn send_dotfile_skipped(
         &self,
         source: impl fmt::Display,
@@ -526,7 +526,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send a config-conflict event
+    /// Send a dotfile-conflict event
     pub(crate) async fn send_dotfile_conflict(
         &self,
         source: impl fmt::Display,
@@ -543,7 +543,7 @@ impl EventSender {
         .await;
     }
 
-    /// Send a config-drift-detected event
+    /// Send a dotfile-drift-detected event
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
         target: impl fmt::Display,
@@ -779,7 +779,7 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
-    /// Config apply operation completed
+    /// Dotfile apply operation completed
     DotfilesApplied {
         deployed_count: usize,
         skipped_count: usize,
@@ -787,7 +787,7 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
-    /// Config drift check operation completed
+    /// Dotfile drift check operation completed
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
@@ -1084,7 +1084,7 @@ impl std::fmt::Display for OperationSuccess {
             } => {
                 write!(
                     f,
-                    "Config apply completed: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s) {steps_completed}"
+                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s) {steps_completed}"
                 )
             }
             OperationSuccess::DotfileDriftChecked {
@@ -1095,7 +1095,7 @@ impl std::fmt::Display for OperationSuccess {
             } => {
                 write!(
                     f,
-                    "Config drift check completed: {drift_count} drifted out of {total_count} {steps_completed}"
+                    "Dotfile drift check: {drift_count} drifted out of {total_count} {steps_completed}"
                 )
             }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),

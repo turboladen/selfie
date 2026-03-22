@@ -454,7 +454,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured installation method for the current environment. If the package has a 'dotfiles' section, run selfie_apply_config afterward to deploy its dotfiles."
+        description = "Install a package using its configured installation method for the current environment. If the package has a 'dotfiles' section, run selfie_apply_dotfiles afterward to deploy its dotfiles."
     )]
     async fn package_install(
         &self,
@@ -514,10 +514,10 @@ impl SelfieServer {
     // ─── Config deploy tools ──────────────────────────────────────────────
 
     #[tool(
-        name = "selfie_apply_config",
+        name = "selfie_apply_dotfiles",
         description = "Deploy dotfiles defined in package YAML files to their target locations. Detects conflicts and drift between repo source files and deployed targets. Use after installing a package that has a 'dotfiles' section, or run without a name to deploy all dotfiles."
     )]
-    async fn selfie_apply_config(
+    async fn selfie_apply_dotfiles(
         &self,
         Parameters(params): Parameters<ApplyParam>,
     ) -> Result<CallToolResult, McpError> {
