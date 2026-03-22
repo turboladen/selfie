@@ -22,9 +22,9 @@ use crate::{
 /// Handle the apply command
 ///
 /// Creates a `DotfileServiceImpl` and delegates to `apply_all` or `apply`
-/// based on whether a package name was given. When a `dotfiles/` directory
-/// exists (sibling of `package_directory`), it's added as a second source
-/// so standalone dotfiles are included in the apply. Events are processed
+/// based on whether a package name was given. When the configured
+/// `dotfiles_directory` exists, it's added as a second source so
+/// standalone dotfiles are included in the apply. Events are processed
 /// through the standard `EventProcessor`.
 pub(crate) async fn handle_apply(
     args: &ApplyArgs,

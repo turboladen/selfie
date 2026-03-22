@@ -74,27 +74,60 @@ where
     }
 
     /// Collect packages from both the main package repository and the optional
-    /// dotfiles repository, returning a combined list.
+    /// dotfiles repository, returning a combined list and any non-fatal warnings.
+    ///
+    /// Warnings are returned (rather than emitted directly) because collection
+    /// happens before the event channel exists — callers emit them as
+    /// `PackageEvent::Warning` once the stream is set up.
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
-    ) -> Result<Vec<Package>, String> {
+    ) -> Result<(Vec<Package>, Vec<String>), String> {
+        let mut warnings = Vec::new();
+
         let mut packages = match package_repo.list_packages() {
             Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
             Err(e) => return Err(format!("Failed to load packages: {e}")),
         };
 
+        let packages_count = packages.len();
+
         if let Some(dotfiles) = dotfiles_repo {
             match dotfiles.list_packages() {
                 Ok(output) => packages.extend(output.valid_packages().cloned()),
                 Err(e) => {
-                    tracing::warn!("Failed to load standalone dotfiles: {e}");
-                    // Non-fatal: standalone dotfiles directory might not exist yet
+                    let msg = format!("Failed to load standalone dotfiles: {e}");
+                    tracing::warn!("{msg}");
+                    warnings.push(msg);
                 }
             }
         }
 
-        Ok(packages)
+        // Detect duplicate names across packages/ and dotfiles/ directories.
+        // Packages from packages/ take precedence (they appear first in the vec).
+        if packages.len() > packages_count {
+            let mut seen = std::collections::HashSet::new();
+            for pkg in &packages[..packages_count] {
+                seen.insert(pkg.name().to_string());
+            }
+
+            let mut deduped_dotfiles = Vec::new();
+            for pkg in packages.drain(packages_count..) {
+                if seen.contains(pkg.name()) {
+                    warnings.push(format!(
+                        "Duplicate name '{}' found in both packages/ and dotfiles/ — \
+                         using the packages/ version",
+                        pkg.name()
+                    ));
+                } else {
+                    seen.insert(pkg.name().to_string());
+                    deduped_dotfiles.push(pkg);
+                }
+            }
+            packages.extend(deduped_dotfiles);
+        }
+
+        Ok((packages, warnings))
     }
 
     /// Create an event stream from an async operation
@@ -254,7 +287,7 @@ where
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
-        let packages =
+        let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -270,8 +303,11 @@ where
 
             sender.send_started().await;
 
-            let result = match packages {
-                Ok(packages) => {
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
                     handle_apply(&packages, &fs, &config, &sender, &options, None).await
                 }
                 Err(e) => {
@@ -284,7 +320,7 @@ where
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
-        let packages =
+        let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -301,8 +337,11 @@ where
 
             sender.send_started().await;
 
-            let result = match packages {
-                Ok(packages) => {
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
                     handle_apply(&packages, &fs, &config, &sender, &options, Some(&name)).await
                 }
                 Err(e) => {
@@ -315,7 +354,7 @@ where
     }
 
     async fn check_drift(&self) -> EventStream {
-        let packages =
+        let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -331,8 +370,13 @@ where
 
             sender.send_started().await;
 
-            let result = match packages {
-                Ok(packages) => handle_check_drift(&packages, &fs, &config, &sender).await,
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
+                    handle_check_drift(&packages, &fs, &config, &sender).await
+                }
                 Err(e) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
                 }

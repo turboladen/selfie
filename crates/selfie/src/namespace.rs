@@ -48,30 +48,59 @@ impl fmt::Display for NamespaceConflict {
 
 impl std::error::Error for NamespaceConflict {}
 
+/// Errors that can occur during namespace validation
+#[derive(Debug)]
+pub enum NamespaceValidationError {
+    /// The name conflicts with an existing entry
+    Conflict(NamespaceConflict),
+    /// Failed to look up names in the required package repository
+    LookupFailed(String),
+}
+
+impl fmt::Display for NamespaceValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Conflict(c) => write!(f, "{c}"),
+            Self::LookupFailed(msg) => write!(f, "namespace lookup failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for NamespaceValidationError {}
+
+impl From<NamespaceConflict> for NamespaceValidationError {
+    fn from(conflict: NamespaceConflict) -> Self {
+        Self::Conflict(conflict)
+    }
+}
+
 /// Validate that a name is unique across both the package and dotfiles repositories.
 ///
-/// Returns `Ok(())` if the name is not found in either repository, or
-/// `Err(NamespaceConflict)` if it exists in one of them.
+/// Returns `Ok(())` if the name is not found in either repository, or an error
+/// if it exists in one of them.
 ///
-/// If either repository lookup fails (e.g., directory doesn't exist), the
-/// failure is treated as "name not found" — this is intentional since the
-/// `dotfiles/` directory is optional.
+/// Errors from the required `package_repo` are propagated as
+/// [`NamespaceValidationError::LookupFailed`] — I/O failures on the main repo
+/// should not be silently ignored. Errors from the optional `dotfiles_repo` are
+/// treated as "name not found" since the directory may not exist.
 pub fn validate_unique_name(
     name: &str,
     package_repo: &impl PackageRepository,
     dotfiles_repo: Option<&impl PackageRepository>,
-) -> Result<(), NamespaceConflict> {
-    // Check packages directory
-    if let Ok(files) = package_repo.find_package_files(name)
-        && !files.is_empty()
-    {
+) -> Result<(), NamespaceValidationError> {
+    // Check packages directory — errors propagate (required repo)
+    let files = package_repo
+        .find_package_files(name)
+        .map_err(|e| NamespaceValidationError::LookupFailed(e.to_string()))?;
+    if !files.is_empty() {
         return Err(NamespaceConflict {
             name: name.to_string(),
             found_in: NameLocation::Packages,
-        });
+        }
+        .into());
     }
 
-    // Check dotfiles directory (if present)
+    // Check dotfiles directory (if present) — errors ignored (optional repo)
     if let Some(dotfiles) = dotfiles_repo
         && let Ok(files) = dotfiles.find_package_files(name)
         && !files.is_empty()
@@ -79,7 +108,8 @@ pub fn validate_unique_name(
         return Err(NamespaceConflict {
             name: name.to_string(),
             found_in: NameLocation::Dotfiles,
-        });
+        }
+        .into());
     }
 
     Ok(())
@@ -88,7 +118,7 @@ pub fn validate_unique_name(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::port::MockPackageRepository;
+    use crate::package::port::{MockPackageRepository, PackageListError};
     use std::path::PathBuf;
 
     #[test]
@@ -116,13 +146,13 @@ mod tests {
 
         let result =
             validate_unique_name("existing", &package_repo, None::<&MockPackageRepository>);
-        assert_eq!(
+        assert!(matches!(
             result,
-            Err(NamespaceConflict {
-                name: "existing".to_string(),
+            Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Packages,
-            })
-        );
+                ..
+            }))
+        ));
     }
 
     #[test]
@@ -138,13 +168,13 @@ mod tests {
             .returning(|_| Ok(vec![PathBuf::from("/dotfiles/existing.yaml")]));
 
         let result = validate_unique_name("existing", &package_repo, Some(&dotfiles_repo));
-        assert_eq!(
+        assert!(matches!(
             result,
-            Err(NamespaceConflict {
-                name: "existing".to_string(),
+            Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Dotfiles,
-            })
-        );
+                ..
+            }))
+        ));
     }
 
     #[test]
@@ -156,6 +186,41 @@ mod tests {
 
         let no_dotfiles: Option<&MockPackageRepository> = None;
         let result = validate_unique_name("new-pkg", &package_repo, no_dotfiles);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_package_repo_error_propagates() {
+        let mut package_repo = MockPackageRepository::new();
+        package_repo.expect_find_package_files().returning(|_| {
+            Err(PackageListError::PackageDirectoryNotFound(
+                "/packages".into(),
+            ))
+        });
+
+        let result = validate_unique_name("foo", &package_repo, None::<&MockPackageRepository>);
+        assert!(matches!(
+            result,
+            Err(NamespaceValidationError::LookupFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_dotfiles_repo_error_treated_as_not_found() {
+        let mut package_repo = MockPackageRepository::new();
+        package_repo
+            .expect_find_package_files()
+            .returning(|_| Ok(vec![]));
+
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo.expect_find_package_files().returning(|_| {
+            Err(PackageListError::PackageDirectoryNotFound(
+                "/dotfiles".into(),
+            ))
+        });
+
+        // Should succeed — dotfiles repo errors are non-fatal
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
         assert!(result.is_ok());
     }
 
