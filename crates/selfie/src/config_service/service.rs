@@ -179,7 +179,7 @@ fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
         std::path::absolute(configs_dir),
     ) {
         (Ok(abs_source), Ok(abs_configs)) => {
-            normalize_path(&abs_source).starts_with(&normalize_path(&abs_configs))
+            normalize_path(&abs_source).starts_with(normalize_path(&abs_configs))
         }
         _ => false,
     }
