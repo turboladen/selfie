@@ -5,7 +5,6 @@ use super::{DotfileEntry, EnvironmentConfig, Package};
 #[derive(Default)]
 pub struct PackageBuilder {
     name: String,
-    version: String,
     homepage: Option<String>,
     description: Option<String>,
     dotfiles: Vec<DotfileEntry>,
@@ -23,17 +22,6 @@ impl PackageBuilder {
     #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.to_string();
-        self
-    }
-
-    /// Set the package version
-    ///
-    /// # Arguments
-    ///
-    /// * `version` - The package version string
-    #[must_use]
-    pub fn version(mut self, version: &str) -> Self {
-        self.version = version.to_string();
         self
     }
 
@@ -103,7 +91,6 @@ impl PackageBuilder {
     pub fn build(self) -> Package {
         Package::new(
             self.name,
-            self.version,
             self.homepage,
             self.description,
             self.dotfiles,

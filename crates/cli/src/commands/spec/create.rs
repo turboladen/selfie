@@ -204,7 +204,6 @@ fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::packa
 
     selfie::package::Package::new(
         package_name.to_string(),
-        "0.1.0".to_string(),
         None,
         None,
         Vec::new(),
@@ -224,7 +223,6 @@ fn create_package_interactive(
     display.print_info("Creating package interactively...");
 
     let name = prompt_package_name(package_name, display)?;
-    let version = prompt_package_version(display)?;
     let homepage = prompt_package_homepage(display)?;
     let description = prompt_package_description(display)?;
     let environments = prompt_environments(&name, config, display)?;
@@ -232,7 +230,6 @@ fn create_package_interactive(
 
     Ok(selfie::package::Package::new(
         name,
-        version,
         homepage,
         description,
         Vec::new(),
@@ -249,17 +246,6 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read package name.");
-            1
-        })
-}
-
-fn prompt_package_version(display: &DisplayManager) -> Result<String, i32> {
-    Input::with_theme(&SimpleTheme)
-        .with_prompt("Version")
-        .default("0.1.0".to_string())
-        .interact()
-        .map_err(|_| {
-            display.print_error("Failed to read version.");
             1
         })
 }
@@ -470,7 +456,7 @@ mod tests {
         let package = create_basic_package("template-test", &config);
 
         assert_eq!(package.name(), "template-test");
-        assert_eq!(package.version(), "0.1.0");
+
         assert!(package.environments().contains_key("test-env"));
 
         let env = package.environments().get("test-env").unwrap();
@@ -519,7 +505,7 @@ mod tests {
         let package = create_basic_package("structure-test", &config);
 
         assert_eq!(package.name(), "structure-test");
-        assert_eq!(package.version(), "0.1.0");
+
         assert!(package.description().is_none());
         assert!(package.homepage().is_none());
 
@@ -542,7 +528,6 @@ mod tests {
         let package = create_basic_package("test-staging", &config);
 
         assert_eq!(package.name(), "test-staging");
-        assert_eq!(package.version(), "0.1.0");
 
         let environments = package.environments();
         assert!(environments.contains_key("staging"));
@@ -585,7 +570,6 @@ mod tests {
         let package = create_basic_package("structure-test", &config);
 
         assert_eq!(package.name(), "structure-test");
-        assert_eq!(package.version(), "0.1.0");
 
         let environments = package.environments();
         assert!(environments.contains_key("test-env"));
@@ -691,7 +675,6 @@ mod tests {
         let file_path = temp_dir.path().join("file-check.yml");
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert!(contents.contains("file-check"));
-        assert!(contents.contains("0.1.0"));
     }
 
     // ── UI-concern tests (name validation uses repo directly for interactive flow) ──

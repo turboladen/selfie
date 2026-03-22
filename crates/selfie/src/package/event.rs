@@ -1860,7 +1860,6 @@ pub enum PackageEvent {
 #[derive(Debug, Clone)]
 pub struct PackageInfoData {
     pub name: String,
-    pub version: String,
     pub description: Option<String>,
     pub homepage: Option<String>,
     pub environments: Vec<String>,
@@ -1902,7 +1901,6 @@ pub struct PackageListData {
 #[derive(Debug, Clone)]
 pub struct PackageListItem {
     pub name: String,
-    pub version: String,
     pub environments: Vec<String>,
     pub status: Option<CheckResult>,
 }
@@ -1918,7 +1916,6 @@ pub struct InvalidPackageInfo {
 #[derive(Debug, Clone)]
 pub struct SpecListItem {
     pub name: String,
-    pub version: String,
     pub description: Option<String>,
     pub environments: Vec<String>,
     pub git_status: Option<super::git::GitFileStatus>,

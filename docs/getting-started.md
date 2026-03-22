@@ -145,7 +145,6 @@ method:
 
 ```yaml
 name: ripgrep
-version: 1.0.0
 description: Fast text search tool that respects gitignore
 homepage: https://github.com/BurntSushi/ripgrep
 

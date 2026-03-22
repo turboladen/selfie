@@ -68,7 +68,6 @@ where
 
     let package_info = PackageInfoData {
         name: package_blob.package.name().to_string(),
-        version: package_blob.package.version().to_string(),
         description: package_blob
             .package
             .description()
@@ -237,7 +236,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| b.install("echo install"))
             .path(&pkg_path)
             .build();
@@ -298,7 +296,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| b.install("echo install"))
             .path(&pkg_path)
             .build();

@@ -162,7 +162,6 @@ mod tests {
         let packages = vec![
             PackageBuilder::default()
                 .name("ripgrep")
-                .version("1.0.0")
                 .environment("macos", |b| {
                     b.install("brew install ripgrep")
                         .check_some("command -v rg")
@@ -171,7 +170,6 @@ mod tests {
                 .build(),
             PackageBuilder::default()
                 .name("node")
-                .version("20.0.0")
                 .environment("macos", |b| b.install("brew install node"))
                 .path(temp_dir.path().join("node.yml"))
                 .build(),
@@ -218,13 +216,11 @@ mod tests {
         let packages = vec![
             PackageBuilder::default()
                 .name("ripgrep")
-                .version("1.0.0")
                 .environment("macos", |b| b.install("brew install ripgrep"))
                 .path(temp_dir.path().join("ripgrep.yml"))
                 .build(),
             PackageBuilder::default()
                 .name("apt-tool")
-                .version("1.0.0")
                 .environment("ubuntu", |b| b.install("apt install apt-tool"))
                 .path(temp_dir.path().join("apt-tool.yml"))
                 .build(),

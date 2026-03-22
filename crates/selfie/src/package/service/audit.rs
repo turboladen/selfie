@@ -370,7 +370,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install").check_some("echo check")
             })
@@ -417,7 +416,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install")
                     .check_some("echo check")
@@ -472,7 +470,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install")
                     .check_some("echo check")
@@ -527,7 +524,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install")
                     .check_some("echo check")
@@ -582,7 +578,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install")
                     .check_some("echo check")
@@ -644,14 +639,12 @@ mod tests {
 
         let pkg1 = PackageBuilder::default()
             .name("pkg-a")
-            .version("1.0.0")
             .environment("test", |b| b.install("echo install").audit_some("echo bun"))
             .path(temp_dir.path().join("pkg-a.yml"))
             .build();
 
         let pkg2 = PackageBuilder::default()
             .name("pkg-b")
-            .version("1.0.0")
             .environment("test", |b| b.install("echo install"))
             .path(temp_dir.path().join("pkg-b.yml"))
             .build();
@@ -730,7 +723,6 @@ mod tests {
         // Package only has "macos" environment, not "test" — should be excluded
         let pkg = PackageBuilder::default()
             .name("wrong-env-pkg")
-            .version("1.0.0")
             .environment("macos", |b| {
                 b.install("brew install something").audit_some("echo brew")
             })
@@ -785,7 +777,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test", |b| {
                 b.install("echo install")
                     .check_some("echo check")

@@ -2709,7 +2709,6 @@ dependencies = [
  "nix",
  "num_cpus",
  "pretty_assertions",
- "semver",
  "serde",
  "serde_json",
  "serde_yaml",

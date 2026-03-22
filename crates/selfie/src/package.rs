@@ -128,9 +128,6 @@ pub struct Package {
     /// Package name
     pub(crate) name: String,
 
-    /// Package version (for the selfie package file, not the underlying package)
-    pub(crate) version: String,
-
     /// Optional homepage URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) homepage: Option<String>,
@@ -239,7 +236,6 @@ impl Package {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
-        version: String,
         homepage: Option<String>,
         description: Option<String>,
         dotfiles: Vec<DotfileEntry>,
@@ -249,7 +245,6 @@ impl Package {
     ) -> Self {
         Self {
             name,
-            version,
             homepage,
             description,
             dotfiles,
@@ -283,7 +278,6 @@ impl Package {
 
         Self {
             name: name.to_string(),
-            version: "0.1.0".to_string(),
             homepage: None,
             description: None,
             dotfiles: Vec::new(),
@@ -297,12 +291,6 @@ impl Package {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Get the package version
-    #[must_use]
-    pub fn version(&self) -> &str {
-        &self.version
     }
 
     /// Get the optional homepage URL
@@ -356,12 +344,10 @@ mod package_tests {
     fn test_create_package_node() {
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("test install"))
             .build();
 
         assert_eq!(package.name, "test-package");
-        assert_eq!(package.version, "1.0.0");
         assert_eq!(package.environments.len(), 1);
         assert_eq!(
             package.environments.get("test-env").unwrap().install,
@@ -373,14 +359,12 @@ mod package_tests {
     fn test_create_package_with_metadata() {
         let package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .homepage("https://example.com")
             .description("Test package description")
             .environment("test-env", |b| b.install("test install"))
             .build();
 
         assert_eq!(package.name, "test-package");
-        assert_eq!(package.version, "1.0.0");
         assert_eq!(package.homepage, Some("https://example.com".to_string()));
         assert_eq!(
             package.description,

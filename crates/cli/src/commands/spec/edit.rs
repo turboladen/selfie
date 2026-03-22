@@ -144,7 +144,6 @@ mod tests {
 
         assert!(get_package.is_new());
         assert_eq!(get_package.package().name(), "test-template");
-        assert_eq!(get_package.package().version(), "0.1.0");
         assert_eq!(
             get_package.file_path(),
             package_dir.join("test-template.yml")
@@ -159,7 +158,6 @@ mod tests {
 
         let original_package = PackageBuilder::default()
             .name("test-package")
-            .version("1.0.0")
             .description("Test package")
             .environment("test", |b| {
                 b.install("echo 'test'").check(Some("echo 'check'"))
@@ -174,21 +172,11 @@ mod tests {
 
         // Should be equivalent
         assert_eq!(original_package.name(), deserialized.name());
-        assert_eq!(original_package.version(), deserialized.version());
         assert_eq!(original_package.description(), deserialized.description());
         assert_eq!(
             original_package.environments().len(),
             deserialized.environments().len()
         );
-    }
-
-    #[test]
-    fn test_package_template_version() {
-        // Verify that new package templates use 0.1.0 version - no filesystem needed
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let get_package = selfie::package::GetPackage::new("version-test", &package_dir);
-
-        assert_eq!(get_package.package().version(), "0.1.0");
     }
 
     #[test]
@@ -222,7 +210,6 @@ mod tests {
         // Create mock existing package
         let package = Package::new(
             "edit-test".to_string(),
-            "1.0.0".to_string(),
             Some("Test package for editing".to_string()),
             None,
             Vec::new(),
@@ -252,7 +239,6 @@ mod tests {
 
         let existing_package = get_result.unwrap();
         assert_eq!(existing_package.package().name(), "edit-test");
-        assert_eq!(existing_package.package().version(), "1.0.0");
 
         // Test saving edited package
         let save_result =

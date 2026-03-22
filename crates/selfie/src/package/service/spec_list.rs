@@ -89,7 +89,6 @@ where
             .map(|s| s.status_for_file(package.path()));
         let item = SpecListItem {
             name: package.name().to_string(),
-            version: package.version().to_string(),
             description: package.description().map(String::from),
             environments: package.environments().keys().cloned().collect(),
             git_status: file_git_status,
@@ -174,13 +173,11 @@ mod tests {
         let packages = vec![
             PackageBuilder::default()
                 .name("ripgrep")
-                .version("1.0.0")
                 .environment("macos", |b| b.install("brew install ripgrep"))
                 .path(temp_dir.path().join("ripgrep.yml"))
                 .build(),
             PackageBuilder::default()
                 .name("apt-tool")
-                .version("1.0.0")
                 .environment("ubuntu", |b| b.install("apt install apt-tool"))
                 .path(temp_dir.path().join("apt-tool.yml"))
                 .build(),
@@ -235,13 +232,11 @@ mod tests {
         let packages = vec![
             PackageBuilder::default()
                 .name("ripgrep")
-                .version("1.0.0")
                 .environment("macos", |b| b.install("brew install ripgrep"))
                 .path(temp_dir.path().join("ripgrep.yml"))
                 .build(),
             PackageBuilder::default()
                 .name("apt-tool")
-                .version("1.0.0")
                 .environment("ubuntu", |b| b.install("apt install apt-tool"))
                 .path(temp_dir.path().join("apt-tool.yml"))
                 .build(),
@@ -290,7 +285,6 @@ mod tests {
         let packages = vec![
             PackageBuilder::default()
                 .name("node")
-                .version("20.0.0")
                 .environment("macos", |b| b.install("brew install node"))
                 .path(temp_dir.path().join("node.yml"))
                 .build(),

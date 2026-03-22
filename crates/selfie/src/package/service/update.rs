@@ -212,7 +212,6 @@ mod tests {
     fn create_test_package(name: &str) -> crate::package::Package {
         PackageBuilder::default()
             .name(name)
-            .version("1.0.0")
             .description("Test package")
             .homepage("https://example.com")
             .environment("test-env", |b| {
@@ -365,7 +364,6 @@ mod tests {
         // Package with two environments so removing one still leaves a valid package
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("brew install test"))
             .environment("other-env", |b| b.install("apt install test"))
             .path("/test/packages/test-pkg.yml")
@@ -481,7 +479,6 @@ mod tests {
         // Package where both envs have unmatched single quotes
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("echo it's broken"))
             .environment("other-env", |b| b.install("echo it's also broken"))
             .path("/test/packages/test-pkg.yml")

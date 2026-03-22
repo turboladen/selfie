@@ -137,7 +137,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("test-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("brew install test"))
             .path("/test/packages/test-pkg.yml")
             .build();
@@ -169,7 +168,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("target-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("brew install target"))
             .path("/test/packages/target-pkg.yml")
             .build();
@@ -179,7 +177,6 @@ mod tests {
 
         let dependent = PackageBuilder::default()
             .name("dependent-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| {
                 b.install("brew install dependent")
                     .dependencies(vec!["target-pkg"])
@@ -251,7 +248,6 @@ mod tests {
 
         let package = PackageBuilder::default()
             .name("cfg-pkg")
-            .version("1.0.0")
             .environment("test-env", |b| b.install("brew install cfg-pkg"))
             .dotfiles(vec![
                 DotfileEntry::new("vimrc", "~/.vimrc"),

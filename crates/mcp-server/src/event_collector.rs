@@ -66,7 +66,6 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         PackageEvent::PackageInfoLoaded { package_info, .. } => Some(serde_json::json!({
             "type": "package_info",
             "name": &package_info.name,
-            "version": &package_info.version,
             "description": &package_info.description,
             "homepage": &package_info.homepage,
             "environments": &package_info.environments,
@@ -93,7 +92,6 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
             "type": "package_list_item",
             "name": &package_item.name,
-            "version": &package_item.version,
             "environments": &package_item.environments,
             "status": package_item.status.as_ref().map(check_status_label),
         })),
@@ -135,7 +133,6 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         PackageEvent::SpecListItemCompleted { spec_item, .. } => Some(serde_json::json!({
             "type": "spec_list_item",
             "name": &spec_item.name,
-            "version": &spec_item.version,
             "description": &spec_item.description,
             "environments": &spec_item.environments,
             "git_status": git_status_label(spec_item.git_status.as_ref()),
@@ -393,7 +390,7 @@ mod tests {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
                     name: "ripgrep".to_string(),
-                    version: "1.0.0".to_string(),
+
                     environments: vec!["macos".to_string()],
                     status: Some(CheckResult::Success {
                         stdout: "/opt/homebrew/bin/rg".to_string(),
@@ -405,7 +402,7 @@ mod tests {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
                     name: "missing-pkg".to_string(),
-                    version: "1.0.0".to_string(),
+
                     environments: vec!["macos".to_string()],
                     status: Some(CheckResult::Failed {
                         stdout: String::new(),
@@ -441,7 +438,7 @@ mod tests {
                 operation_info: test_op_info(),
                 spec_item: SpecListItem {
                     name: "ripgrep".to_string(),
-                    version: "1.0.0".to_string(),
+
                     description: Some("Fast search tool".to_string()),
                     environments: vec!["macos".to_string(), "ubuntu".to_string()],
                     git_status: None,
@@ -476,7 +473,6 @@ mod tests {
         assert_eq!(result.data["data"].as_array().unwrap().len(), 2);
         assert_eq!(result.data["data"][0]["type"], "spec_list_item");
         assert_eq!(result.data["data"][0]["name"], "ripgrep");
-        assert_eq!(result.data["data"][0]["version"], "1.0.0");
         assert_eq!(result.data["data"][0]["description"], "Fast search tool");
         assert_eq!(result.data["data"][0]["environments"][0], "macos");
         assert_eq!(result.data["data"][1]["type"], "spec_list_summary");

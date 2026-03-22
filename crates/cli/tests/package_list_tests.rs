@@ -31,7 +31,6 @@ fn test_package_list_single_package() {
     // Create a single package
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Hello'"))
         .build();
 
@@ -42,8 +41,7 @@ fn test_package_list_single_package() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("test-package"))
-        .stdout(predicate::str::contains("v1.0.0"));
+        .stdout(predicate::str::contains("test-package"));
 }
 
 #[test]
@@ -54,17 +52,14 @@ fn test_package_list_multiple_packages() {
     let packages = vec![
         PackageBuilder::default()
             .name("package-a")
-            .version("1.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Install A'"))
             .build(),
         PackageBuilder::default()
             .name("package-b")
-            .version("2.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Install B'"))
             .build(),
         PackageBuilder::default()
             .name("package-c")
-            .version("3.0.0")
             .environment("other-env", |b| b.install("echo 'Install C'"))
             .build(),
     ];
@@ -80,15 +75,12 @@ fn test_package_list_multiple_packages() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("package-a"))
-        .stdout(predicate::str::contains("package-b"))
-        .stdout(predicate::str::contains("v1.0.0"))
-        .stdout(predicate::str::contains("v2.0.0"));
+        .stdout(predicate::str::contains("package-b"));
 
     // package-c should NOT be listed since it doesn't support current environment
     let output = cmd.assert().success().get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
     assert!(!output_str.contains("package-c"));
-    assert!(!output_str.contains("v3.0.0"));
 }
 
 #[test]
@@ -98,7 +90,6 @@ fn test_package_list_with_invalid_yaml() {
     // Create a valid package
     let package = PackageBuilder::default()
         .name("valid-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Valid'"))
         .build();
 
@@ -109,7 +100,6 @@ fn test_package_list_with_invalid_yaml() {
     let invalid_path = packages_dir.join("invalid-package.yaml");
     let invalid_yaml = r#"
     name: "invalid-package"
-    version: 1.0.0
     invalid_yaml: :::
     "#;
 
@@ -134,20 +124,17 @@ fn test_package_list_different_environments() {
         // Package with current environment
         PackageBuilder::default()
             .name("current-env-package")
-            .version("1.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Current'"))
             .build(),
         // Package with multiple environments including current
         PackageBuilder::default()
             .name("multi-env-package")
-            .version("2.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Multi current'"))
             .environment("other-env", |b| b.install("echo 'Multi other'"))
             .build(),
         // Package without the current environment
         PackageBuilder::default()
             .name("different-env-package")
-            .version("3.0.0")
             .environment("other-env", |b| b.install("echo 'Different'"))
             .build(),
     ];
@@ -177,7 +164,6 @@ fn test_package_list_with_no_color_flag() {
 
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Hello'"))
         .build();
 
@@ -199,7 +185,6 @@ fn test_package_list_shows_status() {
     // Create a package with a check command
     let package = PackageBuilder::default()
         .name("test-package-with-check")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing'")
                 .check(Some("echo 'check command' > /dev/null && exit 0"))
@@ -225,7 +210,6 @@ fn test_package_list_shows_no_check_status() {
     // Create a package without a check command
     let package = PackageBuilder::default()
         .name("no-check-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Installing'"))
         .build();
 
@@ -268,14 +252,12 @@ fn test_package_list_all_flag_environment_ordering() {
         // Package where current environment is not first alphabetically
         PackageBuilder::default()
             .name("bacon")
-            .version("1.0.0")
             .environment("arch-home", |b| b.install("echo 'Install on arch'"))
             .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
             .build(),
         // Package where current environment is first alphabetically
         PackageBuilder::default()
             .name("bat")
-            .version("1.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
             .environment("ubuntu-server", |b| b.install("echo 'Install on ubuntu'"))
             .build(),
@@ -332,13 +314,11 @@ fn test_package_list_all_flag_shows_all_packages() {
         // Package with current environment
         PackageBuilder::default()
             .name("current-env-package")
-            .version("1.0.0")
             .environment(SELFIE_ENV, |b| b.install("echo 'Current'"))
             .build(),
         // Package without current environment
         PackageBuilder::default()
             .name("different-env-package")
-            .version("2.0.0")
             .environment("other-env", |b| b.install("echo 'Different'"))
             .build(),
     ];
@@ -380,7 +360,6 @@ fn test_package_list_all_flag_not_relevant_status() {
     // Create a package that doesn't support the current environment
     let package_not_relevant = PackageBuilder::default()
         .name("not-relevant-package")
-        .version("1.0.0")
         .environment("other-env", |b| {
             b.install("echo 'Install on other-env'")
                 .check(Some("echo 'check on other-env'"))
@@ -390,7 +369,6 @@ fn test_package_list_all_flag_not_relevant_status() {
     // Create a package that supports current environment but has no check
     let package_no_check = PackageBuilder::default()
         .name("no-check-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
         .build();
 
@@ -431,14 +409,12 @@ fn test_package_list_default_behavior_filters_by_environment() {
     // Create a package that supports current environment but has no check
     let package_no_check = PackageBuilder::default()
         .name("no-check-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("echo 'Install on test-env'"))
         .build();
 
     // Create a package that supports current environment with check
     let package_with_check = PackageBuilder::default()
         .name("with-check-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Install on test-env'")
                 .check(Some("echo 'check on test-env'"))
@@ -477,18 +453,15 @@ fn test_package_list_environment_mismatch_shows_stats() {
     let packages = vec![
         PackageBuilder::default()
             .name("macos-package")
-            .version("1.0.0")
             .environment("macos", |b| b.install("echo 'Install on macOS'"))
             .build(),
         PackageBuilder::default()
             .name("ubuntu-package")
-            .version("1.0.0")
             .environment("ubuntu", |b| b.install("echo 'Install on Ubuntu'"))
             .environment("debian", |b| b.install("echo 'Install on Debian'"))
             .build(),
         PackageBuilder::default()
             .name("multi-env-package")
-            .version("1.0.0")
             .environment("windows", |b| b.install("echo 'Install on Windows'"))
             .environment("macos", |b| b.install("echo 'Install on macOS'"))
             .environment("ubuntu", |b| b.install("echo 'Install on Ubuntu'"))

@@ -319,7 +319,6 @@ mod tests {
         let package = repo.get_package("ripgrep").unwrap();
 
         assert_eq!(package.package.name, "ripgrep");
-        assert_eq!(package.package.version, "0.1.0");
         assert_eq!(package.package.environments.len(), 1);
     }
 
@@ -504,10 +503,8 @@ mod tests {
         let ripgrep = package_output.get("ripgrep").unwrap();
         let fzf = package_output.get("fzf").unwrap();
 
-        assert_eq!(ripgrep.version, "1.0.0");
         assert!(ripgrep.environments.contains_key("test-env"));
 
-        assert_eq!(fzf.version, "0.2.0");
         assert!(fzf.environments.contains_key("other-env"));
     }
 
@@ -1023,7 +1020,6 @@ environments:
         // Create a test package
         let package = Package::new(
             "test-package".to_string(),
-            "1.0.0".to_string(),
             None,
             None,
             Vec::new(),
@@ -1051,7 +1047,6 @@ environments:
         // Create a test package
         let package = Package::new(
             "test-package".to_string(),
-            "1.0.0".to_string(),
             None,
             None,
             Vec::new(),

@@ -334,7 +334,7 @@ mod tests {
 
         assert!(package_blob.is_new());
         assert_eq!(package_blob.package().name(), "test-package");
-        assert_eq!(package_blob.package().version(), "0.1.0");
+
         assert_eq!(
             package_blob.file_path(),
             package_dir.join("test-package.yml")
@@ -370,7 +370,7 @@ mod tests {
         // Verify package structure is correct before saving
         assert!(package_blob.is_new());
         assert_eq!(package_blob.package().name(), "save-test");
-        assert_eq!(package_blob.package().version(), "0.1.0");
+
         assert_eq!(package_blob.file_path(), package_dir.join("save-test.yml"));
 
         // Verify it has default environment (since create_new_package uses GetPackage::new)
@@ -389,7 +389,7 @@ mod tests {
 
         assert!(package_blob.is_new());
         assert_eq!(package_blob.package().name(), "structure-test");
-        assert_eq!(package_blob.package().version(), "0.1.0");
+
         assert_eq!(
             package_blob.file_path(),
             package_dir.join("structure-test.yml")
@@ -550,7 +550,7 @@ mod tests {
 
         // Verify package structure before saving
         assert_eq!(package_blob.package().name(), "workflow-test");
-        assert_eq!(package_blob.package().version(), "0.1.0");
+
         assert!(
             package_blob
                 .package()

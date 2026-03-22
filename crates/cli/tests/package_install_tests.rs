@@ -11,7 +11,6 @@ fn test_package_install() {
     // Create a single package
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing test package'")
                 .check_some("exit 1")
@@ -34,7 +33,6 @@ fn test_failing_recommend_does_not_fail_parent_install() {
     // Create parent package that recommends a broken package
     let parent = PackageBuilder::default()
         .name("parent-pkg")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing parent'")
                 .check_some("exit 1")
@@ -46,7 +44,6 @@ fn test_failing_recommend_does_not_fail_parent_install() {
     // Create a broken recommended package
     let broken = PackageBuilder::default()
         .name("broken-rec")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| b.install("exit 1").check_some("exit 1"))
         .build();
     add_package(&temp_dir, &broken);
@@ -70,7 +67,6 @@ fn test_no_recommends_flag_skips_recommends() {
 
     let parent = PackageBuilder::default()
         .name("skip-rec-pkg")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing'")
                 .check_some("exit 1")
@@ -81,7 +77,6 @@ fn test_no_recommends_flag_skips_recommends() {
 
     let rec = PackageBuilder::default()
         .name("some-rec")
-        .version("1.0.0")
         .environment(SELFIE_ENV, |b| {
             b.install("echo 'Installing rec'").check_some("exit 1")
         })

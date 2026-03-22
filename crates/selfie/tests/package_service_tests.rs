@@ -212,7 +212,6 @@ async fn test_service_spec_info_package() {
 
     if let PackageEvent::PackageInfoLoaded { package_info, .. } = &info_events[0] {
         assert_eq!(package_info.name, "info-package");
-        assert_eq!(package_info.version, "1.0.0");
         assert_eq!(package_info.current_environment, "test");
         assert!(package_info.environments.contains(&"test".to_string()));
     } else {

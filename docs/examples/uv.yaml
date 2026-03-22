@@ -1,5 +1,4 @@
 name: uv
-version: 1.0.0
 description: Fast Python package and project manager
 homepage: https://github.com/astral-sh/uv
 

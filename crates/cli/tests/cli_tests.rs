@@ -90,7 +90,6 @@ fn test_cli_package_list() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'hi'"))
         .build();
 
@@ -106,7 +105,6 @@ fn test_cli_spec_info() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'hi'"))
         .build();
 
@@ -122,7 +120,6 @@ fn test_cli_package_check() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| {
             builder
                 .install("echo 'hi'")
@@ -142,7 +139,6 @@ fn test_cli_package_install() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| {
             builder.install("echo 'installing test-package'")
         })
@@ -160,7 +156,6 @@ fn test_cli_package_status() {
     let temp_dir = setup_default_test_config();
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| {
             builder
                 .install("echo 'hi'")
@@ -199,7 +194,6 @@ fn test_cli_spec_validate() {
 
     let package = PackageBuilder::default()
         .name("test-package")
-        .version("0.1.0")
         .environment(SELFIE_ENV, |builder| builder.install("echo 'hi'"))
         .build();
 
