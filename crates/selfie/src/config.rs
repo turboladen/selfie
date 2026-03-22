@@ -121,6 +121,16 @@ impl SelfieConfig {
     pub fn package_directory_mut(&mut self) -> &mut PathBuf {
         &mut self.package_directory
     }
+
+    /// Get a mutable reference to the configs directory override
+    pub fn configs_directory_mut(&mut self) -> &mut Option<PathBuf> {
+        &mut self.configs_directory
+    }
+
+    /// Get a mutable reference to the state directory override
+    pub fn state_directory_mut(&mut self) -> &mut Option<PathBuf> {
+        &mut self.state_directory
+    }
 }
 
 /// Builder pattern for `SelfieConfig` testing

@@ -121,6 +121,12 @@ impl ClapCli {
         if let Some(dir) = self.package_directory.as_ref() {
             selfie_config.package_directory_mut().clone_from(dir);
         }
+        if let Some(dir) = self.configs_directory.as_ref() {
+            *selfie_config.configs_directory_mut() = Some(dir.clone());
+        }
+        if let Some(dir) = self.state_directory.as_ref() {
+            *selfie_config.state_directory_mut() = Some(dir.clone());
+        }
 
         // Override CLI-specific fields
         if self.verbose {
@@ -173,6 +179,8 @@ mod tests {
     struct FakeArgs {
         environment: Option<&'static str>,
         package_directory: Option<&'static str>,
+        configs_directory: Option<&'static str>,
+        state_directory: Option<&'static str>,
         verbose: bool,
         no_color: bool,
     }
@@ -186,6 +194,14 @@ mod tests {
             }
             if let Some(dir) = self.package_directory {
                 args.push("--package-directory");
+                args.push(dir);
+            }
+            if let Some(dir) = self.configs_directory {
+                args.push("--configs-directory");
+                args.push(dir);
+            }
+            if let Some(dir) = self.state_directory {
+                args.push("--state-directory");
                 args.push(dir);
             }
             if self.verbose {
@@ -221,6 +237,8 @@ mod tests {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: None,
+            configs_directory: None,
+            state_directory: None,
             verbose: false,
             no_color: false,
         }
@@ -238,6 +256,8 @@ mod tests {
         let args = FakeArgs {
             environment: None,
             package_directory: Some("/cli/path"),
+            configs_directory: None,
+            state_directory: None,
             verbose: false,
             no_color: false,
         }
@@ -253,6 +273,8 @@ mod tests {
         let args = FakeArgs {
             environment: None,
             package_directory: None,
+            configs_directory: None,
+            state_directory: None,
             verbose: true,
             no_color: true,
         }
@@ -268,6 +290,8 @@ mod tests {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: Some("/cli/path"),
+            configs_directory: None,
+            state_directory: None,
             verbose: true,
             no_color: true,
         }
@@ -285,6 +309,8 @@ mod tests {
         let args = FakeArgs {
             environment: None,
             package_directory: None,
+            configs_directory: None,
+            state_directory: None,
             verbose: false,
             no_color: false,
         }
@@ -310,6 +336,8 @@ mod tests {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: None,
+            configs_directory: None,
+            state_directory: None,
             verbose: true,
             no_color: false,
         }
@@ -346,5 +374,67 @@ mod tests {
         let selfie = default_selfie_config();
         let config = CliConfig::new(selfie.clone(), CliSection::default());
         assert_eq!(config.selfie_config().environment(), selfie.environment());
+    }
+
+    #[test]
+    fn test_build_cli_config_configs_dir_override() {
+        let args = FakeArgs {
+            environment: None,
+            package_directory: None,
+            configs_directory: Some("/cli/configs"),
+            state_directory: None,
+            verbose: false,
+            no_color: false,
+        }
+        .into_cli();
+
+        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        assert_eq!(
+            config.selfie_config().configs_directory(),
+            PathBuf::from("/cli/configs")
+        );
+    }
+
+    #[test]
+    fn test_build_cli_config_state_dir_override() {
+        let args = FakeArgs {
+            environment: None,
+            package_directory: None,
+            configs_directory: None,
+            state_directory: Some("/cli/state"),
+            verbose: false,
+            no_color: false,
+        }
+        .into_cli();
+
+        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        assert_eq!(
+            config.selfie_config().state_directory(),
+            Some(&PathBuf::from("/cli/state"))
+        );
+    }
+
+    #[test]
+    fn test_build_cli_config_all_directory_overrides() {
+        let args = FakeArgs {
+            environment: None,
+            package_directory: Some("/cli/packages"),
+            configs_directory: Some("/cli/configs"),
+            state_directory: Some("/cli/state"),
+            verbose: false,
+            no_color: false,
+        }
+        .into_cli();
+
+        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        assert_eq!(config.package_directory(), &PathBuf::from("/cli/packages"));
+        assert_eq!(
+            config.selfie_config().configs_directory(),
+            PathBuf::from("/cli/configs")
+        );
+        assert_eq!(
+            config.selfie_config().state_directory(),
+            Some(&PathBuf::from("/cli/state"))
+        );
     }
 }
