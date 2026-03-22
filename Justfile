@@ -20,7 +20,7 @@ fmt-check:
 
 # Lint with clippy (zero warnings)
 clippy:
-    cargo clippy --all-targets
+    cargo clippy --all-targets -- -D warnings
 
 # Run all tests
 test:

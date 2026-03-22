@@ -234,9 +234,8 @@ fn handle_list_event(
                     };
 
                     let line = format!(
-                        "{prefix} {:<width$}  {:<10}  {error_text}",
+                        "{prefix} {:<width$}  {error_text}",
                         filename,
-                        "",
                         width = state.max_name_len
                     );
 

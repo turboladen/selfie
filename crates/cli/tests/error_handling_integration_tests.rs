@@ -159,8 +159,14 @@ name: "incomplete-package"
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Package parses but has no matching environment — list succeeds gracefully
-    cmd.assert().success();
+    // Package parses but has no matching environment — list succeeds but
+    // the package shouldn't appear in the default (env-filtered) output
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("No packages found").or(
+            // If other packages exist, incomplete-package shouldn't show
+            predicate::str::contains("incomplete-package").not(),
+        ));
 }
 
 #[test]
