@@ -58,7 +58,7 @@ impl Package {
         issues.extend(self.validate_urls());
         issues.extend(self.validate_environments_contents(current_env));
         issues.extend(self.validate_command_syntax());
-        issues.extend(self.validate_configs());
+        issues.extend(self.validate_dotfiles());
 
         ValidationResult {
             package_name: self.name.clone(),
@@ -393,25 +393,25 @@ impl Package {
         issues
     }
 
-    /// Validate config entry definitions
+    /// Validate dotfile entry definitions
     ///
-    /// Checks each config entry for:
+    /// Checks each dotfile entry for:
     /// - Empty source path (error)
     /// - Path traversal in source via `..` (error)
-    /// - Target path that is not absolute and doesn't start with `~` (warning)
-    pub(crate) fn validate_configs(&self) -> Vec<ValidationIssue> {
+    /// - Target path that is not absolute and doesn't start with `~` (error)
+    pub(crate) fn validate_dotfiles(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
-        for (i, config) in self.configs.iter().enumerate() {
-            let source = config.source();
-            let target = config.target();
+        for (i, dotfile) in self.dotfiles.iter().enumerate() {
+            let source = dotfile.source();
+            let target = dotfile.target();
 
             if source.is_empty() {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
-                    &format!("configs[{i}].source"),
-                    "Config source path cannot be empty",
-                    Some("Provide a relative path to the config file within the repository."),
+                    &format!("dotfiles[{i}].source"),
+                    "Dotfile source path cannot be empty",
+                    Some("Provide a relative path to the dotfile within the repository."),
                 ));
             }
 
@@ -421,8 +421,8 @@ impl Package {
             {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
-                    &format!("configs[{i}].source"),
-                    "Config source path must not contain '..' (path traversal)",
+                    &format!("dotfiles[{i}].source"),
+                    "Dotfile source path must not contain '..' (path traversal)",
                     Some("Use a relative path without parent directory references."),
                 ));
             }
@@ -430,17 +430,17 @@ impl Package {
             if source.starts_with('/') || source.starts_with('~') {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
-                    &format!("configs[{i}].source"),
-                    "Config source path must be relative",
-                    Some("Use a path relative to the configs directory, e.g., 'pkg/config.toml'."),
+                    &format!("dotfiles[{i}].source"),
+                    "Dotfile source path must be relative",
+                    Some("Use a path relative to the dotfiles directory, e.g., 'pkg/config.toml'."),
                 ));
             }
 
             if !target.starts_with('/') && !target.starts_with('~') {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
-                    &format!("configs[{i}].target"),
-                    "Config target path must be absolute or start with '~'",
+                    &format!("dotfiles[{i}].target"),
+                    "Dotfile target path must be absolute or start with '~'",
                     Some("Use an absolute path like '/etc/config' or '~/.config/file'."),
                 ));
             }
@@ -453,7 +453,7 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use crate::{
-        package::{ConfigEntry, EnvironmentConfig, builder::PackageBuilder},
+        package::{DotfileEntry, EnvironmentConfig, builder::PackageBuilder},
         validation::ValidationLevel,
     };
 
@@ -666,45 +666,48 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_relative_target_errors() {
+    fn test_validate_dotfile_relative_target_errors() {
         let package = PackageBuilder::default()
             .name("bad-config")
             .version("1.0.0")
-            .configs(vec![ConfigEntry::new("src/file.txt", "relative/path.txt")])
+            .dotfiles(vec![DotfileEntry::new("src/file.txt", "relative/path.txt")])
             .build();
         let result = package.validate("test-env");
         assert!(result.issues().has_errors());
     }
 
     #[test]
-    fn test_validate_config_absolute_target_passes() {
+    fn test_validate_dotfile_absolute_target_passes() {
         let package = PackageBuilder::default()
             .name("good-config")
             .version("1.0.0")
             .environment("test-env", |b| b.install("echo hi"))
-            .configs(vec![ConfigEntry::new("src/file.txt", "~/.config/file.txt")])
+            .dotfiles(vec![DotfileEntry::new(
+                "src/file.txt",
+                "~/.config/file.txt",
+            )])
             .build();
         let result = package.validate("test-env");
         assert!(!result.issues().has_errors());
     }
 
     #[test]
-    fn test_validate_config_empty_source_errors() {
+    fn test_validate_dotfile_empty_source_errors() {
         let package = PackageBuilder::default()
             .name("bad-source")
             .version("1.0.0")
-            .configs(vec![ConfigEntry::new("", "~/.config/file.txt")])
+            .dotfiles(vec![DotfileEntry::new("", "~/.config/file.txt")])
             .build();
         let result = package.validate("test-env");
         assert!(result.issues().has_errors());
     }
 
     #[test]
-    fn test_validate_config_path_traversal_errors() {
+    fn test_validate_dotfile_path_traversal_errors() {
         let package = PackageBuilder::default()
             .name("bad-traversal")
             .version("1.0.0")
-            .configs(vec![ConfigEntry::new(
+            .dotfiles(vec![DotfileEntry::new(
                 "../etc/passwd",
                 "~/.config/file.txt",
             )])

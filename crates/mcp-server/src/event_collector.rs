@@ -116,14 +116,14 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         } => Some(
             serde_json::json!({ "type": "removal_dependency_info", "package": package_name, "dependent_packages": dependent_packages }),
         ),
-        PackageEvent::ConfigCleanupInfo {
+        PackageEvent::DotfileCleanupInfo {
             package_name,
-            config_targets,
+            dotfile_targets,
             ..
         } => Some(serde_json::json!({
-            "type": "config_cleanup_info",
+            "type": "dotfile_cleanup_info",
             "package_name": package_name,
-            "config_targets": config_targets,
+            "dotfile_targets": dotfile_targets,
         })),
         PackageEvent::Info { output, .. } => Some(serde_json::json!({
             "type": "output",
@@ -175,42 +175,42 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "type": "warning",
             "message": message,
         })),
-        PackageEvent::ConfigDeploying { source, target, .. } => Some(serde_json::json!({
-            "type": "config_deploying",
+        PackageEvent::DotfileDeploying { source, target, .. } => Some(serde_json::json!({
+            "type": "dotfile_deploying",
             "source": source,
             "target": target,
         })),
-        PackageEvent::ConfigDeployed { source, target, .. } => Some(serde_json::json!({
-            "type": "config_deployed",
+        PackageEvent::DotfileDeployed { source, target, .. } => Some(serde_json::json!({
+            "type": "dotfile_deployed",
             "source": source,
             "target": target,
         })),
-        PackageEvent::ConfigSkipped {
+        PackageEvent::DotfileSkipped {
             source,
             target,
             reason,
             ..
         } => Some(serde_json::json!({
-            "type": "config_skipped",
+            "type": "dotfile_skipped",
             "source": source,
             "target": target,
             "reason": reason,
         })),
-        PackageEvent::ConfigConflict {
+        PackageEvent::DotfileConflict {
             source,
             target,
             diff,
             ..
         } => Some(serde_json::json!({
-            "type": "config_conflict",
+            "type": "dotfile_conflict",
             "source": source,
             "target": target,
             "diff": diff,
         })),
-        PackageEvent::ConfigDriftDetected {
+        PackageEvent::DotfileDriftDetected {
             target, drift_type, ..
         } => Some(serde_json::json!({
-            "type": "config_drift_detected",
+            "type": "dotfile_drift_detected",
             "target": target,
             "drift_type": drift_type,
         })),

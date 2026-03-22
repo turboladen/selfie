@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum OperationType {
-    ConfigApply,
-    ConfigDrift,
+    DotfileApply,
+    DotfileDrift,
     ConfigValidate,
     PackageAudit,
     PackageCheck,

@@ -146,14 +146,14 @@ environments:
 }
 
 #[test]
-fn test_parse_package_with_configs() {
+fn test_parse_package_with_dotfiles() {
     let yaml = r#"
 name: fnm
 version: "1.0.0"
 environments:
   macos:
     install: brew install fnm
-configs:
+dotfiles:
   - source: fnm/fish-conf.fish
     target: ~/.config/fish/conf.d/fnm.fish
   - source: fnm/zsh-conf.zsh
@@ -162,10 +162,10 @@ post_install_note: |
   Configure your shell for fnm.
 "#;
     let package: selfie::package::Package = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(package.configs().len(), 2);
-    assert_eq!(package.configs()[0].source(), "fnm/fish-conf.fish");
+    assert_eq!(package.dotfiles().len(), 2);
+    assert_eq!(package.dotfiles()[0].source(), "fnm/fish-conf.fish");
     assert_eq!(
-        package.configs()[0].target(),
+        package.dotfiles()[0].target(),
         "~/.config/fish/conf.d/fnm.fish"
     );
     assert_eq!(
@@ -175,7 +175,7 @@ post_install_note: |
 }
 
 #[test]
-fn test_parse_package_without_configs_defaults_to_empty() {
+fn test_parse_package_without_dotfiles_defaults_to_empty() {
     let yaml = r#"
 name: basic
 version: "1.0.0"
@@ -184,6 +184,6 @@ environments:
     install: apt install basic
 "#;
     let package: selfie::package::Package = serde_yaml::from_str(yaml).unwrap();
-    assert!(package.configs().is_empty());
+    assert!(package.dotfiles().is_empty());
     assert!(package.post_install_note().is_none());
 }

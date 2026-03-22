@@ -1,13 +1,13 @@
-//! Apply command handler for deploying config files
+//! Apply command handler for deploying dotfiles
 //!
 //! This module handles the `selfie apply` CLI command, which deploys
-//! configuration files defined in package YAML files to their target
+//! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
 use selfie::{
-    config_service::{
-        port::{ApplyOptions, ConfigService},
-        service::ConfigServiceImpl,
+    dotfile_service::{
+        port::{ApplyOptions, DotfileService},
+        service::DotfileServiceImpl,
     },
     fs::real::RealFileSystem,
 };
@@ -20,7 +20,7 @@ use crate::{
 
 /// Handle the apply command
 ///
-/// Creates a `ConfigServiceImpl` and delegates to `apply_all` or `apply`
+/// Creates a `DotfileServiceImpl` and delegates to `apply_all` or `apply`
 /// based on whether a package name was given. Events are processed through
 /// the standard `EventProcessor`.
 pub(crate) async fn handle_apply(
@@ -35,13 +35,13 @@ pub(crate) async fn handle_apply(
 
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let service = ConfigServiceImpl::new(repo, fs, config.selfie_config().clone());
+    let service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
 
     let event_stream = if let Some(name) = &args.name {
-        info!("Applying config for package: {}", name);
+        info!("Applying dotfiles for package: {}", name);
         service.apply(name, options).await
     } else {
-        info!("Applying all config files");
+        info!("Applying all dotfiles");
         service.apply_all(options).await
     };
 

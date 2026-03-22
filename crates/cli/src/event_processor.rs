@@ -284,22 +284,22 @@ impl EventProcessor {
                     .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
             }
 
-            PackageEvent::ConfigDeploying { source, target, .. } => {
+            PackageEvent::DotfileDeploying { source, target, .. } => {
                 self.display
                     .print_info(format!("  Deploying {source} → {target}"));
             }
 
-            PackageEvent::ConfigDeployed { source, target, .. } => {
+            PackageEvent::DotfileDeployed { source, target, .. } => {
                 self.display
                     .print_success(format!("  ✓ {source} → {target}"));
             }
 
-            PackageEvent::ConfigSkipped { source, reason, .. } => {
+            PackageEvent::DotfileSkipped { source, reason, .. } => {
                 self.display
                     .print_info(format!("  ⊘ {source} skipped: {reason}"));
             }
 
-            PackageEvent::ConfigConflict {
+            PackageEvent::DotfileConflict {
                 source,
                 target,
                 diff,
@@ -310,7 +310,7 @@ impl EventProcessor {
                 self.display.print_info(diff.to_string());
             }
 
-            PackageEvent::ConfigDriftDetected {
+            PackageEvent::DotfileDriftDetected {
                 target, drift_type, ..
             } => {
                 self.display
@@ -321,16 +321,16 @@ impl EventProcessor {
                 self.display.print_info(format!("\n📋 {note}"));
             }
 
-            PackageEvent::ConfigCleanupInfo {
+            PackageEvent::DotfileCleanupInfo {
                 package_name,
-                config_targets,
+                dotfile_targets,
                 ..
             } => {
                 self.display.print_info(format!(
-                    "\nPackage '{}' has deployed config files:",
+                    "\nPackage '{}' has deployed dotfiles:",
                     package_name
                 ));
-                for target in &config_targets {
+                for target in &dotfile_targets {
                     self.display.print_info(format!("  - {}", target));
                 }
                 self.display.print_info(

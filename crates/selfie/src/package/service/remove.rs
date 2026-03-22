@@ -57,12 +57,13 @@ where
             .await;
     }
 
-    // Step 2b: Check for config files that may need cleanup
-    let configs = get_package.package().configs();
-    if !configs.is_empty() {
-        let config_targets: Vec<String> = configs.iter().map(|c| c.target().to_string()).collect();
+    // Step 2b: Check for dotfiles that may need cleanup
+    let dotfiles = get_package.package().dotfiles();
+    if !dotfiles.is_empty() {
+        let dotfile_targets: Vec<String> =
+            dotfiles.iter().map(|c| c.target().to_string()).collect();
         sender
-            .send_config_cleanup_info(package_name.to_string(), config_targets)
+            .send_dotfile_cleanup_info(package_name.to_string(), dotfile_targets)
             .await;
     }
 
@@ -96,7 +97,7 @@ mod tests {
     use crate::{
         config::SelfieConfigBuilder,
         package::{
-            ConfigEntry, GetPackage, PackageBuilder,
+            DotfileEntry, GetPackage, PackageBuilder,
             event::{OperationContext, OperationResult},
             port::MockPackageRepository,
             service::ProgressTracker,
@@ -252,9 +253,9 @@ mod tests {
             .name("cfg-pkg")
             .version("1.0.0")
             .environment("test-env", |b| b.install("brew install cfg-pkg"))
-            .configs(vec![
-                ConfigEntry::new("vimrc", "~/.vimrc"),
-                ConfigEntry::new("gitconfig", "~/.gitconfig"),
+            .dotfiles(vec![
+                DotfileEntry::new("vimrc", "~/.vimrc"),
+                DotfileEntry::new("gitconfig", "~/.gitconfig"),
             ])
             .path("/test/packages/cfg-pkg.yml")
             .build();
@@ -276,20 +277,20 @@ mod tests {
 
         assert!(matches!(result, OperationResult::Success(_)));
 
-        // Check that ConfigCleanupInfo was emitted
+        // Check that DotfileCleanupInfo was emitted
         let mut found_cleanup_info = false;
         while let Ok(event) = rx.try_recv() {
-            if let crate::package::event::PackageEvent::ConfigCleanupInfo {
+            if let crate::package::event::PackageEvent::DotfileCleanupInfo {
                 package_name,
-                config_targets,
+                dotfile_targets,
                 ..
             } = event
             {
                 assert_eq!(package_name, "cfg-pkg");
-                assert_eq!(config_targets, vec!["~/.vimrc", "~/.gitconfig"]);
+                assert_eq!(dotfile_targets, vec!["~/.vimrc", "~/.gitconfig"]);
                 found_cleanup_info = true;
             }
         }
-        assert!(found_cleanup_info, "Expected ConfigCleanupInfo event");
+        assert!(found_cleanup_info, "Expected DotfileCleanupInfo event");
     }
 }

@@ -94,15 +94,15 @@ impl GetPackage {
     }
 }
 
-/// A config file mapping from repo source to deployment target.
+/// A dotfile mapping from repo source to deployment target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConfigEntry {
+pub struct DotfileEntry {
     source: String,
     target: String,
 }
 
-impl ConfigEntry {
-    /// Create a new config entry with source and target paths.
+impl DotfileEntry {
+    /// Create a new dotfile entry with source and target paths.
     pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             source: source.into(),
@@ -110,7 +110,7 @@ impl ConfigEntry {
         }
     }
 
-    /// Get the source path (relative path within the configs repository).
+    /// Get the source path (relative path within the dotfiles repository).
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -139,9 +139,9 @@ pub struct Package {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
 
-    /// Config file mappings (source → target); applies regardless of environment
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) configs: Vec<ConfigEntry>,
+    /// Dotfile mappings (source → target); applies regardless of environment
+    #[serde(default, alias = "configs", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) dotfiles: Vec<DotfileEntry>,
 
     /// Optional note displayed to the user after a fresh install
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,7 +242,7 @@ impl Package {
         version: String,
         homepage: Option<String>,
         description: Option<String>,
-        configs: Vec<ConfigEntry>,
+        dotfiles: Vec<DotfileEntry>,
         post_install_note: Option<String>,
         environments: HashMap<String, EnvironmentConfig>,
         path: PathBuf,
@@ -252,7 +252,7 @@ impl Package {
             version,
             homepage,
             description,
-            configs,
+            dotfiles,
             post_install_note,
             environments,
             path,
@@ -286,7 +286,7 @@ impl Package {
             version: "0.1.0".to_string(),
             homepage: None,
             description: None,
-            configs: Vec::new(),
+            dotfiles: Vec::new(),
             post_install_note: None,
             environments,
             path: PathBuf::new(), // Will be set by GetPackage::new
@@ -317,10 +317,10 @@ impl Package {
         self.description.as_deref()
     }
 
-    /// Get the list of config file mappings for this package
+    /// Get the list of dotfile mappings for this package
     #[must_use]
-    pub fn configs(&self) -> &[ConfigEntry] {
-        &self.configs
+    pub fn dotfiles(&self) -> &[DotfileEntry] {
+        &self.dotfiles
     }
 
     /// Get the optional post-install note for this package

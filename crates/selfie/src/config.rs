@@ -25,9 +25,9 @@ pub struct SelfieConfig {
     pub(crate) environment: String,
     pub(crate) package_directory: PathBuf,
 
-    // Optional override for configs directory (defaults to sibling of package_directory)
+    // Optional override for dotfiles directory (defaults to sibling of package_directory)
     #[serde(default)]
-    configs_directory: Option<PathBuf>,
+    dotfiles_directory: Option<PathBuf>,
 
     // Optional override for deploy state directory (defaults to ~/.local/state/selfie per XDG)
     #[serde(default)]
@@ -71,18 +71,18 @@ impl SelfieConfig {
         &self.package_directory
     }
 
-    /// Get the configs directory path.
+    /// Get the dotfiles directory path.
     ///
-    /// Defaults to a sibling `configs` directory next to `package_directory`.
+    /// Defaults to a sibling `dotfiles` directory next to `package_directory`.
     /// For example, if `package_directory` is `~/selfie/packages`, this returns
-    /// `~/selfie/configs`. Can be overridden in config.
+    /// `~/selfie/dotfiles`. Can be overridden in config.
     #[must_use]
-    pub fn configs_directory(&self) -> PathBuf {
-        self.configs_directory.clone().unwrap_or_else(|| {
+    pub fn dotfiles_directory(&self) -> PathBuf {
+        self.dotfiles_directory.clone().unwrap_or_else(|| {
             self.package_directory
                 .parent()
-                .map(|p| p.join("configs"))
-                .unwrap_or_else(|| self.package_directory.join("configs"))
+                .map(|p| p.join("dotfiles"))
+                .unwrap_or_else(|| self.package_directory.join("dotfiles"))
         })
     }
 
@@ -122,9 +122,9 @@ impl SelfieConfig {
         &mut self.package_directory
     }
 
-    /// Get a mutable reference to the configs directory override
-    pub fn configs_directory_mut(&mut self) -> &mut Option<PathBuf> {
-        &mut self.configs_directory
+    /// Get a mutable reference to the dotfiles directory override
+    pub fn dotfiles_directory_mut(&mut self) -> &mut Option<PathBuf> {
+        &mut self.dotfiles_directory
     }
 
     /// Get a mutable reference to the state directory override
@@ -141,7 +141,7 @@ impl SelfieConfig {
 pub struct SelfieConfigBuilder {
     environment: String,
     package_directory: PathBuf,
-    configs_directory: Option<PathBuf>,
+    dotfiles_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     command_timeout: Option<NonZeroU64>,
     max_parallel: Option<NonZeroUsize>,
@@ -165,8 +165,8 @@ impl SelfieConfigBuilder {
     }
 
     #[must_use]
-    pub fn configs_directory(mut self, path: PathBuf) -> Self {
-        self.configs_directory = Some(path);
+    pub fn dotfiles_directory(mut self, path: PathBuf) -> Self {
+        self.dotfiles_directory = Some(path);
         self
     }
 
@@ -205,7 +205,7 @@ impl SelfieConfigBuilder {
         SelfieConfig {
             environment: self.environment,
             package_directory: self.package_directory,
-            configs_directory: self.configs_directory,
+            dotfiles_directory: self.dotfiles_directory,
             state_directory: self.state_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
             max_parallel_installations: self.max_parallel.unwrap_or(default_max_parallel()),
@@ -341,23 +341,23 @@ mod tests {
     }
 
     #[test]
-    fn test_configs_directory_defaults_to_sibling_of_package_directory() {
+    fn test_dotfiles_directory_defaults_to_sibling_of_package_directory() {
         let config = SelfieConfigBuilder::default()
             .package_directory("/home/user/selfie-packages/packages")
             .build();
         assert_eq!(
-            config.configs_directory(),
-            Path::new("/home/user/selfie-packages/configs")
+            config.dotfiles_directory(),
+            Path::new("/home/user/selfie-packages/dotfiles")
         );
     }
 
     #[test]
-    fn test_configs_directory_can_be_overridden() {
+    fn test_dotfiles_directory_can_be_overridden() {
         let config = SelfieConfigBuilder::default()
             .package_directory("/home/user/selfie-packages/packages")
-            .configs_directory(PathBuf::from("/custom/configs"))
+            .dotfiles_directory(PathBuf::from("/custom/dotfiles"))
             .build();
-        assert_eq!(config.configs_directory(), Path::new("/custom/configs"));
+        assert_eq!(config.dotfiles_directory(), Path::new("/custom/dotfiles"));
     }
 
     #[test]
