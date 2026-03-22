@@ -568,11 +568,11 @@ async fn test_apply_rejects_path_traversal() {
 
     // Should get a warning specifically about path traversal
     let has_traversal_warning = events.iter().any(|e| {
-        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes dotfiles directory"))
+        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes YAML base directory"))
     });
     assert!(
         has_traversal_warning,
-        "Should emit a warning about path escaping dotfiles directory"
+        "Should emit a warning about path escaping YAML base directory"
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");

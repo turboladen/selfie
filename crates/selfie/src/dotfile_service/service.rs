@@ -207,20 +207,20 @@ fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     raw
 }
 
-/// Validate that a resolved source path doesn't escape the configs directory.
+/// Validate that a resolved source path doesn't escape the YAML base directory.
 ///
 /// Prevents path traversal attacks where a malicious package YAML could use
-/// `../` sequences to read files outside the configs directory.
+/// `../` sequences to read files outside the YAML file's parent directory.
 ///
 /// Uses a component-level normalization that resolves `..` without requiring
 /// the path to exist on disk (unlike `canonicalize`).
-fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
+fn validate_source_path(source_path: &Path, base_dir: &Path) -> bool {
     match (
         std::path::absolute(source_path),
-        std::path::absolute(configs_dir),
+        std::path::absolute(base_dir),
     ) {
-        (Ok(abs_source), Ok(abs_configs)) => {
-            normalize_path(&abs_source).starts_with(normalize_path(&abs_configs))
+        (Ok(abs_source), Ok(abs_base)) => {
+            normalize_path(&abs_source).starts_with(normalize_path(&abs_base))
         }
         _ => false,
     }
@@ -442,7 +442,7 @@ where
             if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes dotfiles directory",
+                        "Skipping '{}': source path escapes YAML base directory",
                         entry.source()
                     ))
                     .await;
@@ -642,7 +642,7 @@ where
             if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes dotfiles directory",
+                        "Skipping '{}': source path escapes YAML base directory",
                         entry.source()
                     ))
                     .await;
