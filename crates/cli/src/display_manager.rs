@@ -6,10 +6,27 @@
 
 use std::collections::VecDeque;
 use std::fmt::Display;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+/// Shorten a path for display by replacing the home directory with `~`.
+pub(crate) fn shorten_path(path: &str) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    path.to_string()
+}
+
+/// Shorten a path for display, accepting a `&Path`.
+#[allow(dead_code)]
+pub(crate) fn shorten_display_path(path: &Path) -> String {
+    shorten_path(&path.display().to_string())
+}
 
 /// Standard indentation for structured CLI output (e.g., section content,
 /// result cards, list suggestions, and other indented fields).
@@ -351,6 +368,38 @@ impl DisplayManager {
         } else {
             self.mp.suspend(|| println!("── {title} ──"));
         }
+    }
+
+    /// Print a unified diff with per-line coloring (stdout)
+    ///
+    /// Colors: `---`/`-` lines red, `+++`/`+` lines green, `@@` hunks cyan,
+    /// context lines dim. Paths in `---`/`+++` headers are shortened with `~`.
+    pub(crate) fn print_diff(&self, diff: &str) {
+        self.mp.suspend(|| {
+            for line in diff.lines() {
+                if self.use_colors {
+                    if let Some(rest) = line.strip_prefix("--- ") {
+                        println!("{}", style(format!("--- {}", shorten_path(rest))).red());
+                    } else if let Some(rest) = line.strip_prefix("+++ ") {
+                        println!("{}", style(format!("+++ {}", shorten_path(rest))).green());
+                    } else if line.starts_with("@@") {
+                        println!("{}", style(line).cyan());
+                    } else if line.starts_with('-') {
+                        println!("{}", style(line).red());
+                    } else if line.starts_with('+') {
+                        println!("{}", style(line).green());
+                    } else {
+                        println!("{}", style(line).dim());
+                    }
+                } else if let Some(rest) = line.strip_prefix("--- ") {
+                    println!("--- {}", shorten_path(rest));
+                } else if let Some(rest) = line.strip_prefix("+++ ") {
+                    println!("+++ {}", shorten_path(rest));
+                } else {
+                    println!("{line}");
+                }
+            }
+        });
     }
 
     /// Print a plain line to stdout
