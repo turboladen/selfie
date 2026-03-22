@@ -76,8 +76,8 @@ where
 
 /// Resolve the deploy state file path.
 ///
-/// Uses the configured `state_directory` if available, otherwise resolves
-/// `~/.config/selfie/deploy-state.yml` via the filesystem abstraction.
+/// Uses the configured `state_directory` if available, otherwise defaults to
+/// `~/.local/state/selfie/deploy-state.yml` (XDG_STATE_HOME) via the filesystem abstraction.
 ///
 /// # Errors
 ///
@@ -393,6 +393,21 @@ where
 
             let target_path = expand_target_path(filesystem, entry.target());
 
+            // Enforce documented rule: target must be absolute after expansion.
+            // A relative target would write relative to CWD, which is surprising
+            // and potentially dangerous.
+            if !target_path.is_absolute() {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
+                        entry.target(),
+                        target_path.display()
+                    ))
+                    .await;
+                skipped_count += 1;
+                continue;
+            }
+
             // Read source file
             let source_content = match filesystem.read_file(&source_path) {
                 Ok(content) => content,
@@ -556,6 +571,18 @@ where
 
             let source_path = resolve_source_path(&configs_dir, entry.source());
             let target_path = expand_target_path(filesystem, entry.target());
+
+            // Reject relative targets (same guard as handle_apply)
+            if !target_path.is_absolute() {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{}': target path '{}' is not absolute",
+                        entry.target(),
+                        target_path.display()
+                    ))
+                    .await;
+                continue;
+            }
 
             // Runtime path traversal guard (same as handle_apply)
             if !validate_source_path(&source_path, &configs_dir) {

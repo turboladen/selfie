@@ -29,7 +29,7 @@ pub struct SelfieConfig {
     #[serde(default)]
     configs_directory: Option<PathBuf>,
 
-    // Optional override for deploy state directory (defaults to ~/.config/selfie)
+    // Optional override for deploy state directory (defaults to ~/.local/state/selfie per XDG)
     #[serde(default)]
     state_directory: Option<PathBuf>,
 

@@ -1,7 +1,8 @@
 //! Per-machine deploy state persistence and drift detection.
 //!
 //! Each time selfie deploys a config file, it records the source and target
-//! checksums in a [`DeployState`] file (typically `~/.config/selfie/deploy-state.yml`).
+//! checksums in a [`DeployState`] file (typically `~/.local/state/selfie/deploy-state.yml`,
+//! i.e., under XDG_STATE_HOME).
 //! On subsequent runs, these stored checksums are compared against the current
 //! file contents to classify changes as one of four [`DriftType`] variants —
 //! enabling the service layer to decide whether to deploy, skip, or flag a

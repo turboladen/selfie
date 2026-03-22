@@ -437,10 +437,10 @@ impl Package {
             }
 
             if !target.starts_with('/') && !target.starts_with('~') {
-                issues.push(ValidationIssue::warning(
+                issues.push(ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
                     &format!("configs[{i}].target"),
-                    "Config target path should be absolute or start with '~'",
+                    "Config target path must be absolute or start with '~'",
                     Some("Use an absolute path like '/etc/config' or '~/.config/file'."),
                 ));
             }
@@ -666,14 +666,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_relative_target_warns() {
+    fn test_validate_config_relative_target_errors() {
         let package = PackageBuilder::default()
             .name("bad-config")
             .version("1.0.0")
             .configs(vec![ConfigEntry::new("src/file.txt", "relative/path.txt")])
             .build();
         let result = package.validate("test-env");
-        assert!(result.issues().has_warnings() || result.issues().has_errors());
+        assert!(result.issues().has_errors());
     }
 
     #[test]
