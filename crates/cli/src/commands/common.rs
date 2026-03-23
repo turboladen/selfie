@@ -93,7 +93,7 @@ pub(crate) async fn handle_track_standalone(
 
 /// Track a file for an existing package via `DotfileServiceImpl::track_for_package`.
 ///
-/// Shared by `selfie package track-config` and `selfie track` (interactive).
+/// Shared by `selfie package track-dotfile` and `selfie track` (interactive).
 pub(crate) async fn handle_track_for_package(
     package_name: &str,
     file: &str,

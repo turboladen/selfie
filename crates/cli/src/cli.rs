@@ -371,8 +371,8 @@ pub(crate) enum PackageSubcommands {
     /// adds a dotfiles entry to the package spec, and records initial
     /// deploy state.
     ///
-    /// Example: `selfie package track-config alacritty ~/.config/alacritty/alacritty.toml`
-    TrackConfig {
+    /// Example: `selfie package track-dotfile alacritty ~/.config/alacritty/alacritty.toml`
+    TrackDotfile {
         /// Name of the existing package to add the dotfile to
         package_name: String,
 

@@ -3,4 +3,4 @@ pub(crate) mod check;
 pub(crate) mod install;
 pub(crate) mod list;
 pub(crate) mod status;
-pub(crate) mod track_config;
+pub(crate) mod track_dotfile;
