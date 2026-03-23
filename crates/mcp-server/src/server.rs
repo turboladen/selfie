@@ -530,6 +530,7 @@ impl SelfieServer {
         let options = ApplyOptions {
             dry_run: params.dry_run,
             auto_accept: params.auto_accept,
+            conflict_resolver: None,
         };
 
         use selfie::dotfile_service::port::DotfileService;

@@ -6,6 +6,7 @@
 //! to perform dotfile deployment operations.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -14,6 +15,7 @@ use crate::{
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
+        port::ConflictResolution,
         state::{DeployState, DriftType},
     },
     fs::filesystem::{FileSystem, FileSystemError},
@@ -590,7 +592,34 @@ where
                     skipped_count += 1;
                 }
                 DeployDecision::Conflict => {
-                    if options.auto_accept {
+                    // Build the diff for display/resolution (needed by both
+                    // the resolver and the fallback conflict event).
+                    let target_content = filesystem.read_file(&target_path).unwrap_or_default();
+                    let diff = unified_diff(
+                        &target_content,
+                        &source_content,
+                        &target_path.to_string_lossy(),
+                        &source_path.to_string_lossy(),
+                    );
+
+                    // Determine whether to accept: --yes flag, interactive
+                    // resolver, or neither (skip with conflict event).
+                    let accept = if options.auto_accept {
+                        true
+                    } else if let Some(resolver) = &options.conflict_resolver {
+                        let src = source_path.display().to_string();
+                        let tgt = target_path.display().to_string();
+                        let d = diff.clone();
+                        let r = Arc::clone(resolver);
+                        tokio::task::spawn_blocking(move || r.resolve(&src, &tgt, &d))
+                            .await
+                            .unwrap_or(ConflictResolution::Skip)
+                            == ConflictResolution::Accept
+                    } else {
+                        false
+                    };
+
+                    if accept {
                         if perform_deploy(
                             filesystem,
                             &mut deploy_state,
@@ -610,14 +639,6 @@ where
                             skipped_count += 1;
                         }
                     } else {
-                        // Emit conflict with diff
-                        let target_content = filesystem.read_file(&target_path).unwrap_or_default();
-                        let diff = unified_diff(
-                            &target_content,
-                            &source_content,
-                            &target_path.to_string_lossy(),
-                            &source_path.to_string_lossy(),
-                        );
                         sender
                             .send_dotfile_conflict(
                                 source_path.display(),
