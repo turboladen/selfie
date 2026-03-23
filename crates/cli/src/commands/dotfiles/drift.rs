@@ -4,7 +4,10 @@
 //! all deployed dotfiles for drift between repo sources, deployed targets,
 //! and the last-known deploy state checksums.
 
-use selfie::dotfile_service::port::DotfileService;
+use selfie::{
+    dotfile_service::port::DotfileService,
+    package::event::{OperationResult, OperationSuccess, PackageEvent},
+};
 use tracing::info;
 
 use crate::{
@@ -23,8 +26,35 @@ pub(crate) async fn handle_drift(config: &CliConfig, display: &DisplayManager) -
     let service = create_dotfile_service(config);
     let event_stream = service.check_drift().await;
 
+    let display_for_handler = display.clone();
     let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
+    let result = processor
+        .process_events(event_stream, |event| match event {
+            // Render the completion summary with color that matches the outcome:
+            //   0 drifted → green ✔ (all clean)
+            //   N drifted → yellow ⚠ (attention needed)
+            PackageEvent::Completed {
+                result: OperationResult::Success(success),
+                ..
+            } => {
+                let has_drift = matches!(
+                    success,
+                    OperationSuccess::DotfileDriftChecked {
+                        drift_count,
+                        ..
+                    } if *drift_count > 0
+                );
+
+                if has_drift {
+                    display_for_handler.print_warning(success.to_string());
+                } else {
+                    display_for_handler.print_success(success.to_string());
+                }
+                true
+            }
+            _ => false,
+        })
+        .await;
 
     result.exit_code
 }
