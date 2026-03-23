@@ -653,6 +653,25 @@ impl SelfieServer {
         Parameters(params): Parameters<TrackDotfileParam>,
     ) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
+
+        // Namespace validation — prevent conflicts with existing packages
+        let pkg_repo =
+            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().to_owned());
+        let dotfiles_dir = self.config.dotfiles_directory().to_owned();
+        let dotfiles_repo = if dotfiles_dir.is_dir() {
+            Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+        } else {
+            None
+        };
+        if let Err(e) =
+            selfie::namespace::validate_unique_name(&params.name, &pkg_repo, dotfiles_repo.as_ref())
+        {
+            return Err(McpError::invalid_params(
+                format!("Namespace conflict: {e}"),
+                None,
+            ));
+        }
+
         let stream = self
             .dotfile_service
             .track_standalone(&params.name, &params.file)

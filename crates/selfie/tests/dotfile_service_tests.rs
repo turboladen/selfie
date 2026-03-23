@@ -1258,8 +1258,8 @@ async fn test_track_standalone_creates_spec_and_copies_file() {
     assert!(spec.exists(), "YAML spec should be created");
     let spec_content = std::fs::read_to_string(&spec).unwrap();
     assert!(
-        spec_content.contains("starship.toml"),
-        "Spec should reference the source file"
+        spec_content.contains("starship/starship.toml"),
+        "Spec should reference the source file with subdirectory"
     );
 }
 

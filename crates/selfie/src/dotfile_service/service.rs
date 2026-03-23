@@ -908,7 +908,10 @@ where
     // Create the YAML spec (spec_path already computed above for overwrite check)
     let package = crate::package::PackageBuilder::default()
         .name(name)
-        .dotfiles(vec![DotfileEntry::new(&filename, target_path)])
+        .dotfiles(vec![DotfileEntry::new(
+            format!("{name}/{filename}"),
+            target_path,
+        )])
         .path(spec_path.clone())
         .build();
 
@@ -921,7 +924,8 @@ where
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
-    deploy_state.record_deployment(&filename, target_path, &checksum);
+    let source_key = format!("{name}/{filename}");
+    deploy_state.record_deployment(&source_key, target_path, &checksum);
     if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Cannot save deploy state: {e}"
