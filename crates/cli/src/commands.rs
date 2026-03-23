@@ -26,6 +26,7 @@ pub(crate) mod config;
 pub(crate) mod dotfiles;
 pub(crate) mod package;
 pub(crate) mod spec;
+pub(crate) mod track;
 
 use common::create_package_service;
 use package::list::ListCommand;
@@ -66,6 +67,7 @@ pub(crate) async fn dispatch_command(
             dispatch_package_command(&package_cmd.command, config, display, cancellation_token)
                 .await
         }
+        ClapCommands::Track { file } => track::handle_track(file, config, &display).await,
         ClapCommands::Config(config_cmd) => {
             dispatch_config_command(&config_cmd.command, config, display, fs)
         }

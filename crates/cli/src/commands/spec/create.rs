@@ -1,8 +1,12 @@
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
-use selfie::package::{
-    EnvironmentConfig, SpecService,
-    event::{OperationResult, OperationSuccess, PackageEvent},
-    port::PackageRepository,
+use selfie::{
+    namespace::{self, NamespaceValidationError},
+    package::{
+        EnvironmentConfig, SpecService,
+        event::{OperationResult, OperationSuccess, PackageEvent},
+        port::PackageRepository,
+        repository::yaml::YamlPackageRepository,
+    },
 };
 use std::{collections::HashMap, path::PathBuf};
 use tracing::info;
@@ -32,7 +36,7 @@ pub(crate) async fn handle_create(
     let repo = common::create_package_repository(config);
 
     // Get a valid package name or handle existing package scenarios
-    let package_name = match get_valid_package_name(package_name, &repo, display) {
+    let package_name = match get_valid_package_name(package_name, &repo, config, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
         Ok(PackageNameResult::EditExisting(path)) => {
             display.print_info(format!(
@@ -125,65 +129,93 @@ pub(crate) async fn handle_create(
 fn get_valid_package_name(
     initial_name: &str,
     repo: &impl PackageRepository,
+    config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<PackageNameResult, i32> {
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
 
+    // Build an optional dotfiles repo for namespace validation
+    let dotfiles_dir = config.selfie_config().dotfiles_directory();
+    let dotfiles_repo = if dotfiles_dir.is_dir() {
+        Some(YamlPackageRepository::new(
+            selfie::fs::real::RealFileSystem,
+            dotfiles_dir,
+        ))
+    } else {
+        None
+    };
+
     loop {
-        // Check if package already exists
-        if let Ok(existing_package) = repo.get_package(&current_name) {
-            display.print_info(format!("Package '{current_name}' already exists."));
+        // Check namespace conflict (packages + dotfiles directories)
+        match namespace::validate_unique_name(&current_name, repo, dotfiles_repo.as_ref()) {
+            Err(NamespaceValidationError::LookupFailed(msg)) => {
+                display.print_error(format!("Failed to check namespace: {msg}"));
+                return Err(1);
+            }
+            Err(NamespaceValidationError::Conflict(conflict)) => {
+                // Name exists somewhere — check if it's in packages/ (editable)
+                // or dotfiles/ (just a conflict, need a different name)
+                if let Ok(existing_package) = repo.get_package(&current_name) {
+                    display.print_info(format!("Package '{current_name}' already exists."));
 
-            let action = Select::with_theme(&SimpleTheme)
-                .with_prompt("What would you like to do?")
-                .items([
-                    "Edit the existing package",
-                    "Create a new package with a different name",
-                    "Cancel",
-                ])
-                .default(0)
-                .interact();
+                    let action = Select::with_theme(&SimpleTheme)
+                        .with_prompt("What would you like to do?")
+                        .items([
+                            "Edit the existing package",
+                            "Create a new package with a different name",
+                            "Cancel",
+                        ])
+                        .default(0)
+                        .interact();
 
-            match action {
-                Ok(0) => {
-                    // Edit existing package
-                    return Ok(PackageNameResult::EditExisting(
-                        existing_package.file_path().to_path_buf(),
-                    ));
-                }
-                Ok(1) => {
-                    // Create with different name
-                    retry_count += 1;
-                    if retry_count > MAX_NAME_RETRIES {
-                        display.print_error(format!(
-                            "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
-                        ));
-                        return Err(1);
+                    match action {
+                        Ok(0) => {
+                            return Ok(PackageNameResult::EditExisting(
+                                existing_package.file_path().to_path_buf(),
+                            ));
+                        }
+                        Ok(1) => {
+                            // Fall through to prompt for new name below
+                        }
+                        _ => return Ok(PackageNameResult::Cancelled),
                     }
+                } else {
+                    // Conflict is in dotfiles/ — can't edit, need a different name
+                    display.print_warning(format!("Name conflict: {conflict}"));
+                    display.print_suggestion(
+                        "Choose a different name to avoid conflicting with the standalone dotfile.",
+                    );
+                }
 
-                    let new_name: String = if let Ok(name) = Input::with_theme(&SimpleTheme)
-                        .with_prompt(format!(
-                            "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
-                        ))
-                        .interact()
-                    {
-                        name
-                    } else {
-                        display.print_error("Failed to read package name.");
-                        return Err(1);
-                    };
-                    current_name = new_name;
-                    continue; // Loop back to check the new name
+                // Prompt for a new name
+                retry_count += 1;
+                if retry_count > MAX_NAME_RETRIES {
+                    display.print_error(format!(
+                        "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
+                    ));
+                    return Err(1);
                 }
-                _ => {
-                    // Cancel
-                    return Ok(PackageNameResult::Cancelled);
-                }
+
+                let new_name: String = if let Ok(name) = Input::with_theme(&SimpleTheme)
+                    .with_prompt(format!(
+                        "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
+                    ))
+                    .interact()
+                {
+                    name
+                } else {
+                    display.print_error("Failed to read package name.");
+                    return Err(1);
+                };
+                current_name = new_name;
+                continue;
+            }
+            Ok(()) => {
+                // Name is unique — proceed with creation
+                return Ok(PackageNameResult::CreateNew(current_name));
             }
         }
-        // Package doesn't exist, we can use this name
-        return Ok(PackageNameResult::CreateNew(current_name));
     }
 }
 

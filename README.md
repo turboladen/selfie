@@ -233,6 +233,8 @@ selfie --help                    # Main help
 selfie spec --help               # Spec (definition) commands
 selfie package --help            # Package (runtime) commands
 selfie apply --help              # Dotfile deployment commands
+selfie dotfiles --help           # Dotfile inspection and tracking
+selfie track --help              # Interactive file tracking shortcut
 selfie spec create --help        # Specific command help
 ```
 
@@ -273,7 +275,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ✅ Login shell execution for install/check/audit commands
-- 📋 Dotfile tracking (`selfie dotfiles track`) (planned)
+- ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-config`, `selfie track`
+- ✅ Dotfile drift detection: `selfie dotfiles drift`, `selfie dotfiles list`
 - 📋 Git-backed sync (`selfie sync push/pull`) (planned)
 - 📋 Package groups and bulk operations (planned)
 

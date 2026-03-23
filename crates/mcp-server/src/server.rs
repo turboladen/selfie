@@ -227,6 +227,26 @@ impl SelfieServer {
             ));
         }
 
+        // Check for namespace conflicts across packages/ and dotfiles/ directories
+        let pkg_repo =
+            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().clone());
+        let dotfiles_dir = self.config.dotfiles_directory();
+        let dotfiles_repo = if dotfiles_dir.is_dir() {
+            Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+        } else {
+            None
+        };
+        if let Err(e) = selfie::namespace::validate_unique_name(
+            &params.package,
+            &pkg_repo,
+            dotfiles_repo.as_ref(),
+        ) {
+            return Err(McpError::invalid_params(
+                format!("Namespace conflict: {e}"),
+                None,
+            ));
+        }
+
         let file_path = self
             .config
             .package_directory()

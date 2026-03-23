@@ -118,6 +118,17 @@ pub(crate) enum ClapCommands {
     /// inspect drift, list tracked files, and add new ones.
     Dotfiles(DotfilesCommands),
 
+    /// Interactive shortcut to start tracking a config file
+    ///
+    /// Prompts whether the file belongs to an existing package or should
+    /// become a new standalone dotfile, then delegates accordingly.
+    ///
+    /// Example: `selfie track ~/.config/starship.toml`
+    Track {
+        /// Path to the file to track (the deploy target)
+        file: String,
+    },
+
     /// Configuration management operations
     ///
     /// Commands for validating and managing the selfie configuration file.
