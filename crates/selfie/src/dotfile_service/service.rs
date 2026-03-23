@@ -20,10 +20,10 @@ use crate::{
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
-        Package,
+        DotfileEntry, Package,
         event::{
-            EventSender, EventStream, OperationContext, OperationResult, OperationSuccess,
-            PackageEvent, StepCount, metadata::OperationType,
+            EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
+            OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
         port::PackageRepository,
     },
@@ -381,6 +381,53 @@ where
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
                 }
             };
+
+            sender.send_completed(result).await;
+        })
+    }
+
+    async fn track_standalone(&self, name: &str, target_path: &str) -> EventStream {
+        let dotfiles_repo = self.dotfiles_repository.clone();
+        let fs = self.filesystem.clone();
+        let config = self.config.clone();
+        let name = name.to_string();
+        let target_path = target_path.to_string();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileTrack,
+                name.clone(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+            sender.send_started().await;
+
+            let result =
+                handle_track_standalone(&name, &target_path, dotfiles_repo.as_ref(), &fs, &config);
+
+            sender.send_completed(result).await;
+        })
+    }
+
+    async fn track_for_package(&self, package_name: &str, target_path: &str) -> EventStream {
+        let repo = self.package_repository.clone();
+        let fs = self.filesystem.clone();
+        let config = self.config.clone();
+        let package_name = package_name.to_string();
+        let target_path = target_path.to_string();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileTrack,
+                package_name.clone(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+            sender.send_started().await;
+
+            let result = handle_track_for_package(&package_name, &target_path, &repo, &fs, &config);
 
             sender.send_completed(result).await;
         })
@@ -764,6 +811,181 @@ where
         total_count,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total_count, total_count),
+    })
+}
+
+/// Handle `track_standalone`: copy target file into dotfiles dir, create a new
+/// YAML spec, and record initial deploy state.
+fn handle_track_standalone<R, F>(
+    name: &str,
+    target_path: &str,
+    dotfiles_repo: Option<&R>,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
+    let Some(_repo) = dotfiles_repo else {
+        return OperationResult::Failure(OperationFailure::Generic(
+            "No dotfiles directory configured. Set `dotfiles_directory` in config.".to_string(),
+        ));
+    };
+
+    let dotfiles_dir = config.dotfiles_directory();
+
+    // Expand and validate the target path
+    let expanded_target = expand_target_path(filesystem, target_path);
+    if !filesystem.path_exists(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Target file does not exist: {}",
+            expanded_target.display()
+        )));
+    }
+
+    // Read the target file content
+    let content = match filesystem.read_file(&expanded_target) {
+        Ok(c) => c,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot read target file: {e}"
+            )));
+        }
+    };
+
+    // Determine source filename (just the basename of the target)
+    let filename = expanded_target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // Copy the file into dotfiles_dir/name/filename
+    let source_dir = dotfiles_dir.join(name);
+    let source_path = source_dir.join(&filename);
+
+    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot write source file: {e}"
+        )));
+    }
+
+    // Create the YAML spec
+    let package = crate::package::PackageBuilder::default()
+        .name(name)
+        .dotfiles(vec![DotfileEntry::new(&filename, target_path)])
+        .path(dotfiles_dir.join(format!("{name}.yml")))
+        .build();
+
+    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
+    if let Err(e) = _repo.save_package(&package, &spec_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save spec: {e}"
+        )));
+    }
+
+    // Record initial deploy state
+    let checksum = compute_checksum(content.as_bytes());
+    let mut deploy_state = load_deploy_state(filesystem, config);
+    deploy_state.record_deployment(&filename, target_path, &checksum);
+    let _ = save_deploy_state(filesystem, config, &deploy_state);
+
+    OperationResult::Success(OperationSuccess::DotfileTracked {
+        name: name.to_string(),
+        source_path,
+        target_path: target_path.to_string(),
+        environment: config.environment().to_string(),
+        steps_completed: StepCount::new(1, 1),
+    })
+}
+
+/// Handle `track_for_package`: load an existing package, copy the target file
+/// alongside the YAML, add a dotfiles entry, save, and record deploy state.
+fn handle_track_for_package<R, F>(
+    package_name: &str,
+    target_path: &str,
+    repo: &R,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
+    // Load the existing package
+    let mut package_blob = match repo.get_package(package_name) {
+        Ok(blob) => blob,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot load package '{package_name}': {e}"
+            )));
+        }
+    };
+
+    // Expand and validate the target path
+    let expanded_target = expand_target_path(filesystem, target_path);
+    if !filesystem.path_exists(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Target file does not exist: {}",
+            expanded_target.display()
+        )));
+    }
+
+    // Read the target file content
+    let content = match filesystem.read_file(&expanded_target) {
+        Ok(c) => c,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot read target file: {e}"
+            )));
+        }
+    };
+
+    // Determine where to copy the file — alongside the package YAML
+    let package_dir = package_blob
+        .file_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let filename = expanded_target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let source_path = package_dir.join(&filename);
+
+    // Copy the file
+    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot write source file: {e}"
+        )));
+    }
+
+    // Add dotfiles entry and save
+    package_blob
+        .package_mut()
+        .add_dotfile(DotfileEntry::new(&filename, target_path));
+
+    let file_path = package_blob.file_path().to_path_buf();
+    if let Err(e) = repo.save_package(package_blob.package(), &file_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save updated package: {e}"
+        )));
+    }
+
+    // Record initial deploy state
+    let checksum = compute_checksum(content.as_bytes());
+    let mut deploy_state = load_deploy_state(filesystem, config);
+    deploy_state.record_deployment(&filename, target_path, &checksum);
+    let _ = save_deploy_state(filesystem, config, &deploy_state);
+
+    OperationResult::Success(OperationSuccess::DotfileTracked {
+        name: package_name.to_string(),
+        source_path,
+        target_path: target_path.to_string(),
+        environment: config.environment().to_string(),
+        steps_completed: StepCount::new(1, 1),
     })
 }
 

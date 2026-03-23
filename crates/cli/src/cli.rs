@@ -353,6 +353,21 @@ pub(crate) enum PackageSubcommands {
         /// Must correspond to a package definition file in the package directory.
         package_name: String,
     },
+
+    /// Add a config file to an existing package's dotfiles
+    ///
+    /// Copies the file into the package's directory (alongside the YAML),
+    /// adds a dotfiles entry to the package spec, and records initial
+    /// deploy state.
+    ///
+    /// Example: `selfie package track-config alacritty ~/.config/alacritty/alacritty.toml`
+    TrackConfig {
+        /// Name of the existing package to add the dotfile to
+        package_name: String,
+
+        /// Path to the file to track (the deploy target)
+        file: String,
+    },
 }
 
 /// Dotfiles command group container
@@ -389,6 +404,21 @@ pub(crate) enum DotfilesSubcommands {
     ///
     /// Example: `selfie dotfiles list`
     List,
+
+    /// Start tracking a file as a standalone dotfile
+    ///
+    /// Copies the file into the dotfiles directory, creates a new YAML spec
+    /// with the source→target mapping, and records initial deploy state.
+    /// The file remains at its original location.
+    ///
+    /// Example: `selfie dotfiles track starship ~/.config/starship.toml`
+    Track {
+        /// Name for the new dotfile spec
+        name: String,
+
+        /// Path to the file to track (the deploy target)
+        file: String,
+    },
 }
 
 /// Configuration command group container

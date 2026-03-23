@@ -179,6 +179,9 @@ async fn dispatch_package_command(
         PackageSubcommands::Status { package_name } => {
             package::status::handle_status(&service, package_name, config, &display).await
         }
+        PackageSubcommands::TrackConfig { package_name, file } => {
+            package::track_config::handle_track_config(package_name, file, config, &display).await
+        }
     }
 }
 
@@ -193,6 +196,9 @@ async fn dispatch_dotfiles_command(
     match command {
         DotfilesSubcommands::Drift => dotfiles::drift::handle_drift(config, display).await,
         DotfilesSubcommands::List => dotfiles::list::handle_list(config, display),
+        DotfilesSubcommands::Track { name, file } => {
+            dotfiles::track::handle_track(name, file, config, display).await
+        }
     }
 }
 

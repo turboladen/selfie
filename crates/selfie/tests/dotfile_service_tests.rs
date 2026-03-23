@@ -1217,3 +1217,139 @@ async fn test_check_drift_covers_standalone_dotfiles() {
         other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
 }
+
+// ───────────────────────────────── Track tests ─────────────────────────────────
+
+#[tokio::test]
+async fn test_track_standalone_creates_spec_and_copies_file() {
+    let dirs = TestDirs::new();
+
+    // Create a "target" file to track (simulating ~/.config/starship.toml)
+    let target_file = dirs.target_dir.join("starship.toml");
+    std::fs::write(&target_file, "format = \"$all\"").unwrap();
+
+    let service = dirs.service_with_dotfiles();
+    let stream = service
+        .track_standalone("starship", target_file.to_str().unwrap())
+        .await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileTracked { name, .. }) => {
+            assert_eq!(name, "starship");
+        }
+        other => panic!("Expected DotfileTracked success, got: {other:?}"),
+    }
+
+    // Source file should be copied into dotfiles_dir/starship/starship.toml
+    let copied = dirs.dotfiles_dir.join("starship").join("starship.toml");
+    assert!(
+        copied.exists(),
+        "Source file should be copied to dotfiles dir"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&copied).unwrap(),
+        "format = \"$all\""
+    );
+
+    // YAML spec should be created at dotfiles_dir/starship.yml
+    let spec = dirs.dotfiles_dir.join("starship.yml");
+    assert!(spec.exists(), "YAML spec should be created");
+    let spec_content = std::fs::read_to_string(&spec).unwrap();
+    assert!(
+        spec_content.contains("starship.toml"),
+        "Spec should reference the source file"
+    );
+}
+
+#[tokio::test]
+async fn test_track_standalone_fails_when_target_missing() {
+    let dirs = TestDirs::new();
+    let service = dirs.service_with_dotfiles();
+
+    let stream = service
+        .track_standalone("missing", "/nonexistent/file.toml")
+        .await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    assert!(
+        matches!(result, OperationResult::Failure(_)),
+        "Should fail when target file doesn't exist"
+    );
+}
+
+#[tokio::test]
+async fn test_track_for_package_adds_dotfile_to_existing_package() {
+    let dirs = TestDirs::new();
+
+    // Create an existing package without dotfiles
+    let yaml = r#"name: alacritty
+version: "1.0"
+environments:
+  test:
+    install: "echo installed"
+"#;
+    std::fs::write(dirs.package_dir.join("alacritty.yml"), yaml).unwrap();
+
+    // Create a "target" file to track
+    let target_file = dirs.target_dir.join("alacritty.toml");
+    std::fs::write(&target_file, "[font]\nsize = 12").unwrap();
+
+    let service = dirs.service();
+    let stream = service
+        .track_for_package("alacritty", target_file.to_str().unwrap())
+        .await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileTracked { name, .. }) => {
+            assert_eq!(name, "alacritty");
+        }
+        other => panic!("Expected DotfileTracked success, got: {other:?}"),
+    }
+
+    // Source file should be copied alongside the YAML
+    let copied = dirs.package_dir.join("alacritty.toml");
+    assert!(
+        copied.exists(),
+        "Source file should be copied alongside the package YAML"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&copied).unwrap(),
+        "[font]\nsize = 12"
+    );
+
+    // Package YAML should now contain a dotfiles section
+    let updated_yaml = std::fs::read_to_string(dirs.package_dir.join("alacritty.yml")).unwrap();
+    assert!(
+        updated_yaml.contains("dotfiles"),
+        "Updated YAML should contain dotfiles section"
+    );
+    assert!(
+        updated_yaml.contains("alacritty.toml"),
+        "Updated YAML should reference the tracked file"
+    );
+}
+
+#[tokio::test]
+async fn test_track_for_package_fails_when_package_not_found() {
+    let dirs = TestDirs::new();
+
+    let target_file = dirs.target_dir.join("some.conf");
+    std::fs::write(&target_file, "content").unwrap();
+
+    let service = dirs.service();
+    let stream = service
+        .track_for_package("nonexistent", target_file.to_str().unwrap())
+        .await;
+    let events = collect_events(stream).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    assert!(
+        matches!(result, OperationResult::Failure(_)),
+        "Should fail when package doesn't exist"
+    );
+}

@@ -61,11 +61,12 @@ impl std::fmt::Debug for ApplyOptions {
 ///
 /// This trait abstracts dotfile deployment operations to allow different
 /// implementations and enable comprehensive testing through mocking.
-/// It provides three operations:
 ///
-/// - `apply_all` — Deploy all dotfiles from all packages
-/// - `apply` — Deploy dotfiles for a specific package
-/// - `check_drift` — Check for drift between deployed files and repo sources
+/// Operations:
+/// - `apply_all` / `apply` — Deploy dotfiles to target locations
+/// - `check_drift` — Detect changes since last deploy
+/// - `track_standalone` — Start tracking a file as a standalone dotfile
+/// - `track_for_package` — Add a file to an existing package's dotfiles
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait DotfileService: Send + Sync {
     /// Deploy all dotfiles from all packages
@@ -76,4 +77,26 @@ pub trait DotfileService: Send + Sync {
 
     /// Check for drift between deployed files and repo sources
     fn check_drift(&self) -> impl Future<Output = EventStream> + Send;
+
+    /// Track a file as a standalone dotfile.
+    ///
+    /// Copies the file at `target_path` into the dotfiles directory under a
+    /// new spec named `name`, creates a YAML spec with the source→target
+    /// mapping, and records initial deploy state.
+    fn track_standalone(
+        &self,
+        name: &str,
+        target_path: &str,
+    ) -> impl Future<Output = EventStream> + Send;
+
+    /// Add a file to an existing package's dotfiles.
+    ///
+    /// Copies the file at `target_path` into the package's directory
+    /// (alongside the YAML), adds a `dotfiles` entry to the package spec,
+    /// saves the updated YAML, and records initial deploy state.
+    fn track_for_package(
+        &self,
+        package_name: &str,
+        target_path: &str,
+    ) -> impl Future<Output = EventStream> + Send;
 }

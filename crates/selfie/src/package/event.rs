@@ -794,6 +794,17 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Dotfile tracking operation completed
+    DotfileTracked {
+        /// Name of the spec (package or standalone dotfile)
+        name: String,
+        /// Where the file was copied to in the repo
+        source_path: std::path::PathBuf,
+        /// The original target path being tracked
+        target_path: String,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -1098,6 +1109,17 @@ impl std::fmt::Display for OperationSuccess {
                     "Dotfile drift check: {drift_count} drifted out of {total_count} {steps_completed}"
                 )
             }
+            OperationSuccess::DotfileTracked {
+                name,
+                target_path,
+                steps_completed,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Now tracking '{target_path}' in spec '{name}' {steps_completed}"
+                )
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -1396,6 +1418,7 @@ impl OperationSuccess {
             | OperationSuccess::PackageCreated { package_name, .. }
             | OperationSuccess::PackageUpdated { package_name, .. }
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
+            OperationSuccess::DotfileTracked { name, .. } => Some(name),
             OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
@@ -1422,7 +1445,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageUpdated { environment, .. }
             | OperationSuccess::PackageRemoved { environment, .. }
             | OperationSuccess::DotfilesApplied { environment, .. }
-            | OperationSuccess::DotfileDriftChecked { environment, .. } => Some(environment),
+            | OperationSuccess::DotfileDriftChecked { environment, .. }
+            | OperationSuccess::DotfileTracked { environment, .. } => Some(environment),
             OperationSuccess::Generic(_) => None,
         }
     }
@@ -1471,6 +1495,9 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::DotfileDriftChecked {
+                steps_completed, ..
+            }
+            | OperationSuccess::DotfileTracked {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
