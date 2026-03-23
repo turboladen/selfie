@@ -807,6 +807,23 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// Sync push completed — all commits created and pushed to remote
+    SyncPushComplete {
+        commits_pushed: usize,
+        steps_completed: StepCount,
+    },
+    /// Sync pull completed — new commits pulled from remote
+    SyncPullComplete {
+        commits_pulled: usize,
+        packages_updated: Vec<String>,
+        packages_added: Vec<String>,
+        packages_removed: Vec<String>,
+        steps_completed: StepCount,
+    },
+    /// Sync pull found no new changes
+    SyncPullUpToDate { steps_completed: StepCount },
+    /// Sync push found no changes to commit
+    SyncNothingToPush { steps_completed: StepCount },
     /// Generic success with just a message (for backward compatibility)
     Generic(String),
 }
@@ -1134,6 +1151,64 @@ impl std::fmt::Display for OperationSuccess {
                     "Now tracking '{target_path}' in spec '{name}' {steps_completed}"
                 )
             }
+            OperationSuccess::SyncPushComplete {
+                commits_pushed,
+                steps_completed,
+            } => {
+                let label = if *commits_pushed == 1 {
+                    "commit"
+                } else {
+                    "commits"
+                };
+                write!(
+                    f,
+                    "Pushed {commits_pushed} {label} to remote {steps_completed}"
+                )
+            }
+            OperationSuccess::SyncPullComplete {
+                commits_pulled,
+                packages_updated,
+                packages_added,
+                packages_removed,
+                steps_completed,
+            } => {
+                let label = if *commits_pulled == 1 {
+                    "commit"
+                } else {
+                    "commits"
+                };
+                let mut parts = Vec::new();
+                if !packages_updated.is_empty() {
+                    parts.push(format!("updated: {}", packages_updated.join(", ")));
+                }
+                if !packages_added.is_empty() {
+                    parts.push(format!("added: {}", packages_added.join(", ")));
+                }
+                if !packages_removed.is_empty() {
+                    parts.push(format!("removed: {}", packages_removed.join(", ")));
+                }
+                if parts.is_empty() {
+                    write!(
+                        f,
+                        "Pulled {commits_pulled} {label} from remote {steps_completed}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Pulled {commits_pulled} {label} from remote ({}) {steps_completed}",
+                        parts.join("; ")
+                    )
+                }
+            }
+            OperationSuccess::SyncPullUpToDate { steps_completed } => {
+                write!(f, "Already up to date with remote {steps_completed}")
+            }
+            OperationSuccess::SyncNothingToPush { steps_completed } => {
+                write!(
+                    f,
+                    "Nothing to push — working tree is clean {steps_completed}"
+                )
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -1438,6 +1513,10 @@ impl OperationSuccess {
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfilesApplied { .. }
             | OperationSuccess::DotfileDriftChecked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1461,7 +1540,11 @@ impl OperationSuccess {
             | OperationSuccess::DotfilesApplied { environment, .. }
             | OperationSuccess::DotfileDriftChecked { environment, .. }
             | OperationSuccess::DotfileTracked { environment, .. } => Some(environment),
-            OperationSuccess::Generic(_) => None,
+            OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => None,
         }
     }
 
@@ -1512,6 +1595,18 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::DotfileTracked {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPushComplete {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPullComplete {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPullUpToDate {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncNothingToPush {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
@@ -1894,6 +1989,33 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         package_name: String,
         note: String,
+    },
+
+    /// Git repository status for sync status command
+    SyncRepoStatus {
+        operation_info: OperationInfo,
+        repo_root: std::path::PathBuf,
+        branch: Option<String>,
+        modified_count: usize,
+        staged_count: usize,
+        untracked_count: usize,
+        deleted_count: usize,
+        ahead: usize,
+        behind: usize,
+    },
+
+    /// Dotfile drift summary for sync status command
+    SyncDriftSummary {
+        operation_info: OperationInfo,
+        drifted_packages: Vec<String>,
+        total_deployed: usize,
+    },
+
+    /// A commit was created during sync push
+    SyncCommitCreated {
+        operation_info: OperationInfo,
+        package_name: String,
+        message: String,
     },
 }
 

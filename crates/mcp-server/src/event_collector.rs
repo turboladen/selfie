@@ -218,6 +218,45 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "package": package_name,
             "note": note,
         })),
+        PackageEvent::SyncRepoStatus {
+            repo_root,
+            branch,
+            modified_count,
+            staged_count,
+            untracked_count,
+            deleted_count,
+            ahead,
+            behind,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_repo_status",
+            "repo_root": repo_root.display().to_string(),
+            "branch": branch,
+            "modified_count": modified_count,
+            "staged_count": staged_count,
+            "untracked_count": untracked_count,
+            "deleted_count": deleted_count,
+            "ahead": ahead,
+            "behind": behind,
+        })),
+        PackageEvent::SyncDriftSummary {
+            drifted_packages,
+            total_deployed,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_drift_summary",
+            "drifted_packages": drifted_packages,
+            "total_deployed": total_deployed,
+        })),
+        PackageEvent::SyncCommitCreated {
+            package_name,
+            message,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_commit_created",
+            "package": package_name,
+            "message": message,
+        })),
         _ => None,
     }
 }

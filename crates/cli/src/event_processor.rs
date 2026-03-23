@@ -359,7 +359,10 @@ impl EventProcessor {
             | PackageEvent::PackageListItemCompleted { .. }
             | PackageEvent::RemovalDependencyInfo { .. }
             | PackageEvent::SpecListItemCompleted { .. }
-            | PackageEvent::SpecListLoaded { .. } => {
+            | PackageEvent::SpecListLoaded { .. }
+            | PackageEvent::SyncRepoStatus { .. }
+            | PackageEvent::SyncDriftSummary { .. }
+            | PackageEvent::SyncCommitCreated { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
