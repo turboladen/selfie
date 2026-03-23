@@ -104,10 +104,11 @@ pub(crate) async fn handle_apply(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
-            // Suppress DotfileDeploying — the deployed line is sufficient
+            // Suppress per-file progress lines — the summary is sufficient
             matches!(
                 event,
                 selfie::package::event::PackageEvent::DotfileDeploying { .. }
+                    | selfie::package::event::PackageEvent::DotfileDeployed { .. }
             )
         })
         .await;
