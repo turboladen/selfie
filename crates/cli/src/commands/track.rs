@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use dialoguer::{Input, Select, theme::ColorfulTheme};
+use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
     fs::real::RealFileSystem,
     namespace,
@@ -84,7 +84,7 @@ fn prompt_track_choice(package_names: &[String], file: &str) -> TrackChoice {
     items.push(NEW_STANDALONE.to_string());
     items.push(TYPE_A_NAME.to_string());
 
-    let selection = Select::with_theme(&ColorfulTheme::default())
+    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
         .with_prompt("Where should this file be tracked?")
         .items(&items)
         .default(0)
