@@ -172,6 +172,22 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct TrackDotfileParam {
+    /// Name for the new standalone dotfile spec
+    pub name: String,
+    /// Absolute path to the file to track (the deploy target)
+    pub file: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PackageTrackDotfileParam {
+    /// Name of the existing package to add the dotfile to
+    pub package: String,
+    /// Absolute path to the file to track (the deploy target)
+    pub file: String,
+}
+
 // ─── Spec (definition) tools ───────────────────────────────────────────────
 
 #[tool_router]
@@ -560,6 +576,104 @@ impl SelfieServer {
             self.dotfile_service.apply_all(options).await
         };
 
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_dotfiles_list",
+        description = "List all dotfile mappings across packages and standalone dotfiles. Returns package name, source path, and target path for each entry. Fast — no commands are executed."
+    )]
+    async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
+        use selfie::package::port::PackageRepository;
+
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            self.config.package_directory().to_path_buf(),
+        );
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+
+        if let Ok(output) = repo.list_packages() {
+            for pkg in output.valid_packages().filter(|p| !p.dotfiles().is_empty()) {
+                for entry in pkg.dotfiles() {
+                    entries.push(serde_json::json!({
+                        "package": pkg.name(),
+                        "source": entry.source(),
+                        "target": entry.target(),
+                        "origin": "packages",
+                    }));
+                }
+            }
+        }
+
+        let dotfiles_dir = self.config.dotfiles_directory();
+        if dotfiles_dir.is_dir() {
+            let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+            if let Ok(output) = dotfiles_repo.list_packages() {
+                for pkg in output.valid_packages().filter(|p| !p.dotfiles().is_empty()) {
+                    for entry in pkg.dotfiles() {
+                        entries.push(serde_json::json!({
+                            "package": pkg.name(),
+                            "source": entry.source(),
+                            "target": entry.target(),
+                            "origin": "dotfiles",
+                        }));
+                    }
+                }
+            }
+        }
+
+        let data = serde_json::json!({
+            "status": "success",
+            "total": entries.len(),
+            "dotfiles": entries,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&data).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        name = "selfie_dotfiles_drift",
+        description = "Check all deployed dotfiles for drift between repo sources, deployed targets, and last-known deploy state. Returns per-file drift status."
+    )]
+    async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
+        use selfie::dotfile_service::port::DotfileService;
+        let stream = self.dotfile_service.check_drift().await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_dotfiles_track",
+        description = "Start tracking a file as a standalone dotfile. Copies the file into the dotfiles directory, creates a YAML spec, and records initial deploy state. Use selfie_package_track_dotfile instead if the file belongs to an existing package."
+    )]
+    async fn selfie_dotfiles_track(
+        &self,
+        Parameters(params): Parameters<TrackDotfileParam>,
+    ) -> Result<CallToolResult, McpError> {
+        use selfie::dotfile_service::port::DotfileService;
+        let stream = self
+            .dotfile_service
+            .track_standalone(&params.name, &params.file)
+            .await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_package_track_dotfile",
+        description = "Add a file to an existing package's dotfiles. Copies the file into the package's directory, adds a dotfiles entry to the YAML spec, and records initial deploy state. The package must already exist."
+    )]
+    async fn selfie_package_track_dotfile(
+        &self,
+        Parameters(params): Parameters<PackageTrackDotfileParam>,
+    ) -> Result<CallToolResult, McpError> {
+        use selfie::dotfile_service::port::DotfileService;
+        let stream = self
+            .dotfile_service
+            .track_for_package(&params.package, &params.file)
+            .await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }
