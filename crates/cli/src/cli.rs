@@ -118,6 +118,12 @@ pub(crate) enum ClapCommands {
     /// inspect drift, list tracked files, and track new ones.
     Dotfiles(DotfilesCommands),
 
+    /// Git sync operations — status, push, pull
+    ///
+    /// Commands for syncing package specs and dotfiles via git.
+    /// Generates per-package conventional commits automatically.
+    Sync(SyncCommands),
+
     /// Interactive shortcut to start tracking a config file
     ///
     /// Prompts whether the file belongs to an existing package or should
@@ -429,6 +435,62 @@ pub(crate) enum DotfilesSubcommands {
         /// Path to the file to track (the deploy target)
         file: String,
     },
+}
+
+/// Sync command group container
+#[derive(Args, Debug, Clone)]
+pub(crate) struct SyncCommands {
+    /// The specific sync operation to perform
+    #[clap(subcommand)]
+    pub(crate) command: SyncSubcommands,
+}
+
+/// Sync management operations
+///
+/// These subcommands sync package specs and dotfiles via git.
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum SyncSubcommands {
+    /// Show git repository status and dotfile drift summary
+    ///
+    /// Displays uncommitted changes, remote tracking state, and
+    /// whether any deployed dotfiles have drifted from their sources.
+    ///
+    /// Example: `selfie sync status`
+    Status,
+
+    /// Commit and push changes to the remote
+    ///
+    /// Groups changed files by package and generates conventional commit
+    /// messages automatically. Prompts to confirm each message before
+    /// committing. Use `--yes` to accept all generated messages.
+    ///
+    /// Example: `selfie sync push`
+    /// Example: `selfie sync push --batch --message "update all specs"`
+    Push {
+        /// Create a single commit for all changes instead of per-package
+        #[arg(long)]
+        batch: bool,
+
+        /// Override commit message (only valid with --batch)
+        #[arg(long, short, requires = "batch")]
+        message: Option<String>,
+
+        /// Accept all generated messages without prompting
+        #[arg(long, short)]
+        yes: bool,
+
+        /// Include non-package files in a housekeeping commit
+        #[arg(long)]
+        include_untracked: bool,
+    },
+
+    /// Fetch and fast-forward merge from the remote
+    ///
+    /// Refuses if the working tree has uncommitted changes. After pulling,
+    /// shows which packages were updated, added, or removed.
+    ///
+    /// Example: `selfie sync pull`
+    Pull,
 }
 
 /// Configuration command group container

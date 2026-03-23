@@ -24,6 +24,7 @@ handle the details.
 - [**Package Files Reference**](docs/package-files.md) - Complete package definition format
 - [**Example Packages**](docs/examples/) - Ready-to-use package definitions
 - [**Configuration Guide**](docs/configuration.md) - Environment setup and options
+- [**Git Sync Guide**](docs/sync.md) - Syncing specs across machines
 
 ### 🎯 Real-World Usage
 
@@ -235,6 +236,7 @@ selfie package --help            # Package (runtime) commands
 selfie apply --help              # Dotfile deployment commands
 selfie dotfiles --help           # Dotfile inspection and tracking
 selfie track --help              # Interactive file tracking shortcut
+selfie sync --help               # Git sync operations
 selfie spec create --help        # Specific command help
 ```
 
@@ -278,7 +280,7 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-dotfile`, `selfie track`
 - ✅ Dotfile drift detection: `selfie dotfiles drift`
 - ✅ Dotfile listing: `selfie dotfiles list`
-- 📋 Git-backed sync (`selfie sync push/pull`) (planned)
+- ✅ Git sync: `selfie sync status/push/pull` with per-package conventional commits
 - 📋 Package groups and bulk operations (planned)
 
 ## Contributing

@@ -34,4 +34,5 @@ pub mod fs;
 pub mod git;
 pub mod namespace;
 pub mod package;
+pub mod sync_service;
 pub mod validation;

@@ -573,6 +573,14 @@ impl EventSender {
         .await;
     }
 
+    /// Get a snapshot of the current operation info with a fresh timestamp.
+    ///
+    /// Used when constructing custom event variants (e.g., `SyncRepoStatus`)
+    /// that carry their own `OperationInfo` field.
+    pub(crate) fn operation_info(&self) -> OperationInfo {
+        self.touch_operation_info()
+    }
+
     fn touch_operation_info(&self) -> OperationInfo {
         let mut info = self.operation_info.clone();
         info.timestamp = Instant::now();

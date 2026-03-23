@@ -13,11 +13,13 @@ use selfie::{
     config::SelfieConfig,
     dotfile_service::{port::ApplyOptions, service::DotfileServiceImpl},
     fs::RealFileSystem,
+    git::GixGitAdapter,
     package::{
         EnvironmentConfig, Package, PackageService, SpecService, event::PackageUpdateFields,
         git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
+    sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
 
@@ -32,10 +34,13 @@ type ConcreteService = PackageServiceImpl<
 type ConcreteDotfileService =
     DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem>;
 
+type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
+
 #[derive(Clone)]
 pub struct SelfieServer {
     service: Arc<ConcreteService>,
     dotfile_service: Arc<ConcreteDotfileService>,
+    sync_service: Arc<ConcreteSyncService>,
     config: SelfieConfig,
     tool_router: ToolRouter<Self>,
 }
@@ -188,6 +193,23 @@ pub struct PackageTrackDotfileParam {
     pub file: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct SyncPushParam {
+    /// Create a single commit for all changes instead of per-package
+    #[serde(default)]
+    pub batch: bool,
+    /// Override commit message (only meaningful with batch=true)
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Per-package custom commit messages (package name → message).
+    /// Packages not in this map use the auto-generated default.
+    #[serde(default)]
+    pub messages: std::collections::HashMap<String, String>,
+    /// Include non-package files in a housekeeping commit
+    #[serde(default)]
+    pub include_untracked: bool,
+}
+
 // ─── Spec (definition) tools ───────────────────────────────────────────────
 
 #[tool_router]
@@ -203,9 +225,12 @@ impl SelfieServer {
             let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
             dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
         }
+        let sync_service =
+            SyncServiceImpl::new(GixGitAdapter, dotfile_service.clone(), config.clone());
         Self {
             service: Arc::new(service),
             dotfile_service: Arc::new(dotfile_service),
+            sync_service: Arc::new(sync_service),
             config,
             tool_router: Self::tool_router(),
         }
@@ -693,6 +718,85 @@ impl SelfieServer {
             .dotfile_service
             .track_for_package(&params.package, &params.file)
             .await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    // ─── Sync tools ────────────────────────────────────────────────────────
+
+    #[tool(
+        name = "selfie_sync_status",
+        description = "Get git repository status and dotfile drift summary. Returns structured JSON with uncommitted changes, remote tracking state, and drifted dotfile names. Use this to check if there are changes to push or pull."
+    )]
+    async fn selfie_sync_status(&self) -> Result<CallToolResult, McpError> {
+        let stream = self.sync_service.status().await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_sync_push",
+        description = "Commit and push changes to the remote git repository. By default, creates one conventional commit per changed package (e.g., 'feat(starship): add package spec'). Use batch=true for a single commit. Provide per-package custom messages via the 'messages' parameter (map of package name to message). Returns the list of commits created."
+    )]
+    async fn selfie_sync_push(
+        &self,
+        Parameters(params): Parameters<SyncPushParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let options = PushOptions {
+            batch: params.batch,
+            message: params.message.clone(),
+            auto_accept: true, // MCP never prompts
+            include_untracked: params.include_untracked,
+        };
+
+        // Phase 1: Prepare commits
+        let pending_commits = match self.sync_service.prepare_push(&options).await {
+            Ok(commits) => commits,
+            Err(e) => {
+                let data = serde_json::json!({
+                    "status": "error",
+                    "message": e.to_string(),
+                });
+                return Ok(CallToolResult::error(vec![Content::text(
+                    serde_json::to_string_pretty(&data).unwrap_or_default(),
+                )]));
+            }
+        };
+
+        if pending_commits.is_empty() {
+            let data = serde_json::json!({
+                "status": "nothing_to_push",
+                "message": "Working tree is clean — nothing to push",
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&data).unwrap_or_default(),
+            )]));
+        }
+
+        // Apply custom messages from the `messages` parameter
+        let confirmed_commits: Vec<ConfirmedCommit> = pending_commits
+            .into_iter()
+            .map(|c| {
+                let message = params.messages.get(&c.name).cloned().unwrap_or(c.message);
+                ConfirmedCommit {
+                    files: c.files,
+                    message,
+                }
+            })
+            .collect();
+
+        // Phase 2: Execute commits and push
+        let stream = self.sync_service.execute_push(confirmed_commits).await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
+    }
+
+    #[tool(
+        name = "selfie_sync_pull",
+        description = "Fetch and fast-forward merge from the remote. Refuses if the working tree has uncommitted changes (push first). Returns which packages were updated, added, or removed. Suggests running 'selfie apply' if dotfile sources changed."
+    )]
+    async fn selfie_sync_pull(&self) -> Result<CallToolResult, McpError> {
+        let stream = self.sync_service.pull().await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))
     }

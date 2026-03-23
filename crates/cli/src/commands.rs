@@ -26,6 +26,7 @@ pub(crate) mod config;
 pub(crate) mod dotfiles;
 pub(crate) mod package;
 pub(crate) mod spec;
+pub(crate) mod sync;
 pub(crate) mod track;
 
 use common::create_package_service;
@@ -38,6 +39,7 @@ use crate::config::CliConfig;
 use crate::{
     cli::{
         ClapCommands, ConfigSubcommands, DotfilesSubcommands, PackageSubcommands, SpecSubcommands,
+        SyncSubcommands,
     },
     display_manager::DisplayManager,
 };
@@ -66,6 +68,9 @@ pub(crate) async fn dispatch_command(
         ClapCommands::Package(package_cmd) => {
             dispatch_package_command(&package_cmd.command, config, display, cancellation_token)
                 .await
+        }
+        ClapCommands::Sync(sync_cmd) => {
+            dispatch_sync_command(&sync_cmd.command, config, &display).await
         }
         ClapCommands::Track { file } => track::handle_track(file, config, &display).await,
         ClapCommands::Config(config_cmd) => {
@@ -201,6 +206,34 @@ async fn dispatch_dotfiles_command(
         DotfilesSubcommands::Track { name, file } => {
             dotfiles::track::handle_track(name, file, config, display).await
         }
+    }
+}
+
+/// Handle sync commands
+async fn dispatch_sync_command(
+    command: &SyncSubcommands,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> i32 {
+    debug!("Handling sync command: {:?}", command);
+
+    match command {
+        SyncSubcommands::Status => sync::status::handle_status(config, display).await,
+        SyncSubcommands::Push {
+            batch,
+            message,
+            yes,
+            include_untracked,
+        } => {
+            let args = sync::push::PushArgs {
+                batch: *batch,
+                message: message.clone(),
+                yes: *yes,
+                include_untracked: *include_untracked,
+            };
+            sync::push::handle_push(&args, config, display).await
+        }
+        SyncSubcommands::Pull => sync::pull::handle_pull(config, display).await,
     }
 }
 
