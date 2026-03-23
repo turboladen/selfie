@@ -41,6 +41,22 @@ pub struct PendingCommit {
     pub files: Vec<PathBuf>,
 }
 
+/// Result of [`SyncService::prepare_push`].
+///
+/// Contains proposed commits for new changes, plus metadata about the
+/// current branch state (e.g., how many commits are already ahead of the
+/// remote). This allows callers to distinguish "nothing at all" from
+/// "no new commits but existing commits need pushing."
+#[derive(Debug, Clone)]
+pub struct PrepareResult {
+    /// Proposed commits for uncommitted changes.
+    pub pending_commits: Vec<PendingCommit>,
+    /// Number of local commits already ahead of the remote.
+    /// When this is > 0 and `pending_commits` is empty, the caller should
+    /// still call [`SyncService::execute_push`] to push existing commits.
+    pub ahead: usize,
+}
+
 /// A commit confirmed by the caller, with a potentially edited message.
 ///
 /// Created from a [`PendingCommit`] after the caller has had a chance to
@@ -75,15 +91,15 @@ pub trait SyncService: Send + Sync {
 
     /// Analyze uncommitted changes and generate per-package commit proposals.
     ///
-    /// This is a **non-mutating query** — no git state is changed. Returns
-    /// `Ok(vec![])` when there's nothing to commit.
+    /// This is a **non-mutating query** — no git state is changed. Returns a
+    /// [`PrepareResult`] containing proposed commits and branch state metadata.
     ///
     /// Errors are returned directly (not as events) because this is a preparation
     /// step, not a long-running operation.
     fn prepare_push(
         &self,
         options: &PushOptions,
-    ) -> impl Future<Output = anyhow::Result<Vec<PendingCommit>>> + Send;
+    ) -> impl Future<Output = anyhow::Result<PrepareResult>> + Send;
 
     /// Stage, commit, and push the confirmed commits.
     ///

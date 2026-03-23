@@ -750,8 +750,8 @@ impl SelfieServer {
         };
 
         // Phase 1: Prepare commits
-        let pending_commits = match self.sync_service.prepare_push(&options).await {
-            Ok(commits) => commits,
+        let prepare_result = match self.sync_service.prepare_push(&options).await {
+            Ok(result) => result,
             Err(e) => {
                 let data = serde_json::json!({
                     "status": "error",
@@ -763,7 +763,7 @@ impl SelfieServer {
             }
         };
 
-        if pending_commits.is_empty() {
+        if prepare_result.pending_commits.is_empty() && prepare_result.ahead == 0 {
             let data = serde_json::json!({
                 "status": "nothing_to_push",
                 "message": "Working tree is clean — nothing to push",
@@ -774,7 +774,8 @@ impl SelfieServer {
         }
 
         // Apply custom messages from the `messages` parameter
-        let confirmed_commits: Vec<ConfirmedCommit> = pending_commits
+        let confirmed_commits: Vec<ConfirmedCommit> = prepare_result
+            .pending_commits
             .into_iter()
             .map(|c| {
                 let message = params.messages.get(&c.name).cloned().unwrap_or(c.message);
@@ -785,7 +786,7 @@ impl SelfieServer {
             })
             .collect();
 
-        // Phase 2: Execute commits and push
+        // Phase 2: Execute commits and push (also pushes existing ahead commits)
         let stream = self.sync_service.execute_push(confirmed_commits).await;
         let result = event_collector::collect_events(stream).await;
         Ok(tool_result(result))

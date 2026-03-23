@@ -5,7 +5,9 @@ use console::style;
 use selfie::{
     git::GixGitAdapter,
     package::event::{OperationResult, OperationSuccess, PackageEvent},
-    sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
+    sync_service::{
+        ConfirmedCommit, PrepareResult, PushOptions, SyncService, service::SyncServiceImpl,
+    },
 };
 
 use crate::{
@@ -37,21 +39,44 @@ pub(crate) async fn handle_push(
     };
 
     // Phase 1: Prepare commits (non-mutating)
-    let pending_commits = match service.prepare_push(&options).await {
-        Ok(commits) => commits,
+    let PrepareResult {
+        pending_commits,
+        ahead,
+    } = match service.prepare_push(&options).await {
+        Ok(result) => result,
         Err(e) => {
             display.print_error(e.to_string());
             return 1;
         }
     };
 
-    if pending_commits.is_empty() {
+    if pending_commits.is_empty() && ahead == 0 {
         display.print_info("Nothing to push — working tree is clean");
         return 0;
     }
 
-    // Show what will be committed
     let use_colors = config.use_colors();
+
+    // If no new commits but ahead > 0, push existing commits directly
+    if pending_commits.is_empty() && ahead > 0 {
+        let label = if ahead == 1 { "commit" } else { "commits" };
+        display.print_info(format!(
+            "{ahead} existing {label} not yet pushed — pushing now"
+        ));
+
+        let event_stream = service.execute_push(vec![]).await;
+        let display_for_handler = display.clone();
+        let processor = EventProcessor::new(display.clone());
+        let result = processor
+            .process_events(event_stream, move |event| {
+                handle_push_event(event, &display_for_handler, use_colors)
+            })
+            .await;
+
+        return result.exit_code;
+    }
+
+    // Show what will be committed
     display.println("");
     for commit in &pending_commits {
         let file_count = commit.files.len();

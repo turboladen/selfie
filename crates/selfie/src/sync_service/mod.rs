@@ -14,5 +14,5 @@
 pub mod port;
 pub mod service;
 
-pub use self::port::{ConfirmedCommit, PendingCommit, PushOptions, SyncService};
+pub use self::port::{ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncService};
 pub use self::service::SyncServiceImpl;

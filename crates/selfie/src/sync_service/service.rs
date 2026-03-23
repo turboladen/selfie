@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::port::{ConfirmedCommit, PendingCommit, PushOptions, SyncService};
+use super::port::{ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncService};
 
 /// Concrete implementation of [`SyncService`].
 ///
@@ -153,7 +153,7 @@ where
         })
     }
 
-    async fn prepare_push(&self, options: &PushOptions) -> anyhow::Result<Vec<PendingCommit>> {
+    async fn prepare_push(&self, options: &PushOptions) -> anyhow::Result<PrepareResult> {
         let repo_info = self.discover_repo().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let status = self
@@ -161,8 +161,13 @@ where
             .repo_status(&repo_info.root)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        if status.is_clean() && status.ahead == 0 {
-            return Ok(vec![]);
+        let ahead = status.ahead;
+
+        if status.is_clean() && ahead == 0 {
+            return Ok(PrepareResult {
+                pending_commits: vec![],
+                ahead: 0,
+            });
         }
 
         // Collect all changed files (modified + staged + untracked + deleted)
@@ -184,7 +189,10 @@ where
         }
 
         if all_changed.is_empty() {
-            return Ok(vec![]);
+            return Ok(PrepareResult {
+                pending_commits: vec![],
+                ahead,
+            });
         }
 
         if options.batch {
@@ -194,11 +202,14 @@ where
                 .message
                 .clone()
                 .unwrap_or_else(|| generate_batch_message(&all_changed));
-            return Ok(vec![PendingCommit {
-                name: "all".to_string(),
-                message,
-                files,
-            }]);
+            return Ok(PrepareResult {
+                pending_commits: vec![PendingCommit {
+                    name: "all".to_string(),
+                    message,
+                    files,
+                }],
+                ahead,
+            });
         }
 
         // Group files by package name
@@ -244,7 +255,10 @@ where
             );
         }
 
-        Ok(commits)
+        Ok(PrepareResult {
+            pending_commits: commits,
+            ahead,
+        })
     }
 
     async fn execute_push(&self, commits: Vec<ConfirmedCommit>) -> EventStream {
@@ -261,17 +275,6 @@ where
             );
 
             sender.send_started().await;
-
-            if commits.is_empty() {
-                sender
-                    .send_completed(OperationResult::Success(
-                        OperationSuccess::SyncNothingToPush {
-                            steps_completed: StepCount::new(0, 0),
-                        },
-                    ))
-                    .await;
-                return;
-            }
 
             let repo_info = match git.discover_repo(config.package_directory()) {
                 Ok(info) => info,
