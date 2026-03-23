@@ -1311,26 +1311,26 @@ environments:
         other => panic!("Expected DotfileTracked success, got: {other:?}"),
     }
 
-    // Source file should be copied alongside the YAML
-    let copied = dirs.package_dir.join("alacritty.toml");
+    // Source file should be copied into a subdirectory named after the package
+    let copied = dirs.package_dir.join("alacritty").join("alacritty.toml");
     assert!(
         copied.exists(),
-        "Source file should be copied alongside the package YAML"
+        "Source file should be copied into package subdirectory"
     );
     assert_eq!(
         std::fs::read_to_string(&copied).unwrap(),
         "[font]\nsize = 12"
     );
 
-    // Package YAML should now contain a dotfiles section
+    // Package YAML should now contain a dotfiles section with relative source path
     let updated_yaml = std::fs::read_to_string(dirs.package_dir.join("alacritty.yml")).unwrap();
     assert!(
         updated_yaml.contains("dotfiles"),
         "Updated YAML should contain dotfiles section"
     );
     assert!(
-        updated_yaml.contains("alacritty.toml"),
-        "Updated YAML should reference the tracked file"
+        updated_yaml.contains("alacritty/alacritty.toml"),
+        "Updated YAML should reference the tracked file with subdirectory"
     );
 }
 

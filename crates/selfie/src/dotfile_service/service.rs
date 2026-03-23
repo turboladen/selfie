@@ -968,7 +968,9 @@ where
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let source_path = package_dir.join(&filename);
+    let source_dir = package_dir.join(package_name);
+    let source_path = source_dir.join(&filename);
+    let relative_source = format!("{package_name}/{filename}");
 
     // Copy the file
     if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
@@ -977,10 +979,10 @@ where
         )));
     }
 
-    // Add dotfiles entry and save
+    // Add dotfiles entry and save — source is relative to the YAML's parent dir
     package_blob
         .package_mut()
-        .add_dotfile(DotfileEntry::new(&filename, target_path));
+        .add_dotfile(DotfileEntry::new(&relative_source, target_path));
 
     let file_path = package_blob.file_path().to_path_buf();
     if let Err(e) = repo.save_package(package_blob.package(), &file_path) {
@@ -992,7 +994,7 @@ where
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
-    deploy_state.record_deployment(&filename, target_path, &checksum);
+    deploy_state.record_deployment(&relative_source, target_path, &checksum);
     let _ = save_deploy_state(filesystem, config, &deploy_state);
 
     OperationResult::Success(OperationSuccess::DotfileTracked {
