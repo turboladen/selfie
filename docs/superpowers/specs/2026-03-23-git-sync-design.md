@@ -197,12 +197,15 @@ pub trait SyncService {
 }
 ```
 
-**`GitOperations`** — port for git operations, enabling testable mocks:
+**`GitSyncProvider`** — port for git write/sync operations, enabling testable mocks. This is a
+separate trait from the existing `GitStatusProvider` (which provides read-only status for
+`PackageServiceImpl`). Both traits are implemented by a single concrete adapter (`GixGitAdapter`),
+following interface segregation — each consumer only sees the methods it needs:
 
 ```rust
-pub trait GitOperations: Send + Sync {
+pub trait GitSyncProvider: Send + Sync {
     fn discover_repo(&self, path: &Path) -> Result<RepoInfo>;
-    fn status(&self, repo_root: &Path) -> Result<RepoStatus>;
+    fn repo_status(&self, repo_root: &Path) -> Result<RepoStatus>;
     fn stage_files(&self, repo_root: &Path, files: &[PathBuf]) -> Result<()>;
     fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId>;
     fn push(&self, repo_root: &Path) -> Result<()>;
@@ -271,7 +274,7 @@ pub struct SyncServiceImpl<G, D> {
 
 Generic over:
 
-- `G: GitOperations` — for testable git mocking
+- `G: GitSyncProvider` — for testable git mocking
 - `D: DotfileService` — for drift checking in `sync status`
 
 The service uses `config.package_directory()` as the discovery starting point for all git
@@ -299,19 +302,22 @@ New `PackageEvent` variants, using `operation_info: OperationInfo` where applica
   - `SyncPullUpToDate` — when pull finds nothing new.
   - `SyncNothingToPush` — when push finds no changes.
 
-### Adapter: `GixGitOperations`
+### Adapter: `GixGitAdapter`
 
-Implements `GitOperations` using the `gix` crate for local operations (discover, status, stage,
-commit, diff). The existing `GixGitStatusProvider` (in `package/git_adapter.rs`) remains separate —
-it serves a different purpose (annotating spec list output) and has a simpler interface. If
-significant code duplication emerges during implementation, shared helpers can be extracted to a
-common `gix_utils` module.
+A single concrete struct that implements **both** `GitStatusProvider` and `GitSyncProvider`. This
+replaces the existing `GixGitStatusProvider` (renamed). The adapter lives in a shared location
+accessible to both `PackageServiceImpl` (which only needs `GitStatusProvider`) and `SyncServiceImpl`
+(which needs `GitSyncProvider`).
 
-**Network operations (push/fetch):** The `gix` crate's networking support requires additional
-features and authentication handling that adds complexity. The `GixGitOperations` adapter shells out
-to the `git` binary for `push` and `fetch` only, leveraging the user's existing SSH/credential
-configuration. All other operations use `gix` natively. This is a pragmatic hybrid: `gix` for fast
-local operations, `git` CLI for battle-tested networking.
+The adapter uses the `gix` crate for local operations (discover, status, stage, commit, diff) and
+shells out to the `git` binary for push and fetch only, leveraging the user's existing
+SSH/credential configuration. This is a pragmatic hybrid: `gix` for fast local operations, `git` CLI
+for battle-tested networking.
+
+**Migration:** `GixGitStatusProvider` → `GixGitAdapter`. All existing call sites that reference
+`GixGitStatusProvider` are updated. The `git_adapter.rs` file moves from `package/` to a shared
+location (e.g., `crates/selfie/src/git/adapter.rs`) so both services can access it without
+cross-module coupling.
 
 **Additional `gix` features needed:** The workspace `Cargo.toml` currently enables only `status`.
 Staging and committing will require `index` and `revision` features at minimum. The exact feature
@@ -365,7 +371,7 @@ MCP `sync_push` parameters:
 - **Commit message generation** — given file changes, assert correct conventional commit format.
 - **File grouping** — given changed paths, assert correct package grouping.
 - **Edge cases** — no remote, dirty repo detection, nothing to push, non-fast-forward pull.
-- **`GitOperations` mocked** via `mockall` behind `with_mocks` feature flag.
+- **`GitSyncProvider` mocked** via `mockall` behind `with_mocks` feature flag.
 
 ### CLI Tests
 
@@ -384,18 +390,28 @@ MCP `sync_push` parameters:
 
 ### New Files
 
+- `crates/selfie/src/git/mod.rs` — shared git module (re-exports)
+- `crates/selfie/src/git/sync_provider.rs` — `GitSyncProvider` trait
 - `crates/selfie/src/sync_service/mod.rs`
-- `crates/selfie/src/sync_service/port.rs`
-- `crates/selfie/src/sync_service/service.rs`
-- `crates/selfie/src/sync_service/gix_adapter.rs`
+- `crates/selfie/src/sync_service/port.rs` — `SyncService` trait
+- `crates/selfie/src/sync_service/service.rs` — `SyncServiceImpl<G, D>`
 - `crates/cli/src/commands/sync.rs` (or `sync/` module with subcommands)
+
+### Moved/Renamed Files
+
+- `crates/selfie/src/package/git_adapter.rs` → `crates/selfie/src/git/adapter.rs`
+  (`GixGitStatusProvider` → `GixGitAdapter`, now implements both `GitStatusProvider` and
+  `GitSyncProvider`)
+- `crates/selfie/src/package/git.rs` → `crates/selfie/src/git/status_provider.rs`
+  (`GitStatusProvider` trait + types stay as-is)
 
 ### Modified Files
 
-- `crates/selfie/src/lib.rs` — add `sync_service` module
+- `crates/selfie/src/lib.rs` — add `git` and `sync_service` modules
+- `crates/selfie/src/package/mod.rs` — re-export git types from new location
 - `crates/selfie/src/package/event.rs` — new event variants + `OperationType` variants
 - `crates/cli/src/cli.rs` — `Sync` command group + subcommands
 - `crates/cli/src/commands.rs` — dispatch + `sync` module
-- `crates/mcp-server/src/server.rs` — three new tools
+- `crates/mcp-server/src/server.rs` — three new tools + updated git adapter import
 - `README.md` — status section
 - `docs/configuration.md` — mention sync commands
