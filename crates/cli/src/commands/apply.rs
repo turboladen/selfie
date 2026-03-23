@@ -37,8 +37,12 @@ impl ConflictResolver for InteractiveConflictResolver {
         let short_source = shorten_path(source);
         let short_target = shorten_path(target);
 
+        // Blank line for breathing room before the conflict block
+        self.display.println("");
         self.display
-            .print_warning(format!("  Conflict: {short_source} → {short_target}"));
+            .print_warning(format!("  Conflict: {short_target}"));
+        self.display
+            .print_progress(format!("{short_source} → {short_target}"));
         self.display.print_diff(diff);
 
         let items = &[
@@ -46,7 +50,7 @@ impl ConflictResolver for InteractiveConflictResolver {
             "Skip (keep target as-is)",
         ];
         let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("  How should this conflict be resolved?")
+            .with_prompt("How should this conflict be resolved?")
             .items(items)
             .default(0)
             .interact();
@@ -98,7 +102,15 @@ pub(crate) async fn handle_apply(
     };
 
     let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_event| false).await;
+    let result = processor
+        .process_events(event_stream, |event| {
+            // Suppress DotfileDeploying — the deployed line is sufficient
+            matches!(
+                event,
+                selfie::package::event::PackageEvent::DotfileDeploying { .. }
+            )
+        })
+        .await;
 
     result.exit_code
 }

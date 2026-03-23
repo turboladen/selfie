@@ -295,12 +295,13 @@ impl EventProcessor {
                 let short_source = crate::display_manager::shorten_path(&source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
-                    .print_success(format!("  ✓ {short_source} → {short_target}"));
+                    .print_success(format!("  {short_source} → {short_target}"));
             }
 
             PackageEvent::DotfileSkipped { source, reason, .. } => {
+                let short_source = crate::display_manager::shorten_path(&source);
                 self.display
-                    .print_info(format!("  ⊘ {source} skipped: {reason}"));
+                    .print_info(format!("  ⊘ {short_source} skipped: {reason}"));
             }
 
             PackageEvent::DotfileConflict {
@@ -311,8 +312,11 @@ impl EventProcessor {
             } => {
                 let short_source = crate::display_manager::shorten_path(&source);
                 let short_target = crate::display_manager::shorten_path(&target);
+                self.display.println("");
                 self.display
-                    .print_warning(format!("  Conflict: {short_source} → {short_target}"));
+                    .print_warning(format!("  Conflict: {short_target}"));
+                self.display
+                    .print_progress(format!("{short_source} → {short_target}"));
                 self.display.print_diff(&diff);
             }
 
