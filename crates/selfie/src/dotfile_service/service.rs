@@ -225,7 +225,11 @@ fn is_safe_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
-fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
+/// Expand a user-provided path, resolving `~` and symlinks where possible.
+///
+/// Tries full canonicalization first. Falls back to tilde expansion via the
+/// `FileSystem` trait if the path doesn't exist yet.
+pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = PathBuf::from(target);
 
     // Try full canonicalization first (works if path exists)
@@ -552,7 +556,7 @@ where
                 continue;
             }
 
-            let target_path = expand_target_path(filesystem, entry.target());
+            let target_path = expand_user_path(filesystem, entry.target());
 
             // Enforce documented rule: target must be absolute after expansion.
             // A relative target would write relative to CWD, which is surprising
@@ -755,7 +759,7 @@ where
             total_count += 1;
 
             let source_path = resolve_source_path(&base_dir, entry.source());
-            let target_path = expand_target_path(filesystem, entry.target());
+            let target_path = expand_user_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
             if !target_path.is_absolute() {
@@ -854,7 +858,7 @@ where
     let dotfiles_dir = config.dotfiles_directory();
 
     // Expand and validate the target path
-    let expanded_target = expand_target_path(filesystem, target_path);
+    let expanded_target = expand_user_path(filesystem, target_path);
     if !filesystem.path_exists(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
@@ -966,12 +970,12 @@ where
     };
 
     // Check if this target is already tracked in the package
-    let expanded_target = expand_target_path(filesystem, target_path);
+    let expanded_target = expand_user_path(filesystem, target_path);
     if package_blob
         .package()
         .dotfiles()
         .iter()
-        .any(|entry| expand_target_path(filesystem, entry.target()) == expanded_target)
+        .any(|entry| expand_user_path(filesystem, entry.target()) == expanded_target)
     {
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: package_name.to_string(),
@@ -1094,18 +1098,18 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_target_path_absolute() {
+    fn test_expand_user_path_absolute() {
         let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "/tmp/some/file");
+        let result = expand_user_path(&fs, "/tmp/some/file");
         // Should be an absolute path starting with /tmp
         assert!(result.is_absolute());
         assert!(result.starts_with("/tmp"));
     }
 
     #[test]
-    fn test_expand_target_path_tilde() {
+    fn test_expand_user_path_tilde() {
         let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "~/test-file");
+        let result = expand_user_path(&fs, "~/test-file");
         // Should start with the actual home directory, not literal "~"
         assert!(result.is_absolute());
         assert!(

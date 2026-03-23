@@ -41,6 +41,15 @@ pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &Displ
 
     let repo = create_package_repository(config);
 
+    // Check if this file is already tracked anywhere
+    if let Some(pkg_name) = find_existing_tracker(file, config) {
+        display.print_info(format!(
+            "Already tracking '{}' in spec '{}'",
+            file, pkg_name
+        ));
+        return 0;
+    }
+
     // Collect available package names for the prompt
     let package_names = match load_package_names(&repo) {
         Ok(names) => names,
@@ -156,6 +165,43 @@ fn suggest_name(file_path: &str) -> String {
         Some((base, _ext)) if !base.is_empty() => base.to_string(),
         _ => stem.to_string(),
     }
+}
+
+/// Check if a file is already tracked by any package or standalone dotfile.
+///
+/// Scans both the packages directory and the dotfiles directory for a dotfile
+/// entry whose target matches the given file path. Returns the name of the
+/// package that tracks it, or `None`.
+fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
+    let fs = RealFileSystem;
+    let expanded = selfie::dotfile_service::service::expand_user_path(&fs, file);
+
+    let repos: Vec<YamlPackageRepository<RealFileSystem>> = [
+        Some(config.selfie_config().package_directory().to_path_buf()),
+        {
+            let d = config.selfie_config().dotfiles_directory().to_path_buf();
+            d.is_dir().then_some(d)
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .map(|dir| YamlPackageRepository::new(RealFileSystem, dir))
+    .collect();
+
+    for repo in &repos {
+        if let Ok(output) = repo.list_packages() {
+            for pkg in output.valid_packages() {
+                for entry in pkg.dotfiles() {
+                    let entry_expanded =
+                        selfie::dotfile_service::service::expand_user_path(&fs, entry.target());
+                    if entry_expanded == expanded {
+                        return Some(pkg.name().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Load sorted package names from the repository.
