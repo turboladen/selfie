@@ -18,3 +18,6 @@ pub use self::port::{
     ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncError, SyncService,
 };
 pub use self::service::SyncServiceImpl;
+
+#[cfg(any(test, feature = "with_mocks"))]
+pub use self::port::MockSyncService;

@@ -46,7 +46,6 @@ pub(crate) async fn handle_push(
         }
     };
 
-    // Surface any warnings from the preparation phase
     for warning in &warnings {
         display.print_warning(warning);
     }
@@ -58,28 +57,35 @@ pub(crate) async fn handle_push(
 
     let use_colors = config.use_colors();
 
-    // If no new commits but ahead > 0, push existing commits directly
+    // No new commits but unpushed local commits exist — push them directly
     if pending_commits.is_empty() && ahead > 0 {
         let label = if ahead == 1 { "commit" } else { "commits" };
         display.print_info(format!(
             "{ahead} existing {label} not yet pushed — pushing now"
         ));
-
-        let event_stream = service.execute_push(vec![]).await;
-        let display_for_handler = display.clone();
-        let processor = EventProcessor::new(display.clone());
-        let result = processor
-            .process_events(event_stream, move |event| {
-                handle_push_event(event, &display_for_handler, use_colors)
-            })
-            .await;
-
-        return result.exit_code;
+        return execute_push(&service, vec![], display, use_colors).await;
     }
 
-    // Show what will be committed
+    // Phase 1.5: Preview and confirm commit messages
+    show_pending_commits(&pending_commits, display, use_colors);
+
+    let confirmed_commits = match confirm_commits(pending_commits, args.yes, display) {
+        Some(commits) => commits,
+        None => return 130, // User cancelled
+    };
+
+    // Phase 2: Execute commits and push
+    execute_push(&service, confirmed_commits, display, use_colors).await
+}
+
+/// Display the list of pending commits as a preview before confirmation.
+fn show_pending_commits(
+    commits: &[selfie::sync_service::PendingCommit],
+    display: &DisplayManager,
+    use_colors: bool,
+) {
     display.println("");
-    for commit in &pending_commits {
+    for commit in commits {
         let file_count = commit.files.len();
         let label = if file_count == 1 { "file" } else { "files" };
         if use_colors {
@@ -92,54 +98,67 @@ pub(crate) async fn handle_push(
         }
     }
     display.println("");
+}
 
-    // Phase 1.5: Confirm/edit commit messages
-    let confirmed_commits = if args.yes {
-        // Auto-accept all
-        pending_commits
-            .into_iter()
-            .map(|c| ConfirmedCommit {
-                files: c.files,
-                message: c.message,
-            })
-            .collect()
-    } else {
-        // Prompt for each commit message
-        let mut confirmed = Vec::new();
-        for commit in pending_commits {
-            let edited_message: String =
-                match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("Commit message")
-                    .default(commit.message.clone())
-                    .interact_text()
-                {
-                    Ok(msg) => msg,
-                    Err(_) => {
-                        display.print_warning("Cancelled");
-                        return 130;
-                    }
-                };
+/// Prompt the user to confirm or edit each commit message.
+///
+/// Returns `None` if the user cancelled (e.g., Ctrl-C).
+fn confirm_commits(
+    pending: Vec<selfie::sync_service::PendingCommit>,
+    auto_accept: bool,
+    display: &DisplayManager,
+) -> Option<Vec<ConfirmedCommit>> {
+    if auto_accept {
+        return Some(
+            pending
+                .into_iter()
+                .map(|c| ConfirmedCommit {
+                    files: c.files,
+                    message: c.message,
+                })
+                .collect(),
+        );
+    }
 
-            confirmed.push(ConfirmedCommit {
-                files: commit.files,
-                message: edited_message,
-            });
-        }
-        confirmed
-    };
+    let mut confirmed = Vec::new();
+    for commit in pending {
+        let edited_message: String =
+            match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt("Commit message")
+                .default(commit.message.clone())
+                .interact_text()
+            {
+                Ok(msg) => msg,
+                Err(_) => {
+                    display.print_warning("Cancelled");
+                    return None;
+                }
+            };
 
-    // Phase 2: Execute commits and push
-    let event_stream = service.execute_push(confirmed_commits).await;
+        confirmed.push(ConfirmedCommit {
+            files: commit.files,
+            message: edited_message,
+        });
+    }
+    Some(confirmed)
+}
 
+/// Execute the push via the service and process the resulting event stream.
+async fn execute_push(
+    service: &impl SyncService,
+    commits: Vec<ConfirmedCommit>,
+    display: &DisplayManager,
+    use_colors: bool,
+) -> i32 {
+    let event_stream = service.execute_push(commits).await;
     let display_for_handler = display.clone();
     let processor = EventProcessor::new(display.clone());
-    let result = processor
+    processor
         .process_events(event_stream, move |event| {
             handle_push_event(event, &display_for_handler, use_colors)
         })
-        .await;
-
-    result.exit_code
+        .await
+        .exit_code
 }
 
 fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors: bool) -> bool {
@@ -191,6 +210,8 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors:
 mod tests {
     use super::*;
     use selfie::package::event::{OperationContext, OperationInfo, OperationType, StepCount};
+    use selfie::sync_service::PendingCommit;
+    use std::path::PathBuf;
 
     fn make_operation_info() -> OperationInfo {
         OperationInfo {
@@ -202,6 +223,16 @@ mod tests {
             timestamp: std::time::Instant::now(),
         }
     }
+
+    fn make_pending_commit(name: &str, message: &str, files: &[&str]) -> PendingCommit {
+        PendingCommit {
+            name: name.to_string(),
+            message: message.to_string(),
+            files: files.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    // --- handle_push_event tests ---
 
     #[test]
     fn handles_commit_created() {
@@ -249,5 +280,120 @@ mod tests {
             operation_info: make_operation_info(),
         };
         assert!(handle_push_event(&started, &display, false));
+    }
+
+    // --- show_pending_commits tests ---
+
+    #[test]
+    fn show_pending_commits_single_file_uses_singular() {
+        let display = DisplayManager::new(false);
+        let commits = vec![make_pending_commit(
+            "starship",
+            "feat(starship): add package spec",
+            &["starship.yml"],
+        )];
+
+        // Should not panic; display output includes "1 file"
+        show_pending_commits(&commits, &display, false);
+    }
+
+    #[test]
+    fn show_pending_commits_multiple_files_uses_plural() {
+        let display = DisplayManager::new(false);
+        let commits = vec![make_pending_commit(
+            "starship",
+            "chore(starship): update spec and dotfiles",
+            &["starship.yml", "starship/starship.toml"],
+        )];
+
+        // Should not panic; display output includes "2 files"
+        show_pending_commits(&commits, &display, false);
+    }
+
+    #[test]
+    fn show_pending_commits_multiple_commits() {
+        let display = DisplayManager::new(false);
+        let commits = vec![
+            make_pending_commit(
+                "starship",
+                "feat(starship): add package spec",
+                &["starship.yml"],
+            ),
+            make_pending_commit("fnm", "feat(fnm): add package spec", &["fnm.yml"]),
+        ];
+
+        show_pending_commits(&commits, &display, false);
+    }
+
+    #[test]
+    fn show_pending_commits_with_colors() {
+        let display = DisplayManager::new(false);
+        let commits = vec![make_pending_commit(
+            "starship",
+            "feat(starship): add package spec",
+            &["starship.yml"],
+        )];
+
+        // Exercises the use_colors=true branch
+        show_pending_commits(&commits, &display, true);
+    }
+
+    // --- confirm_commits tests ---
+
+    #[test]
+    fn confirm_commits_auto_accept_preserves_messages() {
+        let display = DisplayManager::new(false);
+        let pending = vec![
+            make_pending_commit("starship", "feat(starship): add spec", &["starship.yml"]),
+            make_pending_commit("fnm", "feat(fnm): add spec", &["fnm.yml"]),
+        ];
+
+        let confirmed = confirm_commits(pending, true, &display).unwrap();
+
+        assert_eq!(confirmed.len(), 2);
+        assert_eq!(confirmed[0].message, "feat(starship): add spec");
+        assert_eq!(confirmed[0].files, vec![PathBuf::from("starship.yml")]);
+        assert_eq!(confirmed[1].message, "feat(fnm): add spec");
+        assert_eq!(confirmed[1].files, vec![PathBuf::from("fnm.yml")]);
+    }
+
+    #[test]
+    fn confirm_commits_auto_accept_empty_list() {
+        let display = DisplayManager::new(false);
+        let confirmed = confirm_commits(vec![], true, &display).unwrap();
+        assert!(confirmed.is_empty());
+    }
+
+    // --- execute_push tests ---
+
+    #[tokio::test]
+    async fn execute_push_returns_exit_code_from_event_stream() {
+        use selfie::package::event::EventStream;
+        use selfie::sync_service::MockSyncService;
+
+        let mut mock_service = MockSyncService::new();
+        mock_service.expect_execute_push().returning(|_| {
+            Box::pin(async {
+                let events = vec![PackageEvent::Completed {
+                    operation_info: OperationInfo {
+                        id: uuid::Uuid::new_v4(),
+                        operation_type: OperationType::SyncPush,
+                        package_name: String::new(),
+                        environment: "test".to_string(),
+                        context: OperationContext::default(),
+                        timestamp: std::time::Instant::now(),
+                    },
+                    result: OperationResult::Success(OperationSuccess::SyncPushComplete {
+                        commits_pushed: 1,
+                        steps_completed: StepCount::new(1, 1),
+                    }),
+                }];
+                Box::pin(futures::stream::iter(events)) as EventStream
+            })
+        });
+
+        let display = DisplayManager::new(false);
+        let exit_code = execute_push(&mock_service, vec![], &display, false).await;
+        assert_eq!(exit_code, 0);
     }
 }
