@@ -111,7 +111,7 @@ pub(crate) enum ClapCommands {
     /// target locations on the system. Detects conflicts and drift.
     Apply(ApplyArgs),
 
-    /// Dotfile management operations — drift, list, status, track
+    /// Dotfile management operations — drift, list, track
     ///
     /// Commands for inspecting and managing dotfiles across packages.
     /// Use `selfie apply` to deploy dotfiles; use `selfie dotfiles` to
