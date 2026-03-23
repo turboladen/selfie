@@ -101,15 +101,26 @@ pub(crate) async fn handle_apply(
         service.apply_all(options).await
     };
 
+    let display_for_handler = display.clone();
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| {
+        .process_events(event_stream, |event| match event {
             // Suppress per-file progress lines — the summary is sufficient
-            matches!(
-                event,
-                selfie::package::event::PackageEvent::DotfileDeploying { .. }
-                    | selfie::package::event::PackageEvent::DotfileDeployed { .. }
-            )
+            selfie::package::event::PackageEvent::DotfileDeploying { .. }
+            | selfie::package::event::PackageEvent::DotfileDeployed { .. } => true,
+
+            // Render the completion summary as info (blue) rather than
+            // success (green) so it doesn't blend with diff additions.
+            selfie::package::event::PackageEvent::Completed { result, .. } => {
+                match result {
+                    selfie::package::event::OperationResult::Success(success) => {
+                        display_for_handler.print_info(success.to_string());
+                    }
+                    _ => return false, // let default handler deal with failures
+                }
+                true
+            }
+            _ => false,
         })
         .await;
 
