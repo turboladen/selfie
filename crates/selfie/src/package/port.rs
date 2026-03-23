@@ -329,18 +329,20 @@ impl ListPackagesOutput {
         self.0.is_empty()
     }
 
-    /// Get all package loading results (both successes and failures)
-    ///
-    /// Returns a slice containing the result of attempting to load each
-    /// package file found in the repository.
     /// Create a `ListPackagesOutput` from a list of valid packages.
     ///
     /// Useful in tests where you want to construct output without going
     /// through a real repository.
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
     pub fn from_packages(packages: Vec<Package>) -> Self {
         Self(packages.into_iter().map(Ok).collect())
     }
 
+    /// Get all package loading results (both successes and failures)
+    ///
+    /// Returns a slice containing the result of attempting to load each
+    /// package file found in the repository.
     pub fn all_results(&self) -> &[Result<Package, PackageParseError>] {
         &self.0
     }

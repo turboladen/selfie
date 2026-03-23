@@ -8,6 +8,7 @@ use console::style;
 
 use selfie::{
     commands::ShellCommandRunner,
+    dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
         GetPackage, SpecService,
@@ -19,7 +20,7 @@ use selfie::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::config::CliConfig;
+use crate::{config::CliConfig, event_processor::EventProcessor};
 use std::{path::Path, process::Command};
 
 use crate::display_manager::{DisplayManager, INDENT};
@@ -38,6 +39,73 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     fs: F,
 ) -> YamlPackageRepository<F> {
     YamlPackageRepository::new(fs, config.package_directory().clone())
+}
+
+/// Create a `DotfileServiceImpl` with the packages repo and, if the configured
+/// `dotfiles_directory` exists on disk, an additional dotfiles repo.
+///
+/// This is the standard setup for any command that needs `DotfileService`.
+pub(crate) fn create_dotfile_service(
+    config: &CliConfig,
+) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+    let repo = create_package_repository(config);
+    let fs = RealFileSystem;
+    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+
+    let dotfiles_dir = config.selfie_config().dotfiles_directory();
+    if dotfiles_dir.is_dir() {
+        let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+        service = service.with_dotfiles_repository(dotfiles_repo);
+    }
+
+    service
+}
+
+/// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.
+///
+/// Shared by `selfie dotfiles track` and `selfie track` (interactive).
+pub(crate) async fn handle_track_standalone(
+    name: &str,
+    file: &str,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> i32 {
+    let dotfiles_dir = config.selfie_config().dotfiles_directory();
+    if !dotfiles_dir.is_dir() {
+        display.print_error(format!(
+            "Dotfiles directory does not exist: {}",
+            dotfiles_dir.display()
+        ));
+        display.print_suggestion(format!(
+            "Create it with: mkdir -p {}",
+            dotfiles_dir.display()
+        ));
+        return 1;
+    }
+
+    let service = create_dotfile_service(config);
+    let event_stream = service.track_standalone(name, file).await;
+
+    let processor = EventProcessor::new(display.clone());
+    let result = processor.process_events(event_stream, |_| false).await;
+    result.exit_code
+}
+
+/// Track a file for an existing package via `DotfileServiceImpl::track_for_package`.
+///
+/// Shared by `selfie package track-config` and `selfie track` (interactive).
+pub(crate) async fn handle_track_for_package(
+    package_name: &str,
+    file: &str,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> i32 {
+    let service = create_dotfile_service(config);
+    let event_stream = service.track_for_package(package_name, file).await;
+
+    let processor = EventProcessor::new(display.clone());
+    let result = processor.process_events(event_stream, |_| false).await;
+    result.exit_code
 }
 
 /// Save a package to the filesystem with consistent error handling

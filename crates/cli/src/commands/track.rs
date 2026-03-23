@@ -7,21 +7,33 @@
 
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 use selfie::{
-    dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::real::RealFileSystem,
+    namespace,
     package::{port::PackageRepository, repository::yaml::YamlPackageRepository},
 };
 use tracing::info;
 
 use crate::{
-    commands::common::create_package_repository, config::CliConfig,
-    display_manager::DisplayManager, event_processor::EventProcessor,
+    commands::common::{self, create_package_repository},
+    config::CliConfig,
+    display_manager::DisplayManager,
 };
 
 /// Sentinel item appended after real package names in the select list.
 const NEW_STANDALONE: &str = "→ New standalone dotfile";
 /// Sentinel item for free-text name entry.
 const TYPE_A_NAME: &str = "→ Let me type a name";
+
+/// What the user chose in the interactive prompt.
+#[derive(Debug, PartialEq)]
+enum TrackChoice {
+    /// Add the file to an existing package
+    ExistingPackage(String),
+    /// Create a new standalone dotfile with the given name
+    NewStandalone(String),
+    /// User cancelled
+    Cancelled,
+}
 
 /// Handle the `selfie track` interactive command
 pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &DisplayManager) -> i32 {
@@ -38,8 +50,37 @@ pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &Displ
         }
     };
 
+    let choice = prompt_track_choice(&package_names, file);
+
+    match choice {
+        TrackChoice::ExistingPackage(ref name) => {
+            common::handle_track_for_package(name, file, config, display).await
+        }
+        TrackChoice::NewStandalone(ref name) => {
+            // Validate namespace before creating
+            let dotfiles_dir = config.selfie_config().dotfiles_directory();
+            let dotfiles_repo = if dotfiles_dir.is_dir() {
+                Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+            } else {
+                None
+            };
+            if let Err(e) = namespace::validate_unique_name(name, &repo, dotfiles_repo.as_ref()) {
+                display.print_error(format!("Cannot use name '{name}': {e}"));
+                return 1;
+            }
+            common::handle_track_standalone(name, file, config, display).await
+        }
+        TrackChoice::Cancelled => {
+            display.print_info("Cancelled.");
+            0
+        }
+    }
+}
+
+/// Present the interactive selection prompt and return the user's choice.
+fn prompt_track_choice(package_names: &[String], file: &str) -> TrackChoice {
     // Build the selection list: existing packages + sentinel options
-    let mut items: Vec<String> = package_names.clone();
+    let mut items: Vec<String> = package_names.to_vec();
     items.push(NEW_STANDALONE.to_string());
     items.push(TYPE_A_NAME.to_string());
 
@@ -51,38 +92,29 @@ pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &Displ
 
     let choice = match selection {
         Ok(Some(idx)) => idx,
-        Ok(None) | Err(_) => {
-            display.print_info("Cancelled.");
-            return 0;
-        }
+        Ok(None) | Err(_) => return TrackChoice::Cancelled,
     };
 
+    resolve_choice(&items, choice, file)
+}
+
+/// Pure function: given the selection list and the chosen index, determine action.
+fn resolve_choice(items: &[String], choice: usize, file: &str) -> TrackChoice {
     let selected = &items[choice];
 
     if selected == TYPE_A_NAME {
-        // Free-text: prompt for a standalone dotfile name
-        let name = match prompt_for_name() {
-            Some(n) => n,
-            None => {
-                display.print_info("Cancelled.");
-                return 0;
-            }
-        };
-        track_standalone(&name, file, config, display).await
+        match prompt_for_name() {
+            Some(name) => TrackChoice::NewStandalone(name),
+            None => TrackChoice::Cancelled,
+        }
     } else if selected == NEW_STANDALONE {
-        // Derive a default name from the filename (strip leading dot)
         let suggested = suggest_name(file);
-        let name = match prompt_for_name_with_default(&suggested) {
-            Some(n) => n,
-            None => {
-                display.print_info("Cancelled.");
-                return 0;
-            }
-        };
-        track_standalone(&name, file, config, display).await
+        match prompt_for_name_with_default(&suggested) {
+            Some(name) => TrackChoice::NewStandalone(name),
+            None => TrackChoice::Cancelled,
+        }
     } else {
-        // An existing package was chosen
-        track_for_package(selected, file, config, display).await
+        TrackChoice::ExistingPackage(selected.clone())
     }
 }
 
@@ -135,58 +167,6 @@ fn load_package_names(repo: &impl PackageRepository) -> Result<Vec<String>, Stri
     Ok(names)
 }
 
-/// Track as a standalone dotfile via `DotfileServiceImpl::track_standalone`.
-async fn track_standalone(
-    name: &str,
-    file: &str,
-    config: &CliConfig,
-    display: &DisplayManager,
-) -> i32 {
-    let repo = create_package_repository(config);
-    let fs = RealFileSystem;
-    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
-
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if !dotfiles_dir.is_dir() {
-        display.print_error(format!(
-            "Dotfiles directory does not exist: {}",
-            dotfiles_dir.display()
-        ));
-        display.print_suggestion(format!(
-            "Create it with: mkdir -p {}",
-            dotfiles_dir.display()
-        ));
-        return 1;
-    }
-
-    let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
-    service = service.with_dotfiles_repository(dotfiles_repo);
-
-    let event_stream = service.track_standalone(name, file).await;
-
-    let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
-    result.exit_code
-}
-
-/// Track for an existing package via `DotfileServiceImpl::track_for_package`.
-async fn track_for_package(
-    package_name: &str,
-    file: &str,
-    config: &CliConfig,
-    display: &DisplayManager,
-) -> i32 {
-    let repo = create_package_repository(config);
-    let fs = RealFileSystem;
-    let service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
-
-    let event_stream = service.track_for_package(package_name, file).await;
-
-    let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
-    result.exit_code
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +207,20 @@ mod tests {
 
         let names = load_package_names(&repo).unwrap();
         assert_eq!(names, vec!["alacritty", "fnm", "zsh"]);
+    }
+
+    #[test]
+    fn resolve_choice_selects_existing_package() {
+        let items = vec![
+            "alacritty".to_string(),
+            "fnm".to_string(),
+            NEW_STANDALONE.to_string(),
+            TYPE_A_NAME.to_string(),
+        ];
+        let result = resolve_choice(&items, 0, "~/.config/test.toml");
+        assert_eq!(
+            result,
+            TrackChoice::ExistingPackage("alacritty".to_string())
+        );
     }
 }

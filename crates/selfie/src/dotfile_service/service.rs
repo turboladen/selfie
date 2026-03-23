@@ -827,7 +827,7 @@ where
     R: PackageRepository,
     F: FileSystem,
 {
-    let Some(_repo) = dotfiles_repo else {
+    let Some(dotfiles_repo) = dotfiles_repo else {
         return OperationResult::Failure(OperationFailure::Generic(
             "No dotfiles directory configured. Set `dotfiles_directory` in config.".to_string(),
         ));
@@ -861,9 +861,25 @@ where
         .to_string_lossy()
         .to_string();
 
+    // Check for existing spec (prevent silent overwrite)
+    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
+    if filesystem.path_exists(&spec_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "A dotfile spec already exists at {}. Remove it first or choose a different name.",
+            spec_path.display()
+        )));
+    }
+
     // Copy the file into dotfiles_dir/name/filename
     let source_dir = dotfiles_dir.join(name);
     let source_path = source_dir.join(&filename);
+
+    if filesystem.path_exists(&source_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Source file already exists at {}. Remove it first or choose a different name.",
+            source_path.display()
+        )));
+    }
 
     if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -871,15 +887,14 @@ where
         )));
     }
 
-    // Create the YAML spec
+    // Create the YAML spec (spec_path already computed above for overwrite check)
     let package = crate::package::PackageBuilder::default()
         .name(name)
         .dotfiles(vec![DotfileEntry::new(&filename, target_path)])
-        .path(dotfiles_dir.join(format!("{name}.yml")))
+        .path(spec_path.clone())
         .build();
 
-    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
-    if let Err(e) = _repo.save_package(&package, &spec_path) {
+    if let Err(e) = dotfiles_repo.save_package(&package, &spec_path) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Cannot save spec: {e}"
         )));

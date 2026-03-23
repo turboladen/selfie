@@ -5,15 +5,14 @@
 //! dotfiles directory and creating a YAML spec for it.
 
 use selfie::{
-    dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
-    fs::real::RealFileSystem,
-    package::repository::yaml::YamlPackageRepository,
+    fs::real::RealFileSystem, namespace, package::repository::yaml::YamlPackageRepository,
 };
 use tracing::info;
 
 use crate::{
-    commands::common::create_package_repository, config::CliConfig,
-    display_manager::DisplayManager, event_processor::EventProcessor,
+    commands::common::{self, create_package_repository},
+    config::CliConfig,
+    display_manager::DisplayManager,
 };
 
 /// Handle the `selfie dotfiles track` command
@@ -25,31 +24,18 @@ pub(crate) async fn handle_track(
 ) -> i32 {
     info!("Tracking dotfile '{}' as '{}'", file, name);
 
+    // Validate namespace before creating
     let repo = create_package_repository(config);
-    let fs = RealFileSystem;
-    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
-
-    // The dotfiles directory must exist for standalone tracking
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if !dotfiles_dir.is_dir() {
-        display.print_error(format!(
-            "Dotfiles directory does not exist: {}",
-            dotfiles_dir.display()
-        ));
-        display.print_suggestion(format!(
-            "Create it with: mkdir -p {}",
-            dotfiles_dir.display()
-        ));
+    let dotfiles_repo = if dotfiles_dir.is_dir() {
+        Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+    } else {
+        None
+    };
+    if let Err(e) = namespace::validate_unique_name(name, &repo, dotfiles_repo.as_ref()) {
+        display.print_error(format!("Cannot use name '{name}': {e}"));
         return 1;
     }
 
-    let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
-    service = service.with_dotfiles_repository(dotfiles_repo);
-
-    let event_stream = service.track_standalone(name, file).await;
-
-    let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
-
-    result.exit_code
+    common::handle_track_standalone(name, file, config, display).await
 }
