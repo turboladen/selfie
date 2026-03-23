@@ -410,6 +410,123 @@ async fn test_apply_conflict_auto_accept() {
 }
 
 #[tokio::test]
+async fn test_apply_conflict_resolver_accept() {
+    use selfie::dotfile_service::port::{ConflictResolution, ConflictResolver};
+    use std::sync::Arc;
+
+    /// A test resolver that always accepts conflicts.
+    struct AlwaysAccept;
+    impl ConflictResolver for AlwaysAccept {
+        fn resolve(&self, _source: &str, _target: &str, _diff: &str) -> ConflictResolution {
+            ConflictResolution::Accept
+        }
+    }
+
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+
+    // First deploy
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Modify target and source to create a conflict
+    std::fs::write(&target_file, "key = \"user-modified\"").unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"updated-source\"").unwrap();
+
+    // Apply with a resolver that accepts
+    let options = ApplyOptions {
+        conflict_resolver: Some(Arc::new(AlwaysAccept)),
+        ..Default::default()
+    };
+    let stream = service.apply_all(options).await;
+    let events = collect_events(stream).await;
+
+    // Should deploy (not emit a conflict event)
+    let has_conflict = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::DotfileConflict { .. }));
+    assert!(
+        !has_conflict,
+        "Should NOT emit DotfileConflict when resolver accepts"
+    );
+
+    let has_deployed = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }));
+    assert!(has_deployed, "Should deploy when resolver accepts");
+
+    let content = std::fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "key = \"updated-source\"");
+}
+
+#[tokio::test]
+async fn test_apply_conflict_resolver_skip() {
+    use selfie::dotfile_service::port::{ConflictResolution, ConflictResolver};
+    use std::sync::Arc;
+
+    /// A test resolver that always skips conflicts.
+    struct AlwaysSkip;
+    impl ConflictResolver for AlwaysSkip {
+        fn resolve(&self, _source: &str, _target: &str, _diff: &str) -> ConflictResolution {
+            ConflictResolution::Skip
+        }
+    }
+
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"original\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+
+    // First deploy
+    let stream = service.apply_all(ApplyOptions::default()).await;
+    let _ = collect_events(stream).await;
+
+    // Modify target and source to create a conflict
+    std::fs::write(&target_file, "key = \"user-modified\"").unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"updated-source\"").unwrap();
+
+    // Apply with a resolver that skips
+    let options = ApplyOptions {
+        conflict_resolver: Some(Arc::new(AlwaysSkip)),
+        ..Default::default()
+    };
+    let stream = service.apply_all(options).await;
+    let events = collect_events(stream).await;
+
+    // Should NOT deploy, should emit conflict event (resolver returned Skip)
+    let has_deployed = events
+        .iter()
+        .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }));
+    assert!(!has_deployed, "Should NOT deploy when resolver skips");
+
+    // Target should still have the user's content
+    let content = std::fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "key = \"user-modified\"");
+}
+
+#[tokio::test]
 async fn test_check_drift_detects_target_change() {
     let dirs = TestDirs::new();
 

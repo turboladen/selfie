@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::fmt::Display;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use console::style;
@@ -20,12 +19,6 @@ pub(crate) fn shorten_path(path: &str) -> String {
         return format!("~{rest}");
     }
     path.to_string()
-}
-
-/// Shorten a path for display, accepting a `&Path`.
-#[allow(dead_code)]
-pub(crate) fn shorten_display_path(path: &Path) -> String {
-    shorten_path(&path.display().to_string())
 }
 
 /// Standard indentation for structured CLI output (e.g., section content,

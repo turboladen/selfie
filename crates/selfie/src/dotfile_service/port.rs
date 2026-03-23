@@ -44,6 +44,19 @@ pub struct ApplyOptions {
     pub conflict_resolver: Option<Arc<dyn ConflictResolver>>,
 }
 
+impl std::fmt::Debug for ApplyOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApplyOptions")
+            .field("dry_run", &self.dry_run)
+            .field("auto_accept", &self.auto_accept)
+            .field(
+                "conflict_resolver",
+                &self.conflict_resolver.as_ref().map(|_| "<resolver>"),
+            )
+            .finish()
+    }
+}
+
 /// Port for dotfile deployment operations (Hexagonal Architecture)
 ///
 /// This trait abstracts dotfile deployment operations to allow different
