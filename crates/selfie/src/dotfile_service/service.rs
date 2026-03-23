@@ -542,7 +542,8 @@ where
             // Detect drift
             let drift =
                 deploy_state.detect_drift(entry.source(), &source_checksum, &target_checksum);
-            let decision = deploy_decision(&drift, target_exists);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             let unit = DeployUnit {
                 source_path: &source_path,
@@ -574,6 +575,15 @@ where
                     }
                 }
                 DeployDecision::Skip(reason) => {
+                    // If this was an untracked file that's already in sync,
+                    // record the state so future runs see DriftType::None.
+                    if drift == DriftType::NotTracked && !options.dry_run {
+                        deploy_state.record_deployment(
+                            entry.source(),
+                            &target_path.to_string_lossy(),
+                            &source_checksum,
+                        );
+                    }
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
