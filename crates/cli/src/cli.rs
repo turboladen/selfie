@@ -111,6 +111,13 @@ pub(crate) enum ClapCommands {
     /// target locations on the system. Detects conflicts and drift.
     Apply(ApplyArgs),
 
+    /// Dotfile management operations — drift, list, status, track
+    ///
+    /// Commands for inspecting and managing dotfiles across packages.
+    /// Use `selfie apply` to deploy dotfiles; use `selfie dotfiles` to
+    /// inspect drift, list tracked files, and add new ones.
+    Dotfiles(DotfilesCommands),
+
     /// Configuration management operations
     ///
     /// Commands for validating and managing the selfie configuration file.
@@ -346,6 +353,42 @@ pub(crate) enum PackageSubcommands {
         /// Must correspond to a package definition file in the package directory.
         package_name: String,
     },
+}
+
+/// Dotfiles command group container
+///
+/// This structure holds the dotfile-related subcommands for inspecting
+/// and managing dotfiles tracked by selfie packages.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct DotfilesCommands {
+    /// The specific dotfiles operation to perform
+    #[clap(subcommand)]
+    pub(crate) command: DotfilesSubcommands,
+}
+
+/// Dotfile management operations
+///
+/// These subcommands inspect and manage dotfiles defined in package YAML
+/// files and the standalone dotfiles directory.
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum DotfilesSubcommands {
+    /// Check for drift between deployed dotfiles and repo sources
+    ///
+    /// Compares deployed dotfiles against their source files and the last-known
+    /// checksums to detect changes. Reports which files have drifted and how
+    /// (repo changed, target changed, or both).
+    ///
+    /// Example: `selfie dotfiles drift`
+    Drift,
+
+    /// List all dotfiles defined across packages
+    ///
+    /// Shows all dotfile mappings (source → target) from both the packages
+    /// directory and the standalone dotfiles directory. Includes deployment
+    /// status when available.
+    ///
+    /// Example: `selfie dotfiles list`
+    List,
 }
 
 /// Configuration command group container

@@ -23,6 +23,7 @@ pub(crate) mod apply;
 pub(crate) mod common;
 pub(crate) mod completion;
 pub(crate) mod config;
+pub(crate) mod dotfiles;
 pub(crate) mod package;
 pub(crate) mod spec;
 
@@ -34,7 +35,9 @@ use tracing::debug;
 use crate::config::CliConfig;
 
 use crate::{
-    cli::{ClapCommands, ConfigSubcommands, PackageSubcommands, SpecSubcommands},
+    cli::{
+        ClapCommands, ConfigSubcommands, DotfilesSubcommands, PackageSubcommands, SpecSubcommands,
+    },
     display_manager::DisplayManager,
 };
 use apply::handle_apply;
@@ -53,6 +56,9 @@ pub(crate) async fn dispatch_command(
 
     match command {
         ClapCommands::Apply(args) => handle_apply(args, config, &display).await,
+        ClapCommands::Dotfiles(dotfiles_cmd) => {
+            dispatch_dotfiles_command(&dotfiles_cmd.command, config, &display).await
+        }
         ClapCommands::Spec(spec_cmd) => {
             dispatch_spec_command(&spec_cmd.command, config, display, cancellation_token).await
         }
@@ -173,6 +179,20 @@ async fn dispatch_package_command(
         PackageSubcommands::Status { package_name } => {
             package::status::handle_status(&service, package_name, config, &display).await
         }
+    }
+}
+
+/// Handle dotfile management commands
+async fn dispatch_dotfiles_command(
+    command: &DotfilesSubcommands,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> i32 {
+    debug!("Handling dotfiles command: {:?}", command);
+
+    match command {
+        DotfilesSubcommands::Drift => dotfiles::drift::handle_drift(config, display).await,
+        DotfilesSubcommands::List => dotfiles::list::handle_list(config, display),
     }
 }
 
