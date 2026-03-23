@@ -98,9 +98,7 @@ where
             match dotfiles.list_packages() {
                 Ok(output) => packages.extend(output.valid_packages().cloned()),
                 Err(e) => {
-                    let msg = format!("Failed to load standalone dotfiles: {e}");
-                    tracing::warn!("{msg}");
-                    warnings.push(msg);
+                    warnings.push(format!("Failed to load standalone dotfiles: {e}"));
                 }
             }
         }
