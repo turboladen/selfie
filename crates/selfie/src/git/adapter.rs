@@ -25,9 +25,18 @@ pub struct GixGitAdapter;
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
 /// Open a `gix` repo from a path, mapping errors to `GitSyncError`.
+///
+/// Distinguishes "not a git repository" from real I/O or corruption errors,
+/// matching the error discrimination in `GitStatusProvider::status_for_directory`.
 fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
-    gix::discover(path).map_err(|_| GitSyncError::NotARepo {
-        path: path.to_path_buf(),
+    gix::discover(path).map_err(|e| match e {
+        gix::discover::Error::Discover(_) => GitSyncError::NotARepo {
+            path: path.to_path_buf(),
+        },
+        other => GitSyncError::OperationFailed {
+            operation: "discover repository".to_string(),
+            message: other.to_string(),
+        },
     })
 }
 

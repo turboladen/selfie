@@ -65,13 +65,22 @@ pub struct RepoStatus {
 }
 
 impl RepoStatus {
-    /// Returns `true` if the working tree has any uncommitted changes.
+    /// Returns `true` if the working tree has any changes (including untracked files).
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         !self.modified.is_empty()
             || !self.staged.is_empty()
             || !self.untracked.is_empty()
             || !self.deleted.is_empty()
+    }
+
+    /// Returns `true` if there are tracked file changes that could conflict with a merge.
+    ///
+    /// Unlike [`is_dirty`](Self::is_dirty), this excludes untracked files since they
+    /// cannot conflict with a fast-forward merge. Use this for pull guards.
+    #[must_use]
+    pub fn has_uncommitted_changes(&self) -> bool {
+        !self.modified.is_empty() || !self.staged.is_empty() || !self.deleted.is_empty()
     }
 
     /// Returns `true` if the working tree is completely clean.
@@ -211,5 +220,25 @@ mod tests {
             ..Default::default()
         };
         assert!(status.is_dirty());
+    }
+
+    #[test]
+    fn has_uncommitted_changes_excludes_untracked() {
+        let status = RepoStatus {
+            untracked: vec![PathBuf::from("new.yml")],
+            ..Default::default()
+        };
+        // Untracked files are dirty but NOT uncommitted changes
+        assert!(status.is_dirty());
+        assert!(!status.has_uncommitted_changes());
+    }
+
+    #[test]
+    fn has_uncommitted_changes_includes_modified() {
+        let status = RepoStatus {
+            modified: vec![PathBuf::from("foo.yml")],
+            ..Default::default()
+        };
+        assert!(status.has_uncommitted_changes());
     }
 }

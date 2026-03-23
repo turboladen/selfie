@@ -481,7 +481,7 @@ pub(crate) enum SyncSubcommands {
 
         /// Include non-package files in a housekeeping commit
         #[arg(long)]
-        include_untracked: bool,
+        include_ungrouped: bool,
     },
 
     /// Fetch and fast-forward merge from the remote

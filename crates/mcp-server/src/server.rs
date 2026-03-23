@@ -207,7 +207,7 @@ pub struct SyncPushParam {
     pub messages: std::collections::HashMap<String, String>,
     /// Include non-package files in a housekeeping commit
     #[serde(default)]
-    pub include_untracked: bool,
+    pub include_ungrouped: bool,
 }
 
 // ─── Spec (definition) tools ───────────────────────────────────────────────
@@ -746,7 +746,7 @@ impl SelfieServer {
             batch: params.batch,
             message: params.message.clone(),
             auto_accept: true, // MCP never prompts
-            include_untracked: params.include_untracked,
+            include_ungrouped: params.include_ungrouped,
         };
 
         // Phase 1: Prepare commits
@@ -767,6 +767,7 @@ impl SelfieServer {
             let data = serde_json::json!({
                 "status": "nothing_to_push",
                 "message": "Working tree is clean — nothing to push",
+                "warnings": prepare_result.warnings,
             });
             return Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&data).unwrap_or_default(),

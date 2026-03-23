@@ -130,21 +130,15 @@ where
         Ok((packages, warnings))
     }
 
-    /// Create an event stream from an async operation
+    /// Create an event stream from an async operation.
+    ///
+    /// Delegates to the shared [`crate::package::event::create_event_stream`] utility.
     fn create_event_stream<Func, Fut>(f: Func) -> EventStream
     where
         Func: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            f(tx).await;
-        });
-
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::package::event::create_event_stream(f)
     }
 }
 

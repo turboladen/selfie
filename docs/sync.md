@@ -51,7 +51,7 @@ selfie sync push          # Per-package commits, prompts for each message
 selfie sync push -y       # Accept generated messages without prompting
 selfie sync push --batch  # Single commit for all changes
 selfie sync push --batch --message "update all specs"
-selfie sync push --include-untracked  # Include non-package files
+selfie sync push --include-ungrouped  # Include non-package files
 ```
 
 **File grouping rules:**
@@ -59,7 +59,7 @@ selfie sync push --include-untracked  # Include non-package files
 - YAML files (`*.yml`) -> package name is the file stem (`starship.yml` -> `starship`)
 - Files in a subdirectory -> package name is the directory name (`starship/starship.toml` ->
   `starship`)
-- Files that don't match either pattern are "ungrouped" and skipped unless `--include-untracked` is
+- Files that don't match either pattern are "ungrouped" and skipped unless `--include-ungrouped` is
   used
 
 **Conventional commit messages** are generated automatically:
@@ -81,7 +81,7 @@ When prompting, the generated message is the default — press Enter to accept o
 | `--batch`                | Single commit for all changes          |
 | `--message "..."` / `-m` | Override message (only with `--batch`) |
 | `--yes` / `-y`           | Accept all generated messages          |
-| `--include-untracked`    | Include non-package files              |
+| `--include-ungrouped`    | Include non-package files              |
 
 ### `selfie sync pull`
 
@@ -124,7 +124,7 @@ The MCP server exposes three sync tools for AI assistant integration:
 | Tool                 | Parameters                                          | Notes                   |
 | -------------------- | --------------------------------------------------- | ----------------------- |
 | `selfie_sync_status` | none                                                | Returns structured JSON |
-| `selfie_sync_push`   | `batch`, `message`, `messages`, `include_untracked` | Per-package by default  |
+| `selfie_sync_push`   | `batch`, `message`, `messages`, `include_ungrouped` | Per-package by default  |
 | `selfie_sync_pull`   | none                                                | Returns what changed    |
 
 The `messages` parameter on `selfie_sync_push` is a map of package name to custom commit message,

@@ -73,6 +73,28 @@ use uuid::Uuid;
 /// and boxed to enable dynamic dispatch and async iteration.
 pub type EventStream = Pin<Box<dyn Stream<Item = PackageEvent> + Send>>;
 
+/// Create an event stream from an async closure.
+///
+/// Spawns a tokio task that runs the closure with a channel sender, and returns
+/// the receiving end as a pinned stream. This is the standard pattern for
+/// creating event streams across all services (`PackageService`, `DotfileService`,
+/// `SyncService`).
+pub fn create_event_stream<F, Fut>(f: F) -> EventStream
+where
+    F: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let (tx, rx) = mpsc::channel(32);
+
+    tokio::spawn(async move {
+        f(tx).await;
+    });
+
+    Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    }))
+}
+
 /// Internal event sender for package operations
 ///
 /// Provides a high-level interface for emitting package events with consistent
@@ -2015,7 +2037,7 @@ pub enum PackageEvent {
     /// Dotfile drift summary for sync status command
     SyncDriftSummary {
         operation_info: OperationInfo,
-        drifted_packages: Vec<String>,
+        drifted_targets: Vec<String>,
         total_deployed: usize,
     },
 

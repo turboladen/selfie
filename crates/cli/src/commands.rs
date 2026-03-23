@@ -223,13 +223,13 @@ async fn dispatch_sync_command(
             batch,
             message,
             yes,
-            include_untracked,
+            include_ungrouped,
         } => {
             let args = sync::push::PushArgs {
                 batch: *batch,
                 message: message.clone(),
                 yes: *yes,
-                include_untracked: *include_untracked,
+                include_ungrouped: *include_ungrouped,
             };
             sync::push::handle_push(&args, config, display).await
         }

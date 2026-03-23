@@ -3,15 +3,12 @@
 use console::style;
 
 use selfie::{
-    git::GixGitAdapter,
     package::event::{OperationResult, OperationSuccess, PackageEvent},
-    sync_service::{
-        ConfirmedCommit, PrepareResult, PushOptions, SyncService, service::SyncServiceImpl,
-    },
+    sync_service::{ConfirmedCommit, PrepareResult, PushOptions, SyncService},
 };
 
 use crate::{
-    commands::common::create_dotfile_service, config::CliConfig, display_manager::DisplayManager,
+    commands::common::create_sync_service, config::CliConfig, display_manager::DisplayManager,
     event_processor::EventProcessor,
 };
 
@@ -19,7 +16,7 @@ pub(crate) struct PushArgs {
     pub batch: bool,
     pub message: Option<String>,
     pub yes: bool,
-    pub include_untracked: bool,
+    pub include_ungrouped: bool,
 }
 
 pub(crate) async fn handle_push(
@@ -27,21 +24,20 @@ pub(crate) async fn handle_push(
     config: &CliConfig,
     display: &DisplayManager,
 ) -> i32 {
-    let git = GixGitAdapter;
-    let dotfile_service = create_dotfile_service(config);
-    let service = SyncServiceImpl::new(git, dotfile_service, config.selfie_config().clone());
+    let service = create_sync_service(config);
 
     let options = PushOptions {
         batch: args.batch,
         message: args.message.clone(),
         auto_accept: args.yes,
-        include_untracked: args.include_untracked,
+        include_ungrouped: args.include_ungrouped,
     };
 
     // Phase 1: Prepare commits (non-mutating)
     let PrepareResult {
         pending_commits,
         ahead,
+        warnings,
     } = match service.prepare_push(&options).await {
         Ok(result) => result,
         Err(e) => {
@@ -49,6 +45,11 @@ pub(crate) async fn handle_push(
             return 1;
         }
     };
+
+    // Surface any warnings from the preparation phase
+    for warning in &warnings {
+        display.print_warning(warning);
+    }
 
     if pending_commits.is_empty() && ahead == 0 {
         display.print_info("Nothing to push — working tree is clean");
@@ -183,5 +184,70 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors:
         PackageEvent::Started { .. } | PackageEvent::Progress { .. } => true,
 
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selfie::package::event::{OperationContext, OperationInfo, OperationType, StepCount};
+
+    fn make_operation_info() -> OperationInfo {
+        OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::SyncPush,
+            package_name: String::new(),
+            environment: "test".to_string(),
+            context: OperationContext::default(),
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn handles_commit_created() {
+        let display = DisplayManager::new(false);
+        let event = PackageEvent::SyncCommitCreated {
+            operation_info: make_operation_info(),
+            package_name: "starship".to_string(),
+            message: "abc1234 feat(starship): add package spec".to_string(),
+        };
+
+        assert!(handle_push_event(&event, &display, false));
+    }
+
+    #[test]
+    fn handles_push_complete() {
+        let display = DisplayManager::new(false);
+        let event = PackageEvent::Completed {
+            operation_info: make_operation_info(),
+            result: OperationResult::Success(OperationSuccess::SyncPushComplete {
+                commits_pushed: 3,
+                steps_completed: StepCount::new(4, 4),
+            }),
+        };
+
+        assert!(handle_push_event(&event, &display, false));
+    }
+
+    #[test]
+    fn handles_nothing_to_push() {
+        let display = DisplayManager::new(false);
+        let event = PackageEvent::Completed {
+            operation_info: make_operation_info(),
+            result: OperationResult::Success(OperationSuccess::SyncNothingToPush {
+                steps_completed: StepCount::new(0, 0),
+            }),
+        };
+
+        assert!(handle_push_event(&event, &display, false));
+    }
+
+    #[test]
+    fn suppresses_started_and_progress() {
+        let display = DisplayManager::new(false);
+        let started = PackageEvent::Started {
+            operation_info: make_operation_info(),
+        };
+        assert!(handle_push_event(&started, &display, false));
     }
 }

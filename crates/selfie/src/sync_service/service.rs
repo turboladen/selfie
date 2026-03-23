@@ -19,7 +19,9 @@ use crate::{
     },
 };
 
-use super::port::{ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncService};
+use super::port::{
+    ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncError, SyncService,
+};
 
 /// Concrete implementation of [`SyncService`].
 ///
@@ -54,22 +56,13 @@ where
 
     /// Create an event stream from an async operation.
     ///
-    /// Spawns a task that runs the closure with a channel sender, and returns
-    /// the receiving end as a pinned stream.
+    /// Delegates to the shared [`create_event_stream`] utility.
     fn create_event_stream<Func, Fut>(f: Func) -> EventStream
     where
         Func: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            f(tx).await;
-        });
-
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::package::event::create_event_stream(f)
     }
 }
 
@@ -135,12 +128,12 @@ where
 
             // Step 2: Check dotfile drift
             let drift_stream = dotfile_service.check_drift().await;
-            let (drifted_packages, total_deployed) = collect_drift_summary(drift_stream).await;
+            let (drifted_targets, total_deployed) = collect_drift_summary(drift_stream).await;
 
             sender
                 .send(PackageEvent::SyncDriftSummary {
                     operation_info: sender.operation_info(),
-                    drifted_packages,
+                    drifted_targets,
                     total_deployed,
                 })
                 .await;
@@ -153,13 +146,16 @@ where
         })
     }
 
-    async fn prepare_push(&self, options: &PushOptions) -> anyhow::Result<PrepareResult> {
-        let repo_info = self.discover_repo().map_err(|e| anyhow::anyhow!("{e}"))?;
+    async fn prepare_push(&self, options: &PushOptions) -> Result<PrepareResult, SyncError> {
+        let repo_info = self.discover_repo().map_err(|e| match e {
+            GitSyncError::NotARepo { path } => SyncError::NotARepo { path },
+            other => SyncError::GitError(other.to_string()),
+        })?;
 
         let status = self
             .git
             .repo_status(&repo_info.root)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(|e| SyncError::GitError(e.to_string()))?;
 
         let ahead = status.ahead;
 
@@ -167,6 +163,7 @@ where
             return Ok(PrepareResult {
                 pending_commits: vec![],
                 ahead: 0,
+                warnings: vec![],
             });
         }
 
@@ -192,6 +189,7 @@ where
             return Ok(PrepareResult {
                 pending_commits: vec![],
                 ahead,
+                warnings: vec![],
             });
         }
 
@@ -209,6 +207,7 @@ where
                     files,
                 }],
                 ahead,
+                warnings: vec![],
             });
         }
 
@@ -241,7 +240,8 @@ where
         }
 
         // Handle ungrouped files
-        if !ungrouped.is_empty() && options.include_untracked {
+        let mut warnings = Vec::new();
+        if !ungrouped.is_empty() && options.include_ungrouped {
             let files = ungrouped.into_iter().map(|(p, _)| p).collect();
             commits.push(PendingCommit {
                 name: "housekeeping".to_string(),
@@ -249,15 +249,18 @@ where
                 files,
             });
         } else if !ungrouped.is_empty() {
-            tracing::warn!(
-                count = ungrouped.len(),
-                "Files not associated with any package — use --include-untracked to commit them"
-            );
+            let count = ungrouped.len();
+            let label = if count == 1 { "file" } else { "files" };
+            warnings.push(format!(
+                "{count} {label} not associated with any package — use --include-ungrouped to commit them"
+            ));
+            tracing::warn!(count, "Ungrouped files excluded from push");
         }
 
         Ok(PrepareResult {
             pending_commits: commits,
             ahead,
+            warnings,
         })
     }
 
@@ -388,9 +391,10 @@ where
                 }
             };
 
-            // Step 2: Check for dirty working tree
+            // Step 2: Check for tracked file changes that could conflict with merge.
+            // Untracked files are allowed — they can't conflict with a fast-forward.
             match git.repo_status(&repo_info.root) {
-                Ok(status) if status.is_dirty() => {
+                Ok(status) if status.has_uncommitted_changes() => {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
                             "Uncommitted changes detected. Run 'selfie sync push' first, then try again.".to_string(),
@@ -445,11 +449,12 @@ where
                     let (packages_updated, packages_added, packages_removed) =
                         categorize_pull_changes(&changed_files);
 
-                    // Check if any dotfile source files changed
+                    // Check if any dotfile source files changed (non-YAML files
+                    // inside a package subdirectory, e.g., `starship/starship.toml`).
+                    // Root-level non-YAML files (README.md, .gitignore) are not dotfiles.
                     let has_dotfile_changes = changed_files.iter().any(|f| {
-                        !f.path
-                            .extension()
-                            .is_some_and(|ext| ext == "yml" || ext == "yaml")
+                        !is_yaml_file(&f.path)
+                            && f.path.parent().is_some_and(|p| p != Path::new(""))
                     });
 
                     if has_dotfile_changes {
@@ -846,5 +851,54 @@ mod tests {
         assert_eq!(updated, vec!["starship"]);
         assert!(added.is_empty());
         assert!(removed.is_empty());
+    }
+
+    // ─── has_dotfile_changes heuristic tests ────────────────────────────────
+
+    /// Helper to check if a set of changed files would trigger the dotfile warning.
+    fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile]) -> bool {
+        changed_files
+            .iter()
+            .any(|f| !is_yaml_file(&f.path) && f.path.parent().is_some_and(|p| p != Path::new("")))
+    }
+
+    #[test]
+    fn dotfile_changes_detected_in_subdirectory() {
+        use crate::git::{ChangeType, ChangedFile};
+
+        let files = vec![ChangedFile {
+            path: PathBuf::from("starship/starship.toml"),
+            change_type: ChangeType::Modified,
+        }];
+        assert!(has_dotfile_changes(&files));
+    }
+
+    #[test]
+    fn no_dotfile_changes_for_root_non_yaml() {
+        use crate::git::{ChangeType, ChangedFile};
+
+        // Root-level non-YAML files (README, .gitignore) are NOT dotfiles
+        let files = vec![
+            ChangedFile {
+                path: PathBuf::from("README.md"),
+                change_type: ChangeType::Modified,
+            },
+            ChangedFile {
+                path: PathBuf::from(".gitignore"),
+                change_type: ChangeType::Modified,
+            },
+        ];
+        assert!(!has_dotfile_changes(&files));
+    }
+
+    #[test]
+    fn no_dotfile_changes_for_yaml_only() {
+        use crate::git::{ChangeType, ChangedFile};
+
+        let files = vec![ChangedFile {
+            path: PathBuf::from("starship.yml"),
+            change_type: ChangeType::Modified,
+        }];
+        assert!(!has_dotfile_changes(&files));
     }
 }
