@@ -11,6 +11,16 @@ use std::sync::{Arc, Mutex};
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+/// Shorten a path for display by replacing the home directory with `~`.
+pub(crate) fn shorten_path(path: &str) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    path.to_string()
+}
+
 /// Standard indentation for structured CLI output (e.g., section content,
 /// result cards, list suggestions, and other indented fields).
 pub(crate) const INDENT: &str = "   ";
@@ -351,6 +361,66 @@ impl DisplayManager {
         } else {
             self.mp.suspend(|| println!("── {title} ──"));
         }
+    }
+
+    /// Print a unified diff with per-line coloring and visual framing (stdout)
+    ///
+    /// Layout:
+    /// ```text
+    /// --- old/path
+    /// +++ new/path
+    /// ──────────────────────────────────────────
+    ///  context line
+    /// -removed line
+    /// +added line
+    /// ──────────────────────────────────────────
+    /// ```
+    ///
+    /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
+    /// context dim, separator dim. Paths shortened with `~`.
+    pub(crate) fn print_diff(&self, diff: &str) {
+        const SEPARATOR: &str =
+            "──────────────────────────────────────────────────────────────────────";
+
+        self.mp.suspend(|| {
+            let mut printed_separator = false;
+
+            for line in diff.lines() {
+                if self.use_colors {
+                    if let Some(rest) = line.strip_prefix("--- ") {
+                        println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
+                    } else if let Some(rest) = line.strip_prefix("+++ ") {
+                        println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
+                        println!("  {}", style(SEPARATOR).dim());
+                        printed_separator = true;
+                    } else if line.starts_with("@@") {
+                        println!("  {}", style(line).cyan());
+                    } else if line.starts_with('-') {
+                        println!("  {}", style(line).red());
+                    } else if line.starts_with('+') {
+                        println!("  {}", style(line).green());
+                    } else {
+                        println!("  {}", style(line).dim());
+                    }
+                } else if let Some(rest) = line.strip_prefix("--- ") {
+                    println!("  --- {}", shorten_path(rest));
+                } else if let Some(rest) = line.strip_prefix("+++ ") {
+                    println!("  +++ {}", shorten_path(rest));
+                    println!("  {SEPARATOR}");
+                    printed_separator = true;
+                } else {
+                    println!("  {line}");
+                }
+            }
+
+            if printed_separator {
+                if self.use_colors {
+                    println!("  {}", style(SEPARATOR).dim());
+                } else {
+                    println!("  {SEPARATOR}");
+                }
+            }
+        });
     }
 
     /// Print a plain line to stdout

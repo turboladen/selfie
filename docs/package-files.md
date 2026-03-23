@@ -86,8 +86,8 @@ all environments.
 
 Each entry has two fields:
 
-- `source` — Relative path within your dotfiles directory (see
-  [Configuration Guide](configuration.md) for `dotfiles_directory`)
+- `source` — Relative path from the YAML file's parent directory (source files are colocated
+  alongside their package or dotfile definition)
 - `target` — Absolute destination path (supports `~` for home directory)
 
 ```yaml
@@ -363,23 +363,28 @@ package directory.
 ### How It Works
 
 1. **Define** dotfile mappings in your package YAML (the `dotfiles` field)
-2. **Store** dotfile source files in your dotfiles directory (a sibling of your package directory by
-   default — see [Configuration Guide](configuration.md) for `dotfiles_directory`)
+2. **Store** source files alongside the YAML definition (in a subdirectory named after the package)
 3. **Deploy** with `selfie apply`
 
 ### Directory Structure
+
+Source files are colocated with their YAML definitions. Package dotfiles live under `packages/`, and
+standalone dotfiles (not tied to any package) live under `dotfiles/`:
 
 ```
 ~/.selfie/
 ├── packages/              # Package definitions (package_directory)
 │   ├── fnm.yaml
-│   └── starship.yaml
-└── dotfiles/              # Dotfile source files (dotfiles_directory)
-    ├── fnm/
-    │   ├── fish-conf.fish
-    │   └── zsh-conf.zsh
-    └── starship/
-        └── starship.toml
+│   ├── fnm/               # Source files for fnm package
+│   │   ├── fish-conf.fish
+│   │   └── zsh-conf.zsh
+│   ├── starship.yaml
+│   └── starship/          # Source files for starship package
+│       └── starship.toml
+└── dotfiles/              # Standalone dotfile definitions (dotfiles_directory)
+    ├── dprint.yaml
+    └── dprint/            # Source files for standalone dprint dotfile
+        └── dprint.jsonc
 ```
 
 ### Example Package with Dotfiles

@@ -25,7 +25,8 @@ pub struct SelfieConfig {
     pub(crate) environment: String,
     pub(crate) package_directory: PathBuf,
 
-    // Optional override for dotfiles directory (defaults to sibling of package_directory)
+    // Optional override for standalone dotfiles directory (YAML definitions + source files
+    // for dotfiles not tied to any package; defaults to sibling of package_directory)
     #[serde(default)]
     dotfiles_directory: Option<PathBuf>,
 
@@ -71,7 +72,10 @@ impl SelfieConfig {
         &self.package_directory
     }
 
-    /// Get the dotfiles directory path.
+    /// Get the standalone dotfiles directory path.
+    ///
+    /// This directory contains standalone dotfile YAML definitions and their
+    /// associated source files — dotfiles that aren't tied to any package.
     ///
     /// Defaults to a sibling `dotfiles` directory next to `package_directory`.
     /// For example, if `package_directory` is `~/selfie/packages`, this returns

@@ -285,18 +285,23 @@ impl EventProcessor {
             }
 
             PackageEvent::DotfileDeploying { source, target, .. } => {
+                let short_source = crate::display_manager::shorten_path(&source);
+                let short_target = crate::display_manager::shorten_path(&target);
                 self.display
-                    .print_info(format!("  Deploying {source} → {target}"));
+                    .print_info(format!("  Deploying {short_source} → {short_target}"));
             }
 
             PackageEvent::DotfileDeployed { source, target, .. } => {
+                let short_source = crate::display_manager::shorten_path(&source);
+                let short_target = crate::display_manager::shorten_path(&target);
                 self.display
-                    .print_success(format!("  ✓ {source} → {target}"));
+                    .print_success(format!("  {short_source} → {short_target}"));
             }
 
             PackageEvent::DotfileSkipped { source, reason, .. } => {
+                let short_source = crate::display_manager::shorten_path(&source);
                 self.display
-                    .print_info(format!("  ⊘ {source} skipped: {reason}"));
+                    .print_info(format!("  ⊘ {short_source} skipped: {reason}"));
             }
 
             PackageEvent::DotfileConflict {
@@ -305,16 +310,22 @@ impl EventProcessor {
                 diff,
                 ..
             } => {
+                let short_source = crate::display_manager::shorten_path(&source);
+                let short_target = crate::display_manager::shorten_path(&target);
+                self.display.println("");
                 self.display
-                    .print_warning(format!("  ⚠ Conflict: {source} → {target}"));
-                self.display.print_info(diff.to_string());
+                    .print_warning(format!("  Conflict: {short_target}"));
+                self.display
+                    .print_progress(format!("{short_source} → {short_target}"));
+                self.display.print_diff(&diff);
             }
 
             PackageEvent::DotfileDriftDetected {
                 target, drift_type, ..
             } => {
+                let short_target = crate::display_manager::shorten_path(&target);
                 self.display
-                    .print_warning(format!("  ⚠ Drift in {target}: {drift_type}"));
+                    .print_warning(format!("  Drift in {short_target}: {drift_type}"));
             }
 
             PackageEvent::PostInstallNote { note, .. } => {

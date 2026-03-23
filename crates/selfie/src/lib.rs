@@ -31,5 +31,6 @@ pub mod commands;
 pub mod config;
 pub mod dotfile_service;
 pub mod fs;
+pub mod namespace;
 pub mod package;
 pub mod validation;

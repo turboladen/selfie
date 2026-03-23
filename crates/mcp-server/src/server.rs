@@ -179,7 +179,14 @@ impl SelfieServer {
     pub fn new(service: ConcreteService, config: SelfieConfig) -> Self {
         let repo =
             YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
-        let dotfile_service = DotfileServiceImpl::new(repo, RealFileSystem, config.clone());
+        let mut dotfile_service = DotfileServiceImpl::new(repo, RealFileSystem, config.clone());
+
+        // Add standalone dotfiles repository if the directory exists
+        let dotfiles_dir = config.dotfiles_directory();
+        if dotfiles_dir.is_dir() {
+            let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+            dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
+        }
         Self {
             service: Arc::new(service),
             dotfile_service: Arc::new(dotfile_service),
@@ -523,6 +530,7 @@ impl SelfieServer {
         let options = ApplyOptions {
             dry_run: params.dry_run,
             auto_accept: params.auto_accept,
+            conflict_resolver: None,
         };
 
         use selfie::dotfile_service::port::DotfileService;

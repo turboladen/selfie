@@ -6,6 +6,7 @@
 //! to perform dotfile deployment operations.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -14,10 +15,12 @@ use crate::{
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
+        port::ConflictResolution,
         state::{DeployState, DriftType},
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
+        Package,
         event::{
             EventSender, EventStream, OperationContext, OperationResult, OperationSuccess,
             PackageEvent, StepCount, metadata::OperationType,
@@ -35,9 +38,14 @@ const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 ///
 /// Coordinates between the package repository, file system, and application
 /// configuration to deploy dotfiles and check for drift.
+///
+/// Supports an optional second repository for standalone dotfiles (the `dotfiles/`
+/// directory). When present, both repositories are scanned during apply and drift
+/// operations.
 #[derive(Debug, Clone)]
 pub struct DotfileServiceImpl<R, F> {
     package_repository: R,
+    dotfiles_repository: Option<R>,
     filesystem: F,
     config: SelfieConfig,
 }
@@ -51,9 +59,75 @@ where
     pub fn new(package_repository: R, filesystem: F, config: SelfieConfig) -> Self {
         Self {
             package_repository,
+            dotfiles_repository: None,
             filesystem,
             config,
         }
+    }
+
+    /// Add a standalone dotfiles repository for the `dotfiles/` directory.
+    ///
+    /// When set, `apply` and `check_drift` operations will scan both the main
+    /// package repository and this dotfiles repository.
+    #[must_use]
+    pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
+        self.dotfiles_repository = Some(repo);
+        self
+    }
+
+    /// Collect packages from both the main package repository and the optional
+    /// dotfiles repository, returning a combined list and any non-fatal warnings.
+    ///
+    /// Warnings are returned (rather than emitted directly) because collection
+    /// happens before the event channel exists — callers emit them as
+    /// `PackageEvent::Warning` once the stream is set up.
+    fn collect_all_packages(
+        package_repo: &R,
+        dotfiles_repo: Option<&R>,
+    ) -> Result<(Vec<Package>, Vec<String>), String> {
+        let mut warnings = Vec::new();
+
+        let mut packages = match package_repo.list_packages() {
+            Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
+            Err(e) => return Err(format!("Failed to load packages: {e}")),
+        };
+
+        let packages_count = packages.len();
+
+        if let Some(dotfiles) = dotfiles_repo {
+            match dotfiles.list_packages() {
+                Ok(output) => packages.extend(output.valid_packages().cloned()),
+                Err(e) => {
+                    warnings.push(format!("Failed to load standalone dotfiles: {e}"));
+                }
+            }
+        }
+
+        // Detect duplicate names across packages/ and dotfiles/ directories.
+        // Packages from packages/ take precedence (they appear first in the vec).
+        if packages.len() > packages_count {
+            let mut seen = std::collections::HashSet::new();
+            for pkg in &packages[..packages_count] {
+                seen.insert(pkg.name().to_string());
+            }
+
+            let mut deduped_dotfiles = Vec::new();
+            for pkg in packages.drain(packages_count..) {
+                if seen.contains(pkg.name()) {
+                    warnings.push(format!(
+                        "Duplicate name '{}' found in both packages/ and dotfiles/ — \
+                         using the packages/ version",
+                        pkg.name()
+                    ));
+                } else {
+                    seen.insert(pkg.name().to_string());
+                    deduped_dotfiles.push(pkg);
+                }
+            }
+            packages.extend(deduped_dotfiles);
+        }
+
+        Ok((packages, warnings))
     }
 
     /// Create an event stream from an async operation
@@ -166,20 +240,20 @@ fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     raw
 }
 
-/// Validate that a resolved source path doesn't escape the configs directory.
+/// Validate that a resolved source path doesn't escape the YAML base directory.
 ///
 /// Prevents path traversal attacks where a malicious package YAML could use
-/// `../` sequences to read files outside the configs directory.
+/// `../` sequences to read files outside the YAML file's parent directory.
 ///
 /// Uses a component-level normalization that resolves `..` without requiring
 /// the path to exist on disk (unlike `canonicalize`).
-fn validate_source_path(source_path: &Path, configs_dir: &Path) -> bool {
+fn validate_source_path(source_path: &Path, base_dir: &Path) -> bool {
     match (
         std::path::absolute(source_path),
-        std::path::absolute(configs_dir),
+        std::path::absolute(base_dir),
     ) {
-        (Ok(abs_source), Ok(abs_configs)) => {
-            normalize_path(&abs_source).starts_with(normalize_path(&abs_configs))
+        (Ok(abs_source), Ok(abs_base)) => {
+            normalize_path(&abs_source).starts_with(normalize_path(&abs_base))
         }
         _ => false,
     }
@@ -213,7 +287,8 @@ where
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
-        let repo = self.package_repository.clone();
+        let collected =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
 
@@ -228,14 +303,25 @@ where
 
             sender.send_started().await;
 
-            let result = handle_apply(&repo, &fs, &config, &sender, &options, None).await;
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
+                    handle_apply(&packages, &fs, &config, &sender, &options, None).await
+                }
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
-        let repo = self.package_repository.clone();
+        let collected =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
         let name = name.to_string();
@@ -251,14 +337,25 @@ where
 
             sender.send_started().await;
 
-            let result = handle_apply(&repo, &fs, &config, &sender, &options, Some(&name)).await;
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
+                    handle_apply(&packages, &fs, &config, &sender, &options, Some(&name)).await
+                }
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
     }
 
     async fn check_drift(&self) -> EventStream {
-        let repo = self.package_repository.clone();
+        let collected =
+            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
         let config = self.config.clone();
 
@@ -273,7 +370,17 @@ where
 
             sender.send_started().await;
 
-            let result = handle_check_drift(&repo, &fs, &config, &sender).await;
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        sender.send_warning(&warning).await;
+                    }
+                    handle_check_drift(&packages, &fs, &config, &sender).await
+                }
+                Err(e) => {
+                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
+                }
+            };
 
             sender.send_completed(result).await;
         })
@@ -334,8 +441,8 @@ async fn perform_deploy<F: FileSystem>(
 }
 
 /// Core logic for applying config files
-async fn handle_apply<R, F>(
-    repo: &R,
+async fn handle_apply<F>(
+    packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
@@ -343,27 +450,15 @@ async fn handle_apply<R, F>(
     filter_name: Option<&str>,
 ) -> OperationResult
 where
-    R: PackageRepository,
     F: FileSystem,
 {
-    // Load packages
-    let packages = match repo.list_packages() {
-        Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
-        Err(e) => {
-            return OperationResult::Failure(crate::package::event::OperationFailure::Generic(
-                format!("Failed to load packages: {e}"),
-            ));
-        }
-    };
-
-    let configs_dir = config.dotfiles_directory();
     let mut deploy_state = load_deploy_state(filesystem, config);
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut conflict_count: usize = 0;
 
-    for package in &packages {
+    for package in packages {
         // If filtering by name, skip non-matching packages
         if let Some(name) = filter_name
             && package.name() != name
@@ -376,14 +471,22 @@ where
             continue;
         }
 
-        for entry in dotfiles {
-            let source_path = resolve_source_path(&configs_dir, entry.source());
+        // Source paths resolve relative to the YAML file's parent directory,
+        // so packages/fnm.yaml with source "fnm/init.fish" → packages/fnm/init.fish
+        let base_dir = package
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
 
-            // Runtime path traversal guard: verify resolved path stays within configs_dir
-            if !validate_source_path(&source_path, &configs_dir) {
+        for entry in dotfiles {
+            let source_path = resolve_source_path(&base_dir, entry.source());
+
+            // Runtime path traversal guard: verify resolved path stays within base_dir
+            if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes dotfiles directory",
+                        "Skipping '{}': source path escapes YAML base directory",
                         entry.source()
                     ))
                     .await;
@@ -439,7 +542,8 @@ where
             // Detect drift
             let drift =
                 deploy_state.detect_drift(entry.source(), &source_checksum, &target_checksum);
-            let decision = deploy_decision(&drift, target_exists);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             let unit = DeployUnit {
                 source_path: &source_path,
@@ -471,13 +575,49 @@ where
                     }
                 }
                 DeployDecision::Skip(reason) => {
+                    // If this was an untracked file that's already in sync,
+                    // record the state so future runs see DriftType::None.
+                    if drift == DriftType::NotTracked && !options.dry_run {
+                        deploy_state.record_deployment(
+                            entry.source(),
+                            &target_path.to_string_lossy(),
+                            &source_checksum,
+                        );
+                    }
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
                     skipped_count += 1;
                 }
                 DeployDecision::Conflict => {
-                    if options.auto_accept {
+                    // Build the diff for display/resolution (needed by both
+                    // the resolver and the fallback conflict event).
+                    let target_content = filesystem.read_file(&target_path).unwrap_or_default();
+                    let diff = unified_diff(
+                        &target_content,
+                        &source_content,
+                        &target_path.to_string_lossy(),
+                        &source_path.to_string_lossy(),
+                    );
+
+                    // Determine whether to accept: --yes flag, interactive
+                    // resolver, or neither (skip with conflict event).
+                    let accept = if options.auto_accept {
+                        true
+                    } else if let Some(resolver) = &options.conflict_resolver {
+                        let src = source_path.display().to_string();
+                        let tgt = target_path.display().to_string();
+                        let d = diff.clone();
+                        let r = Arc::clone(resolver);
+                        tokio::task::spawn_blocking(move || r.resolve(&src, &tgt, &d))
+                            .await
+                            .unwrap_or(ConflictResolution::Skip)
+                            == ConflictResolution::Accept
+                    } else {
+                        false
+                    };
+
+                    if accept {
                         if perform_deploy(
                             filesystem,
                             &mut deploy_state,
@@ -497,14 +637,6 @@ where
                             skipped_count += 1;
                         }
                     } else {
-                        // Emit conflict with diff
-                        let target_content = filesystem.read_file(&target_path).unwrap_or_default();
-                        let diff = unified_diff(
-                            &target_content,
-                            &source_content,
-                            &target_path.to_string_lossy(),
-                            &source_path.to_string_lossy(),
-                        );
                         sender
                             .send_dotfile_conflict(
                                 source_path.display(),
@@ -539,37 +671,32 @@ where
 }
 
 /// Core logic for checking drift
-async fn handle_check_drift<R, F>(
-    repo: &R,
+async fn handle_check_drift<F>(
+    packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
 ) -> OperationResult
 where
-    R: PackageRepository,
     F: FileSystem,
 {
-    let configs_dir = config.dotfiles_directory();
     let deploy_state = load_deploy_state(filesystem, config);
-
-    // Also scan packages to find all config entries
-    let packages = match repo.list_packages() {
-        Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
-        Err(e) => {
-            return OperationResult::Failure(crate::package::event::OperationFailure::Generic(
-                format!("Failed to load packages: {e}"),
-            ));
-        }
-    };
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
 
-    for package in &packages {
+    for package in packages {
+        // Source paths resolve relative to the YAML file's parent directory
+        let base_dir = package
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
         for entry in package.dotfiles() {
             total_count += 1;
 
-            let source_path = resolve_source_path(&configs_dir, entry.source());
+            let source_path = resolve_source_path(&base_dir, entry.source());
             let target_path = expand_target_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
@@ -585,10 +712,10 @@ where
             }
 
             // Runtime path traversal guard (same as handle_apply)
-            if !validate_source_path(&source_path, &configs_dir) {
+            if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes dotfiles directory",
+                        "Skipping '{}': source path escapes YAML base directory",
                         entry.source()
                     ))
                     .await;
