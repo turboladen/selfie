@@ -20,10 +20,10 @@ use crate::{
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
-        Package,
+        DotfileEntry, Package,
         event::{
-            EventSender, EventStream, OperationContext, OperationResult, OperationSuccess,
-            PackageEvent, StepCount, metadata::OperationType,
+            EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
+            OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
         port::PackageRepository,
     },
@@ -214,7 +214,22 @@ fn save_deploy_state<F: FileSystem>(
 /// Tries `expand_path` (which does tilde expansion + canonicalize) first. If that
 /// fails (e.g., target doesn't exist yet), expands just the tilde prefix using the
 /// filesystem and constructs the rest of the path without requiring it to exist.
-fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
+/// Check that a name is safe for use as a filesystem path component.
+///
+/// Rejects names containing path separators, `..`, or characters outside
+/// the alphanumeric + hyphen + underscore set used for package names.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Expand a user-provided path, resolving `~` and symlinks where possible.
+///
+/// Tries full canonicalization first. Falls back to tilde expansion via the
+/// `FileSystem` trait if the path doesn't exist yet.
+pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = PathBuf::from(target);
 
     // Try full canonicalization first (works if path exists)
@@ -385,6 +400,53 @@ where
             sender.send_completed(result).await;
         })
     }
+
+    async fn track_standalone(&self, name: &str, target_path: &str) -> EventStream {
+        let dotfiles_repo = self.dotfiles_repository.clone();
+        let fs = self.filesystem.clone();
+        let config = self.config.clone();
+        let name = name.to_string();
+        let target_path = target_path.to_string();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileTrack,
+                name.clone(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+            sender.send_started().await;
+
+            let result =
+                handle_track_standalone(&name, &target_path, dotfiles_repo.as_ref(), &fs, &config);
+
+            sender.send_completed(result).await;
+        })
+    }
+
+    async fn track_for_package(&self, package_name: &str, target_path: &str) -> EventStream {
+        let repo = self.package_repository.clone();
+        let fs = self.filesystem.clone();
+        let config = self.config.clone();
+        let package_name = package_name.to_string();
+        let target_path = target_path.to_string();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileTrack,
+                package_name.clone(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+            sender.send_started().await;
+
+            let result = handle_track_for_package(&package_name, &target_path, &repo, &fs, &config);
+
+            sender.send_completed(result).await;
+        })
+    }
 }
 
 /// Describes a single config file deployment operation
@@ -494,7 +556,7 @@ where
                 continue;
             }
 
-            let target_path = expand_target_path(filesystem, entry.target());
+            let target_path = expand_user_path(filesystem, entry.target());
 
             // Enforce documented rule: target must be absolute after expansion.
             // A relative target would write relative to CWD, which is surprising
@@ -697,7 +759,7 @@ where
             total_count += 1;
 
             let source_path = resolve_source_path(&base_dir, entry.source());
-            let target_path = expand_target_path(filesystem, entry.target());
+            let target_path = expand_user_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
             if !target_path.is_absolute() {
@@ -767,6 +829,244 @@ where
     })
 }
 
+/// Handle `track_standalone`: copy target file into dotfiles dir, create a new
+/// YAML spec, and record initial deploy state.
+fn handle_track_standalone<R, F>(
+    name: &str,
+    target_path: &str,
+    dotfiles_repo: Option<&R>,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
+    let Some(dotfiles_repo) = dotfiles_repo else {
+        return OperationResult::Failure(OperationFailure::Generic(
+            "No dotfiles directory configured. Set `dotfiles_directory` in config.".to_string(),
+        ));
+    };
+
+    // Reject names with path separators or traversal components
+    if !is_safe_name(name) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+        )));
+    }
+
+    let dotfiles_dir = config.dotfiles_directory();
+
+    // Expand and validate the target path
+    let expanded_target = expand_user_path(filesystem, target_path);
+    if !filesystem.path_exists(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Target file does not exist: {}",
+            expanded_target.display()
+        )));
+    }
+
+    // Read the target file content
+    let content = match filesystem.read_file(&expanded_target) {
+        Ok(c) => c,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot read target file: {e}"
+            )));
+        }
+    };
+
+    // Determine source filename (just the basename of the target)
+    let filename = expanded_target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // Check for existing spec (prevent silent overwrite)
+    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
+    if filesystem.path_exists(&spec_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "A dotfile spec already exists at {}. Remove it first or choose a different name.",
+            spec_path.display()
+        )));
+    }
+
+    // Copy the file into dotfiles_dir/name/filename
+    let source_dir = dotfiles_dir.join(name);
+    let source_path = source_dir.join(&filename);
+
+    if filesystem.path_exists(&source_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Source file already exists at {}. Remove it first or choose a different name.",
+            source_path.display()
+        )));
+    }
+
+    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot write source file: {e}"
+        )));
+    }
+
+    // Create the YAML spec (spec_path already computed above for overwrite check)
+    let package = crate::package::PackageBuilder::default()
+        .name(name)
+        .dotfiles(vec![DotfileEntry::new(
+            format!("{name}/{filename}"),
+            target_path,
+        )])
+        .path(spec_path.clone())
+        .build();
+
+    if let Err(e) = dotfiles_repo.save_package(&package, &spec_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save spec: {e}"
+        )));
+    }
+
+    // Record initial deploy state
+    let checksum = compute_checksum(content.as_bytes());
+    let mut deploy_state = load_deploy_state(filesystem, config);
+    let source_key = format!("{name}/{filename}");
+    deploy_state.record_deployment(&source_key, target_path, &checksum);
+    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save deploy state: {e}"
+        )));
+    }
+
+    OperationResult::Success(OperationSuccess::DotfileTracked {
+        name: name.to_string(),
+        source_path,
+        target_path: target_path.to_string(),
+        was_already_tracked: false,
+        environment: config.environment().to_string(),
+        steps_completed: StepCount::new(1, 1),
+    })
+}
+
+/// Handle `track_for_package`: load an existing package, copy the target file
+/// alongside the YAML, add a dotfiles entry, save, and record deploy state.
+fn handle_track_for_package<R, F>(
+    package_name: &str,
+    target_path: &str,
+    repo: &R,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
+    // Load the existing package
+    let mut package_blob = match repo.get_package(package_name) {
+        Ok(blob) => blob,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot load package '{package_name}': {e}"
+            )));
+        }
+    };
+
+    // Check if this target is already tracked in the package
+    let expanded_target = expand_user_path(filesystem, target_path);
+    if package_blob
+        .package()
+        .dotfiles()
+        .iter()
+        .any(|entry| expand_user_path(filesystem, entry.target()) == expanded_target)
+    {
+        return OperationResult::Success(OperationSuccess::DotfileTracked {
+            name: package_name.to_string(),
+            source_path: expanded_target,
+            target_path: target_path.to_string(),
+            was_already_tracked: true,
+            environment: config.environment().to_string(),
+            steps_completed: StepCount::new(1, 1),
+        });
+    }
+
+    // Validate the target path
+    if !filesystem.path_exists(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Target file does not exist: {}",
+            expanded_target.display()
+        )));
+    }
+
+    // Read the target file content
+    let content = match filesystem.read_file(&expanded_target) {
+        Ok(c) => c,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot read target file: {e}"
+            )));
+        }
+    };
+
+    // Determine where to copy the file — alongside the package YAML
+    let package_dir = package_blob
+        .file_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let filename = expanded_target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let source_dir = package_dir.join(package_name);
+    let source_path = source_dir.join(&filename);
+    let relative_source = format!("{package_name}/{filename}");
+
+    // Prevent silent overwrite of existing source files
+    if filesystem.path_exists(&source_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Source file already exists at {}. Remove it first or choose a different file.",
+            source_path.display()
+        )));
+    }
+
+    // Copy the file
+    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot write source file: {e}"
+        )));
+    }
+
+    // Add dotfiles entry and save — source is relative to the YAML's parent dir
+    package_blob
+        .package_mut()
+        .add_dotfile(DotfileEntry::new(&relative_source, target_path));
+
+    let file_path = package_blob.file_path().to_path_buf();
+    if let Err(e) = repo.save_package(package_blob.package(), &file_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save updated package: {e}"
+        )));
+    }
+
+    // Record initial deploy state
+    let checksum = compute_checksum(content.as_bytes());
+    let mut deploy_state = load_deploy_state(filesystem, config);
+    deploy_state.record_deployment(&relative_source, target_path, &checksum);
+    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save deploy state: {e}"
+        )));
+    }
+
+    OperationResult::Success(OperationSuccess::DotfileTracked {
+        name: package_name.to_string(),
+        source_path,
+        target_path: target_path.to_string(),
+        was_already_tracked: false,
+        environment: config.environment().to_string(),
+        steps_completed: StepCount::new(1, 1),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,18 +1098,18 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_target_path_absolute() {
+    fn test_expand_user_path_absolute() {
         let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "/tmp/some/file");
+        let result = expand_user_path(&fs, "/tmp/some/file");
         // Should be an absolute path starting with /tmp
         assert!(result.is_absolute());
         assert!(result.starts_with("/tmp"));
     }
 
     #[test]
-    fn test_expand_target_path_tilde() {
+    fn test_expand_user_path_tilde() {
         let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "~/test-file");
+        let result = expand_user_path(&fs, "~/test-file");
         // Should start with the actual home directory, not literal "~"
         assert!(result.is_absolute());
         assert!(

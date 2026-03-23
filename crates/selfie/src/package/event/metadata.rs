@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum OperationType {
     DotfileApply,
     DotfileDrift,
+    DotfileTrack,
     ConfigValidate,
     PackageAudit,
     PackageCheck,

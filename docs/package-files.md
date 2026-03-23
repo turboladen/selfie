@@ -443,11 +443,38 @@ Without `--yes`, conflicts are reported but the target file is left untouched.
 Check whether deployed dotfiles have been modified since they were last deployed:
 
 ```bash
+# Dedicated drift check (shows per-file status)
+selfie dotfiles drift
+
+# Or use apply --dry-run for a preview of what would change
 selfie apply --dry-run
 ```
 
-This shows which files are up to date, which have drifted, and which need deploying — without
-writing anything.
+### Listing Tracked Dotfiles
+
+See all dotfile mappings across packages and standalone dotfiles:
+
+```bash
+selfie dotfiles list
+```
+
+### Tracking New Files
+
+Start tracking an existing config file so it can be deployed to other machines:
+
+```bash
+# Interactive — prompts where to track the file
+selfie track ~/.config/starship.toml
+
+# Track as a standalone dotfile (in dotfiles/ directory)
+selfie dotfiles track starship ~/.config/starship.toml
+
+# Add to an existing package (in packages/ directory)
+selfie package track-dotfile starship ~/.config/starship.toml
+```
+
+The track commands copy the file into the repo, create or update the YAML spec with the
+source→target mapping, and record initial deploy state for drift detection.
 
 ### Validation Rules for Dotfiles
 

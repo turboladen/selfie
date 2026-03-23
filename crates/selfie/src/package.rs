@@ -75,6 +75,11 @@ impl GetPackage {
         &self.package
     }
 
+    /// Get a mutable reference to the package content
+    pub fn package_mut(&mut self) -> &mut Package {
+        &mut self.package
+    }
+
     /// Get the file path where the package is/should be stored
     #[must_use]
     pub fn file_path(&self) -> &std::path::Path {
@@ -309,6 +314,20 @@ impl Package {
     #[must_use]
     pub fn dotfiles(&self) -> &[DotfileEntry] {
         &self.dotfiles
+    }
+
+    /// Add a dotfile mapping to this package.
+    ///
+    /// Skips the entry if a dotfile with the same target already exists,
+    /// preventing duplicate entries from repeated `track-dotfile` calls.
+    pub fn add_dotfile(&mut self, entry: DotfileEntry) {
+        let already_tracked = self
+            .dotfiles
+            .iter()
+            .any(|existing| existing.target() == entry.target());
+        if !already_tracked {
+            self.dotfiles.push(entry);
+        }
     }
 
     /// Get the optional post-install note for this package

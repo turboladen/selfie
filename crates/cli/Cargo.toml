@@ -13,7 +13,7 @@ clap = { version = "4.5.31", features = ["derive"] }
 clap_complete = "4.5"
 comfy-table = { version = "7.1.4", features = ["custom_styling"] }
 console.workspace = true
-dialoguer = "0.12"
+dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 indicatif.workspace = true
 futures.workspace = true
 human-panic = "2"
