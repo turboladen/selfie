@@ -936,6 +936,7 @@ where
         name: name.to_string(),
         source_path,
         target_path: target_path.to_string(),
+        was_already_tracked: false,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),
     })
@@ -964,8 +965,25 @@ where
         }
     };
 
-    // Expand and validate the target path
+    // Check if this target is already tracked in the package
     let expanded_target = expand_target_path(filesystem, target_path);
+    if package_blob
+        .package()
+        .dotfiles()
+        .iter()
+        .any(|entry| expand_target_path(filesystem, entry.target()) == expanded_target)
+    {
+        return OperationResult::Success(OperationSuccess::DotfileTracked {
+            name: package_name.to_string(),
+            source_path: expanded_target,
+            target_path: target_path.to_string(),
+            was_already_tracked: true,
+            environment: config.environment().to_string(),
+            steps_completed: StepCount::new(1, 1),
+        });
+    }
+
+    // Validate the target path
     if !filesystem.path_exists(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
@@ -1039,6 +1057,7 @@ where
         name: package_name.to_string(),
         source_path,
         target_path: target_path.to_string(),
+        was_already_tracked: false,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),
     })

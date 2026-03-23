@@ -12,6 +12,7 @@ use selfie::{
     fs::{filesystem::FileSystem, real::RealFileSystem},
     package::{
         GetPackage, SpecService,
+        event::PackageEvent,
         git_adapter::GixGitStatusProvider,
         port::PackageRepository,
         repository::yaml::YamlPackageRepository,
@@ -87,7 +88,12 @@ pub(crate) async fn handle_track_standalone(
     let event_stream = service.track_standalone(name, file).await;
 
     let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
+    let display_for_handler = display.clone();
+    let result = processor
+        .process_events(event_stream, move |event| {
+            handle_already_tracked(event, &display_for_handler)
+        })
+        .await;
     result.exit_code
 }
 
@@ -104,8 +110,36 @@ pub(crate) async fn handle_track_for_package(
     let event_stream = service.track_for_package(package_name, file).await;
 
     let processor = EventProcessor::new(display.clone());
-    let result = processor.process_events(event_stream, |_| false).await;
+    let display_for_handler = display.clone();
+    let result = processor
+        .process_events(event_stream, move |event| {
+            handle_already_tracked(event, &display_for_handler)
+        })
+        .await;
     result.exit_code
+}
+
+/// Custom event handler that renders already-tracked results as info (ℹ) instead
+/// of success (✓), since no work was performed.
+fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> bool {
+    use selfie::package::event::{OperationResult, OperationSuccess};
+
+    match event {
+        PackageEvent::Completed {
+            result:
+                OperationResult::Success(
+                    success @ OperationSuccess::DotfileTracked {
+                        was_already_tracked: true,
+                        ..
+                    },
+                ),
+            ..
+        } => {
+            display.print_info(success.to_string());
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Save a package to the filesystem with consistent error handling

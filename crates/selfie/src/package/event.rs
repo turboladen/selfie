@@ -802,6 +802,8 @@ pub enum OperationSuccess {
         source_path: std::path::PathBuf,
         /// The original target path being tracked
         target_path: String,
+        /// Whether the file was already tracked (no-op)
+        was_already_tracked: bool,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1107,6 +1109,18 @@ impl std::fmt::Display for OperationSuccess {
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count} {steps_completed}"
+                )
+            }
+            OperationSuccess::DotfileTracked {
+                name,
+                target_path,
+                was_already_tracked: true,
+                steps_completed,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Already tracking '{target_path}' in spec '{name}' {steps_completed}"
                 )
             }
             OperationSuccess::DotfileTracked {
