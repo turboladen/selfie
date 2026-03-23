@@ -1,11 +1,21 @@
 mod builder;
 pub mod event;
-pub mod git;
-pub mod git_adapter;
 pub mod port;
 pub mod repository;
 pub mod service;
 pub mod validate;
+
+// Re-export git types from crate::git for backward compatibility.
+pub mod git {
+    pub use crate::git::{GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider};
+
+    #[cfg(any(test, feature = "with_mocks"))]
+    pub use crate::git::MockGitStatusProvider;
+}
+
+pub mod git_adapter {
+    pub use crate::git::GixGitAdapter as GixGitStatusProvider;
+}
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
 pub use self::service::{InstallOptions, PackageService, SpecService};

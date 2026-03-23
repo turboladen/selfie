@@ -7,13 +7,15 @@ use std::{
     path::Path,
 };
 
-use super::git::{GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider};
+use super::status_provider::{
+    GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider,
+};
 
 /// Git status provider backed by the `gix` crate.
 #[derive(Debug, Clone)]
-pub struct GixGitStatusProvider;
+pub struct GixGitAdapter;
 
-impl GitStatusProvider for GixGitStatusProvider {
+impl GitStatusProvider for GixGitAdapter {
     fn status_for_directory(&self, directory: &Path) -> Result<GitDirectoryStatus, GitStatusError> {
         let repo = match gix::discover(directory) {
             Ok(repo) => repo,
@@ -119,7 +121,7 @@ mod tests {
     #[test]
     fn non_git_directory_returns_not_in_repo() {
         let temp = tempfile::TempDir::new().unwrap();
-        let provider = GixGitStatusProvider;
+        let provider = GixGitAdapter;
         let result = provider.status_for_directory(temp.path()).unwrap();
         assert!(!result.in_repo);
         assert!(result.files.is_empty());
@@ -130,7 +132,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         gix::init(temp.path()).unwrap();
 
-        let provider = GixGitStatusProvider;
+        let provider = GixGitAdapter;
         let result = provider.status_for_directory(temp.path()).unwrap();
         assert!(result.in_repo);
     }
@@ -143,7 +145,7 @@ mod tests {
         let file_path = temp.path().join("untracked.yml");
         fs::write(&file_path, "name: untracked\n").unwrap();
 
-        let provider = GixGitStatusProvider;
+        let provider = GixGitAdapter;
         let result = provider.status_for_directory(temp.path()).unwrap();
 
         assert!(result.in_repo);
