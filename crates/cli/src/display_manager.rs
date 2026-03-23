@@ -370,33 +370,61 @@ impl DisplayManager {
         }
     }
 
-    /// Print a unified diff with per-line coloring (stdout)
+    /// Print a unified diff with per-line coloring and visual framing (stdout)
     ///
-    /// Colors: `---`/`-` lines red, `+++`/`+` lines green, `@@` hunks cyan,
-    /// context lines dim. Paths in `---`/`+++` headers are shortened with `~`.
+    /// Layout:
+    /// ```text
+    /// --- old/path
+    /// +++ new/path
+    /// ──────────────────────────────────────────
+    ///  context line
+    /// -removed line
+    /// +added line
+    /// ──────────────────────────────────────────
+    /// ```
+    ///
+    /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
+    /// context dim, separator dim. Paths shortened with `~`.
     pub(crate) fn print_diff(&self, diff: &str) {
+        const SEPARATOR: &str =
+            "──────────────────────────────────────────────────────────────────────";
+
         self.mp.suspend(|| {
+            let mut printed_separator = false;
+
             for line in diff.lines() {
                 if self.use_colors {
                     if let Some(rest) = line.strip_prefix("--- ") {
-                        println!("{}", style(format!("--- {}", shorten_path(rest))).red());
+                        println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
                     } else if let Some(rest) = line.strip_prefix("+++ ") {
-                        println!("{}", style(format!("+++ {}", shorten_path(rest))).green());
+                        println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
+                        println!("  {}", style(SEPARATOR).dim());
+                        printed_separator = true;
                     } else if line.starts_with("@@") {
-                        println!("{}", style(line).cyan());
+                        println!("  {}", style(line).cyan());
                     } else if line.starts_with('-') {
-                        println!("{}", style(line).red());
+                        println!("  {}", style(line).red());
                     } else if line.starts_with('+') {
-                        println!("{}", style(line).green());
+                        println!("  {}", style(line).green());
                     } else {
-                        println!("{}", style(line).dim());
+                        println!("  {}", style(line).dim());
                     }
                 } else if let Some(rest) = line.strip_prefix("--- ") {
-                    println!("--- {}", shorten_path(rest));
+                    println!("  --- {}", shorten_path(rest));
                 } else if let Some(rest) = line.strip_prefix("+++ ") {
-                    println!("+++ {}", shorten_path(rest));
+                    println!("  +++ {}", shorten_path(rest));
+                    println!("  {SEPARATOR}");
+                    printed_separator = true;
                 } else {
-                    println!("{line}");
+                    println!("  {line}");
+                }
+            }
+
+            if printed_separator {
+                if self.use_colors {
+                    println!("  {}", style(SEPARATOR).dim());
+                } else {
+                    println!("  {SEPARATOR}");
                 }
             }
         });
