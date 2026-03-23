@@ -214,6 +214,17 @@ fn save_deploy_state<F: FileSystem>(
 /// Tries `expand_path` (which does tilde expansion + canonicalize) first. If that
 /// fails (e.g., target doesn't exist yet), expands just the tilde prefix using the
 /// filesystem and constructs the rest of the path without requiring it to exist.
+/// Check that a name is safe for use as a filesystem path component.
+///
+/// Rejects names containing path separators, `..`, or characters outside
+/// the alphanumeric + hyphen + underscore set used for package names.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
 fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = PathBuf::from(target);
 
@@ -833,6 +844,13 @@ where
         ));
     };
 
+    // Reject names with path separators or traversal components
+    if !is_safe_name(name) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+        )));
+    }
+
     let dotfiles_dir = config.dotfiles_directory();
 
     // Expand and validate the target path
@@ -904,7 +922,11 @@ where
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
     deploy_state.record_deployment(&filename, target_path, &checksum);
-    let _ = save_deploy_state(filesystem, config, &deploy_state);
+    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save deploy state: {e}"
+        )));
+    }
 
     OperationResult::Success(OperationSuccess::DotfileTracked {
         name: name.to_string(),
@@ -972,6 +994,14 @@ where
     let source_path = source_dir.join(&filename);
     let relative_source = format!("{package_name}/{filename}");
 
+    // Prevent silent overwrite of existing source files
+    if filesystem.path_exists(&source_path) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Source file already exists at {}. Remove it first or choose a different file.",
+            source_path.display()
+        )));
+    }
+
     // Copy the file
     if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -995,7 +1025,11 @@ where
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
     deploy_state.record_deployment(&relative_source, target_path, &checksum);
-    let _ = save_deploy_state(filesystem, config, &deploy_state);
+    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot save deploy state: {e}"
+        )));
+    }
 
     OperationResult::Success(OperationSuccess::DotfileTracked {
         name: package_name.to_string(),

@@ -319,7 +319,7 @@ impl Package {
     /// Add a dotfile mapping to this package.
     ///
     /// Skips the entry if a dotfile with the same target already exists,
-    /// preventing duplicate entries from repeated `track-config` calls.
+    /// preventing duplicate entries from repeated `track-dotfile` calls.
     pub fn add_dotfile(&mut self, entry: DotfileEntry) {
         let already_tracked = self
             .dotfiles

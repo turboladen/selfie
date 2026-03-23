@@ -115,7 +115,7 @@ pub(crate) enum ClapCommands {
     ///
     /// Commands for inspecting and managing dotfiles across packages.
     /// Use `selfie apply` to deploy dotfiles; use `selfie dotfiles` to
-    /// inspect drift, list tracked files, and add new ones.
+    /// inspect drift, list tracked files, and track new ones.
     Dotfiles(DotfilesCommands),
 
     /// Interactive shortcut to start tracking a config file
@@ -410,8 +410,7 @@ pub(crate) enum DotfilesSubcommands {
     /// List all dotfiles defined across packages
     ///
     /// Shows all dotfile mappings (source → target) from both the packages
-    /// directory and the standalone dotfiles directory. Includes deployment
-    /// status when available.
+    /// directory and the standalone dotfiles directory.
     ///
     /// Example: `selfie dotfiles list`
     List,

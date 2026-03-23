@@ -470,7 +470,7 @@ selfie track ~/.config/starship.toml
 selfie dotfiles track starship ~/.config/starship.toml
 
 # Add to an existing package (in packages/ directory)
-selfie package track-config starship ~/.config/starship.toml
+selfie package track-dotfile starship ~/.config/starship.toml
 ```
 
 The track commands copy the file into the repo, create or update the YAML spec with the

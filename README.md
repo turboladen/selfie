@@ -275,7 +275,7 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ✅ Login shell execution for install/check/audit commands
-- ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-config`, `selfie track`
+- ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-dotfile`, `selfie track`
 - ✅ Dotfile drift detection: `selfie dotfiles drift`, `selfie dotfiles list`
 - 📋 Git-backed sync (`selfie sync push/pull`) (planned)
 - 📋 Package groups and bulk operations (planned)
