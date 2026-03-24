@@ -40,6 +40,43 @@ fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
     })
 }
 
+/// Check if a file has the executable bit set.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
+}
+
+/// Open the repo's index file, or create an empty one if it doesn't exist yet
+/// (e.g., a freshly-initialized repo with no commits).
+fn open_or_create_index(repo: &gix::Repository) -> Result<gix::index::File, GitSyncError> {
+    match repo.open_index() {
+        Ok(index) => Ok(index),
+        Err(_) => {
+            // No index file on disk yet — create an empty one.
+            Ok(gix::index::File::from_state(
+                gix::index::State::new(repo.object_hash()),
+                repo.index_path(),
+            ))
+        }
+    }
+}
+
+/// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
+fn git_sync_err(operation: &str, e: impl std::fmt::Display) -> GitSyncError {
+    GitSyncError::OperationFailed {
+        operation: operation.to_string(),
+        message: e.to_string(),
+    }
+}
+
 /// Run a `git` CLI command in the given directory.
 ///
 /// Stdin is set to `Stdio::null` and `GIT_TERMINAL_PROMPT=0` to prevent git
@@ -273,29 +310,145 @@ impl GitSyncProvider for GixGitAdapter {
             return Ok(());
         }
 
-        // Use `git add -A` to handle additions, modifications, AND deletions.
-        // Plain `git add --` would fail for deleted paths.
-        let mut args = vec!["add", "-A", "--"];
-        let file_strs: Vec<String> = files
-            .iter()
-            .map(|f| f.to_string_lossy().to_string())
-            .collect();
-        let file_refs: Vec<&str> = file_strs.iter().map(String::as_str).collect();
-        args.extend(file_refs);
+        let repo = open_repo(repo_root)?;
+        let mut index = open_or_create_index(&repo)?;
 
-        run_git(repo_root, &args)?;
+        let workdir = repo
+            .workdir()
+            .ok_or_else(|| GitSyncError::OperationFailed {
+                operation: "stage".to_string(),
+                message: "bare repository".to_string(),
+            })?;
+
+        for file in files {
+            let full_path = workdir.join(file);
+            let rela_bstring = gix::path::into_bstr(file);
+            let rela_path: &gix::bstr::BStr = rela_bstring.as_ref();
+
+            if full_path.exists() {
+                // File exists → hash it as a blob and upsert into the index.
+                let data = std::fs::read(&full_path).map_err(|e| git_sync_err("read file", e))?;
+                let blob_id = repo
+                    .write_blob(&data)
+                    .map_err(|e| git_sync_err("write blob", e))?;
+
+                let entry_mode = if is_executable(&full_path) {
+                    gix::index::entry::Mode::FILE_EXECUTABLE
+                } else {
+                    gix::index::entry::Mode::FILE
+                };
+
+                match index.entry_index_by_path_and_stage(
+                    rela_path,
+                    gix::index::entry::Stage::Unconflicted,
+                ) {
+                    Some(pos) => {
+                        // Update existing entry in place.
+                        let entry = &mut index.entries_mut()[pos];
+                        entry.id = blob_id.detach();
+                        entry.mode = entry_mode;
+                        entry.flags.remove(
+                            gix::index::entry::Flags::ASSUME_VALID
+                                | gix::index::entry::Flags::UPDATE,
+                        );
+                    }
+                    None => {
+                        // New file — push and re-sort.
+                        index.dangerously_push_entry(
+                            Default::default(),
+                            blob_id.detach(),
+                            gix::index::entry::Flags::empty(),
+                            entry_mode,
+                            rela_path,
+                        );
+                        index.sort_entries();
+                    }
+                }
+            } else {
+                // File deleted → remove from index.
+                let rela_owned = rela_path.to_owned();
+                index.remove_entries(|_, path, _| path == rela_owned);
+            }
+        }
+
+        index
+            .write(Default::default())
+            .map_err(|e| git_sync_err("write index", e))?;
         Ok(())
     }
 
     fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
-        // Perform the commit; ignore stdout since its format varies (e.g.,
-        // root-commit has extra text) and isn't stable across git versions.
-        let _commit_output = run_git(repo_root, &["commit", "-m", message])?;
+        let repo = open_repo(repo_root)?;
+        let index = open_or_create_index(&repo)?;
 
-        // Reliably obtain the new commit hash from HEAD.
-        let hash = run_git(repo_root, &["rev-parse", "HEAD"])?;
+        // Build a tree from the current index by starting from HEAD's tree
+        // (or the empty tree for the first commit) and upserting every entry.
+        let head_tree_id = repo
+            .head_tree_id_or_empty()
+            .map_err(|e| git_sync_err("head tree", e))?;
+        let mut editor = repo
+            .edit_tree(head_tree_id)
+            .map_err(|e| git_sync_err("edit tree", e))?;
 
-        Ok(CommitId(hash))
+        // Collect HEAD tree entries so we can detect deletions.
+        let head_entries: HashSet<String> = repo
+            .find_tree(head_tree_id)
+            .ok()
+            .map(|tree| {
+                tree.traverse()
+                    .breadthfirst
+                    .files()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| r.filepath.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Upsert all index entries into the tree.
+        let index_paths: HashSet<String> = index
+            .entries()
+            .iter()
+            .map(|e| e.path(&index).to_string())
+            .collect();
+
+        for entry in index.entries() {
+            let path = entry.path(&index);
+            let kind = match entry.mode {
+                gix::index::entry::Mode::FILE_EXECUTABLE => {
+                    gix::object::tree::EntryKind::BlobExecutable
+                }
+                gix::index::entry::Mode::SYMLINK => gix::object::tree::EntryKind::Link,
+                _ => gix::object::tree::EntryKind::Blob,
+            };
+            editor
+                .upsert(path.to_owned(), kind, entry.id)
+                .map_err(|e| git_sync_err("upsert tree entry", e))?;
+        }
+
+        // Remove entries that were in HEAD but are no longer in the index.
+        for path in &head_entries {
+            if !index_paths.contains(path) {
+                let bpath: &gix::bstr::BStr = path.as_str().into();
+                editor
+                    .remove(bpath.to_owned())
+                    .map_err(|e| git_sync_err("remove tree entry", e))?;
+            }
+        }
+
+        let tree_id = editor.write().map_err(|e| git_sync_err("write tree", e))?;
+
+        // Determine parent(s).
+        let parents: Vec<gix::ObjectId> = repo
+            .head_id()
+            .map(|id| vec![id.detach()])
+            .unwrap_or_default();
+
+        let commit_id = repo
+            .commit("HEAD", message, tree_id, parents)
+            .map_err(|e| git_sync_err("commit", e))?;
+
+        Ok(CommitId(commit_id.to_string()))
     }
 
     fn push(&self, repo_root: &Path) -> Result<(), GitSyncError> {

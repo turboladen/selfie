@@ -8,7 +8,7 @@ chrono = { version = "0.4", features = ["serde"] }
 console = "0.16"
 dunce = "1.0"
 futures = "0.3.31"
-gix = { version = "0.72", default-features = false, features = ["status", "index", "revision"] }
+gix = { version = "0.72", default-features = false, features = ["status", "index", "revision", "tree-editor"] }
 indicatif = "0.18"
 mockall = "0.14.0"
 serde = { version = "1.0", features = ["derive"] }
