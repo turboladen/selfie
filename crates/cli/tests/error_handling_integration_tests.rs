@@ -189,7 +189,6 @@ fn test_package_validation_error() {
     // Create an invalid package file
     let invalid_yaml = r#"
 name: "invalid-package"
-version: "1.0.0"
 environments:
   test-env:
     # Missing install command

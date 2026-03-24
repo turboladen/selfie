@@ -59,7 +59,6 @@ fn create_package_with_dotfiles(
 
     let yaml = format!(
         r#"name: {name}
-version: "1.0"
 environments:
   test:
     install: "echo installed"
@@ -664,7 +663,6 @@ async fn test_apply_all_no_dotfiles_packages() {
     let dirs = TestDirs::new();
 
     let yaml = r#"name: no-config-pkg
-version: "1.0"
 environments:
   test:
     install: "echo installed"
@@ -1286,7 +1284,6 @@ async fn test_track_for_package_adds_dotfile_to_existing_package() {
 
     // Create an existing package without dotfiles
     let yaml = r#"name: alacritty
-version: "1.0"
 environments:
   test:
     install: "echo installed"

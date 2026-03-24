@@ -307,7 +307,7 @@ mod tests {
 
         let yaml = r"
             name: ripgrep
-            version: 0.1.0
+
             environments:
               mac:
                 install: brew install ripgrep
@@ -454,7 +454,7 @@ mod tests {
         // Add valid package files
         let package1 = r"
             name: ripgrep
-            version: 1.0.0
+
             environments:
               test-env:
                 install: brew install ripgrep
@@ -462,7 +462,7 @@ mod tests {
 
         let package2 = r"
             name: fzf
-            version: 0.2.0
+
             environments:
               other-env:
                 install: brew install fzf
@@ -554,7 +554,7 @@ mod tests {
         // Add valid and invalid package files
         let ripgrep_package = r"
             name: ripgrep
-            version: 1.0.0
+
             environments:
               test-env:
                 install: brew install ripgrep
@@ -562,7 +562,7 @@ mod tests {
 
         let fzf_package = r"
             name: fzf
-            version: 0.2.0
+
             environments:
               other-env:
                 install: brew install fzf
@@ -689,7 +689,7 @@ mod tests {
         // Create multiple files with the same package name
         let package_yaml = r"
             name: duplicate
-            version: 1.0.0
+
             environments:
               test-env:
                 install: echo test
@@ -729,7 +729,7 @@ mod tests {
         // Create a simple package with no dependencies
         let package_content = r"
 name: simple-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install'
@@ -758,7 +758,7 @@ environments:
         // Create target package
         let target_content = r"
 name: target-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install target'
@@ -773,7 +773,7 @@ environments:
         // Create dependent package
         let dependent_content = r"
 name: dependent-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install dependent'
@@ -789,7 +789,7 @@ environments:
         // Create another package without dependency
         let independent_content = r"
 name: independent-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install independent'
@@ -819,7 +819,7 @@ environments:
         // Create target package
         let target_content = r"
 name: target-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install target'
@@ -834,7 +834,7 @@ environments:
         // Create dependent package with dependency in production environment
         let dependent_content = r"
 name: multi-env-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install test'
@@ -868,7 +868,7 @@ environments:
         // Create a self-referencing package (edge case)
         let self_ref_content = r"
 name: self-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install'
@@ -898,7 +898,7 @@ environments:
         // Create target package
         let target_content = r"
 name: shared-lib
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install shared-lib'
@@ -909,7 +909,7 @@ environments:
         // Create first dependent package
         let dependent1_content = r"
 name: app-one
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install app-one'
@@ -921,7 +921,7 @@ environments:
         // Create second dependent package
         let dependent2_content = r"
 name: app-two
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install app-two'
@@ -951,7 +951,7 @@ environments:
         // Create a valid package
         let valid_content = r"
 name: valid-package
-version: 1.0.0
+
 environments:
   test:
     install: echo 'install valid'
@@ -1088,7 +1088,7 @@ environments:
         // Mock get_package to return a valid package
         let package_yaml = r#"
 name: test-package
-version: 1.0.0
+
 environments:
   default:
     install: echo "install"
@@ -1156,7 +1156,7 @@ environments:
         // Mock get_package to return a valid package
         let package_yaml = r#"
 name: test-package
-version: 1.0.0
+
 environments:
   default:
     install: echo "install"

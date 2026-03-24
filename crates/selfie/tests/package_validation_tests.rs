@@ -21,7 +21,6 @@ fn test_validate_package_with_invalid_command_syntax() {
     // Create package with unmatched quote in command
     let package_yaml = r#"
 name: test-package
-version: 1.0.0
 environments:
   test-env:
     install: 'echo "hello world'
@@ -60,7 +59,6 @@ fn test_validate_package_with_invalid_url() {
     // Create package with invalid homepage URL
     let package_yaml = r#"
 name: test-package
-version: 1.0.0
 homepage: "not-a-valid-url"
 environments:
   test-env:
@@ -96,7 +94,6 @@ fn test_parse_package_with_recommends() {
 
     let package_yaml = r#"
 name: test-package
-version: 1.0.0
 environments:
   test-env:
     install: echo "install"
@@ -127,7 +124,6 @@ fn test_parse_package_without_recommends_defaults_to_empty() {
 
     let package_yaml = r#"
 name: test-package
-version: 1.0.0
 environments:
   test-env:
     install: echo "install"
@@ -149,7 +145,6 @@ environments:
 fn test_parse_package_with_dotfiles() {
     let yaml = r#"
 name: fnm
-version: "1.0.0"
 environments:
   macos:
     install: brew install fnm
@@ -178,7 +173,6 @@ post_install_note: |
 fn test_parse_package_without_dotfiles_defaults_to_empty() {
     let yaml = r#"
 name: basic
-version: "1.0.0"
 environments:
   linux:
     install: apt install basic

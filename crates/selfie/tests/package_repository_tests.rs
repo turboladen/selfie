@@ -26,14 +26,12 @@ fn test_repository_with_mixed_package_formats() {
 
     let package1_yaml = r#"
 name: package1
-version: 1.0.0
 environments:
   test-env:
     install: echo "installing package1"
 "#;
     let package2_yaml = r#"
 name: package2
-version: 2.0.0
 environments:
   test-env:
     install: echo "installing package2"

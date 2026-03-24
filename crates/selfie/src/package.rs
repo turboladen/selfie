@@ -112,6 +112,7 @@ impl GetPackage {
 
 /// A dotfile mapping from repo source to deployment target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotfileEntry {
     source: String,
     target: String,
@@ -140,6 +141,7 @@ impl DotfileEntry {
 /// Core package entity representing a package definition
 ///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Package {
     /// Package name
     pub(crate) name: String,
@@ -171,6 +173,7 @@ pub struct Package {
 
 /// Configuration for a specific environment
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
     /// Command to install the package
     pub(crate) install: String,
