@@ -469,7 +469,9 @@ fn validate_changed_packages(
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
-    let mut failures: Vec<String> = Vec::new();
+    use super::port::PackageValidationFailure;
+
+    let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
     for (path, kind) in changes {
         if *kind == FileChangeKind::Deleted || !is_yaml_file(path) {
@@ -477,10 +479,15 @@ fn validate_changed_packages(
         }
 
         let abs_path = repo_root.join(path);
+        let path_str = path.display().to_string();
+
         let content = match std::fs::read_to_string(&abs_path) {
             Ok(c) => c,
             Err(e) => {
-                failures.push(format!("{}: failed to read: {e}", path.display()));
+                failures.push(PackageValidationFailure {
+                    path: path_str,
+                    reason: format!("failed to read: {e}"),
+                });
                 continue;
             }
         };
@@ -488,7 +495,10 @@ fn validate_changed_packages(
         let mut package: crate::package::Package = match serde_yaml::from_str(&content) {
             Ok(p) => p,
             Err(e) => {
-                failures.push(format!("{}: invalid YAML: {e}", path.display()));
+                failures.push(PackageValidationFailure {
+                    path: path_str,
+                    reason: e.to_string(),
+                });
                 continue;
             }
         };
@@ -500,20 +510,19 @@ fn validate_changed_packages(
                 .issues()
                 .errors()
                 .iter()
-                .map(|i| format!("  - {}: {}", i.field(), i.message()))
+                .map(|i| format!("{}: {}", i.field(), i.message()))
                 .collect();
-            failures.push(format!("{}:\n{}", path.display(), msgs.join("\n")));
+            failures.push(PackageValidationFailure {
+                path: path_str,
+                reason: msgs.join("; "),
+            });
         }
     }
 
     if failures.is_empty() {
         Ok(())
     } else {
-        let count = failures.len();
-        Err(SyncError::ValidationFailed {
-            count,
-            details: failures.join("\n"),
-        })
+        Err(SyncError::ValidationFailed { failures })
     }
 }
 

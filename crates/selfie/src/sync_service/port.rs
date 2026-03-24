@@ -27,12 +27,20 @@ pub enum SyncError {
     GitError(String),
 
     /// One or more changed package files failed validation.
-    #[error("validation failed for {count} {}: {details}", if *count == 1 { "package" } else { "packages" })]
+    #[error("validation failed for {} {}", .failures.len(), if .failures.len() == 1 { "package" } else { "packages" })]
     ValidationFailed {
-        count: usize,
-        /// Human-readable summary of each failing package and its errors.
-        details: String,
+        /// Per-file validation failures with structured details.
+        failures: Vec<PackageValidationFailure>,
     },
+}
+
+/// A single package file that failed validation during sync push.
+#[derive(Debug, Clone)]
+pub struct PackageValidationFailure {
+    /// Relative path to the package file (e.g., `packages/topgrade.yml`).
+    pub path: String,
+    /// What went wrong — parse error or validation errors.
+    pub reason: String,
 }
 
 /// Options controlling how `sync push` behaves.

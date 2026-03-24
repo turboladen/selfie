@@ -4,7 +4,7 @@ use console::style;
 
 use selfie::{
     package::event::{OperationResult, OperationSuccess, PackageEvent},
-    sync_service::{ConfirmedCommit, PrepareResult, PushOptions, SyncService},
+    sync_service::{ConfirmedCommit, PrepareResult, PushOptions, SyncError, SyncService},
 };
 
 use crate::{
@@ -25,6 +25,7 @@ pub(crate) async fn handle_push(
     display: &DisplayManager,
 ) -> i32 {
     let service = create_sync_service(config);
+    let use_colors = config.use_colors();
 
     let options = PushOptions {
         batch: args.batch,
@@ -40,6 +41,27 @@ pub(crate) async fn handle_push(
         warnings,
     } = match service.prepare_push(&options).await {
         Ok(result) => result,
+        Err(SyncError::ValidationFailed { failures }) => {
+            let count = failures.len();
+            let label = selfie::pluralize(count, "package", "packages");
+            display.print_error(format!(
+                "{count} changed {label} failed validation — fix before pushing"
+            ));
+            display.println("");
+            for failure in &failures {
+                if use_colors {
+                    display.println(format!(
+                        "  {} {}",
+                        style("✗").red(),
+                        style(&failure.path).bold()
+                    ));
+                } else {
+                    display.println(format!("  ✗ {}", failure.path));
+                }
+                display.println(format!("    {}", failure.reason));
+            }
+            return 1;
+        }
         Err(e) => {
             display.print_error(e.to_string());
             return 1;
@@ -54,8 +76,6 @@ pub(crate) async fn handle_push(
         display.print_info("Nothing to push — working tree is clean");
         return 0;
     }
-
-    let use_colors = config.use_colors();
 
     // No new commits but unpushed local commits exist — push them directly
     if pending_commits.is_empty() && ahead > 0 {
