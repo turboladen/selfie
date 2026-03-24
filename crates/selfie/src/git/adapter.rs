@@ -112,7 +112,9 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
         .status(gix::progress::Discard)
         .map_err(|e| e.to_string())?;
 
-    let iter = platform.into_iter(Vec::new()).map_err(|e| e.to_string())?;
+    let iter = platform
+        .into_iter(std::iter::empty::<gix::bstr::BString>())
+        .map_err(|e| e.to_string())?;
 
     let mut worktree_mods = HashSet::new();
     let mut index_mods = HashSet::new();
@@ -137,7 +139,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
                 }
             }
             gix::status::Item::TreeIndex(change) => {
-                let location = change.fields().0.to_string();
+                let location = change.location().to_string();
                 index_mods.insert(location);
             }
         }
