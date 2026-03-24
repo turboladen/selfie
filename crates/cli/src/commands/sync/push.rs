@@ -109,16 +109,20 @@ fn show_pending_commits(
     display.println("");
     display.print_info(format!("{count} {label} to push:"));
     display.println("");
-    for commit in commits {
+    for (i, commit) in commits.iter().enumerate() {
+        let num = i + 1;
         let file_count = commit.files.len();
         let file_label = selfie::pluralize(file_count, "file", "files");
         if use_colors {
             display.println(format!(
-                "  {} ({file_count} {file_label})",
+                "  {num}. {} ({file_count} {file_label})",
                 style(&commit.message).bold()
             ));
         } else {
-            display.println(format!("  {} ({file_count} {file_label})", commit.message));
+            display.println(format!(
+                "  {num}. {} ({file_count} {file_label})",
+                commit.message
+            ));
         }
     }
     display.println("");
@@ -144,11 +148,13 @@ fn confirm_commits(
         );
     }
 
+    let total = pending.len();
     let mut confirmed = Vec::new();
-    for commit in pending {
+    for (i, commit) in pending.into_iter().enumerate() {
+        let num = i + 1;
         let edited_message: String =
             match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt("Commit message")
+                .with_prompt(format!("Commit message ({num}/{total})"))
                 .default(commit.message.clone())
                 .interact_text()
             {
