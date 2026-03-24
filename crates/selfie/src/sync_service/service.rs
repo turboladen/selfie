@@ -277,6 +277,12 @@ where
                 }
             }
 
+            // Snapshot ahead count before push to include pre-existing unpushed commits.
+            let ahead_before_push = git
+                .repo_status(&repo_info.root)
+                .map(|s| s.ahead)
+                .unwrap_or(commits_created);
+
             // Push all commits
             sender
                 .send_progress(total_steps, total_steps, "Pushing to remote")
@@ -294,7 +300,7 @@ where
             sender
                 .send_completed(OperationResult::Success(
                     OperationSuccess::SyncPushComplete {
-                        commits_pushed: commits_created,
+                        commits_pushed: ahead_before_push,
                         steps_completed: StepCount::new(total_steps, total_steps),
                     },
                 ))
@@ -491,10 +497,10 @@ fn group_changes_by_package(
     let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
     let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
 
-    for (path, kind) in changes {
-        match infer_package_name(&path) {
-            Some(name) => groups.entry(name).or_default().push((path, kind)),
-            None => ungrouped.push((path, kind)),
+    for (path, kind) in &changes {
+        match infer_package_name(path, &changes) {
+            Some(name) => groups.entry(name).or_default().push((path.clone(), *kind)),
+            None => ungrouped.push((path.clone(), *kind)),
         }
     }
 
@@ -539,35 +545,63 @@ fn group_changes_by_package(
 /// inside a package subdirectory, e.g., `starship/starship.toml`).
 ///
 /// Root-level non-YAML files (README.md, .gitignore) are **not** considered
-/// dotfile sources.
+/// dotfile sources. A subdirectory file is only considered a dotfile source if
+/// its parent directory name matches a YAML spec in the changeset (e.g.,
+/// `starship/starship.toml` is a dotfile source only if `starship.yml` also changed).
 fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile]) -> bool {
-    changed_files
+    let yaml_stems: std::collections::HashSet<String> = changed_files
         .iter()
-        .any(|f| !is_yaml_file(&f.path) && f.path.parent().is_some_and(|p| p != Path::new("")))
+        .filter(|f| is_yaml_file(&f.path))
+        .filter_map(|f| f.path.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+
+    changed_files.iter().any(|f| {
+        !is_yaml_file(&f.path)
+            && f.path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|dir| yaml_stems.contains(&*dir.to_string_lossy()))
+    })
 }
 
-/// Infer the package name from a file path.
+/// Infer the package name from a file path, using sibling YAML files as evidence.
 ///
 /// Rules:
 /// - YAML files (`*.yml`, `*.yaml`) → package name is the file stem
-///   (e.g., `starship.yml` → `starship`, `packages/starship.yml` → `starship`)
-/// - Files in a subdirectory → package name is the parent directory name
-///   (e.g., `starship/starship.toml` → `starship`)
-/// - Files at the root with no YAML extension → `None` (ungrouped)
-fn infer_package_name(path: &Path) -> Option<String> {
+///   (e.g., `starship.yml` → `starship`)
+/// - Non-YAML files in a subdirectory whose name matches a known YAML spec
+///   → package name is the parent directory name
+///   (e.g., `starship/starship.toml` → `starship` if `starship.yml` exists)
+/// - Everything else → `None` (ungrouped)
+///
+/// `all_changed` is the full set of changed files, used to check for sibling
+/// YAML evidence.
+fn infer_package_name(path: &Path, all_changed: &[(PathBuf, FileChangeKind)]) -> Option<String> {
     // Check if it's a YAML file — use file stem as package name
-    if let Some(ext) = path.extension()
-        && (ext == "yml" || ext == "yaml")
-    {
+    if is_yaml_file(path) {
         return path.file_stem().map(|s| s.to_string_lossy().to_string());
     }
 
-    // For non-YAML files, use the parent directory name
-    // e.g., `starship/starship.toml` → `starship`
-    // e.g., `packages/starship/init.fish` → `starship` (last non-file component)
-    path.parent()
+    // For non-YAML files, use the parent directory name — but only if a
+    // sibling YAML spec exists in the changeset (e.g., `starship.yml` for
+    // `starship/init.fish`). This prevents unrelated files like `docs/sync.md`
+    // from being grouped as package "docs".
+    let dir_name = path
+        .parent()
         .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().to_string())
+        .map(|s| s.to_string_lossy().to_string())?;
+
+    let has_sibling_yaml = all_changed.iter().any(|(p, _)| {
+        is_yaml_file(p)
+            && p.file_stem()
+                .is_some_and(|stem| stem.to_string_lossy() == dir_name)
+    });
+
+    if has_sibling_yaml {
+        Some(dir_name)
+    } else {
+        None
+    }
 }
 
 /// Generate a conventional commit message for a package's changes.
@@ -679,8 +713,21 @@ fn categorize_pull_changes(
     let mut seen_added = std::collections::HashSet::new();
     let mut seen_removed = std::collections::HashSet::new();
 
+    // Build context for infer_package_name: convert ChangedFile to (PathBuf, FileChangeKind)
+    let all_as_pairs: Vec<(PathBuf, FileChangeKind)> = changed_files
+        .iter()
+        .map(|f| {
+            let kind = match f.change_type {
+                ChangeType::Added => FileChangeKind::Added,
+                ChangeType::Modified => FileChangeKind::Modified,
+                ChangeType::Deleted => FileChangeKind::Deleted,
+            };
+            (f.path.clone(), kind)
+        })
+        .collect();
+
     for file in changed_files {
-        if let Some(name) = infer_package_name(&file.path) {
+        if let Some(name) = infer_package_name(&file.path, &all_as_pairs) {
             match file.change_type {
                 ChangeType::Added => {
                     if seen_added.insert(name.clone()) {
@@ -710,43 +757,71 @@ mod tests {
 
     // ─── infer_package_name tests ────────────────────────────────────────────
 
+    /// Shorthand: an empty changeset (for YAML files that don't need sibling evidence).
+    const NO_CONTEXT: &[(PathBuf, FileChangeKind)] = &[];
+
     #[test]
     fn infer_from_yaml_file_stem() {
         assert_eq!(
-            infer_package_name(Path::new("starship.yml")),
+            infer_package_name(Path::new("starship.yml"), NO_CONTEXT),
             Some("starship".to_string())
         );
         assert_eq!(
-            infer_package_name(Path::new("fnm.yaml")),
+            infer_package_name(Path::new("fnm.yaml"), NO_CONTEXT),
             Some("fnm".to_string())
         );
     }
 
     #[test]
     fn infer_from_nested_yaml() {
-        // YAML in a subdirectory still uses file stem
         assert_eq!(
-            infer_package_name(Path::new("packages/starship.yml")),
+            infer_package_name(Path::new("packages/starship.yml"), NO_CONTEXT),
             Some("starship".to_string())
         );
     }
 
     #[test]
-    fn infer_from_subdirectory() {
+    fn infer_from_subdirectory_with_sibling_yaml() {
+        // A non-YAML file is grouped only if a sibling YAML spec exists
+        let context = vec![
+            (PathBuf::from("starship.yml"), FileChangeKind::Modified),
+            (
+                PathBuf::from("starship/starship.toml"),
+                FileChangeKind::Modified,
+            ),
+        ];
         assert_eq!(
-            infer_package_name(Path::new("starship/starship.toml")),
+            infer_package_name(Path::new("starship/starship.toml"), &context),
             Some("starship".to_string())
         );
+
+        let fnm_context = vec![
+            (PathBuf::from("fnm.yml"), FileChangeKind::Added),
+            (PathBuf::from("fnm/init.fish"), FileChangeKind::Added),
+        ];
         assert_eq!(
-            infer_package_name(Path::new("fnm/init.fish")),
+            infer_package_name(Path::new("fnm/init.fish"), &fnm_context),
             Some("fnm".to_string())
         );
     }
 
     #[test]
+    fn infer_subdirectory_without_sibling_yaml_is_ungrouped() {
+        // docs/sync.md should NOT be grouped as package "docs"
+        let context = vec![(PathBuf::from("docs/sync.md"), FileChangeKind::Modified)];
+        assert_eq!(
+            infer_package_name(Path::new("docs/sync.md"), &context),
+            None
+        );
+    }
+
+    #[test]
     fn infer_returns_none_for_root_non_yaml() {
-        assert_eq!(infer_package_name(Path::new("README.md")), None);
-        assert_eq!(infer_package_name(Path::new(".gitignore")), None);
+        assert_eq!(infer_package_name(Path::new("README.md"), NO_CONTEXT), None);
+        assert_eq!(
+            infer_package_name(Path::new(".gitignore"), NO_CONTEXT),
+            None
+        );
     }
 
     // ─── generate_commit_message tests ───────────────────────────────────────
@@ -1048,14 +1123,32 @@ mod tests {
     // ─── has_dotfile_changes tests ───────────────────────────────────────────
 
     #[test]
-    fn dotfile_changes_detected_in_subdirectory() {
+    fn dotfile_changes_detected_with_sibling_yaml() {
         use crate::git::{ChangeType, ChangedFile};
 
+        let files = vec![
+            ChangedFile {
+                path: PathBuf::from("starship.yml"),
+                change_type: ChangeType::Modified,
+            },
+            ChangedFile {
+                path: PathBuf::from("starship/starship.toml"),
+                change_type: ChangeType::Modified,
+            },
+        ];
+        assert!(has_dotfile_changes(&files));
+    }
+
+    #[test]
+    fn no_dotfile_changes_for_unrelated_subdirectory() {
+        use crate::git::{ChangeType, ChangedFile};
+
+        // docs/sync.md should NOT be considered a dotfile change
         let files = vec![ChangedFile {
-            path: PathBuf::from("starship/starship.toml"),
+            path: PathBuf::from("docs/sync.md"),
             change_type: ChangeType::Modified,
         }];
-        assert!(has_dotfile_changes(&files));
+        assert!(!has_dotfile_changes(&files));
     }
 
     #[test]

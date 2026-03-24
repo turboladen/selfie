@@ -181,9 +181,13 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors:
                 OperationResult::Success(OperationSuccess::SyncPushComplete { commits_pushed, .. }),
             ..
         } => {
-            let label = selfie::pluralize(*commits_pushed, "commit", "commits");
             display.println("");
-            display.print_success(format!("Pushed {commits_pushed} {label} to remote"));
+            if *commits_pushed == 0 {
+                display.print_success("Pushed to remote");
+            } else {
+                let label = selfie::pluralize(*commits_pushed, "commit", "commits");
+                display.print_success(format!("Pushed {commits_pushed} {label} to remote"));
+            }
             true
         }
 

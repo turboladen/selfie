@@ -788,8 +788,17 @@ impl SelfieServer {
             .collect();
 
         // Phase 2: Execute commits and push (also pushes existing ahead commits)
+        let warnings = prepare_result.warnings;
         let stream = self.sync_service.execute_push(confirmed_commits).await;
-        let result = event_collector::collect_events(stream).await;
+        let mut result = event_collector::collect_events(stream).await;
+
+        // Include warnings from prepare phase in the result
+        if !warnings.is_empty()
+            && let serde_json::Value::Object(ref mut map) = result.data
+        {
+            map.insert("warnings".to_string(), serde_json::json!(warnings));
+        }
+
         Ok(tool_result(result))
     }
 
