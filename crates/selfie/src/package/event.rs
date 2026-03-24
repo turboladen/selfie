@@ -1185,11 +1185,7 @@ impl std::fmt::Display for OperationSuccess {
                 commits_pushed,
                 steps_completed,
             } => {
-                let label = if *commits_pushed == 1 {
-                    "commit"
-                } else {
-                    "commits"
-                };
+                let label = crate::pluralize(*commits_pushed, "commit", "commits");
                 write!(
                     f,
                     "Pushed {commits_pushed} {label} to remote {steps_completed}"
@@ -1202,11 +1198,7 @@ impl std::fmt::Display for OperationSuccess {
                 packages_removed,
                 steps_completed,
             } => {
-                let label = if *commits_pulled == 1 {
-                    "commit"
-                } else {
-                    "commits"
-                };
+                let label = crate::pluralize(*commits_pulled, "commit", "commits");
                 let mut parts = Vec::new();
                 if !packages_updated.is_empty() {
                     parts.push(format!("updated: {}", packages_updated.join(", ")));
