@@ -167,23 +167,7 @@ where
             });
         }
 
-        // Collect all changed files (modified + staged + untracked + deleted)
-        let mut all_changed: Vec<(PathBuf, FileChangeKind)> = Vec::new();
-        for path in &status.modified {
-            all_changed.push((path.clone(), FileChangeKind::Modified));
-        }
-        for path in &status.staged {
-            // Staged files may overlap with modified — deduplicate
-            if !status.modified.contains(path) {
-                all_changed.push((path.clone(), FileChangeKind::Modified));
-            }
-        }
-        for path in &status.untracked {
-            all_changed.push((path.clone(), FileChangeKind::Added));
-        }
-        for path in &status.deleted {
-            all_changed.push((path.clone(), FileChangeKind::Deleted));
-        }
+        let all_changed = collect_changed_files(&status);
 
         if all_changed.is_empty() {
             return Ok(PrepareResult {
@@ -194,7 +178,6 @@ where
         }
 
         if options.batch {
-            // Single commit for everything
             let files: Vec<PathBuf> = all_changed.iter().map(|(p, _)| p.clone()).collect();
             let message = options
                 .message
@@ -211,51 +194,7 @@ where
             });
         }
 
-        // Group files by package name
-        let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
-        let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
-
-        for (path, kind) in all_changed {
-            match infer_package_name(&path) {
-                Some(name) => groups.entry(name).or_default().push((path, kind)),
-                None => ungrouped.push((path, kind)),
-            }
-        }
-
-        let mut commits: Vec<PendingCommit> = Vec::new();
-
-        // Sort package names for deterministic ordering
-        let mut package_names: Vec<String> = groups.keys().cloned().collect();
-        package_names.sort();
-
-        for name in package_names {
-            let entries = groups.remove(&name).unwrap();
-            let message = generate_commit_message(&name, &entries);
-            let files = entries.into_iter().map(|(p, _)| p).collect();
-            commits.push(PendingCommit {
-                name,
-                message,
-                files,
-            });
-        }
-
-        // Handle ungrouped files
-        let mut warnings = Vec::new();
-        if !ungrouped.is_empty() && options.include_ungrouped {
-            let files = ungrouped.into_iter().map(|(p, _)| p).collect();
-            commits.push(PendingCommit {
-                name: "housekeeping".to_string(),
-                message: "chore: update miscellaneous files".to_string(),
-                files,
-            });
-        } else if !ungrouped.is_empty() {
-            let count = ungrouped.len();
-            let label = crate::pluralize(count, "file", "files");
-            warnings.push(format!(
-                "{count} {label} not associated with any package — use --include-ungrouped to commit them"
-            ));
-            tracing::warn!(count, "Ungrouped files excluded from push");
-        }
+        let (commits, warnings) = group_changes_by_package(all_changed, options);
 
         Ok(PrepareResult {
             pending_commits: commits,
@@ -449,15 +388,7 @@ where
                     let (packages_updated, packages_added, packages_removed) =
                         categorize_pull_changes(&changed_files);
 
-                    // Check if any dotfile source files changed (non-YAML files
-                    // inside a package subdirectory, e.g., `starship/starship.toml`).
-                    // Root-level non-YAML files (README.md, .gitignore) are not dotfiles.
-                    let has_dotfile_changes = changed_files.iter().any(|f| {
-                        !is_yaml_file(&f.path)
-                            && f.path.parent().is_some_and(|p| p != Path::new(""))
-                    });
-
-                    if has_dotfile_changes {
+                    if has_dotfile_changes(&changed_files) {
                         sender
                             .send_log(
                                 crate::package::event::LogLevel::Warning,
@@ -505,6 +436,103 @@ enum FileChangeKind {
     Added,
     Modified,
     Deleted,
+}
+
+/// Collect all changed files from a [`RepoStatus`] into a unified list.
+///
+/// Merges modified, staged (deduplicated against modified), untracked, and
+/// deleted files into `(path, kind)` pairs suitable for grouping.
+fn collect_changed_files(
+    status: &crate::git::sync_provider::RepoStatus,
+) -> Vec<(PathBuf, FileChangeKind)> {
+    let mut changes = Vec::new();
+
+    for path in &status.modified {
+        changes.push((path.clone(), FileChangeKind::Modified));
+    }
+    for path in &status.staged {
+        // Staged files may overlap with modified — deduplicate
+        if !status.modified.contains(path) {
+            changes.push((path.clone(), FileChangeKind::Modified));
+        }
+    }
+    for path in &status.untracked {
+        changes.push((path.clone(), FileChangeKind::Added));
+    }
+    for path in &status.deleted {
+        changes.push((path.clone(), FileChangeKind::Deleted));
+    }
+
+    changes
+}
+
+/// Group changed files by package name and generate per-package commits.
+///
+/// Files that can't be associated with a package are either included as a
+/// "housekeeping" commit (when `include_ungrouped` is set) or reported as
+/// warnings.
+///
+/// Returns `(commits, warnings)`.
+fn group_changes_by_package(
+    changes: Vec<(PathBuf, FileChangeKind)>,
+    options: &PushOptions,
+) -> (Vec<PendingCommit>, Vec<String>) {
+    let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
+    let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
+
+    for (path, kind) in changes {
+        match infer_package_name(&path) {
+            Some(name) => groups.entry(name).or_default().push((path, kind)),
+            None => ungrouped.push((path, kind)),
+        }
+    }
+
+    let mut commits = Vec::new();
+
+    // Sort package names for deterministic ordering
+    let mut package_names: Vec<String> = groups.keys().cloned().collect();
+    package_names.sort();
+
+    for name in package_names {
+        let entries = groups.remove(&name).unwrap();
+        let message = generate_commit_message(&name, &entries);
+        let files = entries.into_iter().map(|(p, _)| p).collect();
+        commits.push(PendingCommit {
+            name,
+            message,
+            files,
+        });
+    }
+
+    let mut warnings = Vec::new();
+    if !ungrouped.is_empty() && options.include_ungrouped {
+        let files = ungrouped.into_iter().map(|(p, _)| p).collect();
+        commits.push(PendingCommit {
+            name: "housekeeping".to_string(),
+            message: "chore: update miscellaneous files".to_string(),
+            files,
+        });
+    } else if !ungrouped.is_empty() {
+        let count = ungrouped.len();
+        let label = crate::pluralize(count, "file", "files");
+        warnings.push(format!(
+            "{count} {label} not associated with any package — use --include-ungrouped to commit them"
+        ));
+        tracing::warn!(count, "Ungrouped files excluded from push");
+    }
+
+    (commits, warnings)
+}
+
+/// Check whether any changed files are dotfile sources (non-YAML files
+/// inside a package subdirectory, e.g., `starship/starship.toml`).
+///
+/// Root-level non-YAML files (README.md, .gitignore) are **not** considered
+/// dotfile sources.
+fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile]) -> bool {
+    changed_files
+        .iter()
+        .any(|f| !is_yaml_file(&f.path) && f.path.parent().is_some_and(|p| p != Path::new("")))
 }
 
 /// Infer the package name from a file path.
@@ -853,14 +881,160 @@ mod tests {
         assert!(removed.is_empty());
     }
 
-    // ─── has_dotfile_changes heuristic tests ────────────────────────────────
+    // ─── collect_changed_files tests ────────────────────────────────────────
 
-    /// Helper to check if a set of changed files would trigger the dotfile warning.
-    fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile]) -> bool {
-        changed_files
-            .iter()
-            .any(|f| !is_yaml_file(&f.path) && f.path.parent().is_some_and(|p| p != Path::new("")))
+    #[test]
+    fn collect_merges_all_change_kinds() {
+        use crate::git::sync_provider::RepoStatus;
+
+        let status = RepoStatus {
+            modified: vec![PathBuf::from("a.yml")],
+            staged: vec![PathBuf::from("b.yml")],
+            untracked: vec![PathBuf::from("c.yml")],
+            deleted: vec![PathBuf::from("d.yml")],
+            ahead: 0,
+            behind: 0,
+        };
+
+        let changes = collect_changed_files(&status);
+
+        assert_eq!(changes.len(), 4);
+        assert!(changes.contains(&(PathBuf::from("a.yml"), FileChangeKind::Modified)));
+        assert!(changes.contains(&(PathBuf::from("b.yml"), FileChangeKind::Modified)));
+        assert!(changes.contains(&(PathBuf::from("c.yml"), FileChangeKind::Added)));
+        assert!(changes.contains(&(PathBuf::from("d.yml"), FileChangeKind::Deleted)));
     }
+
+    #[test]
+    fn collect_deduplicates_staged_and_modified() {
+        use crate::git::sync_provider::RepoStatus;
+
+        let status = RepoStatus {
+            modified: vec![PathBuf::from("overlap.yml")],
+            staged: vec![
+                PathBuf::from("overlap.yml"),
+                PathBuf::from("only-staged.yml"),
+            ],
+            untracked: vec![],
+            deleted: vec![],
+            ahead: 0,
+            behind: 0,
+        };
+
+        let changes = collect_changed_files(&status);
+
+        // overlap.yml should appear once (from modified), only-staged.yml once (from staged)
+        assert_eq!(changes.len(), 2);
+    }
+
+    #[test]
+    fn collect_empty_status_returns_empty() {
+        use crate::git::sync_provider::RepoStatus;
+
+        let status = RepoStatus {
+            modified: vec![],
+            staged: vec![],
+            untracked: vec![],
+            deleted: vec![],
+            ahead: 0,
+            behind: 0,
+        };
+
+        assert!(collect_changed_files(&status).is_empty());
+    }
+
+    // ─── group_changes_by_package tests ──────────────────────────────────────
+
+    #[test]
+    fn group_creates_per_package_commits() {
+        let changes = vec![
+            (PathBuf::from("starship.yml"), FileChangeKind::Added),
+            (PathBuf::from("fnm.yml"), FileChangeKind::Modified),
+        ];
+        let options = PushOptions {
+            batch: false,
+            message: None,
+            auto_accept: false,
+            include_ungrouped: false,
+        };
+
+        let (commits, warnings) = group_changes_by_package(changes, &options);
+
+        assert_eq!(commits.len(), 2);
+        // Sorted alphabetically
+        assert_eq!(commits[0].name, "fnm");
+        assert_eq!(commits[1].name, "starship");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn group_ungrouped_files_warn_by_default() {
+        let changes = vec![
+            (PathBuf::from("starship.yml"), FileChangeKind::Added),
+            (PathBuf::from("README.md"), FileChangeKind::Modified),
+        ];
+        let options = PushOptions {
+            batch: false,
+            message: None,
+            auto_accept: false,
+            include_ungrouped: false,
+        };
+
+        let (commits, warnings) = group_changes_by_package(changes, &options);
+
+        assert_eq!(commits.len(), 1); // Only starship
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("--include-ungrouped"));
+    }
+
+    #[test]
+    fn group_ungrouped_files_included_when_requested() {
+        let changes = vec![
+            (PathBuf::from("starship.yml"), FileChangeKind::Added),
+            (PathBuf::from("README.md"), FileChangeKind::Modified),
+        ];
+        let options = PushOptions {
+            batch: false,
+            message: None,
+            auto_accept: false,
+            include_ungrouped: true,
+        };
+
+        let (commits, warnings) = group_changes_by_package(changes, &options);
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[1].name, "housekeeping");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn group_bundles_yaml_and_dotfiles_together() {
+        let changes = vec![
+            (PathBuf::from("starship.yml"), FileChangeKind::Modified),
+            (
+                PathBuf::from("starship/starship.toml"),
+                FileChangeKind::Modified,
+            ),
+        ];
+        let options = PushOptions {
+            batch: false,
+            message: None,
+            auto_accept: false,
+            include_ungrouped: false,
+        };
+
+        let (commits, _) = group_changes_by_package(changes, &options);
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].name, "starship");
+        assert_eq!(commits[0].files.len(), 2);
+        assert_eq!(
+            commits[0].message,
+            "chore(starship): update spec and dotfiles"
+        );
+    }
+
+    // ─── has_dotfile_changes tests ───────────────────────────────────────────
 
     #[test]
     fn dotfile_changes_detected_in_subdirectory() {
@@ -877,7 +1051,6 @@ mod tests {
     fn no_dotfile_changes_for_root_non_yaml() {
         use crate::git::{ChangeType, ChangedFile};
 
-        // Root-level non-YAML files (README, .gitignore) are NOT dotfiles
         let files = vec![
             ChangedFile {
                 path: PathBuf::from("README.md"),
