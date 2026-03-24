@@ -854,7 +854,7 @@ pub enum OperationSuccess {
     SyncPullUpToDate { steps_completed: StepCount },
     /// Sync push found no changes to commit
     SyncNothingToPush { steps_completed: StepCount },
-    /// Generic success with just a message (for backward compatibility)
+    /// Generic success with a freeform message
     Generic(String),
 }
 
@@ -869,7 +869,7 @@ pub enum OperationFailure {
     DependencyError(DependencyFailure),
     /// Package listing/directory issues
     PackageList(crate::package::port::PackageListError),
-    /// Generic failures with just a message (for backward compatibility)
+    /// Generic failure with a freeform message
     Generic(String),
 }
 
@@ -964,7 +964,7 @@ impl std::fmt::Display for DependencyFailure {
     }
 }
 
-// Backward compatibility: allow creating OperationFailure from strings
+// Convenience: allow creating OperationFailure from strings
 impl From<String> for OperationFailure {
     fn from(msg: String) -> Self {
         OperationFailure::Generic(msg)
@@ -1236,7 +1236,7 @@ impl std::fmt::Display for OperationSuccess {
     }
 }
 
-// Backward compatibility: allow creating OperationSuccess from strings
+// Convenience: allow creating OperationSuccess from strings
 impl From<String> for OperationSuccess {
     fn from(msg: String) -> Self {
         OperationSuccess::Generic(msg)

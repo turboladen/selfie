@@ -5,7 +5,7 @@ pub mod repository;
 pub mod service;
 pub mod validate;
 
-// Re-export git types from crate::git for backward compatibility.
+/// Re-export read-only git status types used by the package service layer.
 pub mod git {
     pub use crate::git::{GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider};
 
@@ -13,6 +13,7 @@ pub mod git {
     pub use crate::git::MockGitStatusProvider;
 }
 
+/// Re-export the concrete git adapter under its package-layer name.
 pub mod git_adapter {
     pub use crate::git::GixGitAdapter as GixGitStatusProvider;
 }
@@ -152,7 +153,7 @@ pub struct Package {
     pub(crate) description: Option<String>,
 
     /// Dotfile mappings (source → target); applies regardless of environment
-    #[serde(default, alias = "configs", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) dotfiles: Vec<DotfileEntry>,
 
     /// Optional note displayed to the user after a fresh install
