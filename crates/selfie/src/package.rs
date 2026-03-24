@@ -170,7 +170,7 @@ pub struct Package {
 
     /// Extra YAML keys (e.g., `_brew: &brew` anchor definitions).
     /// Keys starting with `_` are allowed; anything else is flagged by validation.
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
