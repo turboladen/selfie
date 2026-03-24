@@ -104,17 +104,21 @@ fn show_pending_commits(
     display: &DisplayManager,
     use_colors: bool,
 ) {
+    let count = commits.len();
+    let label = selfie::pluralize(count, "commit", "commits");
+    display.println("");
+    display.print_info(format!("{count} {label} to push:"));
     display.println("");
     for commit in commits {
         let file_count = commit.files.len();
-        let label = selfie::pluralize(file_count, "file", "files");
+        let file_label = selfie::pluralize(file_count, "file", "files");
         if use_colors {
             display.println(format!(
-                "  {} ({file_count} {label})",
+                "  {} ({file_count} {file_label})",
                 style(&commit.message).bold()
             ));
         } else {
-            display.println(format!("  {} ({file_count} {label})", commit.message));
+            display.println(format!("  {} ({file_count} {file_label})", commit.message));
         }
     }
     display.println("");
