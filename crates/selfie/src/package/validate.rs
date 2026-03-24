@@ -55,6 +55,7 @@ impl Package {
         let mut issues = Vec::new();
 
         issues.extend(self.validate_required_fields());
+        issues.extend(self.validate_unknown_fields());
         issues.extend(self.validate_urls());
         issues.extend(self.validate_environments_contents(current_env));
         issues.extend(self.validate_command_syntax());
@@ -88,6 +89,29 @@ impl Package {
         }
 
         issues
+    }
+
+    /// Flag unknown top-level YAML fields.
+    ///
+    /// Fields starting with `_` are allowed (YAML anchor definitions like
+    /// `_brew: &brew`). Anything else is an error — likely a typo or a
+    /// renamed field (e.g., `configs` instead of `dotfiles`).
+    pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
+        self.extra_fields
+            .keys()
+            .filter(|k| !k.starts_with('_'))
+            .map(|k| {
+                ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    k,
+                    &format!(
+                        "unknown field '{k}'; expected one of: name, homepage, description, \
+                         dotfiles, post_install_note, environments"
+                    ),
+                    None,
+                )
+            })
+            .collect()
     }
 
     /// Validate the package name format

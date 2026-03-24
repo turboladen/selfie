@@ -112,7 +112,6 @@ impl GetPackage {
 
 /// A dotfile mapping from repo source to deployment target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DotfileEntry {
     source: String,
     target: String,
@@ -141,7 +140,6 @@ impl DotfileEntry {
 /// Core package entity representing a package definition
 ///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Package {
     /// Package name
     pub(crate) name: String,
@@ -169,11 +167,15 @@ pub struct Package {
     /// Path to the package file (not serialized/deserialized)
     #[serde(skip)]
     pub(crate) path: PathBuf,
+
+    /// Extra YAML keys (e.g., `_brew: &brew` anchor definitions).
+    /// Keys starting with `_` are allowed; anything else is flagged by validation.
+    #[serde(flatten, default, skip_serializing)]
+    pub(crate) extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 /// Configuration for a specific environment
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
     /// Command to install the package
     pub(crate) install: String,
@@ -270,6 +272,7 @@ impl Package {
             post_install_note,
             environments,
             path,
+            extra_fields: HashMap::new(),
         }
     }
 
@@ -303,6 +306,7 @@ impl Package {
             post_install_note: None,
             environments,
             path: PathBuf::new(), // Will be set by GetPackage::new
+            extra_fields: HashMap::new(),
         }
     }
 
