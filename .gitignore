@@ -48,3 +48,6 @@ docker-compose.override.yaml
 # Claude
 .claude/settings.local.json
 .claude/worktrees/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
