@@ -165,10 +165,10 @@ mod tests {
             .build();
 
         // Serialize to YAML
-        let yaml_content = serde_yaml::to_string(&original_package).unwrap();
+        let yaml_content = serde_saphyr::to_string(&original_package).unwrap();
 
         // Deserialize back
-        let deserialized: selfie::package::Package = serde_yaml::from_str(&yaml_content).unwrap();
+        let deserialized: selfie::package::Package = serde_saphyr::from_str(&yaml_content).unwrap();
 
         // Should be equivalent
         assert_eq!(original_package.name(), deserialized.name());

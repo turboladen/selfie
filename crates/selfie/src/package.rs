@@ -171,7 +171,7 @@ pub struct Package {
     /// Extra YAML keys (e.g., `_brew: &brew` anchor definitions).
     /// Keys starting with `_` are allowed; anything else is flagged by validation.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) extra_fields: HashMap<String, serde_yaml::Value>,
+    pub(crate) extra_fields: HashMap<String, serde_json::Value>,
 }
 
 /// Configuration for a specific environment
@@ -571,7 +571,8 @@ mod package_tests {
         let parse_error = PackageParseError::YamlParse {
             package_path: PathBuf::from("/packages/broken.yml"),
             source: Arc::new(
-                serde_yaml::from_str::<serde_yaml::Value>("invalid: yaml: [unclosed").unwrap_err(),
+                serde_saphyr::from_str::<serde_json::Value>("invalid: yaml: [unclosed")
+                    .unwrap_err(),
             ),
         };
 

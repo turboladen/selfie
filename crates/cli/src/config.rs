@@ -165,7 +165,7 @@ pub(crate) fn load_cli_section(fs: &impl selfie::fs::FileSystem) -> CliSection {
         return CliSection::default();
     };
 
-    serde_yaml::from_str::<RawCliFile>(&contents)
+    serde_saphyr::from_str::<RawCliFile>(&contents)
         .map(|raw| raw.cli)
         .unwrap_or_default()
 }
@@ -356,7 +356,7 @@ mod tests {
               verbose: true
               use_colors: false
         "#;
-        let raw: RawCliFile = serde_yaml::from_str(yaml).unwrap();
+        let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
         assert!(raw.cli.verbose);
         assert!(!raw.cli.use_colors);
     }
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_cli_section_deserialization_defaults() {
         let yaml = "environment: test\n";
-        let raw: RawCliFile = serde_yaml::from_str(yaml).unwrap();
+        let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
         assert!(!raw.cli.verbose);
         assert!(raw.cli.use_colors);
     }

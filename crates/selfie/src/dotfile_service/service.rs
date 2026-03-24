@@ -185,7 +185,7 @@ fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> De
         return DeployState::empty();
     }
     match filesystem.read_file(&path) {
-        Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|_| DeployState::empty()),
+        Ok(content) => serde_saphyr::from_str(&content).unwrap_or_else(|_| DeployState::empty()),
         Err(_) => DeployState::empty(),
     }
 }
@@ -197,7 +197,7 @@ fn save_deploy_state<F: FileSystem>(
     state: &DeployState,
 ) -> Result<(), FileSystemError> {
     let path = deploy_state_path(filesystem, config)?;
-    let yaml = serde_yaml::to_string(state).map_err(|e| {
+    let yaml = serde_saphyr::to_string(state).map_err(|e| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
     })?;
     filesystem.write_file(&path, yaml.as_bytes())

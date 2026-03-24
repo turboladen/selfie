@@ -315,7 +315,7 @@ mod tests {
             max_parallel_installations: 4
         "#;
 
-        let config: SelfieConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
 
         assert_eq!(config.environment, "prod");
         assert_eq!(config.package_directory, PathBuf::from("/opt/packages"));
@@ -332,7 +332,7 @@ mod tests {
             package_directory: "/dev/packages"
         "#;
 
-        let config: SelfieConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
 
         // Explicit values
         assert_eq!(config.environment, "dev");
@@ -374,7 +374,7 @@ mod tests {
     "#;
 
         // Deserialization should succeed since we no longer deny unknown fields
-        let result: Result<SelfieConfig, _> = serde_yaml::from_str(yaml);
+        let result: Result<SelfieConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.environment, "prod");
