@@ -177,6 +177,10 @@ where
             });
         }
 
+        // Validate changed YAML files before proposing commits.
+        let environment = self.config.environment();
+        validate_changed_packages(&repo_info.root, &all_changed, environment)?;
+
         if options.batch {
             let files: Vec<PathBuf> = all_changed.iter().map(|(p, _)| p.clone()).collect();
             let message = options
@@ -453,6 +457,64 @@ enum FileChangeKind {
     Added,
     Modified,
     Deleted,
+}
+
+/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
+/// if any have errors.
+///
+/// Only non-deleted YAML files are validated — deleted files are obviously not
+/// parseable, and non-YAML files (dotfile sources) don't have a schema to validate.
+fn validate_changed_packages(
+    repo_root: &Path,
+    changes: &[(PathBuf, FileChangeKind)],
+    environment: &str,
+) -> Result<(), SyncError> {
+    let mut failures: Vec<String> = Vec::new();
+
+    for (path, kind) in changes {
+        if *kind == FileChangeKind::Deleted || !is_yaml_file(path) {
+            continue;
+        }
+
+        let abs_path = repo_root.join(path);
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(e) => {
+                failures.push(format!("{}: failed to read: {e}", path.display()));
+                continue;
+            }
+        };
+
+        let mut package: crate::package::Package = match serde_yaml::from_str(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push(format!("{}: invalid YAML: {e}", path.display()));
+                continue;
+            }
+        };
+        package.path = abs_path;
+
+        let result = package.validate(environment);
+        if result.issues().has_errors() {
+            let msgs: Vec<String> = result
+                .issues()
+                .errors()
+                .iter()
+                .map(|i| format!("  - {}: {}", i.field(), i.message()))
+                .collect();
+            failures.push(format!("{}:\n{}", path.display(), msgs.join("\n")));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        let count = failures.len();
+        Err(SyncError::ValidationFailed {
+            count,
+            details: failures.join("\n"),
+        })
+    }
 }
 
 /// Collect all changed files from a [`RepoStatus`] into a unified list.

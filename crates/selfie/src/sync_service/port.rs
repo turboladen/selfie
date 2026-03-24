@@ -25,6 +25,14 @@ pub enum SyncError {
     /// A git operation failed during preparation.
     #[error("{0}")]
     GitError(String),
+
+    /// One or more changed package files failed validation.
+    #[error("validation failed for {count} {}: {details}", if *count == 1 { "package" } else { "packages" })]
+    ValidationFailed {
+        count: usize,
+        /// Human-readable summary of each failing package and its errors.
+        details: String,
+    },
 }
 
 /// Options controlling how `sync push` behaves.
