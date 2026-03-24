@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 selfie = { path = "../selfie/" }
 tempfile.workspace = true
-serde_yaml.workspace = true
+serde-saphyr.workspace = true
 futures.workspace = true
 tokio-util.workspace = true
 

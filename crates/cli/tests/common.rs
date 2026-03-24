@@ -55,7 +55,7 @@ fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
 /// - The packages directory cannot be created
 /// - Writing the package file fails
 pub fn add_package(base_dir: &TempDir, package: &Package) {
-    let yaml = serde_yaml::to_string(package).unwrap();
+    let yaml = serde_saphyr::to_string(package).unwrap();
     let packages_path = base_dir.path().join("packages");
     fs::create_dir_all(&packages_path).unwrap();
     let package_path = packages_path.join(format!("{}.yaml", package.name()));

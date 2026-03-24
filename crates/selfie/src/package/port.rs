@@ -399,7 +399,7 @@ pub enum PackageParseError {
     YamlParse {
         package_path: PathBuf,
         #[source]
-        source: Arc<serde_yaml::Error>,
+        source: Arc<serde_saphyr::Error>,
     },
 
     /// IO error occurred while reading the package file

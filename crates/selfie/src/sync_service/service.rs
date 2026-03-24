@@ -501,7 +501,7 @@ fn validate_changed_packages(
             }
         };
 
-        let mut package: crate::package::Package = match serde_yaml::from_str(&content) {
+        let mut package: crate::package::Package = match serde_saphyr::from_str(&content) {
             Ok(p) => p,
             Err(e) => {
                 let location = e

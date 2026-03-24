@@ -366,8 +366,8 @@ fn test_duplicate_package_names_error() {
         .build();
 
     // Save as different filenames but same package name
-    let yaml1 = serde_yaml::to_string(&package1).unwrap();
-    let yaml2 = serde_yaml::to_string(&package2).unwrap();
+    let yaml1 = serde_saphyr::to_string(&package1).unwrap();
+    let yaml2 = serde_saphyr::to_string(&package2).unwrap();
 
     fs::write(packages_dir.join("duplicate-v1.yaml"), yaml1).unwrap();
     fs::write(packages_dir.join("duplicate-v2.yaml"), yaml2).unwrap();

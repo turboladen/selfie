@@ -138,8 +138,8 @@ mod tests {
     fn test_roundtrip_serialization() {
         let mut state = DeployState::empty();
         state.record_deployment("a/b.txt", "/home/user/b.txt", "hash1");
-        let yaml = serde_yaml::to_string(&state).unwrap();
-        let loaded: DeployState = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&state).unwrap();
+        let loaded: DeployState = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(loaded.entries().len(), 1);
     }
 

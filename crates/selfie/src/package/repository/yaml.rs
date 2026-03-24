@@ -97,7 +97,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             })?;
 
         let mut package: Package =
-            serde_yaml::from_str(&content).map_err(|e| PackageParseError::YamlParse {
+            serde_saphyr::from_str(&content).map_err(|e| PackageParseError::YamlParse {
                 package_path: path.to_path_buf(),
                 source: Arc::new(e),
             })?;
@@ -198,7 +198,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
         // Serialize the package to YAML
-        let yaml_content = serde_yaml::to_string(package).map_err(|e| {
+        let yaml_content = serde_saphyr::to_string(package).map_err(|e| {
             PackageRepoError::IoError(Arc::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to serialize package to YAML: {e}"),
