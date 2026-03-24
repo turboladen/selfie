@@ -155,7 +155,7 @@ fn confirm_commits(
         let edited_message: String =
             match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!("Commit message ({num}/{total})"))
-                .default(commit.message.clone())
+                .with_initial_text(&commit.message)
                 .interact_text()
             {
                 Ok(msg) => msg,
