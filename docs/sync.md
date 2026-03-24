@@ -56,7 +56,7 @@ selfie sync push --include-ungrouped  # Include non-package files
 
 **File grouping rules:**
 
-- YAML files (`*.yml`) -> package name is the file stem (`starship.yml` -> `starship`)
+- YAML files (`*.yml` / `*.yaml`) -> package name is the file stem (`starship.yml` -> `starship`)
 - Files in a subdirectory -> package name is the directory name (`starship/starship.toml` ->
   `starship`)
 - Files that don't match either pattern are "ungrouped" and skipped unless `--include-ungrouped` is

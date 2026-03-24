@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use super::status_provider::{
@@ -41,10 +41,16 @@ fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
 }
 
 /// Run a `git` CLI command in the given directory.
+///
+/// Stdin is set to `Stdio::null` and `GIT_TERMINAL_PROMPT=0` to prevent git
+/// from blocking on credential prompts, which is critical for non-interactive
+/// callers like the MCP server.
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .map_err(|e| GitSyncError::OperationFailed {
             operation: format!("git {}", args.join(" ")),
@@ -118,17 +124,26 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
 
 /// Parse a single line from `git diff --name-status` output into a
 /// [`ChangedFile`], returning `None` for blank or unparseable lines.
+///
+/// Rename/copy lines have the format `R100\told\tnew` (three tab-separated
+/// fields). We take the *last* field (the new path) for those statuses.
 fn parse_diff_line(line: &str) -> Option<ChangedFile> {
-    let mut parts = line.splitn(2, '\t');
-    let status = parts.next()?;
-    let path = parts.next().filter(|p| !p.is_empty())?;
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 2 {
+        return None;
+    }
 
+    let status = fields[0];
     let change_type = match status {
         "A" => ChangeType::Added,
         "M" => ChangeType::Modified,
         "D" => ChangeType::Deleted,
-        _ => ChangeType::Modified, // R, C, etc. → treat as modified
+        _ => ChangeType::Modified, // R*, C*, etc. → treat as modified
     };
+
+    // For rename/copy (R*, C*) use the last field (new path); otherwise use
+    // the second field.
+    let path = fields.last().filter(|p| !p.is_empty())?;
 
     Some(ChangedFile {
         path: PathBuf::from(path),
@@ -258,8 +273,9 @@ impl GitSyncProvider for GixGitAdapter {
             return Ok(());
         }
 
-        // Use git CLI for staging — gix index manipulation is complex
-        let mut args = vec!["add", "--"];
+        // Use `git add -A` to handle additions, modifications, AND deletions.
+        // Plain `git add --` would fail for deleted paths.
+        let mut args = vec!["add", "-A", "--"];
         let file_strs: Vec<String> = files
             .iter()
             .map(|f| f.to_string_lossy().to_string())
@@ -272,16 +288,12 @@ impl GitSyncProvider for GixGitAdapter {
     }
 
     fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
-        let output = run_git(repo_root, &["commit", "-m", message])?;
+        // Perform the commit; ignore stdout since its format varies (e.g.,
+        // root-commit has extra text) and isn't stable across git versions.
+        let _commit_output = run_git(repo_root, &["commit", "-m", message])?;
 
-        // Extract commit hash from git output (first line typically contains it)
-        // Format: "[branch hash] message"
-        let hash = output
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("unknown")
-            .trim_end_matches(']')
-            .to_string();
+        // Reliably obtain the new commit hash from HEAD.
+        let hash = run_git(repo_root, &["rev-parse", "HEAD"])?;
 
         Ok(CommitId(hash))
     }
@@ -419,9 +431,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_diff_line_rename_treated_as_modified() {
-        let result = parse_diff_line("R100\trenamed.yml").unwrap();
+    fn parse_diff_line_rename_uses_new_path() {
+        // Rename lines have three fields: R100\told\tnew
+        let result = parse_diff_line("R100\told_name.yml\tnew_name.yml").unwrap();
         assert_eq!(result.change_type, ChangeType::Modified);
+        assert_eq!(result.path, PathBuf::from("new_name.yml"));
+    }
+
+    #[test]
+    fn parse_diff_line_rename_single_field_uses_that_path() {
+        // Two-field rename (shouldn't happen in practice, but test graceful handling)
+        let result = parse_diff_line("R100\trenamed.yml").unwrap();
+        assert_eq!(result.path, PathBuf::from("renamed.yml"));
     }
 
     #[test]

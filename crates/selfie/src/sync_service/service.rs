@@ -381,9 +381,20 @@ where
                     commit_count,
                 }) => {
                     // Diff old HEAD vs new HEAD to see what changed
-                    let changed_files = git
-                        .diff_commits(&repo_info.root, &from, &to)
-                        .unwrap_or_default();
+                    let changed_files = match git.diff_commits(&repo_info.root, &from, &to) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            sender
+                                .send_log(
+                                    crate::package::event::LogLevel::Warning,
+                                    format!(
+                                        "Failed to compute diff: {e}. Change summary may be incomplete."
+                                    ),
+                                )
+                                .await;
+                            Vec::new()
+                        }
+                    };
 
                     let (packages_updated, packages_added, packages_removed) =
                         categorize_pull_changes(&changed_files);
