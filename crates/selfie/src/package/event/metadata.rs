@@ -20,4 +20,7 @@ pub enum OperationType {
     SpecInfo,
     SpecList,
     SpecValidateAll,
+    SyncStatus,
+    SyncPush,
+    SyncPull,
 }

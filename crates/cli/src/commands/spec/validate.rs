@@ -1,12 +1,13 @@
-use comfy_table::{ContentArrangement, Table, modifiers, presets};
-use console::style;
 use selfie::package::{
-    event::{PackageEvent, ValidationLevel, ValidationResultData, ValidationStatus},
+    event::{PackageEvent, ValidationResultData, ValidationStatus},
     service::SpecService,
 };
 
 use crate::{
-    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
+    commands::validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::EventProcessor,
     status_style,
 };
 
@@ -109,82 +110,28 @@ fn display_validation_issues_table(
         return;
     }
 
-    display.println("");
-
-    // Show summary
-    let error_count = validation_result
+    let rows: Vec<ValidationRow<'_>> = validation_result
         .issues
         .iter()
-        .filter(|i| matches!(i.level, ValidationLevel::Error))
-        .count();
-    let warning_count = validation_result
-        .issues
-        .iter()
-        .filter(|i| matches!(i.level, ValidationLevel::Warning))
-        .count();
-
-    let header = if error_count > 0 && warning_count > 0 {
-        format!("Validation Issues ({error_count} error(s), {warning_count} warning(s))")
-    } else if error_count > 0 {
-        format!("Validation Errors ({error_count})")
-    } else {
-        format!("Validation Warnings ({warning_count})")
-    };
-
-    display.print_section_header(header);
-
-    let mut table = create_validation_table();
-    table.set_header(vec!["Level", "Category", "Field", "Message", "Suggestion"]);
-
-    for issue in &validation_result.issues {
-        let level = match issue.level {
-            ValidationLevel::Error => {
-                if config.use_colors() {
-                    style("ERROR").red().bold().to_string()
-                } else {
-                    "ERROR".to_string()
-                }
+        .map(|issue| {
+            let level = match issue.level {
+                selfie::package::event::ValidationLevel::Error => "ERROR",
+                selfie::package::event::ValidationLevel::Warning => "WARN",
+            };
+            ValidationRow {
+                level,
+                category: &issue.category,
+                field: &issue.field,
+                message: &issue.message,
+                location: issue.location.as_deref(),
             }
-            ValidationLevel::Warning => {
-                if config.use_colors() {
-                    style("WARN").yellow().bold().to_string()
-                } else {
-                    "WARN".to_string()
-                }
-            }
-        };
+        })
+        .collect();
 
-        let category = if config.use_colors() {
-            style(&issue.category).magenta().to_string()
-        } else {
-            issue.category.clone()
-        };
+    let groups = vec![ValidationGroup {
+        label: &validation_result.package_name,
+        rows,
+    }];
 
-        let field = if config.use_colors() {
-            style(&issue.field).cyan().to_string()
-        } else {
-            issue.field.clone()
-        };
-
-        let suggestion = issue.suggestion.as_deref().unwrap_or("-");
-
-        table.add_row(vec![
-            level,
-            category,
-            field,
-            issue.message.clone(),
-            suggestion.to_string(),
-        ]);
-    }
-
-    display.println(format!("{table}"));
-}
-
-fn create_validation_table() -> Table {
-    let mut table = Table::new();
-    table
-        .load_preset(presets::UTF8_FULL_CONDENSED)
-        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    table
+    display_validation_groups(&groups, config.use_colors(), display);
 }

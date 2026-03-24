@@ -101,7 +101,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             let issues: Vec<Value> = validation_result
                 .issues
                 .iter()
-                .map(|i| serde_json::json!({ "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion }))
+                .map(|i| serde_json::json!({ "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion, "location": &i.location }))
                 .collect();
             Some(
                 serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),
@@ -217,6 +217,45 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "type": "post_install_note",
             "package": package_name,
             "note": note,
+        })),
+        PackageEvent::SyncRepoStatus {
+            repo_root,
+            branch,
+            modified_count,
+            staged_count,
+            untracked_count,
+            deleted_count,
+            ahead,
+            behind,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_repo_status",
+            "repo_root": repo_root.display().to_string(),
+            "branch": branch,
+            "modified_count": modified_count,
+            "staged_count": staged_count,
+            "untracked_count": untracked_count,
+            "deleted_count": deleted_count,
+            "ahead": ahead,
+            "behind": behind,
+        })),
+        PackageEvent::SyncDriftSummary {
+            drifted_targets,
+            total_deployed,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_drift_summary",
+            "drifted_targets": drifted_targets,
+            "total_deployed": total_deployed,
+        })),
+        PackageEvent::SyncCommitCreated {
+            package_name,
+            message,
+            ..
+        } => Some(serde_json::json!({
+            "type": "sync_commit_created",
+            "package": package_name,
+            "message": message,
         })),
         _ => None,
     }

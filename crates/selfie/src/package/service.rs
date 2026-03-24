@@ -247,27 +247,13 @@ where
     /// from an async operation. The operation is executed in a background task and
     /// communicates through a channel.
     ///
-    /// # Arguments
-    ///
-    /// * `f` - Async function that takes an event sender and performs the operation
-    ///
-    /// # Returns
-    ///
-    /// A boxed stream of package events
+    /// Delegates to the shared [`crate::package::event::create_event_stream`] utility.
     fn create_event_stream<F, Fut>(f: F) -> EventStream
     where
         F: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            f(tx).await;
-        });
-
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::package::event::create_event_stream(f)
     }
 
     /// Execute an operation with full dependency injection and standard event handling

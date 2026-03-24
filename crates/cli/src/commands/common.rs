@@ -10,6 +10,7 @@ use selfie::{
     commands::ShellCommandRunner,
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::{filesystem::FileSystem, real::RealFileSystem},
+    git::GixGitAdapter,
     package::{
         GetPackage, SpecService,
         event::PackageEvent,
@@ -18,6 +19,7 @@ use selfie::{
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
+    sync_service::{SyncService, service::SyncServiceImpl},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +62,15 @@ pub(crate) fn create_dotfile_service(
     }
 
     service
+}
+
+/// Create a `SyncServiceImpl` with `GixGitAdapter` and `DotfileService`.
+///
+/// This is the standard setup for any command that needs `SyncService`.
+pub(crate) fn create_sync_service(config: &CliConfig) -> impl SyncService {
+    let git = GixGitAdapter;
+    let dotfile_service = create_dotfile_service(config);
+    SyncServiceImpl::new(git, dotfile_service, config.selfie_config().clone())
 }
 
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.

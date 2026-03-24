@@ -31,6 +31,33 @@ pub mod commands;
 pub mod config;
 pub mod dotfile_service;
 pub mod fs;
+pub mod git;
 pub mod namespace;
 pub mod package;
+pub mod sync_service;
 pub mod validation;
+
+/// Returns `singular` when `count == 1`, otherwise `plural`.
+pub fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pluralize_zero_returns_plural() {
+        assert_eq!(pluralize(0, "file", "files"), "files");
+    }
+
+    #[test]
+    fn pluralize_one_returns_singular() {
+        assert_eq!(pluralize(1, "commit", "commits"), "commit");
+    }
+
+    #[test]
+    fn pluralize_many_returns_plural() {
+        assert_eq!(pluralize(5, "package", "packages"), "packages");
+    }
+}

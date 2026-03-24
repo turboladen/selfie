@@ -231,7 +231,6 @@ mod tests {
 
         let target_yaml = r#"
 name: target-package
-version: 1.0.0
 environments:
   test:
     install: echo "install target"
@@ -240,7 +239,6 @@ environments:
 
         let dependent_yaml = r#"
 name: dependent-package
-version: 1.0.0
 environments:
   test:
     install: echo "install dependent"

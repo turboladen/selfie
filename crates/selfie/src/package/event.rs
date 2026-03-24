@@ -73,6 +73,28 @@ use uuid::Uuid;
 /// and boxed to enable dynamic dispatch and async iteration.
 pub type EventStream = Pin<Box<dyn Stream<Item = PackageEvent> + Send>>;
 
+/// Create an event stream from an async closure.
+///
+/// Spawns a tokio task that runs the closure with a channel sender, and returns
+/// the receiving end as a pinned stream. This is the standard pattern for
+/// creating event streams across all services (`PackageService`, `DotfileService`,
+/// `SyncService`).
+pub fn create_event_stream<F, Fut>(f: F) -> EventStream
+where
+    F: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let (tx, rx) = mpsc::channel(32);
+
+    tokio::spawn(async move {
+        f(tx).await;
+    });
+
+    Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    }))
+}
+
 /// Internal event sender for package operations
 ///
 /// Provides a high-level interface for emitting package events with consistent
@@ -573,6 +595,14 @@ impl EventSender {
         .await;
     }
 
+    /// Get a snapshot of the current operation info with a fresh timestamp.
+    ///
+    /// Used when constructing custom event variants (e.g., `SyncRepoStatus`)
+    /// that carry their own `OperationInfo` field.
+    pub(crate) fn operation_info(&self) -> OperationInfo {
+        self.touch_operation_info()
+    }
+
     fn touch_operation_info(&self) -> OperationInfo {
         let mut info = self.operation_info.clone();
         info.timestamp = Instant::now();
@@ -807,7 +837,24 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
-    /// Generic success with just a message (for backward compatibility)
+    /// Sync push completed — all commits created and pushed to remote
+    SyncPushComplete {
+        commits_pushed: usize,
+        steps_completed: StepCount,
+    },
+    /// Sync pull completed — new commits pulled from remote
+    SyncPullComplete {
+        commits_pulled: usize,
+        packages_updated: Vec<String>,
+        packages_added: Vec<String>,
+        packages_removed: Vec<String>,
+        steps_completed: StepCount,
+    },
+    /// Sync pull found no new changes
+    SyncPullUpToDate { steps_completed: StepCount },
+    /// Sync push found no changes to commit
+    SyncNothingToPush { steps_completed: StepCount },
+    /// Generic success with a freeform message
     Generic(String),
 }
 
@@ -822,7 +869,7 @@ pub enum OperationFailure {
     DependencyError(DependencyFailure),
     /// Package listing/directory issues
     PackageList(crate::package::port::PackageListError),
-    /// Generic failures with just a message (for backward compatibility)
+    /// Generic failure with a freeform message
     Generic(String),
 }
 
@@ -917,7 +964,7 @@ impl std::fmt::Display for DependencyFailure {
     }
 }
 
-// Backward compatibility: allow creating OperationFailure from strings
+// Convenience: allow creating OperationFailure from strings
 impl From<String> for OperationFailure {
     fn from(msg: String) -> Self {
         OperationFailure::Generic(msg)
@@ -1134,12 +1181,62 @@ impl std::fmt::Display for OperationSuccess {
                     "Now tracking '{target_path}' in spec '{name}' {steps_completed}"
                 )
             }
+            OperationSuccess::SyncPushComplete {
+                commits_pushed,
+                steps_completed,
+            } => {
+                let label = crate::pluralize(*commits_pushed, "commit", "commits");
+                write!(
+                    f,
+                    "Pushed {commits_pushed} {label} to remote {steps_completed}"
+                )
+            }
+            OperationSuccess::SyncPullComplete {
+                commits_pulled,
+                packages_updated,
+                packages_added,
+                packages_removed,
+                steps_completed,
+            } => {
+                let label = crate::pluralize(*commits_pulled, "commit", "commits");
+                let mut parts = Vec::new();
+                if !packages_updated.is_empty() {
+                    parts.push(format!("updated: {}", packages_updated.join(", ")));
+                }
+                if !packages_added.is_empty() {
+                    parts.push(format!("added: {}", packages_added.join(", ")));
+                }
+                if !packages_removed.is_empty() {
+                    parts.push(format!("removed: {}", packages_removed.join(", ")));
+                }
+                if parts.is_empty() {
+                    write!(
+                        f,
+                        "Pulled {commits_pulled} {label} from remote {steps_completed}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Pulled {commits_pulled} {label} from remote ({}) {steps_completed}",
+                        parts.join("; ")
+                    )
+                }
+            }
+            OperationSuccess::SyncPullUpToDate { steps_completed } => {
+                write!(f, "Already up to date with remote {steps_completed}")
+            }
+            OperationSuccess::SyncNothingToPush { steps_completed } => {
+                write!(
+                    f,
+                    "Nothing to push — working tree is clean {steps_completed}"
+                )
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
 }
 
-// Backward compatibility: allow creating OperationSuccess from strings
+// Convenience: allow creating OperationSuccess from strings
 impl From<String> for OperationSuccess {
     fn from(msg: String) -> Self {
         OperationSuccess::Generic(msg)
@@ -1438,6 +1535,10 @@ impl OperationSuccess {
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfilesApplied { .. }
             | OperationSuccess::DotfileDriftChecked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
         }
     }
@@ -1461,7 +1562,11 @@ impl OperationSuccess {
             | OperationSuccess::DotfilesApplied { environment, .. }
             | OperationSuccess::DotfileDriftChecked { environment, .. }
             | OperationSuccess::DotfileTracked { environment, .. } => Some(environment),
-            OperationSuccess::Generic(_) => None,
+            OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => None,
         }
     }
 
@@ -1512,6 +1617,18 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::DotfileTracked {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPushComplete {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPullComplete {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncPullUpToDate {
+                steps_completed, ..
+            }
+            | OperationSuccess::SyncNothingToPush {
                 steps_completed, ..
             } => Some(*steps_completed),
             OperationSuccess::Generic(_) => None,
@@ -1895,6 +2012,33 @@ pub enum PackageEvent {
         package_name: String,
         note: String,
     },
+
+    /// Git repository status for sync status command
+    SyncRepoStatus {
+        operation_info: OperationInfo,
+        repo_root: std::path::PathBuf,
+        branch: Option<String>,
+        modified_count: usize,
+        staged_count: usize,
+        untracked_count: usize,
+        deleted_count: usize,
+        ahead: usize,
+        behind: usize,
+    },
+
+    /// Dotfile drift summary for sync status command
+    SyncDriftSummary {
+        operation_info: OperationInfo,
+        drifted_targets: Vec<String>,
+        total_deployed: usize,
+    },
+
+    /// A commit was created during sync push
+    SyncCommitCreated {
+        operation_info: OperationInfo,
+        package_name: String,
+        message: String,
+    },
 }
 
 /// Structured data for package information
@@ -2056,6 +2200,8 @@ pub struct ValidationIssueData {
     pub message: String,
     pub level: ValidationLevel,
     pub suggestion: Option<String>,
+    /// Source location (e.g., `"line 17 column 1"`) when available from parse errors.
+    pub location: Option<String>,
 }
 
 /// Validation issue level
