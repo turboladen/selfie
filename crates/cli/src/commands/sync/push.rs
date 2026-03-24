@@ -59,7 +59,7 @@ pub(crate) async fn handle_push(
 
     // No new commits but unpushed local commits exist — push them directly
     if pending_commits.is_empty() && ahead > 0 {
-        let label = if ahead == 1 { "commit" } else { "commits" };
+        let label = selfie::pluralize(ahead, "commit", "commits");
         display.print_info(format!(
             "{ahead} existing {label} not yet pushed — pushing now"
         ));
@@ -87,7 +87,7 @@ fn show_pending_commits(
     display.println("");
     for commit in commits {
         let file_count = commit.files.len();
-        let label = if file_count == 1 { "file" } else { "files" };
+        let label = selfie::pluralize(file_count, "file", "files");
         if use_colors {
             display.println(format!(
                 "  {} ({file_count} {label})",

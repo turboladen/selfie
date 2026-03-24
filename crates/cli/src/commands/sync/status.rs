@@ -84,10 +84,10 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 if *ahead > 0 && *behind > 0 {
                     display.println(format!("{INDENT}{ahead} ahead, {behind} behind remote"));
                 } else if *ahead > 0 {
-                    let label = if *ahead == 1 { "commit" } else { "commits" };
+                    let label = selfie::pluralize(*ahead, "commit", "commits");
                     display.println(format!("{INDENT}{ahead} {label} ahead of remote"));
                 } else if *behind > 0 {
-                    let label = if *behind == 1 { "commit" } else { "commits" };
+                    let label = selfie::pluralize(*behind, "commit", "commits");
                     display.println(format!("{INDENT}{behind} {label} behind remote"));
                 } else {
                     display.println(format!("{INDENT}Up to date with remote"));

@@ -44,11 +44,7 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
                 }),
             ..
         } => {
-            let label = if *commits_pulled == 1 {
-                "commit"
-            } else {
-                "commits"
-            };
+            let label = selfie::pluralize(*commits_pulled, "commit", "commits");
             display.print_success(format!("Pulled {commits_pulled} {label} from remote"));
 
             if !packages_updated.is_empty() {

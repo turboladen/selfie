@@ -250,7 +250,7 @@ where
             });
         } else if !ungrouped.is_empty() {
             let count = ungrouped.len();
-            let label = if count == 1 { "file" } else { "files" };
+            let label = crate::pluralize(count, "file", "files");
             warnings.push(format!(
                 "{count} {label} not associated with any package — use --include-ungrouped to commit them"
             ));
@@ -565,7 +565,7 @@ fn generate_commit_message(name: &str, entries: &[(PathBuf, FileChangeKind)]) ->
 /// Generate a batch commit message summarizing all changes.
 fn generate_batch_message(entries: &[(PathBuf, FileChangeKind)]) -> String {
     let count = entries.len();
-    let label = if count == 1 { "file" } else { "files" };
+    let label = crate::pluralize(count, "file", "files");
     format!("chore: update {count} {label}")
 }
 

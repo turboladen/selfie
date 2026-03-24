@@ -62,10 +62,10 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
 
     display.println(table.to_string());
     display.print_info(format!(
-        "{total} dotfile{} across {} package{}",
-        if total == 1 { "" } else { "s" },
+        "{total} {} across {} {}",
+        selfie::pluralize(total, "dotfile", "dotfiles"),
         packages.len(),
-        if packages.len() == 1 { "" } else { "s" },
+        selfie::pluralize(packages.len(), "package", "packages"),
     ));
 
     0
