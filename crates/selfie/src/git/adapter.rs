@@ -1,8 +1,14 @@
 //! gix-based implementation of [`GitStatusProvider`] and [`GitSyncProvider`].
 //!
-//! Uses the `gix` crate for native local git operations (discover, status, stage,
-//! commit, diff) and shells out to the `git` binary for network operations (push,
-//! fetch) to leverage the user's existing SSH/credential configuration.
+//! Uses the `gix` crate for local git operations (discover, status, stage,
+//! commit) and shells out to the `git` binary for:
+//! - **Network operations** (push, fetch) — to leverage the user's existing
+//!   SSH agent and credential helpers, which gix's transport layer doesn't
+//!   automatically integrate with.
+//! - **Fast-forward merge** — because it updates both the ref and the working
+//!   tree, requiring checkout logic (`gix-worktree-state`) we don't pull in.
+//! - **Ancillary queries** (branch name, remote, ahead/behind, deleted files,
+//!   diff) — tracked in selfie-y9n for conversion to native gix.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,21 +58,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_path: &Path) -> bool {
     false
-}
-
-/// Open the repo's index file, or create an empty one if it doesn't exist yet
-/// (e.g., a freshly-initialized repo with no commits).
-fn open_or_create_index(repo: &gix::Repository) -> Result<gix::index::File, GitSyncError> {
-    match repo.open_index() {
-        Ok(index) => Ok(index),
-        Err(_) => {
-            // No index file on disk yet — create an empty one.
-            Ok(gix::index::File::from_state(
-                gix::index::State::new(repo.object_hash()),
-                repo.index_path(),
-            ))
-        }
-    }
 }
 
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
@@ -311,7 +302,9 @@ impl GitSyncProvider for GixGitAdapter {
         }
 
         let repo = open_repo(repo_root)?;
-        let mut index = open_or_create_index(&repo)?;
+        let mut index = repo
+            .open_index()
+            .map_err(|e| git_sync_err("open index", e))?;
 
         let workdir = repo
             .workdir()
@@ -379,7 +372,9 @@ impl GitSyncProvider for GixGitAdapter {
 
     fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
         let repo = open_repo(repo_root)?;
-        let index = open_or_create_index(&repo)?;
+        let index = repo
+            .open_index()
+            .map_err(|e| git_sync_err("open index", e))?;
 
         // Build a tree from the current index by starting from HEAD's tree
         // (or the empty tree for the first commit) and upserting every entry.
@@ -452,6 +447,9 @@ impl GitSyncProvider for GixGitAdapter {
     }
 
     fn push(&self, repo_root: &Path) -> Result<(), GitSyncError> {
+        // Shells out because gix's transport layer (blocking-network-client)
+        // doesn't automatically integrate with the user's SSH agent and
+        // credential helpers the way the git CLI does.
         run_git(repo_root, &["push"]).map_err(|e| {
             // Detect common push failure: remote has new commits
             let msg = e.to_string();
@@ -468,15 +466,18 @@ impl GitSyncProvider for GixGitAdapter {
     }
 
     fn fetch(&self, repo_root: &Path) -> Result<(), GitSyncError> {
+        // Shells out for the same reason as push — SSH/credential integration.
         run_git(repo_root, &["fetch"])?;
         Ok(())
     }
 
     fn fast_forward(&self, repo_root: &Path) -> Result<FastForwardResult, GitSyncError> {
-        // Get current HEAD before merge
+        // Shells out because ff-merge updates both the ref AND the working tree.
+        // gix can update refs, but a full working-tree checkout (handling file
+        // modes, symlinks, dirty-file guards) requires gix-worktree-state which
+        // we don't pull in.
         let old_head = run_git(repo_root, &["rev-parse", "HEAD"])?;
 
-        // Try fast-forward merge
         match run_git(repo_root, &["merge", "--ff-only", "@{u}"]) {
             Ok(output) => {
                 if output.contains("Already up to date") {
@@ -553,12 +554,14 @@ mod tests {
         (temp, path)
     }
 
-    /// Create a temporary git repo configured for commits (user, email, no GPG).
+    /// Create a temporary git repo with an initial commit (so the index exists).
     fn init_repo_for_commits() -> (tempfile::TempDir, PathBuf) {
         let (temp, path) = init_repo();
         run_git(&path, &["config", "user.email", "test@test.com"]).unwrap();
         run_git(&path, &["config", "user.name", "Test"]).unwrap();
         run_git(&path, &["config", "commit.gpgsign", "false"]).unwrap();
+        // Create an initial commit so the index file exists on disk.
+        run_git(&path, &["commit", "--allow-empty", "-m", "initial"]).unwrap();
         (temp, path)
     }
 
@@ -674,7 +677,7 @@ mod tests {
 
     #[test]
     fn stage_files_works() {
-        let (_temp, path) = init_repo();
+        let (_temp, path) = init_repo_for_commits();
         fs::write(path.join("test.yml"), "name: test\n").unwrap();
 
         GixGitAdapter
