@@ -91,7 +91,9 @@ Fetches and fast-forward merges from the remote:
 selfie sync pull
 ```
 
-Refuses if the working tree has uncommitted changes — push first. After pulling, shows what changed:
+Refuses if there are staged changes (indicating an in-progress commit). Modified and untracked files
+are allowed through — `git merge --ff-only` fails safely if they'd conflict. After pulling, shows
+what changed:
 
 ```
 ✓ Pulled 3 commits from remote

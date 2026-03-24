@@ -160,7 +160,9 @@ pub trait SyncService: Send + Sync {
 
     /// Fetch and fast-forward merge from the remote.
     ///
-    /// Refuses if the working tree is dirty. Emits progress events during
+    /// Refuses if there are staged changes (indicating an in-progress commit).
+    /// Modified and untracked files are allowed — `git merge --ff-only` handles
+    /// them safely (fails if they'd conflict). Emits progress events during
     /// fetch and merge, then a completion event with what changed.
     fn pull(&self) -> impl Future<Output = EventStream> + Send;
 }
