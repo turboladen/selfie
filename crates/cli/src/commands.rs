@@ -28,6 +28,7 @@ pub(crate) mod package;
 pub(crate) mod spec;
 pub(crate) mod sync;
 pub(crate) mod track;
+pub(crate) mod validation_display;
 
 use common::create_package_service;
 use package::list::ListCommand;

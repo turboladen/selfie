@@ -8,7 +8,12 @@ use selfie::{
 };
 
 use crate::{
-    commands::common::create_sync_service, config::CliConfig, display_manager::DisplayManager,
+    commands::{
+        common::create_sync_service,
+        validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
+    },
+    config::CliConfig,
+    display_manager::DisplayManager,
     event_processor::EventProcessor,
 };
 
@@ -47,19 +52,26 @@ pub(crate) async fn handle_push(
             display.print_error(format!(
                 "{count} changed {label} failed validation — fix before pushing"
             ));
-            display.println("");
-            for failure in &failures {
-                if use_colors {
-                    display.println(format!(
-                        "  {} {}",
-                        style("✗").red(),
-                        style(&failure.path).bold()
-                    ));
-                } else {
-                    display.println(format!("  ✗ {}", failure.path));
-                }
-                display.println(format!("    {}", failure.reason));
-            }
+
+            let groups: Vec<ValidationGroup<'_>> = failures
+                .iter()
+                .map(|f| ValidationGroup {
+                    label: &f.path,
+                    rows: f
+                        .issues
+                        .iter()
+                        .map(|i| ValidationRow {
+                            level: &i.level,
+                            category: &i.category,
+                            field: &i.field,
+                            message: &i.message,
+                            location: i.location.as_deref(),
+                        })
+                        .collect(),
+                })
+                .collect();
+
+            display_validation_groups(&groups, use_colors, display);
             return 1;
         }
         Err(e) => {

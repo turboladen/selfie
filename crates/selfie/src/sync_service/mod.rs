@@ -15,8 +15,8 @@ pub mod port;
 pub mod service;
 
 pub use self::port::{
-    ConfirmedCommit, PackageValidationFailure, PendingCommit, PrepareResult, PushOptions,
-    SyncError, SyncService,
+    ConfirmedCommit, PackageValidationFailure, PackageValidationIssue, PendingCommit,
+    PrepareResult, PushOptions, SyncError, SyncService,
 };
 pub use self::service::SyncServiceImpl;
 

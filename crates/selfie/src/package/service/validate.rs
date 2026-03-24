@@ -58,6 +58,7 @@ where
             message: error.message().to_string(),
             level: ValidationLevel::Error,
             suggestion: error.suggestion().map(std::string::ToString::to_string),
+            location: None,
         });
     }
 
@@ -68,6 +69,7 @@ where
             message: warning.message().to_string(),
             level: ValidationLevel::Warning,
             suggestion: warning.suggestion().map(std::string::ToString::to_string),
+            location: None,
         });
     }
 

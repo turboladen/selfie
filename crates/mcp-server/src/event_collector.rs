@@ -101,7 +101,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             let issues: Vec<Value> = validation_result
                 .issues
                 .iter()
-                .map(|i| serde_json::json!({ "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion }))
+                .map(|i| serde_json::json!({ "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion, "location": &i.location }))
                 .collect();
             Some(
                 serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),

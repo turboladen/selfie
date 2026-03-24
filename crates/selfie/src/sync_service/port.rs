@@ -39,8 +39,24 @@ pub enum SyncError {
 pub struct PackageValidationFailure {
     /// Relative path to the package file (e.g., `packages/topgrade.yml`).
     pub path: String,
-    /// What went wrong — parse error or validation errors.
-    pub reason: String,
+    /// Structured validation issues found in this file.
+    pub issues: Vec<PackageValidationIssue>,
+}
+
+/// A single validation issue within a package file.
+#[derive(Debug, Clone)]
+pub struct PackageValidationIssue {
+    /// Severity: `"ERROR"` or `"WARN"`.
+    pub level: String,
+    /// Issue category (e.g., `"ParseError"`, `"RequiredField"`).
+    pub category: String,
+    /// The YAML field path affected (e.g., `"environments.test-env.install"`).
+    pub field: String,
+    /// Human-readable description.
+    pub message: String,
+    /// Source location from parse errors (e.g., `"line 17 column 1"`), or `None`
+    /// for logical validation errors that don't map to a specific location.
+    pub location: Option<String>,
 }
 
 /// Options controlling how `sync push` behaves.

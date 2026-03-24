@@ -2200,6 +2200,8 @@ pub struct ValidationIssueData {
     pub message: String,
     pub level: ValidationLevel,
     pub suggestion: Option<String>,
+    /// Source location (e.g., `"line 17 column 1"`) when available from parse errors.
+    pub location: Option<String>,
 }
 
 /// Validation issue level

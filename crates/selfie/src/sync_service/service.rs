@@ -472,7 +472,7 @@ fn validate_changed_packages(
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
-    use super::port::PackageValidationFailure;
+    use super::port::{PackageValidationFailure, PackageValidationIssue};
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
@@ -489,7 +489,13 @@ fn validate_changed_packages(
             Err(e) => {
                 failures.push(PackageValidationFailure {
                     path: path_str,
-                    reason: format!("failed to read: {e}"),
+                    issues: vec![PackageValidationIssue {
+                        level: "ERROR".to_string(),
+                        category: "FileError".to_string(),
+                        field: "-".to_string(),
+                        message: format!("failed to read: {e}"),
+                        location: None,
+                    }],
                 });
                 continue;
             }
@@ -498,9 +504,24 @@ fn validate_changed_packages(
         let mut package: crate::package::Package = match serde_yaml::from_str(&content) {
             Ok(p) => p,
             Err(e) => {
+                let location = e
+                    .location()
+                    .map(|loc| format!("line {} column {}", loc.line(), loc.column()));
+                // Strip the " at line N column N" suffix since we capture it separately.
+                let msg = e.to_string();
+                let message = msg
+                    .rfind(" at line ")
+                    .map_or_else(|| msg.clone(), |idx| msg[..idx].to_string());
+
                 failures.push(PackageValidationFailure {
                     path: path_str,
-                    reason: e.to_string(),
+                    issues: vec![PackageValidationIssue {
+                        level: "ERROR".to_string(),
+                        category: "ParseError".to_string(),
+                        field: "-".to_string(),
+                        message,
+                        location,
+                    }],
                 });
                 continue;
             }
@@ -508,16 +529,26 @@ fn validate_changed_packages(
         package.path = abs_path;
 
         let result = package.validate(environment);
-        if result.issues().has_errors() {
-            let msgs: Vec<String> = result
-                .issues()
-                .errors()
-                .iter()
-                .map(|i| format!("{}: {}", i.field(), i.message()))
-                .collect();
+        let issues: Vec<PackageValidationIssue> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .map(|i| PackageValidationIssue {
+                level: match i.level() {
+                    crate::validation::ValidationLevel::Error => "ERROR".to_string(),
+                    crate::validation::ValidationLevel::Warning => "WARN".to_string(),
+                },
+                category: format!("{:?}", i.category()),
+                field: i.field().to_string(),
+                message: i.message().to_string(),
+                location: None,
+            })
+            .collect();
+
+        if !issues.is_empty() {
             failures.push(PackageValidationFailure {
                 path: path_str,
-                reason: msgs.join("; "),
+                issues,
             });
         }
     }
