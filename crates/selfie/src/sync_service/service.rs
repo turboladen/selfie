@@ -340,13 +340,16 @@ where
                 }
             };
 
-            // Step 2: Check for tracked file changes that could conflict with merge.
-            // Untracked files are allowed — they can't conflict with a fast-forward.
+            // Step 2: Check for staged changes that would conflict with merge.
+            // Modified and untracked files are fine — git merge --ff-only handles
+            // them safely (fails if they'd conflict). Only staged files indicate
+            // an in-progress commit that shouldn't be disrupted.
             match git.repo_status(&repo_info.root) {
-                Ok(status) if status.has_uncommitted_changes() => {
+                Ok(status) if !status.staged.is_empty() => {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            "Uncommitted changes detected. Run 'selfie sync push' first, then try again.".to_string(),
+                            "Staged changes detected. Commit or unstage them before pulling."
+                                .to_string(),
                         )))
                         .await;
                     return;
