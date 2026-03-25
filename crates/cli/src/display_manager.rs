@@ -55,7 +55,10 @@ impl ErrorCollector {
         !self.errors.is_empty()
     }
 
-    /// Format and return the error summary as a string
+    /// Format and return the error summary as a string.
+    ///
+    /// Returns `None` if fewer than 2 errors were collected, since single
+    /// errors are already shown inline by the event processor.
     pub(crate) fn format_summary(&self) -> Option<String> {
         if self.errors.len() <= 1 {
             return None;
@@ -772,7 +775,7 @@ mod tests {
         });
 
         assert!(dm.has_errors());
-        // finish() should print to stderr (just verify it doesn't panic)
+        // finish() with a single error should not print summary (just verify no panic)
         dm.finish();
     }
 
