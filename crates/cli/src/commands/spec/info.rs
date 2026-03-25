@@ -171,7 +171,14 @@ pub(crate) fn create_environment_table(
         ]);
     }
 
-    if !env_status.recommends.is_empty() {
+    if !env_status.recommend_statuses.is_empty() {
+        let rec_display: Vec<String> = env_status
+            .recommend_statuses
+            .iter()
+            .map(|dep| format_dependency_with_status(dep, config.use_colors()))
+            .collect();
+        env_table.add_row(vec![format_env_key("Recommends"), rec_display.join(", ")]);
+    } else if !env_status.recommends.is_empty() {
         env_table.add_row(vec![
             format_env_key("Recommends"),
             format_env_value(&env_status.recommends.join(", ")),

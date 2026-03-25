@@ -75,20 +75,8 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         PackageEvent::EnvironmentStatusChecked {
             environment_status, ..
         } => {
-            let dep_statuses: Vec<_> = environment_status
-                .dependency_statuses
-                .iter()
-                .map(|dep| {
-                    serde_json::json!({
-                        "name": &dep.name,
-                        "status": match &dep.status {
-                            selfie::package::event::EnvironmentStatus::Installed => "installed",
-                            selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
-                            selfie::package::event::EnvironmentStatus::Unknown(reason) => reason.as_str(),
-                        },
-                    })
-                })
-                .collect();
+            let dep_statuses = dep_statuses_to_json(&environment_status.dependency_statuses);
+            let rec_statuses = dep_statuses_to_json(&environment_status.recommend_statuses);
 
             Some(serde_json::json!({
                 "type": "environment_status",
@@ -99,6 +87,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "dependencies": &environment_status.dependencies,
                 "dependency_statuses": dep_statuses,
                 "recommends": &environment_status.recommends,
+                "recommend_statuses": rec_statuses,
                 "status": environment_status.status.as_ref().map(|s| match s {
                     selfie::package::event::EnvironmentStatus::Installed => "installed",
                     selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
@@ -300,6 +289,22 @@ fn check_status_label(result: &CheckResult) -> &'static str {
         CheckResult::NoCheckCommand => "no check command defined",
         CheckResult::Error(_) => "error",
     }
+}
+
+fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
+    statuses
+        .iter()
+        .map(|dep| {
+            serde_json::json!({
+                "name": &dep.name,
+                "status": match &dep.status {
+                    selfie::package::event::EnvironmentStatus::Installed => "installed",
+                    selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
+                    selfie::package::event::EnvironmentStatus::Unknown(reason) => reason.as_str(),
+                },
+            })
+        })
+        .collect()
 }
 
 fn audit_details(result: &AuditResult) -> Value {
@@ -584,6 +589,7 @@ mod tests {
                         },
                     ],
                     recommends: vec![],
+                    recommend_statuses: vec![],
                     status: Some(EnvironmentStatus::Installed),
                 },
             },

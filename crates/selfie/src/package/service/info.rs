@@ -144,6 +144,14 @@ where
             token,
         )
         .await;
+        let recommend_statuses = check_dependency_statuses(
+            env_config.recommends(),
+            current_env,
+            repo,
+            command_runner,
+            token,
+        )
+        .await;
 
         let environment_status = EnvironmentStatusData {
             environment_name: current_env.to_string(),
@@ -153,6 +161,7 @@ where
             dependencies: env_config.dependencies().to_vec(),
             dependency_statuses,
             recommends: env_config.recommends().to_vec(),
+            recommend_statuses,
             status,
         };
 

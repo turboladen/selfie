@@ -2062,6 +2062,7 @@ pub struct EnvironmentStatusData {
     pub dependencies: Vec<String>,
     pub dependency_statuses: Vec<DependencyStatus>,
     pub recommends: Vec<String>,
+    pub recommend_statuses: Vec<DependencyStatus>,
     pub status: Option<EnvironmentStatus>,
 }
 
