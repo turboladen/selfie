@@ -57,7 +57,7 @@ impl ErrorCollector {
 
     /// Format and return the error summary as a string
     pub(crate) fn format_summary(&self) -> Option<String> {
-        if self.errors.is_empty() {
+        if self.errors.len() <= 1 {
             return None;
         }
 
@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_collector_with_errors() {
+    fn test_error_collector_single_error_skips_summary() {
         let mut collector = ErrorCollector::default();
         collector.collect(ErrorDetail {
             package_name: "test-pkg".to_string(),
@@ -718,11 +718,41 @@ mod tests {
         });
 
         assert!(collector.has_errors());
+        assert!(
+            collector.format_summary().is_none(),
+            "Single error should not produce a summary (inline message covers it)"
+        );
+    }
+
+    #[test]
+    fn test_error_collector_multiple_errors_shows_summary() {
+        let mut collector = ErrorCollector::default();
+        collector.collect(ErrorDetail {
+            package_name: "test-pkg".to_string(),
+            operation: "install".to_string(),
+            command: Some("brew install test-pkg".to_string()),
+            exit_code: Some(1),
+            stderr: Some("Error: not found".to_string()),
+            stdout: None,
+            message: "Installation failed".to_string(),
+        });
+        collector.collect(ErrorDetail {
+            package_name: "other-pkg".to_string(),
+            operation: "install".to_string(),
+            command: Some("brew install other-pkg".to_string()),
+            exit_code: Some(1),
+            stderr: None,
+            stdout: None,
+            message: "Also failed".to_string(),
+        });
+
+        assert!(collector.has_errors());
         let summary = collector.format_summary().unwrap();
         assert!(summary.contains("test-pkg"));
         assert!(summary.contains("brew install test-pkg"));
         assert!(summary.contains("Exit code: 1"));
         assert!(summary.contains("Error: not found"));
+        assert!(summary.contains("other-pkg"));
         assert!(summary.contains("── Errors"));
     }
 
