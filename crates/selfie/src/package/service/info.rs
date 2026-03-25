@@ -128,46 +128,26 @@ where
         }
     };
 
-    // Step 2: Check installation status for environments
-    progress
-        .next(sender, "Checking installation status for environments")
+    // Step 2: Check installation status for the current environment
+    progress.next(sender, "Checking installation status").await;
+
+    let current_env = config.environment();
+    if let Some(env_config) = package_blob.package.environments().get(current_env) {
+        let status =
+            get_installation_status(package_name, current_env, env_config, command_runner, token)
+                .await;
+        let dependency_statuses = check_dependency_statuses(
+            env_config.dependencies(),
+            current_env,
+            repo,
+            command_runner,
+            token,
+        )
         .await;
 
-    // Sort environments to show current environment first
-    let mut environments: Vec<_> = package_blob.package.environments().iter().collect();
-    environments.sort_by(|a, b| {
-        let a_is_current = a.0 == config.environment();
-        let b_is_current = b.0 == config.environment();
-
-        match (a_is_current, b_is_current) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.0.cmp(b.0),
-        }
-    });
-
-    for (env_name, env_config) in environments {
-        let is_current = env_name == config.environment();
-        let (status, dependency_statuses) = if is_current {
-            let status =
-                get_installation_status(package_name, env_name, env_config, command_runner, token)
-                    .await;
-            let dep_statuses = check_dependency_statuses(
-                env_config.dependencies(),
-                config.environment(),
-                repo,
-                command_runner,
-                token,
-            )
-            .await;
-            (status, dep_statuses)
-        } else {
-            (None, vec![])
-        };
-
         let environment_status = EnvironmentStatusData {
-            environment_name: env_name.clone(),
-            is_current,
+            environment_name: current_env.to_string(),
+            is_current: true,
             install_command: env_config.install().to_string(),
             check_command: env_config.check().map(std::string::ToString::to_string),
             dependencies: env_config.dependencies().to_vec(),
@@ -177,6 +157,12 @@ where
         };
 
         sender.send_environment_status(environment_status).await;
+    } else {
+        sender
+            .send_warning(format!(
+                "Package '{package_name}' has no configuration for environment '{current_env}'"
+            ))
+            .await;
     }
 
     sender
