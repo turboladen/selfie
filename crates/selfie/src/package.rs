@@ -25,6 +25,7 @@ pub use self::service::{InstallOptions, PackageService, SpecService};
 use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_saphyr::{Location, Spanned};
 
 /// Package data for editing operations
 ///
@@ -137,20 +138,45 @@ impl DotfileEntry {
     }
 }
 
+/// Default value for environments field when missing from YAML.
+fn default_environments() -> Spanned<HashMap<String, EnvironmentConfig>> {
+    unspanned(HashMap::new())
+}
+
+/// Deserialize `Spanned<HashMap<...>>` with a fallback to an empty map when the key is missing.
+fn deserialize_environments<'de, D>(
+    deserializer: D,
+) -> Result<Spanned<HashMap<String, EnvironmentConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Spanned<HashMap<String, EnvironmentConfig>>>::deserialize(deserializer)
+        .map(|opt| opt.unwrap_or_else(|| unspanned(HashMap::new())))
+}
+
+/// Create a `Spanned<T>` with `Location::UNKNOWN` for programmatically created values.
+pub(crate) fn unspanned<T>(value: T) -> Spanned<T> {
+    Spanned {
+        value,
+        referenced: Location::UNKNOWN,
+        defined: Location::UNKNOWN,
+    }
+}
+
 /// Core package entity representing a package definition
 ///
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Package {
     /// Package name
-    pub(crate) name: String,
+    pub(crate) name: Spanned<String>,
 
     /// Optional homepage URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) homepage: Option<String>,
+    pub(crate) homepage: Option<Spanned<String>>,
 
     /// Optional package description
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) description: Option<String>,
+    pub(crate) description: Option<Spanned<String>>,
 
     /// Dotfile mappings (source → target); applies regardless of environment
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -158,11 +184,14 @@ pub struct Package {
 
     /// Optional note displayed to the user after a fresh install
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) post_install_note: Option<String>,
+    pub(crate) post_install_note: Option<Spanned<String>>,
 
     /// Map of environment configurations
-    #[serde(default)]
-    pub(crate) environments: HashMap<String, EnvironmentConfig>,
+    #[serde(
+        deserialize_with = "deserialize_environments",
+        default = "default_environments"
+    )]
+    pub(crate) environments: Spanned<HashMap<String, EnvironmentConfig>>,
 
     /// Path to the package file (not serialized/deserialized)
     #[serde(skip)]
@@ -172,6 +201,21 @@ pub struct Package {
     /// Set after deserialization, not serialized. Same pattern as `path`.
     #[serde(skip)]
     pub(crate) raw_yaml: String,
+}
+
+/// Compare only values, ignoring YAML source locations.
+impl PartialEq for Package {
+    fn eq(&self, other: &Self) -> bool {
+        self.name.value == other.name.value
+            && self.homepage.as_ref().map(|s| &s.value) == other.homepage.as_ref().map(|s| &s.value)
+            && self.description.as_ref().map(|s| &s.value)
+                == other.description.as_ref().map(|s| &s.value)
+            && self.dotfiles == other.dotfiles
+            && self.post_install_note.as_ref().map(|s| &s.value)
+                == other.post_install_note.as_ref().map(|s| &s.value)
+            && self.environments.value == other.environments.value
+            && self.path == other.path
+    }
 }
 
 /// Configuration for a specific environment
@@ -265,12 +309,12 @@ impl Package {
         path: PathBuf,
     ) -> Self {
         Self {
-            name,
-            homepage,
-            description,
+            name: unspanned(name),
+            homepage: homepage.map(unspanned),
+            description: description.map(unspanned),
             dotfiles,
-            post_install_note,
-            environments,
+            post_install_note: post_install_note.map(unspanned),
+            environments: unspanned(environments),
             path,
             raw_yaml: String::new(),
         }
@@ -299,12 +343,12 @@ impl Package {
         );
 
         Self {
-            name: name.to_string(),
+            name: unspanned(name.to_string()),
             homepage: None,
             description: None,
             dotfiles: Vec::new(),
             post_install_note: None,
-            environments,
+            environments: unspanned(environments),
             path: PathBuf::new(), // Will be set by GetPackage::new
             raw_yaml: String::new(),
         }
@@ -313,19 +357,19 @@ impl Package {
     /// Get the package name
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.name.value
     }
 
     /// Get the optional homepage URL
     #[must_use]
     pub fn homepage(&self) -> Option<&str> {
-        self.homepage.as_deref()
+        self.homepage.as_ref().map(|s| s.value.as_str())
     }
 
     /// Get the optional package description
     #[must_use]
     pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
+        self.description.as_ref().map(|s| s.value.as_str())
     }
 
     /// Get the list of dotfile mappings for this package
@@ -351,13 +395,13 @@ impl Package {
     /// Get the optional post-install note for this package
     #[must_use]
     pub fn post_install_note(&self) -> Option<&str> {
-        self.post_install_note.as_deref()
+        self.post_install_note.as_ref().map(|s| s.value.as_str())
     }
 
     /// Get the environment configurations
     #[must_use]
     pub fn environments(&self) -> &HashMap<String, EnvironmentConfig> {
-        &self.environments
+        &self.environments.value
     }
 
     /// Get the package file path
@@ -384,10 +428,10 @@ mod package_tests {
             .environment("test-env", |b| b.install("test install"))
             .build();
 
-        assert_eq!(package.name, "test-package");
-        assert_eq!(package.environments.len(), 1);
+        assert_eq!(package.name(), "test-package");
+        assert_eq!(package.environments().len(), 1);
         assert_eq!(
-            package.environments.get("test-env").unwrap().install,
+            package.environments().get("test-env").unwrap().install,
             "test install"
         );
     }
@@ -401,13 +445,10 @@ mod package_tests {
             .environment("test-env", |b| b.install("test install"))
             .build();
 
-        assert_eq!(package.name, "test-package");
-        assert_eq!(package.homepage, Some("https://example.com".to_string()));
-        assert_eq!(
-            package.description,
-            Some("Test package description".to_string())
-        );
-        assert_eq!(package.environments.len(), 1);
+        assert_eq!(package.name(), "test-package");
+        assert_eq!(package.homepage(), Some("https://example.com"));
+        assert_eq!(package.description(), Some("Test package description"));
+        assert_eq!(package.environments().len(), 1);
     }
 
     #[test]

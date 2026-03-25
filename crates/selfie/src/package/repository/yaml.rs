@@ -319,8 +319,8 @@ mod tests {
         let repo = YamlPackageRepository::new(fs, package_dir.clone());
         let package = repo.get_package("ripgrep").unwrap();
 
-        assert_eq!(package.package.name, "ripgrep");
-        assert_eq!(package.package.environments.len(), 1);
+        assert_eq!(package.package.name(), "ripgrep");
+        assert_eq!(package.package.environments().len(), 1);
     }
 
     #[test]
@@ -504,9 +504,9 @@ mod tests {
         let ripgrep = package_output.get("ripgrep").unwrap();
         let fzf = package_output.get("fzf").unwrap();
 
-        assert!(ripgrep.environments.contains_key("test-env"));
+        assert!(ripgrep.environments().contains_key("test-env"));
 
-        assert!(fzf.environments.contains_key("other-env"));
+        assert!(fzf.environments().contains_key("other-env"));
     }
 
     #[test]

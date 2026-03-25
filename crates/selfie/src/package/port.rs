@@ -368,7 +368,7 @@ impl ListPackagesOutput {
     pub fn get(&self, package_name: &str) -> Option<&Package> {
         self.0.iter().find_map(|maybe_p| match maybe_p {
             Ok(p) => {
-                if p.name == package_name {
+                if p.name() == package_name {
                     Some(p)
                 } else {
                     None
