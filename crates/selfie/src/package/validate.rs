@@ -6,6 +6,19 @@ use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssu
 
 use super::Package;
 
+/// Known top-level keys in a package YAML file.
+///
+/// Used by `validate_unknown_fields()` and verified against the `Package` struct
+/// by `test_known_fields_matches_package_struct`.
+pub(crate) const KNOWN_PACKAGE_FIELDS: &[&str] = &[
+    "name",
+    "homepage",
+    "description",
+    "dotfiles",
+    "post_install_note",
+    "environments",
+];
+
 /// Format a `Location` as a human-readable string, returning `None` for unknown locations.
 fn location_string(loc: &Location) -> Option<String> {
     if *loc == Location::UNKNOWN {
@@ -108,17 +121,6 @@ impl Package {
     /// `_brew: &brew`). Anything else is an error — likely a typo or a
     /// renamed field (e.g., `configs` instead of `dotfiles`).
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
-        // Must stay in sync with Package struct fields. The test
-        // `test_known_fields_matches_package_struct` verifies this.
-        const KNOWN_FIELDS: &[&str] = &[
-            "name",
-            "homepage",
-            "description",
-            "dotfiles",
-            "post_install_note",
-            "environments",
-        ];
-
         if self.raw_yaml.is_empty() {
             return vec![];
         }
@@ -131,16 +133,15 @@ impl Package {
             return vec![]; // Parse errors handled elsewhere
         };
 
+        let expected = KNOWN_PACKAGE_FIELDS.join(", ");
+
         raw.keys()
-            .filter(|k| !k.starts_with('_') && !KNOWN_FIELDS.contains(&k.as_str()))
+            .filter(|k| !k.starts_with('_') && !KNOWN_PACKAGE_FIELDS.contains(&k.as_str()))
             .map(|k| {
                 ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
                     k,
-                    &format!(
-                        "unknown field '{k}'; expected one of: name, homepage, description, \
-                         dotfiles, post_install_note, environments"
-                    ),
+                    &format!("unknown field '{k}'; expected one of: {expected}"),
                     None,
                 )
             })
@@ -697,19 +698,10 @@ mod tests {
         let raw: std::collections::HashMap<String, serde_json::Value> =
             serde_saphyr::from_str(&yaml).unwrap();
 
-        let known: Vec<&str> = vec![
-            "name",
-            "homepage",
-            "description",
-            "dotfiles",
-            "post_install_note",
-            "environments",
-        ];
-
         for key in raw.keys() {
             assert!(
-                known.contains(&key.as_str()),
-                "Package serialized a field '{key}' not in KNOWN_FIELDS — update the list in validate_unknown_fields()"
+                KNOWN_PACKAGE_FIELDS.contains(&key.as_str()),
+                "Package serialized a field '{key}' not in KNOWN_PACKAGE_FIELDS — update the list in validate.rs"
             );
         }
     }
