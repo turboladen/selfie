@@ -48,9 +48,11 @@ pub(crate) async fn handle_info(
                 PackageEvent::Progress { .. } => {
                     true // Handled
                 }
-                PackageEvent::Completed { .. } => {
-                    false // Use default completion handling
-                }
+                PackageEvent::Completed {
+                    result: selfie::package::event::OperationResult::Success(_),
+                    ..
+                } => true,
+                PackageEvent::Completed { .. } => false,
                 _ => false, // Use default handling for other events
             }
         })

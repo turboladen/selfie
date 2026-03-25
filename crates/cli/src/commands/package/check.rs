@@ -71,14 +71,15 @@ pub(crate) async fn handle_check(
                     if let Some(s) = spinner.take() {
                         s.finish_clear();
                     }
-                    if let OperationResult::Failure(failure) = result
-                        && failure.is_environment_error()
-                    {
-                        display_environment_error(package_name, failure, config, display);
-                        env_error_handled = true;
-                        return true;
+                    match result {
+                        OperationResult::Success(_) => true,
+                        OperationResult::Failure(failure) if failure.is_environment_error() => {
+                            display_environment_error(package_name, failure, config, display);
+                            env_error_handled = true;
+                            true
+                        }
+                        _ => false,
                     }
-                    false
                 }
                 _ => false,
             }

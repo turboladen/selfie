@@ -28,6 +28,10 @@ pub(crate) async fn handle_status(
                 true
             }
             PackageEvent::Progress { .. } => true,
+            PackageEvent::Completed {
+                result: selfie::package::event::OperationResult::Success(_),
+                ..
+            } => true,
             PackageEvent::Completed { .. } => false,
             _ => false,
         })

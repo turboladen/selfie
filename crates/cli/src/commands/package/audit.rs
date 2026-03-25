@@ -39,16 +39,15 @@ pub(crate) async fn handle_audit(
                 true
             }
             PackageEvent::Progress { .. } => true,
-            PackageEvent::Completed { result, .. } => {
-                if let OperationResult::Failure(failure) = result
-                    && failure.is_environment_error()
-                {
+            PackageEvent::Completed { result, .. } => match result {
+                OperationResult::Success(_) => true,
+                OperationResult::Failure(failure) if failure.is_environment_error() => {
                     display_environment_error(package_name, failure, config, display);
                     env_error_handled = true;
-                    return true;
+                    true
                 }
-                false
-            }
+                _ => false,
+            },
             _ => false,
         })
         .await;
@@ -79,6 +78,10 @@ pub(crate) async fn handle_audit_all(
                 true
             }
             PackageEvent::Progress { .. } => true,
+            PackageEvent::Completed {
+                result: OperationResult::Success(_),
+                ..
+            } => true,
             _ => false,
         })
         .await;
