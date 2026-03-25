@@ -128,7 +128,14 @@ where
 
             // Step 2: Check dotfile drift
             let drift_stream = dotfile_service.check_drift().await;
-            let (drifted_targets, total_deployed) = collect_drift_summary(drift_stream).await;
+            let (drifted_targets, total_deployed, drift_error) =
+                collect_drift_summary(drift_stream).await;
+
+            if let Some(error_msg) = drift_error {
+                sender
+                    .send_warning(format!("Drift check failed: {error_msg}"))
+                    .await;
+            }
 
             sender
                 .send(PackageEvent::SyncDriftSummary {
@@ -765,13 +772,14 @@ fn extract_package_name_from_message(message: &str) -> String {
 
 /// Collect drift information from a DotfileService event stream.
 ///
-/// Consumes the event stream and extracts drifted target paths and total
-/// deployed count from drift events.
-async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize) {
+/// Consumes the event stream and extracts drifted target paths, total
+/// deployed count, and any failure message from drift events.
+async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Option<String>) {
     use futures::StreamExt;
 
     let mut drifted_targets = Vec::new();
     let mut total_deployed = 0;
+    let mut drift_error = None;
 
     futures::pin_mut!(stream);
     while let Some(event) = stream.next().await {
@@ -790,11 +798,17 @@ async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize) {
             } => {
                 total_deployed = total_count;
             }
+            PackageEvent::Completed {
+                result: OperationResult::Failure(failure),
+                ..
+            } => {
+                drift_error = Some(failure.to_string());
+            }
             _ => {}
         }
     }
 
-    (drifted_targets, total_deployed)
+    (drifted_targets, total_deployed, drift_error)
 }
 
 // ─── Pull change categorization ──────────────────────────────────────────────
@@ -1291,5 +1305,64 @@ mod tests {
             change_type: ChangeType::Modified,
         }];
         assert!(!has_dotfile_changes(&files, temp.path()));
+    }
+
+    // ─── collect_drift_summary tests ──────────────────────────────────────────
+
+    fn test_operation_info() -> crate::package::event::OperationInfo {
+        crate::package::event::OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::DotfileDrift,
+            package_name: String::new(),
+            environment: "test".to_string(),
+            context: OperationContext::default(),
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    fn events_to_stream(events: Vec<PackageEvent>) -> EventStream {
+        Box::pin(futures::stream::iter(events))
+    }
+
+    #[tokio::test]
+    async fn collect_drift_summary_surfaces_failure() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_operation_info(),
+            result: OperationResult::Failure(OperationFailure::Generic(
+                "permission denied".to_string(),
+            )),
+        }];
+
+        let (drifted, total, error) = collect_drift_summary(events_to_stream(events)).await;
+
+        assert!(drifted.is_empty());
+        assert_eq!(total, 0);
+        assert_eq!(error.as_deref(), Some("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn collect_drift_summary_returns_none_on_success() {
+        let events = vec![
+            PackageEvent::DotfileDriftDetected {
+                operation_info: test_operation_info(),
+                target: "/home/user/.bashrc".to_string(),
+                drift_type: "content mismatch".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_operation_info(),
+                result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                    drift_count: 1,
+                    total_count: 3,
+                    environment: "test".to_string(),
+                    steps_completed: crate::package::event::StepCount::new(3, 3),
+                }),
+            },
+        ];
+
+        let (drifted, total, error) = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(drifted, vec!["/home/user/.bashrc"]);
+        assert_eq!(total, 3);
+        assert!(error.is_none());
     }
 }
