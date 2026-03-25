@@ -153,7 +153,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
 }
 
 /// Parse a single line from `git diff --name-status` output into a
-/// [`ChangedFile`], returning `None` for blank or unparseable lines.
+/// [`ChangedFile`], returning `None` for blank or unparsable lines.
 ///
 /// Rename/copy lines have the format `R100\told\tnew` (three tab-separated
 /// fields). We take the *last* field (the new path) for those statuses.
@@ -317,8 +317,8 @@ impl GitSyncProvider for GixGitAdapter {
 
         for file in files {
             let full_path = workdir.join(file);
-            let rela_bstring = gix::path::into_bstr(file);
-            let rela_path: &gix::bstr::BStr = rela_bstring.as_ref();
+            let relative_bstring = gix::path::into_bstr(file);
+            let relative_path: &gix::bstr::BStr = relative_bstring.as_ref();
 
             if full_path.exists() {
                 // File exists → hash it as a blob and upsert into the index.
@@ -334,7 +334,7 @@ impl GitSyncProvider for GixGitAdapter {
                 };
 
                 match index.entry_index_by_path_and_stage(
-                    rela_path,
+                    relative_path,
                     gix::index::entry::Stage::Unconflicted,
                 ) {
                     Some(pos) => {
@@ -354,15 +354,15 @@ impl GitSyncProvider for GixGitAdapter {
                             blob_id.detach(),
                             gix::index::entry::Flags::empty(),
                             entry_mode,
-                            rela_path,
+                            relative_path,
                         );
                         index.sort_entries();
                     }
                 }
             } else {
                 // File deleted → remove from index.
-                let rela_owned = rela_path.to_owned();
-                index.remove_entries(|_, path, _| path == rela_owned);
+                let relative_owned = relative_path.to_owned();
+                index.remove_entries(|_, path, _| path == relative_owned);
             }
         }
 
