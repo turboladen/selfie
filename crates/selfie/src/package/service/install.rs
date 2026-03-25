@@ -537,7 +537,8 @@ async fn install_recommends<PR, CR>(
         .await;
 
     // Install recommends concurrently in chunks, bounded by max_concurrency.
-    // Each recommend gets its own ProgressTracker since they run in parallel.
+    // Uses chunks+join_all (not semaphore+spawn) because the function takes
+    // borrowed references that can't move into 'static tokio tasks.
     let max_concurrent = config.max_concurrency().get();
 
     for chunk in recommends.chunks(max_concurrent) {

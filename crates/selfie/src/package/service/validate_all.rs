@@ -53,74 +53,59 @@ where
             .await;
     }
 
-    // Step 2: Validate packages concurrently in chunks
+    // Step 2: Validate each package
     progress.next(sender, "Validating packages").await;
 
-    let max_concurrent = config.max_concurrency().get();
-    let mut all_statuses = Vec::new();
+    let mut error_count: usize = 0;
+    let mut warning_count: usize = 0;
 
-    for chunk in valid_packages.chunks(max_concurrent) {
-        let futures: Vec<_> = chunk
-            .iter()
-            .map(|package| async move {
-                let validation = package.validate(config.environment());
-                let issues = validation.issues();
+    for package in &valid_packages {
+        let validation = package.validate(config.environment());
+        let issues = validation.issues();
 
-                let mut validation_issues = Vec::new();
+        let mut validation_issues = Vec::new();
 
-                for error in issues.errors() {
-                    validation_issues.push(ValidationIssueData {
-                        category: format!("{:?}", error.category()),
-                        field: error.field().to_string(),
-                        message: error.message().to_string(),
-                        level: ValidationLevel::Error,
-                        suggestion: error.suggestion().map(std::string::ToString::to_string),
-                        location: error.location().map(str::to_string),
-                    });
-                }
+        for error in issues.errors() {
+            validation_issues.push(ValidationIssueData {
+                category: format!("{:?}", error.category()),
+                field: error.field().to_string(),
+                message: error.message().to_string(),
+                level: ValidationLevel::Error,
+                suggestion: error.suggestion().map(std::string::ToString::to_string),
+                location: error.location().map(str::to_string),
+            });
+        }
 
-                for warning in issues.warnings() {
-                    validation_issues.push(ValidationIssueData {
-                        category: format!("{:?}", warning.category()),
-                        field: warning.field().to_string(),
-                        message: warning.message().to_string(),
-                        level: ValidationLevel::Warning,
-                        suggestion: warning.suggestion().map(std::string::ToString::to_string),
-                        location: warning.location().map(str::to_string),
-                    });
-                }
+        for warning in issues.warnings() {
+            validation_issues.push(ValidationIssueData {
+                category: format!("{:?}", warning.category()),
+                field: warning.field().to_string(),
+                message: warning.message().to_string(),
+                level: ValidationLevel::Warning,
+                suggestion: warning.suggestion().map(std::string::ToString::to_string),
+                location: warning.location().map(str::to_string),
+            });
+        }
 
-                let status = if issues.has_errors() {
-                    ValidationStatus::HasErrors
-                } else if issues.has_warnings() {
-                    ValidationStatus::HasWarnings
-                } else {
-                    ValidationStatus::Valid
-                };
+        let status = if issues.has_errors() {
+            error_count += 1;
+            ValidationStatus::HasErrors
+        } else if issues.has_warnings() {
+            warning_count += 1;
+            ValidationStatus::HasWarnings
+        } else {
+            ValidationStatus::Valid
+        };
 
-                let validation_result = ValidationResultData {
-                    package_name: package.name().to_string(),
-                    environment: config.environment().to_string(),
-                    status: status.clone(),
-                    issues: validation_issues,
-                };
+        let validation_result = ValidationResultData {
+            package_name: package.name().to_string(),
+            environment: config.environment().to_string(),
+            status,
+            issues: validation_issues,
+        };
 
-                sender.send_validation_result(validation_result).await;
-                status
-            })
-            .collect();
-
-        all_statuses.extend(futures::future::join_all(futures).await);
+        sender.send_validation_result(validation_result).await;
     }
-
-    let error_count = all_statuses
-        .iter()
-        .filter(|s| matches!(s, ValidationStatus::HasErrors))
-        .count();
-    let warning_count = all_statuses
-        .iter()
-        .filter(|s| matches!(s, ValidationStatus::HasWarnings))
-        .count();
 
     let total_errors = error_count + invalid_packages.len();
 

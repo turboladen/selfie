@@ -101,6 +101,8 @@ where
     let max_concurrent = config.max_concurrency().get();
 
     // Audit packages concurrently in chunks, each with its own progress tracker.
+    // Uses chunks+join_all (not semaphore+spawn) because the function takes
+    // borrowed references that can't move into 'static tokio tasks.
     for chunk in package_names.chunks(max_concurrent) {
         if token.is_cancelled() {
             return OperationResult::Failure("Operation cancelled".into());
@@ -351,7 +353,7 @@ mod tests {
         EventSender,
         mpsc::Receiver<crate::package::event::PackageEvent>,
     ) {
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(256);
         let sender = EventSender::new_with_context(
             tx,
             crate::package::event::metadata::OperationType::PackageAudit,
@@ -821,5 +823,150 @@ mod tests {
             }
             other => panic!("Expected PackageAudited conflicts, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_audit_all_respects_concurrency_limit() {
+        use crate::package::port::ListPackagesOutput;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Tracks peak concurrent command executions.
+        struct ConcurrencyTrackingRunner {
+            current: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+            delay: std::time::Duration,
+        }
+
+        impl ConcurrencyTrackingRunner {
+            fn new(delay: std::time::Duration) -> Self {
+                Self {
+                    current: Arc::new(AtomicUsize::new(0)),
+                    peak: Arc::new(AtomicUsize::new(0)),
+                    delay,
+                }
+            }
+
+            fn peak(&self) -> usize {
+                self.peak.load(Ordering::SeqCst)
+            }
+        }
+
+        impl crate::commands::runner::CommandRunner for ConcurrencyTrackingRunner {
+            async fn is_command_available(&self, _command: &str) -> bool {
+                true
+            }
+
+            async fn execute(
+                &self,
+                _command: &str,
+                _token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
+                self.current.fetch_sub(1, Ordering::SeqCst);
+
+                Ok(crate::commands::runner::CommandOutput {
+                    output: std::process::Output {
+                        status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                        stdout: b"test-source\n".to_vec(),
+                        stderr: Vec::new(),
+                    },
+                    duration: self.delay,
+                })
+            }
+
+            async fn execute_with_timeout(
+                &self,
+                command: &str,
+                _timeout: std::time::Duration,
+                token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                self.execute(command, token).await
+            }
+
+            async fn execute_streaming(
+                &self,
+                _command: &str,
+                _timeout: std::time::Duration,
+                _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
+                _token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                unimplemented!("not needed for audit tests")
+            }
+        }
+
+        let max_concurrent = 2;
+        let num_packages = 6;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .max_parallel_unchecked(max_concurrent)
+            .build();
+
+        let packages: Vec<_> = (0..num_packages)
+            .map(|i| {
+                PackageBuilder::default()
+                    .name(&format!("pkg-{i}"))
+                    .environment("test", |b| {
+                        b.install("echo install")
+                            .audit_some(format!("echo pkg-{i}"))
+                    })
+                    .path(temp_dir.path().join(format!("pkg-{i}.yml")))
+                    .build()
+            })
+            .collect();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let packages_clone = packages.clone();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(ListPackagesOutput(
+                packages_clone.iter().cloned().map(Ok).collect(),
+            ))
+        });
+
+        // get_package returns the matching package
+        let packages_for_get = packages.clone();
+        let temp_path = temp_dir.path().to_path_buf();
+        mock_repo.expect_get_package().returning(move |name| {
+            let pkg = packages_for_get
+                .iter()
+                .find(|p| p.name() == name)
+                .unwrap()
+                .clone();
+            Ok(crate::package::GetPackage::from_existing(
+                pkg,
+                temp_path.join(format!("{name}.yml")),
+            ))
+        });
+
+        let runner = ConcurrencyTrackingRunner::new(std::time::Duration::from_millis(50));
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+
+        let result =
+            handle_audit_all(&mock_repo, &config, &runner, &sender, &mut progress, &token).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "Expected success, got: {result:?}"
+        );
+
+        let peak_value = runner.peak();
+        assert!(
+            peak_value <= max_concurrent,
+            "Peak concurrency {peak_value} exceeded limit {max_concurrent}"
+        );
+        assert!(
+            peak_value > 1,
+            "Expected some concurrency but peak was {peak_value}"
+        );
     }
 }
