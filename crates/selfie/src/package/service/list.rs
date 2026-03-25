@@ -333,7 +333,7 @@ mod tests {
         let config = SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(temp_dir.path())
-            .max_parallel_unchecked(max_parallel)
+            .max_concurrency_unchecked(max_parallel)
             .build();
 
         let packages: Vec<_> = (0..num_packages)

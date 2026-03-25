@@ -330,7 +330,7 @@ mod tests {
             .package_directory("/original/path")
             .command_timeout_unchecked(120)
             .stop_on_error(false)
-            .max_parallel_unchecked(8)
+            .max_concurrency_unchecked(8)
             .build();
 
         let args = FakeArgs {

@@ -213,8 +213,8 @@ stop_on_error: false
 
 #### `max_concurrency`
 
-Maximum number of concurrent operations for bulk commands (list, audit, install recommends).
-Defaults to the number of CPUs.
+Maximum number of concurrent operations for bulk commands (list, audit, install recommends) and
+dependency/recommend status checks. Defaults to the number of CPUs.
 
 ```yaml
 max_concurrency: 2

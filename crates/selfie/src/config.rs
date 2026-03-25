@@ -41,7 +41,7 @@ pub struct SelfieConfig {
     #[serde(default = "default_stop_on_error")]
     pub(crate) stop_on_error: bool,
 
-    #[serde(default = "default_max_parallel")]
+    #[serde(default = "default_max_concurrency")]
     pub(crate) max_concurrency: NonZeroUsize,
 }
 
@@ -55,7 +55,7 @@ fn default_stop_on_error() -> bool {
 }
 
 /// Returns the default max concurrency, using available parallelism or falling back to 4.
-fn default_max_parallel() -> NonZeroUsize {
+fn default_max_concurrency() -> NonZeroUsize {
     std::thread::available_parallelism().unwrap_or(const { NonZeroUsize::new(4).unwrap() })
 }
 
@@ -148,7 +148,7 @@ pub struct SelfieConfigBuilder {
     dotfiles_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     command_timeout: Option<NonZeroU64>,
-    max_parallel: Option<NonZeroUsize>,
+    max_concurrency_opt: Option<NonZeroUsize>,
     stop_on_error: Option<bool>,
 }
 
@@ -187,8 +187,8 @@ impl SelfieConfigBuilder {
     ///
     /// This panics if `max` is zero.
     #[must_use]
-    pub fn max_parallel_unchecked(mut self, max: usize) -> Self {
-        self.max_parallel = Some(NonZeroUsize::new(max).unwrap());
+    pub fn max_concurrency_unchecked(mut self, max: usize) -> Self {
+        self.max_concurrency_opt = Some(NonZeroUsize::new(max).unwrap());
         self
     }
 
@@ -212,7 +212,9 @@ impl SelfieConfigBuilder {
             dotfiles_directory: self.dotfiles_directory,
             state_directory: self.state_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
-            max_concurrency: self.max_parallel.unwrap_or(default_max_parallel()),
+            max_concurrency: self
+                .max_concurrency_opt
+                .unwrap_or(default_max_concurrency()),
             stop_on_error: self.stop_on_error.unwrap_or(STOP_ON_ERROR_DEFAULT),
         }
     }
@@ -229,7 +231,7 @@ mod tests {
             .environment("test-env")
             .package_directory("/test/path")
             .command_timeout_unchecked(120)
-            .max_parallel_unchecked(8)
+            .max_concurrency_unchecked(8)
             .build();
 
         assert_eq!(config.environment, "test-env");
@@ -244,7 +246,7 @@ mod tests {
             .environment("test-env")
             .package_directory("/test/path")
             .command_timeout_unchecked(120)
-            .max_parallel_unchecked(8)
+            .max_concurrency_unchecked(8)
             .stop_on_error(false)
             .build();
 
