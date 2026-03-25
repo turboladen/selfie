@@ -1,21 +1,27 @@
 //! Shell completion generation for the selfie CLI
 //!
-//! This module provides functionality to generate shell completion scripts
-//! for various shells including bash, zsh, fish, and `PowerShell`. The completions
-//! enable tab completion for commands, subcommands, options, and flags.
+//! This module generates static shell completion scripts. These complete
+//! commands, subcommands, options, and flags.
 //!
-//! # Usage
-//!
-//! Users can generate completion scripts and install them for their shell:
+//! For dynamic completions (including package name completion), use the
+//! `COMPLETE` env var approach instead:
 //!
 //! ```bash
-//! # Generate bash completions
+//! # Bash — add to ~/.bashrc
+//! source <(COMPLETE=bash selfie)
+//!
+//! # Zsh — add to ~/.zshrc
+//! source <(COMPLETE=zsh selfie)
+//!
+//! # Fish — add to ~/.config/fish/config.fish
+//! COMPLETE=fish selfie | source
+//! ```
+//!
+//! Static completions (this command) are still available as a fallback:
+//!
+//! ```bash
 //! selfie completion bash > ~/.local/share/bash-completion/completions/selfie
-//!
-//! # Generate zsh completions
 //! selfie completion zsh > ~/.zfunc/_selfie
-//!
-//! # Generate fish completions
 //! selfie completion fish > ~/.config/fish/completions/selfie.fish
 //! ```
 

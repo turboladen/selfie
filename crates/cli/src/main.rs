@@ -25,6 +25,7 @@
 
 mod cli;
 mod commands;
+mod completers;
 mod config;
 mod display_manager;
 mod event_processor;
@@ -35,7 +36,8 @@ mod tables;
 
 use std::process;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use display_manager::DisplayManager;
 use selfie::{
     config::{YamlLoader, loader::ConfigLoader},
@@ -99,6 +101,10 @@ fn init_tracing(verbose: bool) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     human_panic::setup_panic!();
+
+    // Handle dynamic shell completion requests.
+    // When COMPLETE=<shell> is set, generates completions and exits.
+    CompleteEnv::with_factory(ClapCli::command).complete();
 
     let args = ClapCli::parse();
 

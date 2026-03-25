@@ -25,13 +25,40 @@ You should see the main help output with available commands.
 
 ### 1. Set Up Shell Completion (Optional)
 
-Enable tab completion for selfie commands by generating completion scripts for your shell. **Note:**
-Completion paths and setup vary by system and shell configuration - these are common examples that
-you may need to adapt for your environment.
+Enable tab completion for selfie commands. Selfie supports two completion modes:
 
-#### Bash
+- **Dynamic completions** (recommended) — completes commands, flags, **and package names**
+- **Static completions** — completes commands and flags only
 
-The location for bash completions varies by system. Here are some common examples:
+#### Dynamic Completions (Recommended)
+
+Dynamic completions call back into the selfie binary on each TAB press, so they can complete package
+names from your configured `package_directory`. Add one of these lines to your shell config:
+
+```bash
+# Bash — add to ~/.bashrc
+source <(COMPLETE=bash selfie)
+
+# Zsh — add to ~/.zshrc
+source <(COMPLETE=zsh selfie)
+```
+
+```fish
+# Fish — add to ~/.config/fish/config.fish
+COMPLETE=fish selfie | source
+```
+
+After restarting your shell, `selfie install <TAB>` will show available package names.
+
+#### Static Completions (Fallback)
+
+If you prefer pre-generated completion scripts (no binary callback), you can generate them with
+`selfie completion <shell>`. These complete commands, subcommands, and flags but not package names.
+
+**Note:** Completion paths and setup vary by system and shell configuration — these are common
+examples that you may need to adapt for your environment.
+
+##### Bash
 
 ```bash
 # User-local (most Linux distributions)
@@ -42,18 +69,12 @@ sudo selfie completion bash > /usr/local/share/bash-completion/completions/selfi
 
 # macOS (user-local)
 selfie completion bash > ~/.bash_completion.d/selfie
-
-# Some systems may use different paths like:
-# ~/.bash_completion.d/selfie
-# /etc/bash_completion.d/selfie
 ```
 
 Check your system's bash completion setup or consult your distribution's documentation for the
 correct path.
 
-#### Zsh
-
-Zsh completion setup depends on your configuration. Here's a common approach:
+##### Zsh
 
 ```bash
 # Create the completion directory if it doesn't exist
@@ -70,16 +91,11 @@ echo 'autoload -U compinit && compinit' >> ~/.zshrc
 If you use a framework like Oh My Zsh or have a custom setup, you may need to place the completion
 file in a different location or modify your configuration accordingly.
 
-#### Fish
-
-Fish typically loads completions from a standard location, but this may vary:
+##### Fish
 
 ```fish
 # Standard location (most systems)
 selfie completion fish > ~/.config/fish/completions/selfie.fish
-
-# Some systems may use:
-# /usr/local/share/fish/completions/selfie.fish
 ```
 
 Fish will automatically load the completions on next shell start.

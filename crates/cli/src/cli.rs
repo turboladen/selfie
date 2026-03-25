@@ -22,6 +22,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete::engine::ArgValueCompleter;
+
+use crate::completers::complete_package_names;
 
 /// Selfie - A personal package manager
 ///
@@ -204,6 +207,7 @@ pub(crate) enum SpecSubcommands {
         ///
         /// If the package exists, it will be opened for editing.
         /// If it doesn't exist, a new template will be created and opened.
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
     },
 
@@ -219,6 +223,7 @@ pub(crate) enum SpecSubcommands {
         ///
         /// The package definition file will be permanently deleted from the
         /// package directory. This operation cannot be undone.
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
 
         /// Skip confirmation prompt (non-interactive mode)
@@ -236,7 +241,7 @@ pub(crate) enum SpecSubcommands {
     /// Example: `selfie spec validate --all`
     Validate {
         /// Name of the package to validate (required unless --all is used)
-        #[arg(conflicts_with = "all", required_unless_present = "all")]
+        #[arg(conflicts_with = "all", required_unless_present = "all", add = ArgValueCompleter::new(complete_package_names))]
         package_name: Option<String>,
 
         /// Validate all packages for the current environment
@@ -268,6 +273,7 @@ pub(crate) enum SpecSubcommands {
         /// Name of the package to get information about
         ///
         /// Must correspond to a package definition file in the package directory.
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
     },
 }
@@ -301,6 +307,7 @@ pub(crate) enum PackageSubcommands {
         ///
         /// Must correspond to a package definition file in the package directory.
         /// The package name should match the filename (without extension).
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
 
         /// Skip installing recommended (soft) dependencies
@@ -322,6 +329,7 @@ pub(crate) enum PackageSubcommands {
         /// Name of the package to check for installation
         ///
         /// Must correspond to a package definition file in the package directory.
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
     },
 
@@ -334,7 +342,7 @@ pub(crate) enum PackageSubcommands {
     /// Example: `selfie package audit --all`
     Audit {
         /// Name of the package to audit (required unless --all is used)
-        #[arg(conflicts_with = "all", required_unless_present = "all")]
+        #[arg(conflicts_with = "all", required_unless_present = "all", add = ArgValueCompleter::new(complete_package_names))]
         package_name: Option<String>,
 
         /// Audit all packages for the current environment
@@ -368,6 +376,7 @@ pub(crate) enum PackageSubcommands {
         /// Name of the package to check status for
         ///
         /// Must correspond to a package definition file in the package directory.
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
     },
 
@@ -380,6 +389,7 @@ pub(crate) enum PackageSubcommands {
     /// Example: `selfie package track-dotfile alacritty ~/.config/alacritty/alacritty.toml`
     TrackDotfile {
         /// Name of the existing package to add the dotfile to
+        #[arg(add = ArgValueCompleter::new(complete_package_names))]
         package_name: String,
 
         /// Path to the file to track (the deploy target)
@@ -528,6 +538,7 @@ pub(crate) enum ConfigSubcommands {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ApplyArgs {
     /// Specific package name (deploys all if omitted)
+    #[arg(add = ArgValueCompleter::new(complete_package_names))]
     pub(crate) name: Option<String>,
 
     /// Show what would change without writing
