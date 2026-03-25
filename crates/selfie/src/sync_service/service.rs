@@ -126,7 +126,8 @@ where
                 })
                 .await;
 
-            // Step 2: Check dotfile drift
+            // Step 2: Check dotfile drift (non-fatal — drift is supplementary info,
+            // unlike git status which is required for sync to function)
             let drift_stream = dotfile_service.check_drift().await;
             let (drifted_targets, total_deployed, drift_error) =
                 collect_drift_summary(drift_stream).await;
@@ -774,6 +775,9 @@ fn extract_package_name_from_message(message: &str) -> String {
 ///
 /// Consumes the event stream and extracts drifted target paths, total
 /// deployed count, and any failure message from drift events.
+///
+/// Assumes the stream emits exactly one `Completed` event (either success or
+/// failure), matching the `check_drift()` contract.
 async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Option<String>) {
     use futures::StreamExt;
 
