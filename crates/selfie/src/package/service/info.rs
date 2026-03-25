@@ -136,12 +136,14 @@ where
         let status =
             get_installation_status(package_name, current_env, env_config, command_runner, token)
                 .await;
+        let max_concurrent = config.max_parallel_installations().get();
         let dependency_statuses = check_dependency_statuses(
             env_config.dependencies(),
             current_env,
             repo,
             command_runner,
             token,
+            max_concurrent,
         )
         .await;
         let recommend_statuses = check_dependency_statuses(
@@ -150,6 +152,7 @@ where
             repo,
             command_runner,
             token,
+            max_concurrent,
         )
         .await;
 
@@ -191,6 +194,7 @@ async fn check_dependency_statuses<PR, CR>(
     repo: &PR,
     command_runner: &CR,
     token: &CancellationToken,
+    max_concurrent: usize,
 ) -> Vec<DependencyStatus>
 where
     PR: PackageRepository,
@@ -200,12 +204,17 @@ where
         return vec![];
     }
 
-    let futures: Vec<_> = dependencies
-        .iter()
-        .map(|dep_name| check_single_dependency(dep_name, current_env, repo, command_runner, token))
-        .collect();
-
-    futures::future::join_all(futures).await
+    let mut results = Vec::with_capacity(dependencies.len());
+    for chunk in dependencies.chunks(max_concurrent) {
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|dep_name| {
+                check_single_dependency(dep_name, current_env, repo, command_runner, token)
+            })
+            .collect();
+        results.extend(futures::future::join_all(futures).await);
+    }
+    results
 }
 
 async fn check_single_dependency<PR, CR>(
@@ -221,10 +230,10 @@ where
 {
     let dep_package = match repo.get_package(dep_name) {
         Ok(pkg) => pkg,
-        Err(_) => {
+        Err(err) => {
             return DependencyStatus {
                 name: dep_name.to_string(),
-                status: EnvironmentStatus::Unknown("package not found".to_string()),
+                status: EnvironmentStatus::Unknown(format!("{err}")),
             };
         }
     };

@@ -295,13 +295,17 @@ fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -
     statuses
         .iter()
         .map(|dep| {
+            let (status, reason) = match &dep.status {
+                selfie::package::event::EnvironmentStatus::Installed => ("installed", None),
+                selfie::package::event::EnvironmentStatus::NotInstalled => ("not installed", None),
+                selfie::package::event::EnvironmentStatus::Unknown(reason) => {
+                    ("unknown", Some(reason.as_str()))
+                }
+            };
             serde_json::json!({
                 "name": &dep.name,
-                "status": match &dep.status {
-                    selfie::package::event::EnvironmentStatus::Installed => "installed",
-                    selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
-                    selfie::package::event::EnvironmentStatus::Unknown(reason) => reason.as_str(),
-                },
+                "status": status,
+                "reason": reason,
             })
         })
         .collect()
@@ -615,10 +619,12 @@ mod tests {
         // dependency_statuses has the rich status objects
         assert_eq!(env_data["dependency_statuses"][0]["name"], "curl");
         assert_eq!(env_data["dependency_statuses"][0]["status"], "installed");
+        assert!(env_data["dependency_statuses"][0]["reason"].is_null());
         assert_eq!(env_data["dependency_statuses"][1]["name"], "wget");
         assert_eq!(
             env_data["dependency_statuses"][1]["status"],
             "not installed"
         );
+        assert!(env_data["dependency_statuses"][1]["reason"].is_null());
     }
 }

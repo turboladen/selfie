@@ -204,7 +204,7 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Str
 }
 
 fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> String {
-    format!("{} ({})", dep.name, format_status(&dep.status, use_colors))
+    format!("{}: {}", dep.name, format_status(&dep.status, use_colors))
 }
 
 #[cfg(test)]
@@ -241,7 +241,7 @@ mod tests {
             status: EnvironmentStatus::Installed,
         };
         let result = format_dependency_with_status(&dep, false);
-        assert!(result.starts_with("git ("));
+        assert!(result.starts_with("git: "));
         assert!(result.contains("Installed"));
     }
 
@@ -252,7 +252,7 @@ mod tests {
             status: EnvironmentStatus::NotInstalled,
         };
         let result = format_dependency_with_status(&dep, false);
-        assert!(result.starts_with("curl ("));
+        assert!(result.starts_with("curl: "));
         assert!(result.contains("Not installed"));
     }
 
@@ -263,7 +263,7 @@ mod tests {
             status: EnvironmentStatus::Unknown("package not found".to_string()),
         };
         let result = format_dependency_with_status(&dep, false);
-        assert!(result.starts_with("missing ("));
+        assert!(result.starts_with("missing: "));
         assert!(result.contains("package not found"));
     }
 }
