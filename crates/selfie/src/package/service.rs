@@ -595,7 +595,7 @@ where
             OperationType::PackageStatus,
             package_name,
             OperationContext::default(),
-            2, // Load package + check status
+            2, // Load package + check status (including dependencies)
             move |repo, command_runner, config, sender, mut progress, token| async move {
                 info::handle_status(
                     &package_name_owned,

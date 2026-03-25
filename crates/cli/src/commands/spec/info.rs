@@ -1,7 +1,9 @@
 use comfy_table::Table;
 use console::style;
 use selfie::package::{
-    event::{EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData},
+    event::{
+        DependencyStatus, EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData,
+    },
     service::SpecService,
 };
 
@@ -155,14 +157,28 @@ pub(crate) fn create_environment_table(
         env_table.add_row(vec![format_env_key("Check"), format_env_value(check)]);
     }
 
-    if !env_status.dependencies.is_empty() {
+    if !env_status.dependency_statuses.is_empty() {
+        let dep_display: Vec<String> = env_status
+            .dependency_statuses
+            .iter()
+            .map(|dep| format_dependency_with_status(dep, config.use_colors()))
+            .collect();
+        env_table.add_row(vec![format_env_key("Dependencies"), dep_display.join(", ")]);
+    } else if !env_status.dependencies.is_empty() {
         env_table.add_row(vec![
             format_env_key("Dependencies"),
             format_env_value(&env_status.dependencies.join(", ")),
         ]);
     }
 
-    if !env_status.recommends.is_empty() {
+    if !env_status.recommend_statuses.is_empty() {
+        let rec_display: Vec<String> = env_status
+            .recommend_statuses
+            .iter()
+            .map(|dep| format_dependency_with_status(dep, config.use_colors()))
+            .collect();
+        env_table.add_row(vec![format_env_key("Recommends"), rec_display.join(", ")]);
+    } else if !env_status.recommends.is_empty() {
         env_table.add_row(vec![
             format_env_key("Recommends"),
             format_env_value(&env_status.recommends.join(", ")),
@@ -185,6 +201,10 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Str
             }
         }
     }
+}
+
+fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> String {
+    format!("{}: {}", dep.name, format_status(&dep.status, use_colors))
 }
 
 #[cfg(test)]
@@ -212,5 +232,38 @@ mod tests {
         let environments = vec![TEST_ENV.to_string(), "alt-test-env".to_string()];
         let result = common::format_environment_names(&environments, TEST_ENV, &config);
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_format_dependency_with_status_installed() {
+        let dep = DependencyStatus {
+            name: "git".to_string(),
+            status: EnvironmentStatus::Installed,
+        };
+        let result = format_dependency_with_status(&dep, false);
+        assert!(result.starts_with("git: "));
+        assert!(result.contains("Installed"));
+    }
+
+    #[test]
+    fn test_format_dependency_with_status_not_installed() {
+        let dep = DependencyStatus {
+            name: "curl".to_string(),
+            status: EnvironmentStatus::NotInstalled,
+        };
+        let result = format_dependency_with_status(&dep, false);
+        assert!(result.starts_with("curl: "));
+        assert!(result.contains("Not installed"));
+    }
+
+    #[test]
+    fn test_format_dependency_with_status_unknown() {
+        let dep = DependencyStatus {
+            name: "missing".to_string(),
+            status: EnvironmentStatus::Unknown("package not found".to_string()),
+        };
+        let result = format_dependency_with_status(&dep, false);
+        assert!(result.starts_with("missing: "));
+        assert!(result.contains("package not found"));
     }
 }

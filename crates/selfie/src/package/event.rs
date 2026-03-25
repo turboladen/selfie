@@ -2060,7 +2060,9 @@ pub struct EnvironmentStatusData {
     pub install_command: String,
     pub check_command: Option<String>,
     pub dependencies: Vec<String>,
+    pub dependency_statuses: Vec<DependencyStatus>,
     pub recommends: Vec<String>,
+    pub recommend_statuses: Vec<DependencyStatus>,
     pub status: Option<EnvironmentStatus>,
 }
 
@@ -2070,6 +2072,13 @@ pub enum EnvironmentStatus {
     Installed,
     NotInstalled,
     Unknown(String),
+}
+
+/// Installation status of a dependency package
+#[derive(Debug, Clone)]
+pub struct DependencyStatus {
+    pub name: String,
+    pub status: EnvironmentStatus,
 }
 
 /// Structured data for package list

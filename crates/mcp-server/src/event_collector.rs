@@ -74,20 +74,27 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         })),
         PackageEvent::EnvironmentStatusChecked {
             environment_status, ..
-        } => Some(serde_json::json!({
-            "type": "environment_status",
-            "environment": &environment_status.environment_name,
-            "is_current": environment_status.is_current,
-            "install_command": &environment_status.install_command,
-            "check_command": &environment_status.check_command,
-            "dependencies": &environment_status.dependencies,
-            "recommends": &environment_status.recommends,
-            "status": environment_status.status.as_ref().map(|s| match s {
-                selfie::package::event::EnvironmentStatus::Installed => "installed",
-                selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
-                selfie::package::event::EnvironmentStatus::Unknown(_) => "unknown",
-            }),
-        })),
+        } => {
+            let dep_statuses = dep_statuses_to_json(&environment_status.dependency_statuses);
+            let rec_statuses = dep_statuses_to_json(&environment_status.recommend_statuses);
+
+            Some(serde_json::json!({
+                "type": "environment_status",
+                "environment": &environment_status.environment_name,
+                "is_current": environment_status.is_current,
+                "install_command": &environment_status.install_command,
+                "check_command": &environment_status.check_command,
+                "dependencies": &environment_status.dependencies,
+                "dependency_statuses": dep_statuses,
+                "recommends": &environment_status.recommends,
+                "recommend_statuses": rec_statuses,
+                "status": environment_status.status.as_ref().map(|s| match s {
+                    selfie::package::event::EnvironmentStatus::Installed => "installed",
+                    selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
+                    selfie::package::event::EnvironmentStatus::Unknown(_) => "unknown",
+                }),
+            }))
+        }
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
         PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
             "type": "package_list_item",
@@ -282,6 +289,26 @@ fn check_status_label(result: &CheckResult) -> &'static str {
         CheckResult::NoCheckCommand => "no check command defined",
         CheckResult::Error(_) => "error",
     }
+}
+
+fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
+    statuses
+        .iter()
+        .map(|dep| {
+            let (status, reason) = match &dep.status {
+                selfie::package::event::EnvironmentStatus::Installed => ("installed", None),
+                selfie::package::event::EnvironmentStatus::NotInstalled => ("not installed", None),
+                selfie::package::event::EnvironmentStatus::Unknown(reason) => {
+                    ("unknown", Some(reason.as_str()))
+                }
+            };
+            serde_json::json!({
+                "name": &dep.name,
+                "status": status,
+                "reason": reason,
+            })
+        })
+        .collect()
 }
 
 fn audit_details(result: &AuditResult) -> Value {
@@ -540,5 +567,64 @@ mod tests {
         assert_eq!(result.data["data"][0]["type"], "removal_dependency_info");
         assert_eq!(result.data["data"][0]["package"], "target-pkg");
         assert_eq!(result.data["data"][0]["dependent_packages"][0], "dep-a");
+    }
+
+    #[tokio::test]
+    async fn test_collect_environment_status_with_dependency_statuses() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, EnvironmentStatusData};
+
+        let events = vec![
+            PackageEvent::EnvironmentStatusChecked {
+                operation_info: test_op_info(),
+                environment_status: EnvironmentStatusData {
+                    environment_name: "macos".to_string(),
+                    is_current: true,
+                    install_command: "brew install git".to_string(),
+                    check_command: Some("which git".to_string()),
+                    dependencies: vec!["curl".to_string(), "wget".to_string()],
+                    dependency_statuses: vec![
+                        DependencyStatus {
+                            name: "curl".to_string(),
+                            status: EnvironmentStatus::Installed,
+                        },
+                        DependencyStatus {
+                            name: "wget".to_string(),
+                            status: EnvironmentStatus::NotInstalled,
+                        },
+                    ],
+                    recommends: vec![],
+                    recommend_statuses: vec![],
+                    status: Some(EnvironmentStatus::Installed),
+                },
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let stream: EventStream = Box::pin(stream::iter(events));
+        let result = collect_events(stream).await;
+
+        assert!(result.success);
+        let env_data = &result.data["data"][0];
+        assert_eq!(env_data["type"], "environment_status");
+        assert_eq!(env_data["environment"], "macos");
+        assert_eq!(env_data["status"], "installed");
+
+        // dependencies remains a stable Vec<String>
+        assert_eq!(env_data["dependencies"][0], "curl");
+        assert_eq!(env_data["dependencies"][1], "wget");
+
+        // dependency_statuses has the rich status objects
+        assert_eq!(env_data["dependency_statuses"][0]["name"], "curl");
+        assert_eq!(env_data["dependency_statuses"][0]["status"], "installed");
+        assert!(env_data["dependency_statuses"][0]["reason"].is_null());
+        assert_eq!(env_data["dependency_statuses"][1]["name"], "wget");
+        assert_eq!(
+            env_data["dependency_statuses"][1]["status"],
+            "not installed"
+        );
+        assert!(env_data["dependency_statuses"][1]["reason"].is_null());
     }
 }

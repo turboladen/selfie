@@ -14,8 +14,8 @@ use crate::{
     config::SelfieConfig,
     package::{
         event::{
-            EnvironmentStatus, EnvironmentStatusData, EventSender, OperationResult,
-            OperationSuccess, PackageInfoData,
+            CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
+            OperationResult, OperationSuccess, PackageInfoData,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -128,43 +128,53 @@ where
         }
     };
 
-    // Step 2: Check installation status for environments
-    progress
-        .next(sender, "Checking installation status for environments")
+    // Step 2: Check installation status for the current environment
+    progress.next(sender, "Checking installation status").await;
+
+    let current_env = config.environment();
+    if let Some(env_config) = package_blob.package.environments().get(current_env) {
+        let status =
+            get_installation_status(package_name, current_env, env_config, command_runner, token)
+                .await;
+        let max_concurrent = config.max_parallel_installations().get();
+        let dependency_statuses = check_dependency_statuses(
+            env_config.dependencies(),
+            current_env,
+            repo,
+            command_runner,
+            token,
+            max_concurrent,
+        )
+        .await;
+        let recommend_statuses = check_dependency_statuses(
+            env_config.recommends(),
+            current_env,
+            repo,
+            command_runner,
+            token,
+            max_concurrent,
+        )
         .await;
 
-    // Sort environments to show current environment first
-    let mut environments: Vec<_> = package_blob.package.environments().iter().collect();
-    environments.sort_by(|a, b| {
-        let a_is_current = a.0 == config.environment();
-        let b_is_current = b.0 == config.environment();
-
-        match (a_is_current, b_is_current) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.0.cmp(b.0),
-        }
-    });
-
-    for (env_name, env_config) in environments {
-        let is_current = env_name == config.environment();
-        let status = if is_current {
-            get_installation_status(env_config, command_runner, token).await
-        } else {
-            None
-        };
-
         let environment_status = EnvironmentStatusData {
-            environment_name: env_name.clone(),
-            is_current,
+            environment_name: current_env.to_string(),
+            is_current: true,
             install_command: env_config.install().to_string(),
             check_command: env_config.check().map(std::string::ToString::to_string),
             dependencies: env_config.dependencies().to_vec(),
+            dependency_statuses,
             recommends: env_config.recommends().to_vec(),
+            recommend_statuses,
             status,
         };
 
         sender.send_environment_status(environment_status).await;
+    } else {
+        sender
+            .send_warning(format!(
+                "Package '{package_name}' has no configuration for environment '{current_env}'"
+            ))
+            .await;
     }
 
     sender
@@ -178,39 +188,126 @@ where
     ))
 }
 
+async fn check_dependency_statuses<PR, CR>(
+    dependencies: &[String],
+    current_env: &str,
+    repo: &PR,
+    command_runner: &CR,
+    token: &CancellationToken,
+    max_concurrent: usize,
+) -> Vec<DependencyStatus>
+where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    if dependencies.is_empty() {
+        return vec![];
+    }
+
+    let mut results = Vec::with_capacity(dependencies.len());
+    for chunk in dependencies.chunks(max_concurrent) {
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|dep_name| {
+                check_single_dependency(dep_name, current_env, repo, command_runner, token)
+            })
+            .collect();
+        results.extend(futures::future::join_all(futures).await);
+    }
+    results
+}
+
+async fn check_single_dependency<PR, CR>(
+    dep_name: &str,
+    current_env: &str,
+    repo: &PR,
+    command_runner: &CR,
+    token: &CancellationToken,
+) -> DependencyStatus
+where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    let dep_package = match repo.get_package(dep_name) {
+        Ok(pkg) => pkg,
+        Err(err) => {
+            return DependencyStatus {
+                name: dep_name.to_string(),
+                status: EnvironmentStatus::Unknown(format!("{err}")),
+            };
+        }
+    };
+
+    let Some(env_config) = dep_package.package.environments().get(current_env) else {
+        return DependencyStatus {
+            name: dep_name.to_string(),
+            status: EnvironmentStatus::Unknown("not in current environment".to_string()),
+        };
+    };
+
+    let check_cmd = env_config.check().map(str::to_string);
+    let result = super::check::execute_check_command_quiet(
+        dep_name,
+        current_env,
+        check_cmd.as_deref(),
+        command_runner,
+        token,
+    )
+    .await;
+
+    DependencyStatus {
+        name: dep_name.to_string(),
+        status: check_result_to_status(result.result),
+    }
+}
+
+fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
+    match result {
+        CheckResult::Success { .. } => EnvironmentStatus::Installed,
+        CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
+        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
+        CheckResult::CommandNotFound => {
+            EnvironmentStatus::Unknown("check command not found".to_string())
+        }
+        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
+    }
+}
+
 async fn get_installation_status(
+    package_name: &str,
+    environment: &str,
     env_config: &crate::package::EnvironmentConfig,
     command_runner: &impl CommandRunner,
     token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
-    if let Some(check_cmd) = env_config.check() {
-        if let Ok(output) = command_runner.execute(check_cmd, token).await {
-            if output.is_success() {
-                Some(EnvironmentStatus::Installed)
-            } else {
-                Some(EnvironmentStatus::NotInstalled)
-            }
-        } else {
-            Some(EnvironmentStatus::Unknown("check failed".to_string()))
-        }
-    } else {
-        Some(EnvironmentStatus::Unknown("no check command".to_string()))
-    }
+    let check_cmd = env_config.check().map(str::to_string);
+    let result = super::check::execute_check_command_quiet(
+        package_name,
+        environment,
+        check_cmd.as_deref(),
+        command_runner,
+        token,
+    )
+    .await;
+    Some(check_result_to_status(result.result))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        commands::runner::{CommandOutput, MockCommandRunner},
         config::SelfieConfigBuilder,
         package::{
-            PackageBuilder,
+            GetPackage, PackageBuilder,
             event::{PackageEvent, metadata::OperationType},
             git::{GitDirectoryStatus, GitFileStatus, GitStatusError, MockGitStatusProvider},
-            port::MockPackageRepository,
+            port::{MockPackageRepository, PackageError},
         },
     };
     use std::collections::HashMap;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Output;
     use tokio::sync::mpsc;
 
     fn test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
@@ -347,5 +444,459 @@ mod tests {
         }
         assert!(found_info, "Expected PackageInfoLoaded event");
         assert!(found_warning, "Expected Warning event for git failure");
+    }
+
+    fn mock_command_output(success: bool) -> CommandOutput {
+        let exit_code = if success { 0 } else { 1 };
+        CommandOutput {
+            output: Output {
+                status: std::process::ExitStatus::from_raw(exit_code * 256),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            duration: std::time::Duration::from_millis(10),
+        }
+    }
+
+    fn status_test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
+        let (tx, rx) = mpsc::channel(256);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageStatus,
+            "test-pkg".to_string(),
+            "test".to_string(),
+            crate::package::event::OperationContext::default(),
+        );
+        (sender, rx)
+    }
+
+    #[tokio::test]
+    async fn test_status_checks_dependency_statuses() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let dep_path = temp_dir.path().join("dep-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .dependencies(vec!["dep-pkg"])
+            })
+            .path(&pkg_path)
+            .build();
+
+        let dep_package = PackageBuilder::default()
+            .name("dep-pkg")
+            .environment("test", |b| {
+                b.install("echo install-dep").check_some("echo check-dep")
+            })
+            .path(&dep_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        let dep_clone = dep_package.clone();
+        mock_repo.expect_get_package().returning(move |name: &str| {
+            if name == "test-pkg" {
+                Ok(GetPackage::from_existing(
+                    pkg_clone.clone(),
+                    pkg_path.clone(),
+                ))
+            } else if name == "dep-pkg" {
+                Ok(GetPackage::from_existing(
+                    dep_clone.clone(),
+                    dep_path.clone(),
+                ))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: temp_dir.path().to_path_buf(),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found_env_status = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert_eq!(environment_status.dependency_statuses.len(), 1);
+                assert_eq!(environment_status.dependency_statuses[0].name, "dep-pkg");
+                assert!(matches!(
+                    environment_status.dependency_statuses[0].status,
+                    EnvironmentStatus::Installed
+                ));
+                found_env_status = true;
+            }
+        }
+        assert!(found_env_status, "Expected EnvironmentStatusChecked event");
+    }
+
+    #[tokio::test]
+    async fn test_status_dep_not_found() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .dependencies(vec!["missing-dep"])
+            })
+            .path(&pkg_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        mock_repo.expect_get_package().returning(move |name: &str| {
+            if name == "test-pkg" {
+                Ok(GetPackage::from_existing(
+                    pkg_clone.clone(),
+                    pkg_path.clone(),
+                ))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: temp_dir.path().to_path_buf(),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert_eq!(environment_status.dependency_statuses.len(), 1);
+                assert_eq!(
+                    environment_status.dependency_statuses[0].name,
+                    "missing-dep"
+                );
+                assert!(matches!(
+                    &environment_status.dependency_statuses[0].status,
+                    EnvironmentStatus::Unknown(reason) if reason.contains("not found")
+                ));
+                found = true;
+            }
+        }
+        assert!(found, "Expected EnvironmentStatusChecked event");
+    }
+
+    #[tokio::test]
+    async fn test_status_dep_not_in_current_env() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let dep_path = temp_dir.path().join("dep-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .dependencies(vec!["dep-pkg"])
+            })
+            .path(&pkg_path)
+            .build();
+
+        // dep-pkg only has "other-env", not "test"
+        let dep_package = PackageBuilder::default()
+            .name("dep-pkg")
+            .environment("other-env", |b| b.install("echo install-dep"))
+            .path(&dep_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        let dep_clone = dep_package.clone();
+        mock_repo.expect_get_package().returning(move |name: &str| {
+            if name == "test-pkg" {
+                Ok(GetPackage::from_existing(
+                    pkg_clone.clone(),
+                    pkg_path.clone(),
+                ))
+            } else if name == "dep-pkg" {
+                Ok(GetPackage::from_existing(
+                    dep_clone.clone(),
+                    dep_path.clone(),
+                ))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: temp_dir.path().to_path_buf(),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert_eq!(environment_status.dependency_statuses.len(), 1);
+                assert!(matches!(
+                    &environment_status.dependency_statuses[0].status,
+                    EnvironmentStatus::Unknown(reason) if reason.contains("not in current environment")
+                ));
+                found = true;
+            }
+        }
+        assert!(found, "Expected EnvironmentStatusChecked event");
+    }
+
+    #[tokio::test]
+    async fn test_status_dep_not_installed() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let dep_path = temp_dir.path().join("dep-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .dependencies(vec!["dep-pkg"])
+            })
+            .path(&pkg_path)
+            .build();
+
+        let dep_package = PackageBuilder::default()
+            .name("dep-pkg")
+            .environment("test", |b| {
+                b.install("echo install-dep").check_some("false")
+            })
+            .path(&dep_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        let dep_clone = dep_package.clone();
+        mock_repo.expect_get_package().returning(move |name: &str| {
+            if name == "test-pkg" {
+                Ok(GetPackage::from_existing(
+                    pkg_clone.clone(),
+                    pkg_path.clone(),
+                ))
+            } else if name == "dep-pkg" {
+                Ok(GetPackage::from_existing(
+                    dep_clone.clone(),
+                    dep_path.clone(),
+                ))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: temp_dir.path().to_path_buf(),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        // Main package check succeeds, dep check fails
+        mock_runner.expect_execute().returning(|cmd, _| {
+            let success = cmd != "false";
+            Box::pin(async move { Ok(mock_command_output(success)) })
+        });
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert_eq!(environment_status.dependency_statuses.len(), 1);
+                assert!(matches!(
+                    environment_status.dependency_statuses[0].status,
+                    EnvironmentStatus::NotInstalled
+                ));
+                found = true;
+            }
+        }
+        assert!(found, "Expected EnvironmentStatusChecked event");
+    }
+
+    #[tokio::test]
+    async fn test_status_no_deps_empty_statuses() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install").check_some("echo check")
+            })
+            .path(&pkg_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        mock_repo.expect_get_package().returning(move |_| {
+            Ok(GetPackage::from_existing(
+                pkg_clone.clone(),
+                pkg_path.clone(),
+            ))
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert!(environment_status.dependency_statuses.is_empty());
+                found = true;
+            }
+        }
+        assert!(found, "Expected EnvironmentStatusChecked event");
     }
 }
