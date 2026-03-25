@@ -1,4 +1,7 @@
-use selfie::package::{event::PackageEvent, service::PackageService};
+use selfie::package::{
+    event::{OperationResult, PackageEvent},
+    service::PackageService,
+};
 
 use crate::{
     commands::spec::info::create_environment_table, config::CliConfig,
@@ -29,7 +32,7 @@ pub(crate) async fn handle_status(
             }
             PackageEvent::Progress { .. } => true,
             PackageEvent::Completed {
-                result: selfie::package::event::OperationResult::Success(_),
+                result: OperationResult::Success(_),
                 ..
             } => true,
             PackageEvent::Completed { .. } => false,

@@ -2,7 +2,8 @@ use comfy_table::Table;
 use console::style;
 use selfie::package::{
     event::{
-        DependencyStatus, EnvironmentStatus, EnvironmentStatusData, PackageEvent, PackageInfoData,
+        DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
+        PackageInfoData,
     },
     service::SpecService,
 };
@@ -49,7 +50,7 @@ pub(crate) async fn handle_info(
                     true // Handled
                 }
                 PackageEvent::Completed {
-                    result: selfie::package::event::OperationResult::Success(_),
+                    result: OperationResult::Success(_),
                     ..
                 } => true,
                 PackageEvent::Completed { .. } => false,
