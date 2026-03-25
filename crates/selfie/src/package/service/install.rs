@@ -536,38 +536,49 @@ async fn install_recommends<PR, CR>(
         ))
         .await;
 
-    // Recommends use a separate progress tracker so they don't overflow
-    // the parent operation's step count. Each package uses ~7 steps in
-    // install_single_package (fetch, env check, pre-install check, get_cmd,
-    // execute, verify, complete).
-    let rec_total_steps = 7 * recommends.len();
-    let mut rec_progress = ProgressTracker::new(rec_total_steps);
+    // Install recommends concurrently in chunks, bounded by max_concurrency.
+    // Each recommend gets its own ProgressTracker since they run in parallel.
+    let max_concurrent = config.max_concurrency().get();
 
-    for recommend_name in &recommends {
+    for chunk in recommends.chunks(max_concurrent) {
         if token.is_cancelled() {
             break;
         }
 
-        sender.send_recommend_started(recommend_name).await;
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|recommend_name| async move {
+                if token.is_cancelled() {
+                    return;
+                }
 
-        match install_single_recommend(
-            recommend_name,
-            repo,
-            config,
-            command_runner,
-            sender,
-            &mut rec_progress,
-            token,
-        )
-        .await
-        {
-            Ok(()) => {
-                sender.send_recommend_succeeded(recommend_name).await;
-            }
-            Err(error) => {
-                sender.send_recommend_failed(recommend_name, &error).await;
-            }
-        }
+                sender.send_recommend_started(recommend_name).await;
+
+                // Each recommend gets its own progress tracker (7 steps per package)
+                let mut rec_progress = ProgressTracker::new(7);
+
+                match install_single_recommend(
+                    recommend_name,
+                    repo,
+                    config,
+                    command_runner,
+                    sender,
+                    &mut rec_progress,
+                    token,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        sender.send_recommend_succeeded(recommend_name).await;
+                    }
+                    Err(error) => {
+                        sender.send_recommend_failed(recommend_name, &error).await;
+                    }
+                }
+            })
+            .collect();
+
+        futures::future::join_all(futures).await;
     }
 }
 

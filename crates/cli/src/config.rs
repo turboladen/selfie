@@ -346,7 +346,7 @@ mod tests {
         let config = args.build_cli_config(selfie_config, CliSection::default());
         assert_eq!(config.command_timeout().as_secs(), 120);
         assert!(!config.selfie_config().stop_on_error());
-        assert_eq!(config.selfie_config().max_parallel_installations().get(), 8);
+        assert_eq!(config.selfie_config().max_concurrency().get(), 8);
     }
 
     #[test]

@@ -301,7 +301,7 @@ mod tests {
             package_directory: "/test/packages"
             command_timeout: 120
             stop_on_error: false
-            max_parallel_installations: 8
+            max_concurrency: 8
         "#;
 
             fs.mock_config_file(config_dir, config_yaml);
@@ -317,7 +317,7 @@ mod tests {
             // Check extended settings
             assert_eq!(config.command_timeout, 120.try_into().unwrap());
             assert!(!config.stop_on_error);
-            assert_eq!(config.max_parallel_installations, 8.try_into().unwrap());
+            assert_eq!(config.max_concurrency, 8.try_into().unwrap());
         }
 
         #[test]
@@ -448,8 +448,8 @@ mod tests {
             // Check command_timeout has default value (60)
             assert_eq!(config.command_timeout.get(), 60);
 
-            // Check max_parallel_installations has sensible default value
-            assert!(config.max_parallel_installations.get() > 0);
+            // Check max_concurrency has sensible default value
+            assert!(config.max_concurrency.get() > 0);
         }
 
         #[test]

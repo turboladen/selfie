@@ -42,7 +42,7 @@ pub struct SelfieConfig {
     pub(crate) stop_on_error: bool,
 
     #[serde(default = "default_max_parallel")]
-    pub(crate) max_parallel_installations: NonZeroUsize,
+    pub(crate) max_concurrency: NonZeroUsize,
 }
 
 /// Returns the default command timeout of 60 seconds.
@@ -54,9 +54,9 @@ fn default_stop_on_error() -> bool {
     true
 }
 
-/// Returns the default max parallel installations, using the CPU count or falling back to 4.
+/// Returns the default max concurrency, using available parallelism or falling back to 4.
 fn default_max_parallel() -> NonZeroUsize {
-    NonZeroUsize::new(num_cpus::get()).unwrap_or(const { NonZeroUsize::new(4).unwrap() })
+    std::thread::available_parallelism().unwrap_or(const { NonZeroUsize::new(4).unwrap() })
 }
 
 impl SelfieConfig {
@@ -104,10 +104,10 @@ impl SelfieConfig {
         Duration::from_secs(self.command_timeout.into())
     }
 
-    /// Get the maximum number of parallel installations allowed
+    /// Get the maximum concurrency for bulk operations
     #[must_use]
-    pub fn max_parallel_installations(&self) -> NonZeroUsize {
-        self.max_parallel_installations
+    pub fn max_concurrency(&self) -> NonZeroUsize {
+        self.max_concurrency
     }
 
     /// Check if operations should stop on first error
@@ -212,7 +212,7 @@ impl SelfieConfigBuilder {
             dotfiles_directory: self.dotfiles_directory,
             state_directory: self.state_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
-            max_parallel_installations: self.max_parallel.unwrap_or(default_max_parallel()),
+            max_concurrency: self.max_parallel.unwrap_or(default_max_parallel()),
             stop_on_error: self.stop_on_error.unwrap_or(STOP_ON_ERROR_DEFAULT),
         }
     }
@@ -235,10 +235,7 @@ mod tests {
         assert_eq!(config.environment, "test-env");
         assert_eq!(config.package_directory, PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout(), Duration::from_secs(120));
-        assert_eq!(
-            config.max_parallel_installations,
-            NonZeroUsize::new(8).unwrap()
-        );
+        assert_eq!(config.max_concurrency, NonZeroUsize::new(8).unwrap());
     }
 
     #[test]
@@ -255,7 +252,7 @@ mod tests {
         assert_eq!(config.environment(), "test-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout(), Duration::from_secs(120));
-        assert_eq!(config.max_parallel_installations().get(), 8);
+        assert_eq!(config.max_concurrency().get(), 8);
         assert!(!config.stop_on_error());
     }
 
@@ -287,7 +284,7 @@ mod tests {
         assert_eq!(config.environment(), "test-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout().as_secs(), 60);
-        assert!(config.max_parallel_installations().get() > 0); // Should be based on CPUs or default
+        assert!(config.max_concurrency().get() > 0); // Should be based on CPUs or default
         assert_eq!(config.stop_on_error(), STOP_ON_ERROR_DEFAULT);
     }
 
@@ -312,7 +309,7 @@ mod tests {
             package_directory: "/opt/packages"
             command_timeout: 90
             stop_on_error: false
-            max_parallel_installations: 4
+            max_concurrency: 4
         "#;
 
         let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
@@ -320,7 +317,7 @@ mod tests {
         assert_eq!(config.environment, "prod");
         assert_eq!(config.package_directory, PathBuf::from("/opt/packages"));
         assert_eq!(config.command_timeout.get(), 90);
-        assert_eq!(config.max_parallel_installations.get(), 4);
+        assert_eq!(config.max_concurrency.get(), 4);
         assert!(!config.stop_on_error);
     }
 
@@ -340,7 +337,7 @@ mod tests {
 
         // Default values
         assert_eq!(config.command_timeout.get(), 60); // Default
-        assert!(config.max_parallel_installations.get() > 0); // Default based on CPUs
+        assert!(config.max_concurrency.get() > 0); // Default based on CPUs
         assert!(config.stop_on_error); // Default
     }
 

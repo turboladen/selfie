@@ -18,7 +18,7 @@ environment: macos
 package_directory: ~/.config/selfie/packages
 command_timeout: 60
 stop_on_error: true
-max_parallel_installations: 4
+max_concurrency: 4
 
 # Frontend-specific sections (each frontend reads only its own)
 cli:
@@ -48,7 +48,7 @@ pub struct SelfieConfig {
     stop_on_error: bool,
 
     #[serde(default = "default_max_parallel")]
-    max_parallel_installations: NonZeroUsize,
+    max_concurrency: NonZeroUsize,
 }
 ```
 
@@ -92,8 +92,8 @@ Methods:
 - `verbose(&self) -> bool`
 - `use_colors(&self) -> bool`
 - Delegate all core getters: `environment()`, `package_directory()`, `command_timeout()`,
-  `stop_on_error()`, `max_parallel_installations()` — these are mandatory, not optional, so CLI
-  command handlers can change `&AppConfig` to `&CliConfig` with minimal diff
+  `stop_on_error()`, `max_concurrency()` — these are mandatory, not optional, so CLI command
+  handlers can change `&AppConfig` to `&CliConfig` with minimal diff
 
 ## Config Loading
 

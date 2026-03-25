@@ -97,88 +97,87 @@ where
         .map(|p| p.name().to_string())
         .collect();
 
-    // Update total steps: 1 (loading) + 3 per package (fetch + env check + audit)
-    let total_steps = 1 + package_names.len() * 3;
-    progress.set_total_steps(total_steps);
+    let total_packages = package_names.len();
+    let max_concurrent = config.max_concurrency().get();
 
-    // Step 2+: Audit each package sequentially
-    for package_name in &package_names {
+    // Audit packages concurrently in chunks, each with its own progress tracker.
+    for chunk in package_names.chunks(max_concurrent) {
         if token.is_cancelled() {
             return OperationResult::Failure("Operation cancelled".into());
         }
 
-        let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
-            Ok(pkg) => pkg,
-            Err(_) => {
-                // Send error audit result but continue with other packages
-                let audit_result = AuditResultData {
-                    package_name: package_name.to_string(),
-                    environment: config.environment().to_string(),
-                    audit_command: None,
-                    result: AuditResult::Error("Failed to load package".to_string()),
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|package_name| async move {
+                if token.is_cancelled() {
+                    return;
+                }
+
+                // Each concurrent audit gets its own progress tracker (3 steps)
+                let mut pkg_progress = ProgressTracker::new(3);
+
+                let package_blob =
+                    match steps::fetch_package(repo, package_name, sender, &mut pkg_progress).await
+                    {
+                        Ok(pkg) => pkg,
+                        Err(_) => {
+                            let audit_result = AuditResultData {
+                                package_name: package_name.to_string(),
+                                environment: config.environment().to_string(),
+                                audit_command: None,
+                                result: AuditResult::Error("Failed to load package".to_string()),
+                            };
+                            sender.send_audit_result(audit_result).await;
+                            return;
+                        }
+                    };
+
+                let (audit_command, dependencies) = match get_audit_command(
+                    package_name,
+                    &package_blob,
+                    config.environment(),
+                    sender,
+                    &mut pkg_progress,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let audit_result = AuditResultData {
+                            package_name: package_name.to_string(),
+                            environment: config.environment().to_string(),
+                            audit_command: None,
+                            result: AuditResult::Error(format!(
+                                "Environment '{}' not configured for package '{package_name}'",
+                                config.environment()
+                            )),
+                        };
+                        sender.send_audit_result(audit_result).await;
+                        return;
+                    }
                 };
+
+                let audit_result = execute_audit_command(
+                    package_name,
+                    config.environment(),
+                    audit_command.as_deref(),
+                    &dependencies,
+                    command_runner,
+                    sender,
+                    &mut pkg_progress,
+                    token,
+                )
+                .await;
+
                 sender.send_audit_result(audit_result).await;
-                // Skip remaining steps for this package
-                progress
-                    .next(
-                        sender,
-                        format!("Skipping environment check for {package_name}"),
-                    )
-                    .await;
-                progress
-                    .next(sender, format!("Skipping audit for {package_name}"))
-                    .await;
-                continue;
-            }
-        };
+            })
+            .collect();
 
-        let (audit_command, dependencies) = match get_audit_command(
-            package_name,
-            &package_blob,
-            config.environment(),
-            sender,
-            progress,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                // Environment not found for this package — report as error, not NoAuditCommand
-                let audit_result = AuditResultData {
-                    package_name: package_name.to_string(),
-                    environment: config.environment().to_string(),
-                    audit_command: None,
-                    result: AuditResult::Error(format!(
-                        "Environment '{}' not configured for package '{package_name}'",
-                        config.environment()
-                    )),
-                };
-                sender.send_audit_result(audit_result).await;
-                progress
-                    .next(sender, format!("Skipping audit for {package_name}"))
-                    .await;
-                continue;
-            }
-        };
-
-        let audit_result = execute_audit_command(
-            package_name,
-            config.environment(),
-            audit_command.as_deref(),
-            &dependencies,
-            command_runner,
-            sender,
-            progress,
-            token,
-        )
-        .await;
-
-        sender.send_audit_result(audit_result).await;
+        futures::future::join_all(futures).await;
     }
 
     OperationResult::Success(OperationSuccess::Generic(format!(
-        "Audit completed for {} package(s)",
-        package_names.len()
+        "Audit completed for {total_packages} package(s)",
     )))
 }
 
