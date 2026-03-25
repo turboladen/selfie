@@ -149,7 +149,9 @@ where
     for (env_name, env_config) in environments {
         let is_current = env_name == config.environment();
         let (status, dependency_statuses) = if is_current {
-            let status = get_installation_status(env_config, command_runner, token).await;
+            let status =
+                get_installation_status(package_name, env_name, env_config, command_runner, token)
+                    .await;
             let dep_statuses = check_dependency_statuses(
                 env_config.dependencies(),
                 config.environment(),
@@ -251,38 +253,39 @@ where
 
     DependencyStatus {
         name: dep_name.to_string(),
-        status: match result.result {
-            CheckResult::Success { .. } => EnvironmentStatus::Installed,
-            CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-            CheckResult::NoCheckCommand => {
-                EnvironmentStatus::Unknown("no check command".to_string())
-            }
-            CheckResult::CommandNotFound => {
-                EnvironmentStatus::Unknown("check command not found".to_string())
-            }
-            CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
-        },
+        status: check_result_to_status(result.result),
+    }
+}
+
+fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
+    match result {
+        CheckResult::Success { .. } => EnvironmentStatus::Installed,
+        CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
+        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
+        CheckResult::CommandNotFound => {
+            EnvironmentStatus::Unknown("check command not found".to_string())
+        }
+        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
     }
 }
 
 async fn get_installation_status(
+    package_name: &str,
+    environment: &str,
     env_config: &crate::package::EnvironmentConfig,
     command_runner: &impl CommandRunner,
     token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
-    if let Some(check_cmd) = env_config.check() {
-        if let Ok(output) = command_runner.execute(check_cmd, token).await {
-            if output.is_success() {
-                Some(EnvironmentStatus::Installed)
-            } else {
-                Some(EnvironmentStatus::NotInstalled)
-            }
-        } else {
-            Some(EnvironmentStatus::Unknown("check failed".to_string()))
-        }
-    } else {
-        Some(EnvironmentStatus::Unknown("no check command".to_string()))
-    }
+    let check_cmd = env_config.check().map(str::to_string);
+    let result = super::check::execute_check_command_quiet(
+        package_name,
+        environment,
+        check_cmd.as_deref(),
+        command_runner,
+        token,
+    )
+    .await;
+    Some(check_result_to_status(result.result))
 }
 
 #[cfg(test)]
