@@ -154,7 +154,7 @@ fn validate_optional_directory(field_name: &str, path: &Path) -> Vec<ValidationI
 }
 
 /// Validate a directory path: check it's absolute after tilde expansion,
-/// and warn if it doesn't exist on disk.
+/// check it exists and is a directory (not a file).
 fn validate_directory_path(field_name: &str, path: &Path) -> Option<ValidationIssue> {
     let path_str = path.to_string_lossy();
     let expanded = shellexpand::tilde(&path_str);
@@ -166,6 +166,18 @@ fn validate_directory_path(field_name: &str, path: &Path) -> Option<ValidationIs
             field_name,
             &format!("The `{field_name}` path is relative and cannot be resolved"),
             Some("Provide an absolute path or use ~ for the home directory"),
+        ));
+    }
+
+    if expanded_path.exists() && !expanded_path.is_dir() {
+        return Some(ValidationIssue::error(
+            ValidationErrorCategory::PathFormat,
+            field_name,
+            &format!(
+                "The path for `{field_name}` is not a directory: {}",
+                expanded_path.display()
+            ),
+            Some("Provide a path to a directory, not a file"),
         ));
     }
 
@@ -357,6 +369,30 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
         assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    #[test]
+    fn file_path_as_package_directory_produces_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir.txt");
+        std::fs::write(&file_path, "").unwrap();
+
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory(&file_path)
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "package_directory")
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
+        assert!(errors[0].message.contains("not a directory"));
     }
 
     // --- validate_dotfiles_directory tests ---

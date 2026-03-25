@@ -50,13 +50,15 @@ package_directory: "relative/path"
 
 #[test]
 fn test_validate_config_with_nonexistent_directory_shows_warning() {
-    // Config with valid but nonexistent package directory should succeed with warning
-    let yaml = r#"
-environment: "test-env"
-package_directory: "/tmp/selfie-cli-test-nonexistent-dir"
-"#;
+    // Use a guaranteed-nonexistent path under a fresh temp dir
+    let pkg_tmp = tempfile::tempdir().unwrap();
+    let nonexistent = pkg_tmp.path().join("does-not-exist");
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"",
+        nonexistent.display()
+    );
 
-    let temp_dir = setup_test_config(yaml);
+    let temp_dir = setup_test_config(&yaml);
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["config", "validate"]);
 
