@@ -32,7 +32,7 @@ use crate::completers::complete_package_names;
 /// that can be used with any subcommand. Global options override values
 /// from the configuration file when provided.
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(name = "selfie", author, version, about, long_about = None)]
 pub struct ClapCli {
     /// Override the target environment from configuration file
     ///
