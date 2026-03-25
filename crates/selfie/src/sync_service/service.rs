@@ -542,7 +542,7 @@ fn validate_changed_packages(
                 category: format!("{:?}", i.category()),
                 field: i.field().to_string(),
                 message: i.message().to_string(),
-                location: None,
+                location: i.location().map(str::to_string),
             })
             .collect();
 

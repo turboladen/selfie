@@ -1,8 +1,19 @@
 use std::path::PathBuf;
 
+use serde_saphyr::Location;
+
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::Package;
+
+/// Format a `Location` as a human-readable string, returning `None` for unknown locations.
+fn location_string(loc: &Location) -> Option<String> {
+    if *loc == Location::UNKNOWN {
+        None
+    } else {
+        Some(format!("line {}, column {}", loc.line(), loc.column()))
+    }
+}
 
 /// Results of a package validation
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -62,7 +73,7 @@ impl Package {
         issues.extend(self.validate_dotfiles());
 
         ValidationResult {
-            package_name: self.name.clone(),
+            package_name: self.name.value.clone(),
             package_path: Some(self.path.clone()),
             issues: issues.into(),
         }
@@ -161,19 +172,23 @@ impl Package {
                     .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         }
 
-        if self.name.is_empty() {
-            return Err(ValidationIssue::error(
+        let name_loc = location_string(&self.name.defined);
+
+        if self.name.value.is_empty() {
+            return Err(ValidationIssue::error_at(
                 ValidationErrorCategory::RequiredField,
                 "name",
                 "Package name is required",
                 Some("Add 'name: your-package-name' to the package file."),
+                name_loc,
             ));
-        } else if !is_valid_package_name(&self.name) {
-            return Err(ValidationIssue::error(
+        } else if !is_valid_package_name(&self.name.value) {
+            return Err(ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 "name",
                 "Package name contains invalid characters",
                 Some("Use only alphanumeric characters, hyphens, and underscores."),
+                name_loc,
             ));
         }
 
@@ -189,12 +204,13 @@ impl Package {
     ///
     /// Returns a `ValidationIssue` error if no environments are defined.
     fn validate_environments_exists(&self) -> Result<(), ValidationIssue> {
-        if self.environments.is_empty() {
-            Err(ValidationIssue::error(
+        if self.environments.value.is_empty() {
+            Err(ValidationIssue::error_at(
                 ValidationErrorCategory::RequiredField,
                 "environments",
                 "At least one environment must be defined",
                 Some("Add an 'environments' section with at least one environment."),
+                location_string(&self.environments.defined),
             ))
         } else {
             Ok(())
@@ -215,7 +231,7 @@ impl Package {
         let mut issues = Vec::new();
 
         // Check if current environment is configured
-        if !current_env.is_empty() && !self.environments.contains_key(current_env) {
+        if !current_env.is_empty() && !self.environments.value.contains_key(current_env) {
             issues.push(ValidationIssue::warning(
                 ValidationErrorCategory::Environment,
                 "environments",
@@ -227,7 +243,7 @@ impl Package {
         }
 
         // Validate each environment's required fields
-        for (env_name, env_config) in &self.environments {
+        for (env_name, env_config) in &self.environments.value {
             if env_config.install.is_empty() {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::RequiredField,
@@ -258,12 +274,14 @@ impl Package {
         let mut issues = Vec::new();
 
         // Check homepage URL if present
-        if let Some(homepage) = &self.homepage {
+        if let Some(spanned_homepage) = &self.homepage {
+            let homepage = &spanned_homepage.value;
+            let hp_loc = location_string(&spanned_homepage.defined);
             match url::Url::parse(homepage) {
                 Ok(url) => {
                     // Check scheme
                     if url.scheme() != "http" && url.scheme() != "https" {
-                        issues.push(ValidationIssue::warning(
+                        issues.push(ValidationIssue::warning_at(
                             ValidationErrorCategory::UrlFormat,
                             "homepage",
                             &format!(
@@ -271,15 +289,17 @@ impl Package {
                                 url.scheme()
                             ),
                             Some("Use https:// prefix for the URL."),
+                            hp_loc.clone(),
                         ));
                     }
                 }
                 Err(err) => {
-                    issues.push(ValidationIssue::error(
+                    issues.push(ValidationIssue::error_at(
                         ValidationErrorCategory::UrlFormat,
                         "homepage",
                         &format!("Invalid URL format: {err}"),
                         Some("Provide a valid URL with http:// or https:// prefix."),
+                        hp_loc.clone(),
                     ));
                 }
             }
@@ -289,7 +309,7 @@ impl Package {
     }
     /// Basic command syntax validation that doesn't require external dependencies
     pub(crate) fn validate_command_syntax(&self) -> Vec<ValidationIssue> {
-        self.validate_command_syntax_for(self.environments.keys().map(String::as_str))
+        self.validate_command_syntax_for(self.environments.value.keys().map(String::as_str))
     }
 
     /// Validate command syntax for only the specified environments
@@ -300,7 +320,7 @@ impl Package {
         let mut issues = Vec::new();
 
         for env_name in env_names {
-            let Some(env_config) = self.environments.get(env_name) else {
+            let Some(env_config) = self.environments.value.get(env_name) else {
                 continue;
             };
 
@@ -537,6 +557,7 @@ mod tests {
 
         package
             .environments
+            .value
             .insert("test-env".to_string(), env_config);
 
         let issues = package.validate_environments_contents("test-env");

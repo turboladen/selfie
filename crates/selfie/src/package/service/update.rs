@@ -9,6 +9,7 @@ use crate::{
         event::{EventSender, OperationResult, OperationSuccess, PackageUpdateFields},
         port::PackageRepository,
         service::ProgressTracker,
+        unspanned,
     },
 };
 
@@ -39,11 +40,11 @@ where
 
     // Apply top-level fields
     if let Some(description) = fields.description {
-        package.description = Some(description);
+        package.description = Some(unspanned(description));
     }
 
     if let Some(homepage) = fields.homepage {
-        package.homepage = Some(homepage);
+        package.homepage = Some(unspanned(homepage));
     }
 
     // Check if environment-scoped fields are present without an environment target
@@ -66,7 +67,7 @@ where
 
     // Apply environment-scoped fields
     if let Some(ref env_name) = fields.environment {
-        if let Some(env_config) = package.environments.get_mut(env_name) {
+        if let Some(env_config) = package.environments.value.get_mut(env_name) {
             modified_envs.push(env_name.clone());
             if let Some(install) = fields.install {
                 env_config.install = install;
@@ -92,7 +93,7 @@ where
 
     // Handle add_environment
     if let Some(add_env) = fields.add_environment {
-        if package.environments.contains_key(&add_env.name) {
+        if package.environments.value.contains_key(&add_env.name) {
             return OperationResult::Failure(
                 format!(
                     "Environment '{}' already exists in package '{package_name}'",
@@ -103,7 +104,7 @@ where
         }
 
         modified_envs.push(add_env.name.clone());
-        package.environments.insert(
+        package.environments.value.insert(
             add_env.name,
             EnvironmentConfig::new(
                 add_env.install,
@@ -117,7 +118,7 @@ where
 
     // Handle remove_environment
     if let Some(ref remove_env) = fields.remove_environment
-        && package.environments.remove(remove_env).is_none()
+        && package.environments.value.remove(remove_env).is_none()
     {
         return OperationResult::Failure(
             format!("Environment '{remove_env}' not found in package '{package_name}'").into(),

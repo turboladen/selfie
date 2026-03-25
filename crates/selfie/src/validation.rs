@@ -114,6 +114,9 @@ pub struct ValidationIssue {
     /// Suggested fix for the issue
     ///
     pub(crate) suggestion: Option<String>,
+
+    /// Source location in the YAML file (e.g., `"line 5, column 3"`)
+    pub(crate) location: Option<String>,
 }
 
 impl ValidationIssue {
@@ -131,6 +134,25 @@ impl ValidationIssue {
             message: message.to_string(),
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
+            location: None,
+        }
+    }
+
+    /// Create a new validation error with source location
+    pub(super) fn error_at(
+        category: ValidationErrorCategory,
+        field: &str,
+        message: &str,
+        suggestion: Option<&str>,
+        location: Option<String>,
+    ) -> Self {
+        Self {
+            category,
+            field: field.to_string(),
+            message: message.to_string(),
+            level: ValidationLevel::Error,
+            suggestion: suggestion.map(std::string::ToString::to_string),
+            location,
         }
     }
 
@@ -147,6 +169,25 @@ impl ValidationIssue {
             message: message.to_string(),
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
+            location: None,
+        }
+    }
+
+    /// Create a new validation warning with source location
+    pub(super) fn warning_at(
+        category: ValidationErrorCategory,
+        field: &str,
+        message: &str,
+        suggestion: Option<&str>,
+        location: Option<String>,
+    ) -> Self {
+        Self {
+            category,
+            field: field.to_string(),
+            message: message.to_string(),
+            level: ValidationLevel::Warning,
+            suggestion: suggestion.map(std::string::ToString::to_string),
+            location,
         }
     }
 
@@ -173,6 +214,11 @@ impl ValidationIssue {
     #[must_use]
     pub fn suggestion(&self) -> Option<&String> {
         self.suggestion.as_ref()
+    }
+
+    #[must_use]
+    pub fn location(&self) -> Option<&str> {
+        self.location.as_deref()
     }
 }
 
