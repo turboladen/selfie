@@ -78,7 +78,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("exists, but cannot be expanded"));
+        .stderr(predicate::str::contains("relative and cannot be resolved"));
 }
 
 // =============================================================================

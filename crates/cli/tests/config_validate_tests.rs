@@ -1,16 +1,11 @@
 pub mod common;
 
-use common::{get_command_with_test_config, setup_test_config};
+use common::{get_command_with_test_config, setup_default_test_config, setup_test_config};
 
 #[test]
 fn test_validate_valid_config() {
-    // Valid config with all required fields
-    let yaml = r#"
-environment: "test-env"
-package_directory: "/test/packages"
-"#;
-
-    let temp_dir = setup_test_config(yaml);
+    // Valid config using default test config (creates real directories)
+    let temp_dir = setup_default_test_config();
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["config", "validate"]);
 
@@ -50,5 +45,24 @@ package_directory: "relative/path"
 
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("exists, but cannot be expanded"));
+        .stderr(predicates::str::contains("relative and cannot be resolved"));
+}
+
+#[test]
+fn test_validate_config_with_nonexistent_directory_shows_warning() {
+    // Use a guaranteed-nonexistent path under a fresh temp dir
+    let pkg_tmp = tempfile::tempdir().unwrap();
+    let nonexistent = pkg_tmp.path().join("does-not-exist");
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"",
+        nonexistent.display()
+    );
+
+    let temp_dir = setup_test_config(&yaml);
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["config", "validate"]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicates::str::contains("does not exist"));
 }
