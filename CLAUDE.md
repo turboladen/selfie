@@ -144,8 +144,6 @@ from the CLI:
   `features = ["with_mocks"]`. The CLI's dev-dependencies already enable this.
 - **Workspace dependencies**: Common deps (`tokio`, `console`, `tracing`, etc.) are defined in the
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
-- **No circular dependency detection**: Install follows deps linearly without cycle detection.
-  Tracked in beads.
 - **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native PATH
   lookup. It finds filesystem executables only — not shell builtins like `cd` or `test`. This is
   intentional: selfie checks for package manager binaries (`brew`, `npm`, `apt`).
