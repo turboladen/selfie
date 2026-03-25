@@ -70,6 +70,33 @@ fn init_tracing(verbose: bool) {
     }
 }
 
+/// Wait for a shutdown signal (SIGINT or SIGTERM on Unix, SIGINT on Windows).
+///
+/// Returns when the first signal is received. Call again to wait for a second signal.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(_) => {
+                // SIGTERM registration can fail in sandboxed environments;
+                // fall back to SIGINT-only.
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// Main entry point for the selfie CLI application
 ///
 /// This function handles the complete CLI workflow:
@@ -125,18 +152,18 @@ async fn main() -> anyhow::Result<()> {
 
     let display = DisplayManager::new(config.use_colors());
 
-    // Set up graceful shutdown: first Ctrl+C cancels in-flight operations,
-    // second Ctrl+C forces immediate exit.
+    // Set up graceful shutdown: first SIGINT/SIGTERM cancels in-flight operations,
+    // second signal forces immediate exit.
     let cancellation_token = CancellationToken::new();
     let token_clone = cancellation_token.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            token_clone.cancel();
-            // Wait for a second Ctrl+C and force-exit
-            if tokio::signal::ctrl_c().await.is_ok() {
-                process::exit(130);
-            }
-        }
+        wait_for_shutdown_signal().await;
+        eprintln!("\nCanceling... (signal again to force quit)");
+        token_clone.cancel();
+
+        // Second signal: force exit
+        wait_for_shutdown_signal().await;
+        process::exit(130);
     });
 
     // Dispatch and execute the requested command
