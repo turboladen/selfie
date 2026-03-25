@@ -527,6 +527,7 @@ fn validate_changed_packages(
             }
         };
         package.path = abs_path;
+        package.raw_yaml = content;
 
         let result = package.validate(environment);
         let issues: Vec<PackageValidationIssue> = result

@@ -102,6 +102,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                 source: Arc::new(e),
             })?;
         package.path = path.to_path_buf();
+        package.raw_yaml = content;
 
         Ok(package)
     }

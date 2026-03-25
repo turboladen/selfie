@@ -168,10 +168,10 @@ pub struct Package {
     #[serde(skip)]
     pub(crate) path: PathBuf,
 
-    /// Extra YAML keys (e.g., `_brew: &brew` anchor definitions).
-    /// Keys starting with `_` are allowed; anything else is flagged by validation.
-    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) extra_fields: HashMap<String, serde_json::Value>,
+    /// Raw YAML content for validation (e.g., unknown field detection).
+    /// Set after deserialization, not serialized. Same pattern as `path`.
+    #[serde(skip)]
+    pub(crate) raw_yaml: String,
 }
 
 /// Configuration for a specific environment
@@ -272,7 +272,7 @@ impl Package {
             post_install_note,
             environments,
             path,
-            extra_fields: HashMap::new(),
+            raw_yaml: String::new(),
         }
     }
 
@@ -306,7 +306,7 @@ impl Package {
             post_install_note: None,
             environments,
             path: PathBuf::new(), // Will be set by GetPackage::new
-            extra_fields: HashMap::new(),
+            raw_yaml: String::new(),
         }
     }
 
