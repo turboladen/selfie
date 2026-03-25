@@ -91,15 +91,33 @@ impl Package {
         issues
     }
 
-    /// Flag unknown top-level YAML fields.
+    /// Flag unknown top-level YAML fields by parsing the raw YAML content.
     ///
     /// Fields starting with `_` are allowed (YAML anchor definitions like
     /// `_brew: &brew`). Anything else is an error — likely a typo or a
     /// renamed field (e.g., `configs` instead of `dotfiles`).
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
-        self.extra_fields
-            .keys()
-            .filter(|k| !k.starts_with('_'))
+        const KNOWN_FIELDS: &[&str] = &[
+            "name",
+            "homepage",
+            "description",
+            "dotfiles",
+            "post_install_note",
+            "environments",
+        ];
+
+        if self.raw_yaml.is_empty() {
+            return vec![];
+        }
+
+        let Ok(raw) = serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
+            &self.raw_yaml,
+        ) else {
+            return vec![]; // Parse errors handled elsewhere
+        };
+
+        raw.keys()
+            .filter(|k| !k.starts_with('_') && !KNOWN_FIELDS.contains(&k.as_str()))
             .map(|k| {
                 ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
