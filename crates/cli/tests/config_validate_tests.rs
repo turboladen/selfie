@@ -45,5 +45,22 @@ package_directory: "relative/path"
 
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("exists, but cannot be expanded"));
+        .stderr(predicates::str::contains("relative and cannot be resolved"));
+}
+
+#[test]
+fn test_validate_config_with_nonexistent_directory_shows_warning() {
+    // Config with valid but nonexistent package directory should succeed with warning
+    let yaml = r#"
+environment: "test-env"
+package_directory: "/tmp/selfie-cli-test-nonexistent-dir"
+"#;
+
+    let temp_dir = setup_test_config(yaml);
+    let mut cmd = get_command_with_test_config(&temp_dir);
+    cmd.args(["config", "validate"]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicates::str::contains("does not exist"));
 }

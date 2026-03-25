@@ -65,11 +65,11 @@ impl SelfieConfig {
         issues.extend(validate_package_directory(&self.package_directory));
 
         if let Some(ref path) = self.dotfiles_directory {
-            issues.extend(validate_directory_path("dotfiles_directory", path));
+            issues.extend(validate_optional_directory("dotfiles_directory", path));
         }
 
         if let Some(ref path) = self.state_directory {
-            issues.extend(validate_directory_path("state_directory", path));
+            issues.extend(validate_optional_directory("state_directory", path));
         }
 
         if let Some(issue) = validate_command_timeout(self.command_timeout) {
@@ -115,50 +115,62 @@ fn validate_environment(environment: &str) -> Option<ValidationIssue> {
 
 /// Validate the package directory path
 ///
-/// Ensures the package directory path is not empty and can be expanded
+/// Ensures the package directory path is not empty and can be resolved
 /// to an absolute path. Also warns if the directory doesn't exist on disk.
 fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-
     if package_directory.as_os_str().is_empty() {
-        issues.push(ValidationIssue::error(
+        return vec![ValidationIssue::error(
             ValidationErrorCategory::RequiredField,
             "package_directory",
             "The `package_directory` field exists, but has no value",
-            Some("Set a value for `package_directory`. Ex. `package_directory: ~/dev/selfie-packages`")
-        ));
-        return issues;
+            Some(
+                "Set a value for `package_directory`. Ex. `package_directory: ~/dev/selfie-packages`",
+            ),
+        )];
     }
 
-    issues.extend(validate_directory_path(
-        "package_directory",
-        package_directory,
-    ));
+    validate_directory_path("package_directory", package_directory)
+        .into_iter()
+        .collect()
+}
 
-    issues
+/// Validate an optional directory path: check for empty value, check it's
+/// absolute after tilde expansion, and warn if it doesn't exist on disk.
+fn validate_optional_directory(field_name: &str, path: &Path) -> Vec<ValidationIssue> {
+    if path.as_os_str().is_empty() {
+        return vec![ValidationIssue::error(
+            ValidationErrorCategory::RequiredField,
+            field_name,
+            &format!("The `{field_name}` field exists, but has no value"),
+            Some(&format!(
+                "Set a value for `{field_name}` or remove the field to use the default"
+            )),
+        )];
+    }
+
+    validate_directory_path(field_name, path)
+        .into_iter()
+        .collect()
 }
 
 /// Validate a directory path: check it's absolute after tilde expansion,
 /// and warn if it doesn't exist on disk.
-fn validate_directory_path(field_name: &str, path: &Path) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-
+fn validate_directory_path(field_name: &str, path: &Path) -> Option<ValidationIssue> {
     let path_str = path.to_string_lossy();
     let expanded = shellexpand::tilde(&path_str);
     let expanded_path = Path::new(expanded.as_ref());
 
     if !expanded_path.is_absolute() {
-        issues.push(ValidationIssue::error(
+        return Some(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             field_name,
-            &format!("The path at `{field_name}` exists, but cannot be expanded"),
-            Some("If the path is relative, simplify it, otherwise provide an absolute path"),
+            &format!("The `{field_name}` path is relative and cannot be resolved"),
+            Some("Provide an absolute path or use ~ for the home directory"),
         ));
-        return issues;
     }
 
     if !expanded_path.exists() {
-        issues.push(ValidationIssue::warning(
+        return Some(ValidationIssue::warning(
             ValidationErrorCategory::PathFormat,
             field_name,
             &format!(
@@ -169,7 +181,7 @@ fn validate_directory_path(field_name: &str, path: &Path) -> Vec<ValidationIssue
         ));
     }
 
-    issues
+    None
 }
 
 /// Validate the command timeout value
@@ -303,6 +315,7 @@ mod tests {
             .collect();
 
         assert_eq!(path_issues.len(), 1);
+        assert!(path_issues[0].message.contains("relative"));
     }
 
     #[test]
@@ -325,9 +338,12 @@ mod tests {
 
     #[test]
     fn nonexistent_package_directory_produces_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+
         let config = SelfieConfigBuilder::default()
             .environment("linux")
-            .package_directory("/tmp/selfie-nonexistent-pkg-dir-test")
+            .package_directory(&nonexistent)
             .build();
 
         let result = config.validate();
@@ -404,10 +420,13 @@ mod tests {
 
     #[test]
     fn dotfiles_directory_absolute_nonexistent_produces_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+
         let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("/tmp")
-            .dotfiles_directory(PathBuf::from("/tmp/selfie-nonexistent-dotfiles-test"))
+            .dotfiles_directory(nonexistent)
             .build();
 
         let result = config.validate();
@@ -421,6 +440,45 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
         assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    #[test]
+    fn dotfiles_directory_empty_produces_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .dotfiles_directory(PathBuf::from(""))
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::RequiredField);
+    }
+
+    #[test]
+    fn dotfiles_directory_tilde_produces_no_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .dotfiles_directory(PathBuf::from("~/dotfiles"))
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert!(errors.is_empty());
     }
 
     // --- validate_state_directory tests ---
@@ -484,10 +542,13 @@ mod tests {
 
     #[test]
     fn state_directory_absolute_nonexistent_produces_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+
         let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("/tmp")
-            .state_directory(PathBuf::from("/tmp/selfie-nonexistent-state-test"))
+            .state_directory(nonexistent)
             .build();
 
         let result = config.validate();
@@ -501,6 +562,26 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
         assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    #[test]
+    fn state_directory_empty_produces_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .state_directory(PathBuf::from(""))
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "state_directory")
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::RequiredField);
     }
 
     // --- validate_command_timeout tests ---
