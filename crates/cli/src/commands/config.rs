@@ -57,8 +57,8 @@ pub(crate) fn handle_validate(
         );
         report_with_style(
             display,
-            "max_parallel_installations:",
-            raw_config.max_parallel_installations().get(),
+            "max_concurrency:",
+            raw_config.max_concurrency().get(),
         );
         report_with_style(display, "stop_on_error:", raw_config.stop_on_error());
         // verbose and use_colors are CLI-only settings, not in the on-disk config

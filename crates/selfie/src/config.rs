@@ -41,8 +41,8 @@ pub struct SelfieConfig {
     #[serde(default = "default_stop_on_error")]
     pub(crate) stop_on_error: bool,
 
-    #[serde(default = "default_max_parallel")]
-    pub(crate) max_parallel_installations: NonZeroUsize,
+    #[serde(default = "default_max_concurrency")]
+    pub(crate) max_concurrency: NonZeroUsize,
 }
 
 /// Returns the default command timeout of 60 seconds.
@@ -54,9 +54,9 @@ fn default_stop_on_error() -> bool {
     true
 }
 
-/// Returns the default max parallel installations, using the CPU count or falling back to 4.
-fn default_max_parallel() -> NonZeroUsize {
-    NonZeroUsize::new(num_cpus::get()).unwrap_or(const { NonZeroUsize::new(4).unwrap() })
+/// Returns the default max concurrency, using available parallelism or falling back to 4.
+fn default_max_concurrency() -> NonZeroUsize {
+    std::thread::available_parallelism().unwrap_or(const { NonZeroUsize::new(4).unwrap() })
 }
 
 impl SelfieConfig {
@@ -104,10 +104,10 @@ impl SelfieConfig {
         Duration::from_secs(self.command_timeout.into())
     }
 
-    /// Get the maximum number of parallel installations allowed
+    /// Get the maximum concurrency for bulk operations
     #[must_use]
-    pub fn max_parallel_installations(&self) -> NonZeroUsize {
-        self.max_parallel_installations
+    pub fn max_concurrency(&self) -> NonZeroUsize {
+        self.max_concurrency
     }
 
     /// Check if operations should stop on first error
@@ -148,7 +148,7 @@ pub struct SelfieConfigBuilder {
     dotfiles_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     command_timeout: Option<NonZeroU64>,
-    max_parallel: Option<NonZeroUsize>,
+    max_concurrency_opt: Option<NonZeroUsize>,
     stop_on_error: Option<bool>,
 }
 
@@ -187,8 +187,8 @@ impl SelfieConfigBuilder {
     ///
     /// This panics if `max` is zero.
     #[must_use]
-    pub fn max_parallel_unchecked(mut self, max: usize) -> Self {
-        self.max_parallel = Some(NonZeroUsize::new(max).unwrap());
+    pub fn max_concurrency_unchecked(mut self, max: usize) -> Self {
+        self.max_concurrency_opt = Some(NonZeroUsize::new(max).unwrap());
         self
     }
 
@@ -212,7 +212,9 @@ impl SelfieConfigBuilder {
             dotfiles_directory: self.dotfiles_directory,
             state_directory: self.state_directory,
             command_timeout: self.command_timeout.unwrap_or(default_command_timeout()),
-            max_parallel_installations: self.max_parallel.unwrap_or(default_max_parallel()),
+            max_concurrency: self
+                .max_concurrency_opt
+                .unwrap_or(default_max_concurrency()),
             stop_on_error: self.stop_on_error.unwrap_or(STOP_ON_ERROR_DEFAULT),
         }
     }
@@ -229,16 +231,13 @@ mod tests {
             .environment("test-env")
             .package_directory("/test/path")
             .command_timeout_unchecked(120)
-            .max_parallel_unchecked(8)
+            .max_concurrency_unchecked(8)
             .build();
 
         assert_eq!(config.environment, "test-env");
         assert_eq!(config.package_directory, PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout(), Duration::from_secs(120));
-        assert_eq!(
-            config.max_parallel_installations,
-            NonZeroUsize::new(8).unwrap()
-        );
+        assert_eq!(config.max_concurrency, NonZeroUsize::new(8).unwrap());
     }
 
     #[test]
@@ -247,7 +246,7 @@ mod tests {
             .environment("test-env")
             .package_directory("/test/path")
             .command_timeout_unchecked(120)
-            .max_parallel_unchecked(8)
+            .max_concurrency_unchecked(8)
             .stop_on_error(false)
             .build();
 
@@ -255,7 +254,7 @@ mod tests {
         assert_eq!(config.environment(), "test-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout(), Duration::from_secs(120));
-        assert_eq!(config.max_parallel_installations().get(), 8);
+        assert_eq!(config.max_concurrency().get(), 8);
         assert!(!config.stop_on_error());
     }
 
@@ -287,7 +286,7 @@ mod tests {
         assert_eq!(config.environment(), "test-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout().as_secs(), 60);
-        assert!(config.max_parallel_installations().get() > 0); // Should be based on CPUs or default
+        assert!(config.max_concurrency().get() > 0); // Should be based on CPUs or default
         assert_eq!(config.stop_on_error(), STOP_ON_ERROR_DEFAULT);
     }
 
@@ -312,7 +311,7 @@ mod tests {
             package_directory: "/opt/packages"
             command_timeout: 90
             stop_on_error: false
-            max_parallel_installations: 4
+            max_concurrency: 4
         "#;
 
         let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
@@ -320,7 +319,7 @@ mod tests {
         assert_eq!(config.environment, "prod");
         assert_eq!(config.package_directory, PathBuf::from("/opt/packages"));
         assert_eq!(config.command_timeout.get(), 90);
-        assert_eq!(config.max_parallel_installations.get(), 4);
+        assert_eq!(config.max_concurrency.get(), 4);
         assert!(!config.stop_on_error);
     }
 
@@ -340,7 +339,7 @@ mod tests {
 
         // Default values
         assert_eq!(config.command_timeout.get(), 60); // Default
-        assert!(config.max_parallel_installations.get() > 0); // Default based on CPUs
+        assert!(config.max_concurrency.get() > 0); // Default based on CPUs
         assert!(config.stop_on_error); // Default
     }
 

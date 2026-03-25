@@ -105,11 +105,10 @@ decide how to display information about that event to the user in the current UI
 
 - The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
 - **Config is split by concern:** `SelfieConfig` (library) holds operational settings
-  (`environment`, `package_directory`, `command_timeout`, `stop_on_error`,
-  `max_parallel_installations`). `CliConfig` (CLI crate) wraps `SelfieConfig` and adds presentation
-  settings (`verbose`, `use_colors`). The config file uses top-level keys for core settings and a
-  `cli:` section for CLI-specific ones. Each frontend reads only its own section; the library
-  ignores unknown keys.
+  (`environment`, `package_directory`, `command_timeout`, `stop_on_error`, `max_concurrency`).
+  `CliConfig` (CLI crate) wraps `SelfieConfig` and adds presentation settings (`verbose`,
+  `use_colors`). The config file uses top-level keys for core settings and a `cli:` section for
+  CLI-specific ones. Each frontend reads only its own section; the library ignores unknown keys.
 - CLI and MCP server commands should call `SpecService` or `PackageService` methods, not use
   `PackageRepository` directly. Tests should exercise the same service interface that production
   code uses, with mocked repositories injected into `PackageServiceImpl`.
@@ -189,7 +188,7 @@ Core settings (top-level, read by `SelfieConfig`):
 - `package_directory`: Directory containing selfie package files.
 - `dotfiles_directory`: Directory containing dotfile source files for `selfie apply`.
 - `state_directory`: Directory for deploy state tracking (checksums, drift detection).
-- `command_timeout`, `stop_on_error`, `max_parallel_installations`: Execution settings.
+- `command_timeout`, `stop_on_error`, `max_concurrency`: Execution settings.
 
 CLI settings (under `cli:` section, read by `CliConfig`):
 

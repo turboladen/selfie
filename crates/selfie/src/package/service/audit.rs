@@ -97,20 +97,56 @@ where
         .map(|p| p.name().to_string())
         .collect();
 
-    // Update total steps: 1 (loading) + 3 per package (fetch + env check + audit)
-    let total_steps = 1 + package_names.len() * 3;
-    progress.set_total_steps(total_steps);
+    let total_packages = package_names.len();
+    let max_concurrent = config.max_concurrency().get();
 
-    // Step 2+: Audit each package sequentially
-    for package_name in &package_names {
+    // Audit packages concurrently in chunks, bounded by max_concurrency.
+    // Uses chunks+join_all (not semaphore+spawn) because the function takes
+    // borrowed references that can't move into 'static tokio tasks.
+    for chunk in package_names.chunks(max_concurrent) {
         if token.is_cancelled() {
             return OperationResult::Failure("Operation cancelled".into());
         }
 
-        let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|name| audit_single_in_bulk(name, repo, config, command_runner, sender, token))
+            .collect();
+
+        futures::future::join_all(futures).await;
+    }
+
+    OperationResult::Success(OperationSuccess::Generic(format!(
+        "Audit completed for {total_packages} package(s)",
+    )))
+}
+
+/// Audit a single package within a bulk operation.
+///
+/// Errors are emitted as events rather than propagated, so the bulk
+/// operation can continue with remaining packages.
+async fn audit_single_in_bulk<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    token: &CancellationToken,
+) where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    if token.is_cancelled() {
+        return;
+    }
+
+    // Each concurrent audit gets its own progress tracker (3 steps: fetch + env check + audit)
+    let mut pkg_progress = ProgressTracker::new(3);
+
+    let package_blob =
+        match steps::fetch_package(repo, package_name, sender, &mut pkg_progress).await {
             Ok(pkg) => pkg,
             Err(_) => {
-                // Send error audit result but continue with other packages
                 let audit_result = AuditResultData {
                     package_name: package_name.to_string(),
                     environment: config.environment().to_string(),
@@ -118,68 +154,48 @@ where
                     result: AuditResult::Error("Failed to load package".to_string()),
                 };
                 sender.send_audit_result(audit_result).await;
-                // Skip remaining steps for this package
-                progress
-                    .next(
-                        sender,
-                        format!("Skipping environment check for {package_name}"),
-                    )
-                    .await;
-                progress
-                    .next(sender, format!("Skipping audit for {package_name}"))
-                    .await;
-                continue;
+                return;
             }
         };
 
-        let (audit_command, dependencies) = match get_audit_command(
-            package_name,
-            &package_blob,
-            config.environment(),
-            sender,
-            progress,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                // Environment not found for this package — report as error, not NoAuditCommand
-                let audit_result = AuditResultData {
-                    package_name: package_name.to_string(),
-                    environment: config.environment().to_string(),
-                    audit_command: None,
-                    result: AuditResult::Error(format!(
-                        "Environment '{}' not configured for package '{package_name}'",
-                        config.environment()
-                    )),
-                };
-                sender.send_audit_result(audit_result).await;
-                progress
-                    .next(sender, format!("Skipping audit for {package_name}"))
-                    .await;
-                continue;
-            }
-        };
+    let (audit_command, dependencies) = match get_audit_command(
+        package_name,
+        &package_blob,
+        config.environment(),
+        sender,
+        &mut pkg_progress,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            let audit_result = AuditResultData {
+                package_name: package_name.to_string(),
+                environment: config.environment().to_string(),
+                audit_command: None,
+                result: AuditResult::Error(format!(
+                    "Environment '{}' not configured for package '{package_name}'",
+                    config.environment()
+                )),
+            };
+            sender.send_audit_result(audit_result).await;
+            return;
+        }
+    };
 
-        let audit_result = execute_audit_command(
-            package_name,
-            config.environment(),
-            audit_command.as_deref(),
-            &dependencies,
-            command_runner,
-            sender,
-            progress,
-            token,
-        )
-        .await;
+    let audit_result = execute_audit_command(
+        package_name,
+        config.environment(),
+        audit_command.as_deref(),
+        &dependencies,
+        command_runner,
+        sender,
+        &mut pkg_progress,
+        token,
+    )
+    .await;
 
-        sender.send_audit_result(audit_result).await;
-    }
-
-    OperationResult::Success(OperationSuccess::Generic(format!(
-        "Audit completed for {} package(s)",
-        package_names.len()
-    )))
+    sender.send_audit_result(audit_result).await;
 }
 
 async fn get_audit_command(
@@ -352,7 +368,7 @@ mod tests {
         EventSender,
         mpsc::Receiver<crate::package::event::PackageEvent>,
     ) {
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(256);
         let sender = EventSender::new_with_context(
             tx,
             crate::package::event::metadata::OperationType::PackageAudit,
@@ -822,5 +838,150 @@ mod tests {
             }
             other => panic!("Expected PackageAudited conflicts, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_audit_all_respects_concurrency_limit() {
+        use crate::package::port::ListPackagesOutput;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Tracks peak concurrent command executions.
+        struct ConcurrencyTrackingRunner {
+            current: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+            delay: std::time::Duration,
+        }
+
+        impl ConcurrencyTrackingRunner {
+            fn new(delay: std::time::Duration) -> Self {
+                Self {
+                    current: Arc::new(AtomicUsize::new(0)),
+                    peak: Arc::new(AtomicUsize::new(0)),
+                    delay,
+                }
+            }
+
+            fn peak(&self) -> usize {
+                self.peak.load(Ordering::SeqCst)
+            }
+        }
+
+        impl crate::commands::runner::CommandRunner for ConcurrencyTrackingRunner {
+            async fn is_command_available(&self, _command: &str) -> bool {
+                true
+            }
+
+            async fn execute(
+                &self,
+                _command: &str,
+                _token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
+                self.current.fetch_sub(1, Ordering::SeqCst);
+
+                Ok(crate::commands::runner::CommandOutput {
+                    output: std::process::Output {
+                        status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                        stdout: b"test-source\n".to_vec(),
+                        stderr: Vec::new(),
+                    },
+                    duration: self.delay,
+                })
+            }
+
+            async fn execute_with_timeout(
+                &self,
+                command: &str,
+                _timeout: std::time::Duration,
+                token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                self.execute(command, token).await
+            }
+
+            async fn execute_streaming(
+                &self,
+                _command: &str,
+                _timeout: std::time::Duration,
+                _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
+                _token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                unimplemented!("not needed for audit tests")
+            }
+        }
+
+        let max_concurrent = 2;
+        let num_packages = 6;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .max_concurrency_unchecked(max_concurrent)
+            .build();
+
+        let packages: Vec<_> = (0..num_packages)
+            .map(|i| {
+                PackageBuilder::default()
+                    .name(&format!("pkg-{i}"))
+                    .environment("test", |b| {
+                        b.install("echo install")
+                            .audit_some(format!("echo pkg-{i}"))
+                    })
+                    .path(temp_dir.path().join(format!("pkg-{i}.yml")))
+                    .build()
+            })
+            .collect();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let packages_clone = packages.clone();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(ListPackagesOutput(
+                packages_clone.iter().cloned().map(Ok).collect(),
+            ))
+        });
+
+        // get_package returns the matching package
+        let packages_for_get = packages.clone();
+        let temp_path = temp_dir.path().to_path_buf();
+        mock_repo.expect_get_package().returning(move |name| {
+            let pkg = packages_for_get
+                .iter()
+                .find(|p| p.name() == name)
+                .unwrap()
+                .clone();
+            Ok(crate::package::GetPackage::from_existing(
+                pkg,
+                temp_path.join(format!("{name}.yml")),
+            ))
+        });
+
+        let runner = ConcurrencyTrackingRunner::new(std::time::Duration::from_millis(50));
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+
+        let result =
+            handle_audit_all(&mock_repo, &config, &runner, &sender, &mut progress, &token).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "Expected success, got: {result:?}"
+        );
+
+        let peak_value = runner.peak();
+        assert!(
+            peak_value <= max_concurrent,
+            "Peak concurrency {peak_value} exceeded limit {max_concurrent}"
+        );
+        assert!(
+            peak_value > 1,
+            "Expected some concurrency but peak was {peak_value}"
+        );
     }
 }

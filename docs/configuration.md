@@ -93,8 +93,8 @@ command_timeout: 300
 # Stop on first error (default: true)
 stop_on_error: true
 
-# Maximum parallel installations (default: number of CPUs)
-max_parallel_installations: 4
+# Maximum concurrent operations (default: number of CPUs)
+max_concurrency: 4
 ```
 
 ## Required Settings
@@ -211,12 +211,13 @@ Whether to stop on first error during operations.
 stop_on_error: false
 ```
 
-#### `max_parallel_installations`
+#### `max_concurrency`
 
-Number of parallel operations for dependency installation.
+Maximum number of concurrent operations for bulk commands (list, audit, install recommends) and
+dependency/recommend status checks. Defaults to the number of CPUs.
 
 ```yaml
-max_parallel_installations: 2
+max_concurrency: 2
 ```
 
 ## Environment Naming Strategies
@@ -287,7 +288,7 @@ selfie config validate
 
 # Supported fields: environment, package_directory, dotfiles_directory,
 # state_directory, verbose, use_colors, command_timeout, stop_on_error,
-# max_parallel_installations
+# max_concurrency
 ```
 
 ### EDITOR Environment Variable Not Set

@@ -90,7 +90,7 @@ where
     progress.next(sender, "Checking package status").await;
 
     // Limit concurrent subprocess spawns to avoid exhausting file descriptors.
-    let semaphore = Arc::new(Semaphore::new(config.max_parallel_installations().get()));
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrency().get()));
 
     // Create parallel tasks for status checking with order preservation
     // Collect package metadata for JoinError handling (values move into spawned tasks)
@@ -333,7 +333,7 @@ mod tests {
         let config = SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(temp_dir.path())
-            .max_parallel_unchecked(max_parallel)
+            .max_concurrency_unchecked(max_parallel)
             .build();
 
         let packages: Vec<_> = (0..num_packages)

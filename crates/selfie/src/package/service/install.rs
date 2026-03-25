@@ -536,37 +536,67 @@ async fn install_recommends<PR, CR>(
         ))
         .await;
 
-    // Recommends use a separate progress tracker so they don't overflow
-    // the parent operation's step count. Each package uses ~7 steps in
-    // install_single_package (fetch, env check, pre-install check, get_cmd,
-    // execute, verify, complete).
-    let rec_total_steps = 7 * recommends.len();
-    let mut rec_progress = ProgressTracker::new(rec_total_steps);
+    // Install recommends concurrently in chunks, bounded by max_concurrency.
+    // Uses chunks+join_all (not semaphore+spawn) because the function takes
+    // borrowed references that can't move into 'static tokio tasks.
+    let max_concurrent = config.max_concurrency().get();
 
-    for recommend_name in &recommends {
+    for chunk in recommends.chunks(max_concurrent) {
         if token.is_cancelled() {
             break;
         }
 
-        sender.send_recommend_started(recommend_name).await;
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|name| {
+                install_recommend_in_bulk(name, repo, config, command_runner, sender, token)
+            })
+            .collect();
 
-        match install_single_recommend(
-            recommend_name,
-            repo,
-            config,
-            command_runner,
-            sender,
-            &mut rec_progress,
-            token,
-        )
-        .await
-        {
-            Ok(()) => {
-                sender.send_recommend_succeeded(recommend_name).await;
-            }
-            Err(error) => {
-                sender.send_recommend_failed(recommend_name, &error).await;
-            }
+        futures::future::join_all(futures).await;
+    }
+}
+
+/// Install a single recommend within a bulk operation.
+///
+/// Emits started/succeeded/failed events. Failures are reported but never
+/// propagate — recommends are soft dependencies.
+async fn install_recommend_in_bulk<PR, CR>(
+    recommend_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    token: &CancellationToken,
+) where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    if token.is_cancelled() {
+        return;
+    }
+
+    sender.send_recommend_started(recommend_name).await;
+
+    // Each recommend gets its own progress tracker (7 steps per package)
+    let mut rec_progress = ProgressTracker::new(7);
+
+    match install_single_recommend(
+        recommend_name,
+        repo,
+        config,
+        command_runner,
+        sender,
+        &mut rec_progress,
+        token,
+    )
+    .await
+    {
+        Ok(()) => {
+            sender.send_recommend_succeeded(recommend_name).await;
+        }
+        Err(error) => {
+            sender.send_recommend_failed(recommend_name, &error).await;
         }
     }
 }

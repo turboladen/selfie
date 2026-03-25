@@ -136,7 +136,7 @@ where
         let status =
             get_installation_status(package_name, current_env, env_config, command_runner, token)
                 .await;
-        let max_concurrent = config.max_parallel_installations().get();
+        let max_concurrent = config.max_concurrency().get();
         let dependency_statuses = check_dependency_statuses(
             env_config.dependencies(),
             current_env,
