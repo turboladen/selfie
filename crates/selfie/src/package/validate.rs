@@ -108,6 +108,8 @@ impl Package {
     /// `_brew: &brew`). Anything else is an error — likely a typo or a
     /// renamed field (e.g., `configs` instead of `dotfiles`).
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
+        // Must stay in sync with Package struct fields. The test
+        // `test_known_fields_matches_package_struct` verifies this.
         const KNOWN_FIELDS: &[&str] = &[
             "name",
             "homepage",
@@ -121,6 +123,8 @@ impl Package {
             return vec![];
         }
 
+        // Uses serde_json::Value as the "any value" container because serde-saphyr
+        // has no Value type. This works because we only inspect keys, not values.
         let Ok(raw) = serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
             &self.raw_yaml,
         ) else {
@@ -671,5 +675,42 @@ mod tests {
             .build();
         let result = package.validate("test-env");
         assert!(result.issues().has_errors());
+    }
+
+    /// Ensures KNOWN_FIELDS stays in sync with the Package struct.
+    ///
+    /// Serializes a fully populated Package to YAML, re-parses as a raw map,
+    /// and asserts every key is present in KNOWN_FIELDS. If this test fails,
+    /// a field was added to Package without updating KNOWN_FIELDS.
+    #[test]
+    fn test_known_fields_matches_package_struct() {
+        let package = PackageBuilder::default()
+            .name("sync-test")
+            .homepage("https://example.com")
+            .description("A test")
+            .post_install_note("note")
+            .dotfiles(vec![DotfileEntry::new("src", "~/.target")])
+            .environment("test-env", |b| b.install("echo hi"))
+            .build();
+
+        let yaml = serde_saphyr::to_string(&package).unwrap();
+        let raw: std::collections::HashMap<String, serde_json::Value> =
+            serde_saphyr::from_str(&yaml).unwrap();
+
+        let known: Vec<&str> = vec![
+            "name",
+            "homepage",
+            "description",
+            "dotfiles",
+            "post_install_note",
+            "environments",
+        ];
+
+        for key in raw.keys() {
+            assert!(
+                known.contains(&key.as_str()),
+                "Package serialized a field '{key}' not in KNOWN_FIELDS — update the list in validate_unknown_fields()"
+            );
+        }
     }
 }
