@@ -548,38 +548,56 @@ async fn install_recommends<PR, CR>(
 
         let futures: Vec<_> = chunk
             .iter()
-            .map(|recommend_name| async move {
-                if token.is_cancelled() {
-                    return;
-                }
-
-                sender.send_recommend_started(recommend_name).await;
-
-                // Each recommend gets its own progress tracker (7 steps per package)
-                let mut rec_progress = ProgressTracker::new(7);
-
-                match install_single_recommend(
-                    recommend_name,
-                    repo,
-                    config,
-                    command_runner,
-                    sender,
-                    &mut rec_progress,
-                    token,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        sender.send_recommend_succeeded(recommend_name).await;
-                    }
-                    Err(error) => {
-                        sender.send_recommend_failed(recommend_name, &error).await;
-                    }
-                }
+            .map(|name| {
+                install_recommend_in_bulk(name, repo, config, command_runner, sender, token)
             })
             .collect();
 
         futures::future::join_all(futures).await;
+    }
+}
+
+/// Install a single recommend within a bulk operation.
+///
+/// Emits started/succeeded/failed events. Failures are reported but never
+/// propagate — recommends are soft dependencies.
+async fn install_recommend_in_bulk<PR, CR>(
+    recommend_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    token: &CancellationToken,
+) where
+    PR: PackageRepository + Sync,
+    CR: CommandRunner,
+{
+    if token.is_cancelled() {
+        return;
+    }
+
+    sender.send_recommend_started(recommend_name).await;
+
+    // Each recommend gets its own progress tracker (7 steps per package)
+    let mut rec_progress = ProgressTracker::new(7);
+
+    match install_single_recommend(
+        recommend_name,
+        repo,
+        config,
+        command_runner,
+        sender,
+        &mut rec_progress,
+        token,
+    )
+    .await
+    {
+        Ok(()) => {
+            sender.send_recommend_succeeded(recommend_name).await;
+        }
+        Err(error) => {
+            sender.send_recommend_failed(recommend_name, &error).await;
+        }
     }
 }
 

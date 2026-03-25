@@ -100,7 +100,7 @@ where
     let total_packages = package_names.len();
     let max_concurrent = config.max_concurrency().get();
 
-    // Audit packages concurrently in chunks, each with its own progress tracker.
+    // Audit packages concurrently in chunks, bounded by max_concurrency.
     // Uses chunks+join_all (not semaphore+spawn) because the function takes
     // borrowed references that can't move into 'static tokio tasks.
     for chunk in package_names.chunks(max_concurrent) {
@@ -110,69 +110,7 @@ where
 
         let futures: Vec<_> = chunk
             .iter()
-            .map(|package_name| async move {
-                if token.is_cancelled() {
-                    return;
-                }
-
-                // Each concurrent audit gets its own progress tracker (3 steps)
-                let mut pkg_progress = ProgressTracker::new(3);
-
-                let package_blob =
-                    match steps::fetch_package(repo, package_name, sender, &mut pkg_progress).await
-                    {
-                        Ok(pkg) => pkg,
-                        Err(_) => {
-                            let audit_result = AuditResultData {
-                                package_name: package_name.to_string(),
-                                environment: config.environment().to_string(),
-                                audit_command: None,
-                                result: AuditResult::Error("Failed to load package".to_string()),
-                            };
-                            sender.send_audit_result(audit_result).await;
-                            return;
-                        }
-                    };
-
-                let (audit_command, dependencies) = match get_audit_command(
-                    package_name,
-                    &package_blob,
-                    config.environment(),
-                    sender,
-                    &mut pkg_progress,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        let audit_result = AuditResultData {
-                            package_name: package_name.to_string(),
-                            environment: config.environment().to_string(),
-                            audit_command: None,
-                            result: AuditResult::Error(format!(
-                                "Environment '{}' not configured for package '{package_name}'",
-                                config.environment()
-                            )),
-                        };
-                        sender.send_audit_result(audit_result).await;
-                        return;
-                    }
-                };
-
-                let audit_result = execute_audit_command(
-                    package_name,
-                    config.environment(),
-                    audit_command.as_deref(),
-                    &dependencies,
-                    command_runner,
-                    sender,
-                    &mut pkg_progress,
-                    token,
-                )
-                .await;
-
-                sender.send_audit_result(audit_result).await;
-            })
+            .map(|name| audit_single_in_bulk(name, repo, config, command_runner, sender, token))
             .collect();
 
         futures::future::join_all(futures).await;
@@ -181,6 +119,83 @@ where
     OperationResult::Success(OperationSuccess::Generic(format!(
         "Audit completed for {total_packages} package(s)",
     )))
+}
+
+/// Audit a single package within a bulk operation.
+///
+/// Errors are emitted as events rather than propagated, so the bulk
+/// operation can continue with remaining packages.
+async fn audit_single_in_bulk<PR, CR>(
+    package_name: &str,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    token: &CancellationToken,
+) where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    if token.is_cancelled() {
+        return;
+    }
+
+    // Each concurrent audit gets its own progress tracker (3 steps: fetch + env check + audit)
+    let mut pkg_progress = ProgressTracker::new(3);
+
+    let package_blob =
+        match steps::fetch_package(repo, package_name, sender, &mut pkg_progress).await {
+            Ok(pkg) => pkg,
+            Err(_) => {
+                let audit_result = AuditResultData {
+                    package_name: package_name.to_string(),
+                    environment: config.environment().to_string(),
+                    audit_command: None,
+                    result: AuditResult::Error("Failed to load package".to_string()),
+                };
+                sender.send_audit_result(audit_result).await;
+                return;
+            }
+        };
+
+    let (audit_command, dependencies) = match get_audit_command(
+        package_name,
+        &package_blob,
+        config.environment(),
+        sender,
+        &mut pkg_progress,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            let audit_result = AuditResultData {
+                package_name: package_name.to_string(),
+                environment: config.environment().to_string(),
+                audit_command: None,
+                result: AuditResult::Error(format!(
+                    "Environment '{}' not configured for package '{package_name}'",
+                    config.environment()
+                )),
+            };
+            sender.send_audit_result(audit_result).await;
+            return;
+        }
+    };
+
+    let audit_result = execute_audit_command(
+        package_name,
+        config.environment(),
+        audit_command.as_deref(),
+        &dependencies,
+        command_runner,
+        sender,
+        &mut pkg_progress,
+        token,
+    )
+    .await;
+
+    sender.send_audit_result(audit_result).await;
 }
 
 async fn get_audit_command(
