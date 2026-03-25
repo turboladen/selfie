@@ -3,6 +3,7 @@
 //! This module provides validation capabilities for application configuration,
 //! ensuring that configuration values are valid and complete before use.
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -10,6 +11,9 @@ use thiserror::Error;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::SelfieConfig;
+
+/// Maximum recommended command timeout in seconds before a warning is emitted.
+const MAX_RECOMMENDED_TIMEOUT_SECS: u64 = 600;
 
 /// Result of configuration validation
 ///
@@ -42,8 +46,8 @@ impl SelfieConfig {
     /// Perform comprehensive validation of the application configuration
     ///
     /// Validates all configuration fields including environment name,
-    /// package directory path, and other settings to ensure they are
-    /// valid and usable.
+    /// package directory path, optional directories, and command timeout
+    /// to ensure they are valid and usable.
     ///
     /// # Returns
     ///
@@ -58,8 +62,19 @@ impl SelfieConfig {
             issues.push(issue);
         }
 
-        let path_issues = validate_package_directory(&self.package_directory);
-        issues.extend_from_slice(&path_issues);
+        issues.extend(validate_package_directory(&self.package_directory));
+
+        if let Some(ref path) = self.dotfiles_directory {
+            issues.extend(validate_directory_path("dotfiles_directory", path));
+        }
+
+        if let Some(ref path) = self.state_directory {
+            issues.extend(validate_directory_path("state_directory", path));
+        }
+
+        if let Some(issue) = validate_command_timeout(self.command_timeout) {
+            issues.push(issue);
+        }
 
         ValidationResult {
             config_file_path: Some(self.package_directory().clone()),
@@ -101,8 +116,7 @@ fn validate_environment(environment: &str) -> Option<ValidationIssue> {
 /// Validate the package directory path
 ///
 /// Ensures the package directory path is not empty and can be expanded
-/// to an absolute path. This is critical because the package directory
-/// is where selfie looks for package definition files.
+/// to an absolute path. Also warns if the directory doesn't exist on disk.
 fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
 
@@ -113,27 +127,74 @@ fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> 
             "The `package_directory` field exists, but has no value",
             Some("Set a value for `package_directory`. Ex. `package_directory: ~/dev/selfie-packages`")
         ));
+        return issues;
     }
 
-    // Validate the package directory path
-    let package_dir = package_directory.to_string_lossy();
-    let expanded_path = shellexpand::tilde(&package_dir);
-    let expanded_path = Path::new(expanded_path.as_ref());
+    issues.extend(validate_directory_path(
+        "package_directory",
+        package_directory,
+    ));
+
+    issues
+}
+
+/// Validate a directory path: check it's absolute after tilde expansion,
+/// and warn if it doesn't exist on disk.
+fn validate_directory_path(field_name: &str, path: &Path) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+
+    let path_str = path.to_string_lossy();
+    let expanded = shellexpand::tilde(&path_str);
+    let expanded_path = Path::new(expanded.as_ref());
 
     if !expanded_path.is_absolute() {
         issues.push(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
-            "package_directory",
-            "The path at `package_directory` exists, but cannot be expanded",
+            field_name,
+            &format!("The path at `{field_name}` exists, but cannot be expanded"),
             Some("If the path is relative, simplify it, otherwise provide an absolute path"),
+        ));
+        return issues;
+    }
+
+    if !expanded_path.exists() {
+        issues.push(ValidationIssue::warning(
+            ValidationErrorCategory::PathFormat,
+            field_name,
+            &format!(
+                "The directory at `{field_name}` does not exist: {}",
+                expanded_path.display()
+            ),
+            Some("Create the directory or update the path"),
         ));
     }
 
     issues
 }
 
+/// Validate the command timeout value
+///
+/// Warns if the timeout exceeds the recommended maximum.
+fn validate_command_timeout(timeout: NonZeroU64) -> Option<ValidationIssue> {
+    (timeout.get() > MAX_RECOMMENDED_TIMEOUT_SECS).then(|| {
+        ValidationIssue::warning(
+            ValidationErrorCategory::InvalidValue,
+            "command_timeout",
+            &format!(
+                "Command timeout is {} seconds, which exceeds the recommended maximum of {MAX_RECOMMENDED_TIMEOUT_SECS} seconds",
+                timeout.get()
+            ),
+            Some(&format!(
+                "Consider lowering `command_timeout` to {MAX_RECOMMENDED_TIMEOUT_SECS} or less"
+            )),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use crate::config::SelfieConfigBuilder;
     use crate::validation::ValidationErrorCategory;
 
@@ -145,7 +206,7 @@ mod tests {
     fn valid_environment_passes() {
         let config = SelfieConfigBuilder::default()
             .environment("macos")
-            .package_directory("/tmp/packages")
+            .package_directory("/tmp")
             .build();
 
         let result = config.validate();
@@ -163,7 +224,7 @@ mod tests {
     fn empty_environment_produces_error() {
         let config = SelfieConfigBuilder::default()
             .environment("")
-            .package_directory("/tmp/packages")
+            .package_directory("/tmp")
             .build();
 
         let result = config.validate();
@@ -187,7 +248,7 @@ mod tests {
     fn valid_absolute_directory_passes() {
         let config = SelfieConfigBuilder::default()
             .environment("linux")
-            .package_directory("/home/user/packages")
+            .package_directory("/tmp")
             .build();
 
         let result = config.validate();
@@ -252,14 +313,253 @@ mod tests {
             .build();
 
         let result = config.validate();
-        let dir_issues: Vec<_> = result
+        let dir_errors: Vec<_> = result
             .issues()
-            .all_issues()
-            .iter()
+            .errors()
+            .into_iter()
             .filter(|i| i.field == "package_directory")
             .collect();
 
-        assert!(dir_issues.is_empty());
+        assert!(dir_errors.is_empty());
+    }
+
+    #[test]
+    fn nonexistent_package_directory_produces_warning() {
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/tmp/selfie-nonexistent-pkg-dir-test")
+            .build();
+
+        let result = config.validate();
+        let warnings: Vec<_> = result
+            .issues()
+            .warnings()
+            .into_iter()
+            .filter(|i| i.field == "package_directory")
+            .collect();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
+        assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    // --- validate_dotfiles_directory tests ---
+
+    #[test]
+    fn dotfiles_directory_none_produces_no_issues() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn dotfiles_directory_relative_produces_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .dotfiles_directory(PathBuf::from("relative/dotfiles"))
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
+    }
+
+    #[test]
+    fn dotfiles_directory_absolute_existing_produces_no_issues() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .dotfiles_directory(PathBuf::from("/tmp"))
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn dotfiles_directory_absolute_nonexistent_produces_warning() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .dotfiles_directory(PathBuf::from("/tmp/selfie-nonexistent-dotfiles-test"))
+            .build();
+
+        let result = config.validate();
+        let warnings: Vec<_> = result
+            .issues()
+            .warnings()
+            .into_iter()
+            .filter(|i| i.field == "dotfiles_directory")
+            .collect();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
+        assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    // --- validate_state_directory tests ---
+
+    #[test]
+    fn state_directory_none_produces_no_issues() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "state_directory")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn state_directory_relative_produces_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .state_directory(PathBuf::from("relative/state"))
+            .build();
+
+        let result = config.validate();
+        let errors: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "state_directory")
+            .collect();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
+    }
+
+    #[test]
+    fn state_directory_absolute_existing_produces_no_issues() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .state_directory(PathBuf::from("/tmp"))
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "state_directory")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn state_directory_absolute_nonexistent_produces_warning() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .state_directory(PathBuf::from("/tmp/selfie-nonexistent-state-test"))
+            .build();
+
+        let result = config.validate();
+        let warnings: Vec<_> = result
+            .issues()
+            .warnings()
+            .into_iter()
+            .filter(|i| i.field == "state_directory")
+            .collect();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
+        assert!(warnings[0].message.contains("does not exist"));
+    }
+
+    // --- validate_command_timeout tests ---
+
+    #[test]
+    fn default_command_timeout_produces_no_issues() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "command_timeout")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn command_timeout_at_600_produces_no_warning() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .command_timeout_unchecked(600)
+            .build();
+
+        let result = config.validate();
+        let issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "command_timeout")
+            .collect();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn command_timeout_over_600_produces_warning() {
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory("/tmp")
+            .command_timeout_unchecked(601)
+            .build();
+
+        let result = config.validate();
+        let warnings: Vec<_> = result
+            .issues()
+            .warnings()
+            .into_iter()
+            .filter(|i| i.field == "command_timeout")
+            .collect();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].category, ValidationErrorCategory::InvalidValue);
     }
 
     // --- SelfieConfig::validate() integration tests ---
@@ -268,7 +568,7 @@ mod tests {
     fn valid_config_has_no_issues() {
         let config = SelfieConfigBuilder::default()
             .environment("macos")
-            .package_directory("/usr/local/packages")
+            .package_directory("/tmp")
             .build();
 
         let result = config.validate();
@@ -301,7 +601,7 @@ mod tests {
     fn validation_result_accessors_work() {
         let config = SelfieConfigBuilder::default()
             .environment("test")
-            .package_directory("/test/path")
+            .package_directory("/tmp")
             .build();
 
         let result = config.validate();

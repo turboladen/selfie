@@ -1,16 +1,11 @@
 pub mod common;
 
-use common::{get_command_with_test_config, setup_test_config};
+use common::{get_command_with_test_config, setup_default_test_config, setup_test_config};
 
 #[test]
 fn test_validate_valid_config() {
-    // Valid config with all required fields
-    let yaml = r#"
-environment: "test-env"
-package_directory: "/test/packages"
-"#;
-
-    let temp_dir = setup_test_config(yaml);
+    // Valid config using default test config (creates real directories)
+    let temp_dir = setup_default_test_config();
     let mut cmd = get_command_with_test_config(&temp_dir);
     cmd.args(["config", "validate"]);
 
