@@ -84,6 +84,7 @@ impl Package {
         issues.extend(self.validate_environments_contents(current_env));
         issues.extend(self.validate_command_syntax());
         issues.extend(self.validate_dotfiles());
+        issues.extend(self.validate_filename_consistency());
 
         ValidationResult {
             package_name: self.name.value.clone(),
@@ -479,6 +480,40 @@ impl Package {
 
         issues
     }
+
+    /// Warn when the package name field doesn't match the filename.
+    ///
+    /// While technically allowed, a mismatch between `name:` and the YAML filename
+    /// causes confusion — tools report the internal name, but users expect it to
+    /// match the file they see on disk.
+    pub(crate) fn validate_filename_consistency(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        let file_stem = self.path().file_stem().and_then(|s| s.to_str());
+
+        if let Some(stem) = file_stem
+            && stem != self.name()
+        {
+            issues.push(ValidationIssue::warning(
+                ValidationErrorCategory::InvalidValue,
+                "name",
+                &format!(
+                    "Package name '{}' does not match filename '{}'",
+                    self.name(),
+                    self.path()
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+                Some(&format!(
+                    "Consider renaming to match: either set name to '{stem}' or rename the file to '{}.yml'",
+                    self.name()
+                )),
+            ));
+        }
+
+        issues
+    }
 }
 
 #[cfg(test)]
@@ -704,5 +739,32 @@ mod tests {
                 "Package serialized a field '{key}' not in KNOWN_PACKAGE_FIELDS — update the list in validate.rs"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_filename_consistency_matching() {
+        let package = PackageBuilder::default()
+            .name("ripgrep")
+            .environment("test-env", |b| b.install("brew install ripgrep"))
+            .path(PathBuf::from("/packages/ripgrep.yml"))
+            .build();
+
+        let issues = package.validate_filename_consistency();
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_validate_filename_consistency_mismatch() {
+        let package = PackageBuilder::default()
+            .name("fisher")
+            .environment("test-env", |b| b.install("fish -c 'fisher install'"))
+            .path(PathBuf::from("/packages/fish-fisher.yml"))
+            .build();
+
+        let issues = package.validate_filename_consistency();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level(), ValidationLevel::Warning);
+        assert!(issues[0].message.contains("fisher"));
+        assert!(issues[0].message.contains("fish-fisher.yml"));
     }
 }
