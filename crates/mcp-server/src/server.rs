@@ -4,7 +4,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{
     ErrorData as McpError,
     handler::server::{ServerHandler, tool::ToolRouter},
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo, ToolsCapability,
+    },
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
@@ -238,7 +240,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new spec file. Requires name, environment, and install command at minimum. The environment should match the user's current selfie environment (use selfie_config_get to check). Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e' to fail fast."
+        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment."
     )]
     async fn spec_create(
         &self,
@@ -310,7 +312,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. Command conventions: check commands should use 'command -v X' (POSIX portable) not 'which X'. Multi-line install scripts should start with 'set -e'."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter."
     )]
     async fn spec_update(
         &self,
@@ -356,7 +358,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry in the updates array has the same fields as selfie_spec_update. Use this instead of calling selfie_spec_update repeatedly to avoid hitting tool call limits. Command conventions: check commands should use 'command -v X' not 'which X'. Multi-line install scripts should start with 'set -e'."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -463,7 +465,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, description, and environments. Fast — no commands are executed. Use this instead of calling selfie_spec_info repeatedly."
+        description = "List all specs for the current environment with name, description, and environments. Fast — no commands executed."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -473,7 +475,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files in the current environment for correctness. Returns validation issues (errors and warnings) per spec. Fast — no commands are executed."
+        description = "Validate all spec files for correctness. Returns per-spec validation issues (errors and warnings). Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -521,7 +523,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured installation method for the current environment. If the package has a 'dotfiles' section, run selfie_apply_dotfiles afterward to deploy its dotfiles."
+        description = "Install a package using its configured method for the current environment."
     )]
     async fn package_install(
         &self,
@@ -537,7 +539,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_list",
-        description = "List packages relevant to the current environment with their installation status (installed/not installed). Set all=true to include packages from other environments too."
+        description = "List packages with installation status. Set all=true to include packages from other environments."
     )]
     async fn package_list(
         &self,
@@ -582,7 +584,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles defined in package YAML files to their target locations. Detects conflicts and drift between repo source files and deployed targets. Use after installing a package that has a 'dotfiles' section, or run without a name to deploy all dotfiles."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Detects conflicts and drift between repo sources and deployed targets."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -607,7 +609,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings across packages and standalone dotfiles. Returns package name, source path, and target path for each entry. Fast — no commands are executed."
+        description = "List all dotfile mappings with package name, source, and target for each entry. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::package::port::PackageRepository;
@@ -660,7 +662,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_drift",
-        description = "Check all deployed dotfiles for drift between repo sources, deployed targets, and last-known deploy state. Returns per-file drift status."
+        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status."
     )]
     async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -671,7 +673,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Start tracking a file as a standalone dotfile. Copies the file into the dotfiles directory, creates a YAML spec, and records initial deploy state. Use selfie_package_track_dotfile instead if the file belongs to an existing package."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -707,7 +709,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_track_dotfile",
-        description = "Add a file to an existing package's dotfiles. Copies the file into the package's directory, adds a dotfiles entry to the YAML spec, and records initial deploy state. The package must already exist."
+        description = "Add a file to an existing package's dotfiles section. The package must already exist."
     )]
     async fn selfie_package_track_dotfile(
         &self,
@@ -726,7 +728,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_sync_status",
-        description = "Get git repository status and dotfile drift summary. Returns structured JSON with uncommitted changes, remote tracking state, and drifted dotfile names. Use this to check if there are changes to push or pull."
+        description = "Get git repository status and dotfile drift summary. Returns uncommitted changes, remote tracking state, and drifted dotfiles."
     )]
     async fn selfie_sync_status(&self) -> Result<CallToolResult, McpError> {
         let stream = self.sync_service.status().await;
@@ -736,7 +738,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_sync_push",
-        description = "Commit and push changes to the remote git repository. By default, creates one conventional commit per changed package (e.g., 'feat(starship): add package spec'). Use batch=true for a single commit. Provide per-package custom messages via the 'messages' parameter (map of package name to message). Returns the list of commits created."
+        description = "Commit and push changes to remote. Creates one commit per changed package by default. Use batch=true for a single commit, or 'messages' for custom per-package messages."
     )]
     async fn selfie_sync_push(
         &self,
@@ -804,7 +806,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_sync_pull",
-        description = "Fetch and fast-forward merge from the remote. Refuses if the working tree has uncommitted changes (push first). Returns which packages were updated, added, or removed. Suggests running 'selfie apply' if dotfile sources changed."
+        description = "Fetch and fast-forward merge from remote. Refuses if working tree has uncommitted changes."
     )]
     async fn selfie_sync_pull(&self) -> Result<CallToolResult, McpError> {
         let stream = self.sync_service.pull().await;
@@ -816,7 +818,9 @@ impl SelfieServer {
 #[tool_handler]
 impl ServerHandler for SelfieServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::default())
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability::default());
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("selfie-mcp", env!("CARGO_PKG_VERSION")))
     }
 }
