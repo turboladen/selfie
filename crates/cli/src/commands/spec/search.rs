@@ -23,18 +23,14 @@ pub(crate) async fn handle_search(
             if handle_spec_list_event(event, config, display) {
                 return true;
             }
-            // Intercept Completed/Success to print a search-specific message
-            // instead of the default "Spec listing completed..."
-            if let PackageEvent::Completed {
-                result: OperationResult::Success(success),
-                ..
-            } = event
-            {
-                let steps = success
-                    .steps_completed()
-                    .map(|s| format!(" {s}"))
-                    .unwrap_or_default();
-                display.print_success(format!("Spec search completed{steps}"));
+            // Suppress the default "Spec listing completed..." message
+            if matches!(
+                event,
+                PackageEvent::Completed {
+                    result: OperationResult::Success(_),
+                    ..
+                }
+            ) {
                 return true;
             }
             false
