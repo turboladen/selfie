@@ -19,6 +19,7 @@ pub enum OperationType {
     PackageValidate,
     SpecInfo,
     SpecList,
+    SpecSearch,
     SpecValidateAll,
     SyncStatus,
     SyncPush,

@@ -212,6 +212,9 @@ Selfie will:
 # List all available packages
 selfie spec list
 
+# Search for packages by keyword (matches name and description)
+selfie spec search node
+
 # Get detailed information about a package
 selfie spec info ripgrep
 

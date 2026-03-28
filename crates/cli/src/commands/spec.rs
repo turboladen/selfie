@@ -3,4 +3,5 @@ pub(crate) mod edit;
 pub(crate) mod info;
 pub(crate) mod list;
 pub(crate) mod remove;
+pub(crate) mod search;
 pub(crate) mod validate;

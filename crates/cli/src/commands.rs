@@ -133,6 +133,9 @@ async fn dispatch_spec_command(
                 SpecSubcommands::List { all } => {
                     spec::list::handle_list(&service, config, &display, *all).await
                 }
+                SpecSubcommands::Search { pattern } => {
+                    spec::search::handle_search(&service, pattern, config, &display).await
+                }
                 SpecSubcommands::Info { package_name } => {
                     spec::info::handle_info(&service, package_name, config, &display).await
                 }

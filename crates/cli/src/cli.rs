@@ -262,6 +262,18 @@ pub(crate) enum SpecSubcommands {
         all: bool,
     },
 
+    /// Search specs by keyword
+    ///
+    /// Searches package names and descriptions for a case-insensitive
+    /// substring match. Results span all environments by default.
+    ///
+    /// Example: `selfie spec search node`
+    /// Example: `selfie spec search "search tool"`
+    Search {
+        /// Search pattern (matches against name and description)
+        pattern: String,
+    },
+
     /// Show detailed information about a package definition
     ///
     /// Displays comprehensive information about a package including its

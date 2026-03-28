@@ -31,7 +31,7 @@ pub(crate) async fn handle_list(
     result.exit_code
 }
 
-fn handle_spec_list_event(
+pub(super) fn handle_spec_list_event(
     event: &PackageEvent,
     config: &CliConfig,
     display: &DisplayManager,

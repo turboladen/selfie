@@ -19,7 +19,9 @@ mod info;
 mod install;
 mod list;
 mod remove;
+mod spec_common;
 mod spec_list;
+mod spec_search;
 mod steps;
 mod update;
 mod validate;
@@ -154,6 +156,9 @@ pub trait SpecService: Send + Sync {
 
     /// List all specs without checking runtime status
     fn list(&self, show_all: bool) -> impl Future<Output = EventStream> + Send;
+
+    /// Search specs by keyword (matches name and description)
+    fn search(&self, pattern: &str) -> impl Future<Output = EventStream> + Send;
 
     /// Validate all specs for the current environment
     fn validate_all(&self) -> impl Future<Output = EventStream> + Send;
@@ -454,6 +459,28 @@ where
             move |repo, _, config, sender, mut progress, _token| async move {
                 spec_list::handle_spec_list(&repo, &config, &git, &sender, &mut progress, show_all)
                     .await
+            },
+        )
+    }
+
+    async fn search(&self, pattern: &str) -> EventStream {
+        let pattern = pattern.to_string();
+        let git = self.git_provider.clone();
+        self.execute_operation_with_deps(
+            OperationType::SpecSearch,
+            "",
+            OperationContext::default(),
+            2, // Load packages + filter/emit
+            move |repo, _, config, sender, mut progress, _token| async move {
+                spec_search::handle_spec_search(
+                    &repo,
+                    &config,
+                    &git,
+                    &sender,
+                    &mut progress,
+                    &pattern,
+                )
+                .await
             },
         )
     }
