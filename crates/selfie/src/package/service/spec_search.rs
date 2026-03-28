@@ -2,20 +2,17 @@
 //! Handles the `spec search` operation — searches specs by keyword.
 //!
 
-use std::collections::HashMap;
-
 use crate::{
     config::SelfieConfig,
     package::{
-        event::{
-            EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, SpecListData,
-            SpecListItem,
-        },
+        event::{EventSender, OperationResult},
         git::GitStatusProvider,
         port::PackageRepository,
         service::ProgressTracker,
     },
 };
+
+use super::spec_common::{SpecQueryOptions, load_filter_emit};
 
 pub(super) async fn handle_spec_search<PR, G>(
     repo: &PR,
@@ -29,103 +26,28 @@ where
     PR: PackageRepository,
     G: GitStatusProvider,
 {
-    // Step 1: Load packages
-    progress.next(sender, "Loading specs").await;
-
-    let list_output = match repo.list_packages() {
-        Ok(output) => output,
-        Err(err) => {
-            return OperationResult::Failure(err.into());
-        }
-    };
-
-    let valid_packages: Vec<_> = list_output.valid_packages().collect();
-    let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
-
-    // Step 2: Filter by search pattern (case-insensitive substring)
-    progress.next(sender, "Searching specs").await;
-
     let pattern_lower = pattern.to_lowercase();
-    let mut matching: Vec<_> = valid_packages
-        .into_iter()
-        .filter(|pkg| {
-            let name_match = pkg.name().to_lowercase().contains(&pattern_lower);
-            let desc_match = pkg
-                .description()
-                .is_some_and(|d| d.to_lowercase().contains(&pattern_lower));
-            name_match || desc_match
-        })
-        .collect();
-
-    matching.sort_by(|a, b| a.name().cmp(b.name()));
-
-    // Calculate environment statistics from matches
-    let mut environment_stats: HashMap<String, usize> = HashMap::new();
-    for package in &matching {
-        for env_name in package.environments().keys() {
-            *environment_stats.entry(env_name.clone()).or_insert(0) += 1;
-        }
-    }
-
-    // Git status lookup
-    let git_dir_status = if matching.is_empty() {
-        None
-    } else {
-        match git.status_for_directory(config.package_directory()) {
-            Ok(status) => Some(status),
-            Err(e) => {
-                sender
-                    .send_warning(format!("Git status unavailable: {e}"))
-                    .await;
-                None
-            }
-        }
-    };
-
-    // Emit results
-    let mut spec_items = Vec::new();
-    for package in &matching {
-        let file_git_status = git_dir_status
-            .as_ref()
-            .map(|s| s.status_for_file(package.path()));
-        let item = SpecListItem {
-            name: package.name().to_string(),
-            description: package.description().map(String::from),
-            environments: package.environments().keys().cloned().collect(),
-            git_status: file_git_status,
-        };
-        sender.send_spec_list_item(item.clone()).await;
-        spec_items.push(item);
-    }
-
-    let invalid_package_items: Vec<InvalidPackageInfo> = invalid_packages
-        .iter()
-        .map(|ip| InvalidPackageInfo {
-            path: ip.package_path().display().to_string(),
-            error: ip.to_string(),
-        })
-        .collect();
-
-    let valid_count = spec_items.len();
-    let invalid_count = invalid_package_items.len();
-
-    let spec_list_data = SpecListData {
-        specs: spec_items,
-        invalid_packages: invalid_package_items,
-        current_environment: config.environment().to_string(),
-        package_directory: config.package_directory().display().to_string(),
-        environment_stats,
-        show_all: true, // search results span all environments
-    };
-
-    sender.send_spec_list(spec_list_data).await;
-
-    OperationResult::Success(OperationSuccess::spec_list_generated(
-        valid_count,
-        invalid_count,
-        config.environment().to_string(),
-        (progress.current_step(), progress.total_steps()).into(),
-    ))
+    load_filter_emit(
+        repo,
+        config,
+        git,
+        sender,
+        progress,
+        SpecQueryOptions {
+            load_step_label: "Loading specs",
+            emit_step_label: "Searching specs",
+            filter: move |pkg: &crate::package::Package| {
+                let name_match = pkg.name().to_lowercase().contains(&pattern_lower);
+                let desc_match = pkg
+                    .description()
+                    .is_some_and(|d: &str| d.to_lowercase().contains(&pattern_lower));
+                name_match || desc_match
+            },
+            include_invalid: false,
+            show_all: true, // search results span all environments
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -134,7 +56,9 @@ mod tests {
     use crate::{
         config::SelfieConfigBuilder,
         package::{
-            PackageBuilder, event::PackageEvent, git::MockGitStatusProvider,
+            PackageBuilder,
+            event::{PackageEvent, SpecListItem},
+            git::MockGitStatusProvider,
             port::MockPackageRepository,
         },
     };
@@ -354,5 +278,47 @@ mod tests {
         let items = collect_items(rx).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "fd-find");
+    }
+
+    #[tokio::test]
+    async fn test_search_emits_summary_without_invalid_packages() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let mock_repo = mock_repo(test_packages(temp_dir.path()));
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let mock_git = mock_git_not_in_repo();
+
+        let result = handle_spec_search(
+            &mock_repo,
+            &config,
+            &mock_git,
+            &sender,
+            &mut progress,
+            "node",
+        )
+        .await;
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found_summary = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::SpecListLoaded { spec_list, .. } = event {
+                assert_eq!(spec_list.specs.len(), 1);
+                assert_eq!(spec_list.specs[0].name, "node");
+                assert!(spec_list.show_all);
+                assert!(spec_list.invalid_packages.is_empty());
+                // env_stats should reflect all packages, not just matches
+                assert_eq!(spec_list.environment_stats.len(), 2);
+                assert_eq!(spec_list.environment_stats["macos"], 2);
+                assert_eq!(spec_list.environment_stats["ubuntu"], 1);
+                found_summary = true;
+            }
+        }
+        assert!(found_summary, "Expected SpecListLoaded event");
     }
 }

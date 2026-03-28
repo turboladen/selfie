@@ -19,6 +19,7 @@ mod info;
 mod install;
 mod list;
 mod remove;
+mod spec_common;
 mod spec_list;
 mod spec_search;
 mod steps;
