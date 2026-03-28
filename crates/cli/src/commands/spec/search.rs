@@ -1,3 +1,4 @@
+use selfie::package::event::{OperationResult, PackageEvent};
 use selfie::package::service::SpecService;
 
 use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
@@ -19,7 +20,24 @@ pub(crate) async fn handle_search(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| {
-            handle_spec_list_event(event, config, display)
+            if handle_spec_list_event(event, config, display) {
+                return true;
+            }
+            // Intercept Completed/Success to print a search-specific message
+            // instead of the default "Spec listing completed..."
+            if let PackageEvent::Completed {
+                result: OperationResult::Success(success),
+                ..
+            } = event
+            {
+                let steps = success
+                    .steps_completed()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default();
+                display.print_success(format!("Spec search completed{steps}"));
+                return true;
+            }
+            false
         })
         .await;
     result.exit_code
