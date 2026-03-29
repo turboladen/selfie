@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::SelfieConfig,
     dotfile_service::port::DotfileService,
-    git::sync_provider::{ChangeType, GitSyncError, GitSyncProvider, RepoInfo},
+    git::sync_provider::{ChangeType, GitSyncError, GitSyncProvider},
     package::event::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
         OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -49,11 +49,6 @@ where
         }
     }
 
-    /// Discover the git repository containing the package directory.
-    fn discover_repo(&self) -> Result<RepoInfo, GitSyncError> {
-        self.git.discover_repo(self.config.package_directory())
-    }
-
     /// Create an event stream from an async operation.
     ///
     /// Delegates to the shared [`create_event_stream`] utility.
@@ -64,6 +59,24 @@ where
     {
         crate::package::event::create_event_stream(f)
     }
+}
+
+/// Run a blocking git operation on the tokio blocking thread pool.
+///
+/// Git operations do filesystem and network I/O that can block the async
+/// executor. This helper moves them to a dedicated thread via
+/// [`tokio::task::spawn_blocking`].
+async fn blocking_git<F, T>(f: F) -> Result<T, GitSyncError>
+where
+    F: FnOnce() -> Result<T, GitSyncError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| GitSyncError::OperationFailed {
+            operation: "spawn_blocking".to_string(),
+            message: e.to_string(),
+        })?
 }
 
 impl<G, D> SyncService for SyncServiceImpl<G, D>
@@ -88,7 +101,13 @@ where
             sender.send_started().await;
 
             // Step 1: Get repo status
-            let repo_info = match git.discover_repo(config.package_directory()) {
+            let repo_info = match blocking_git({
+                let git = git.clone();
+                let dir = config.package_directory().to_path_buf();
+                move || git.discover_repo(&dir)
+            })
+            .await
+            {
                 Ok(info) => info,
                 Err(e) => {
                     sender
@@ -100,7 +119,13 @@ where
                 }
             };
 
-            let repo_status = match git.repo_status(&repo_info.root) {
+            let repo_status = match blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.repo_status(&root)
+            })
+            .await
+            {
                 Ok(status) => status,
                 Err(e) => {
                     sender
@@ -155,15 +180,24 @@ where
     }
 
     async fn prepare_push(&self, options: &PushOptions) -> Result<PrepareResult, SyncError> {
-        let repo_info = self.discover_repo().map_err(|e| match e {
+        let repo_info = blocking_git({
+            let git = self.git.clone();
+            let dir = self.config.package_directory().to_path_buf();
+            move || git.discover_repo(&dir)
+        })
+        .await
+        .map_err(|e| match e {
             GitSyncError::NotARepo { path } => SyncError::NotARepo { path },
             other => SyncError::GitError(other.to_string()),
         })?;
 
-        let status = self
-            .git
-            .repo_status(&repo_info.root)
-            .map_err(|e| SyncError::GitError(e.to_string()))?;
+        let status = blocking_git({
+            let git = self.git.clone();
+            let root = repo_info.root.clone();
+            move || git.repo_status(&root)
+        })
+        .await
+        .map_err(|e| SyncError::GitError(e.to_string()))?;
 
         let ahead = status.ahead;
 
@@ -230,7 +264,13 @@ where
 
             sender.send_started().await;
 
-            let repo_info = match git.discover_repo(config.package_directory()) {
+            let repo_info = match blocking_git({
+                let git = git.clone();
+                let dir = config.package_directory().to_path_buf();
+                move || git.discover_repo(&dir)
+            })
+            .await
+            {
                 Ok(info) => info,
                 Err(e) => {
                     sender
@@ -255,7 +295,14 @@ where
                     .await;
 
                 // Stage files
-                if let Err(e) = git.stage_files(&repo_info.root, &commit.files) {
+                if let Err(e) = blocking_git({
+                    let git = git.clone();
+                    let root = repo_info.root.clone();
+                    let files = commit.files.clone();
+                    move || git.stage_files(&root, &files)
+                })
+                .await
+                {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
                             format!("Failed to stage files: {e}"),
@@ -265,7 +312,14 @@ where
                 }
 
                 // Commit
-                match git.commit(&repo_info.root, &commit.message) {
+                match blocking_git({
+                    let git = git.clone();
+                    let root = repo_info.root.clone();
+                    let msg = commit.message.clone();
+                    move || git.commit(&root, &msg)
+                })
+                .await
+                {
                     Ok(commit_id) => {
                         // Extract package name from the commit message for the event
                         let package_name = extract_package_name_from_message(&commit.message);
@@ -290,17 +344,27 @@ where
             }
 
             // Snapshot ahead count before push to include pre-existing unpushed commits.
-            let ahead_before_push = git
-                .repo_status(&repo_info.root)
-                .map(|s| s.ahead)
-                .unwrap_or(commits_created);
+            let ahead_before_push = blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.repo_status(&root)
+            })
+            .await
+            .map(|s| s.ahead)
+            .unwrap_or(commits_created);
 
             // Push all commits
             sender
                 .send_progress(total_steps, total_steps, "Pushing to remote")
                 .await;
 
-            if let Err(e) = git.push(&repo_info.root) {
+            if let Err(e) = blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.push(&root)
+            })
+            .await
+            {
                 sender
                     .send_completed(OperationResult::Failure(OperationFailure::Generic(
                         format!("Push failed: {e}. Your commits are preserved locally — run 'selfie sync pull' first, then try again."),
@@ -336,7 +400,13 @@ where
             sender.send_started().await;
 
             // Step 1: Discover repo
-            let repo_info = match git.discover_repo(config.package_directory()) {
+            let repo_info = match blocking_git({
+                let git = git.clone();
+                let dir = config.package_directory().to_path_buf();
+                move || git.discover_repo(&dir)
+            })
+            .await
+            {
                 Ok(info) => info,
                 Err(e) => {
                     sender
@@ -352,7 +422,13 @@ where
             // Modified and untracked files are fine — git merge --ff-only handles
             // them safely (fails if they'd conflict). Only staged files indicate
             // an in-progress commit that shouldn't be disrupted.
-            match git.repo_status(&repo_info.root) {
+            match blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.repo_status(&root)
+            })
+            .await
+            {
                 Ok(status) if !status.staged.is_empty() => {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
@@ -375,7 +451,13 @@ where
 
             // Step 3: Fetch
             sender.send_progress(1, 3, "Fetching from remote").await;
-            if let Err(e) = git.fetch(&repo_info.root) {
+            if let Err(e) = blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.fetch(&root)
+            })
+            .await
+            {
                 sender
                     .send_completed(OperationResult::Failure(OperationFailure::Generic(
                         format!("Fetch failed: {e}"),
@@ -386,7 +468,13 @@ where
 
             // Step 4: Fast-forward merge
             sender.send_progress(2, 3, "Merging remote changes").await;
-            match git.fast_forward(&repo_info.root) {
+            match blocking_git({
+                let git = git.clone();
+                let root = repo_info.root.clone();
+                move || git.fast_forward(&root)
+            })
+            .await
+            {
                 Ok(crate::git::FastForwardResult::AlreadyUpToDate) => {
                     sender
                         .send_completed(OperationResult::Success(
@@ -402,7 +490,15 @@ where
                     commit_count,
                 }) => {
                     // Diff old HEAD vs new HEAD to see what changed
-                    let changed_files = match git.diff_commits(&repo_info.root, &from, &to) {
+                    let changed_files = match blocking_git({
+                        let git = git.clone();
+                        let root = repo_info.root.clone();
+                        let from = from.clone();
+                        let to = to.clone();
+                        move || git.diff_commits(&root, &from, &to)
+                    })
+                    .await
+                    {
                         Ok(files) => files,
                         Err(e) => {
                             sender
