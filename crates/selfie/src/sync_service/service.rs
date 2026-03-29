@@ -66,7 +66,7 @@ where
 /// Git operations do filesystem and network I/O that can block the async
 /// executor. This helper moves them to a dedicated thread via
 /// [`tokio::task::spawn_blocking`].
-async fn blocking_git<F, T>(f: F) -> Result<T, GitSyncError>
+async fn blocking_git<F, T>(op: &str, f: F) -> Result<T, GitSyncError>
 where
     F: FnOnce() -> Result<T, GitSyncError> + Send + 'static,
     T: Send + 'static,
@@ -74,8 +74,8 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| GitSyncError::OperationFailed {
-            operation: "spawn_blocking".to_string(),
-            message: e.to_string(),
+            operation: op.to_string(),
+            message: format!("task panicked: {e}"),
         })?
 }
 
@@ -101,7 +101,7 @@ where
             sender.send_started().await;
 
             // Step 1: Get repo status
-            let repo_info = match blocking_git({
+            let repo_info = match blocking_git("discover_repo", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -119,7 +119,7 @@ where
                 }
             };
 
-            let repo_status = match blocking_git({
+            let repo_status = match blocking_git("repo_status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -180,7 +180,7 @@ where
     }
 
     async fn prepare_push(&self, options: &PushOptions) -> Result<PrepareResult, SyncError> {
-        let repo_info = blocking_git({
+        let repo_info = blocking_git("discover_repo", {
             let git = self.git.clone();
             let dir = self.config.package_directory().to_path_buf();
             move || git.discover_repo(&dir)
@@ -191,7 +191,7 @@ where
             other => SyncError::GitError(other.to_string()),
         })?;
 
-        let status = blocking_git({
+        let status = blocking_git("repo_status", {
             let git = self.git.clone();
             let root = repo_info.root.clone();
             move || git.repo_status(&root)
@@ -264,7 +264,7 @@ where
 
             sender.send_started().await;
 
-            let repo_info = match blocking_git({
+            let repo_info = match blocking_git("discover_repo", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -295,7 +295,7 @@ where
                     .await;
 
                 // Stage files
-                if let Err(e) = blocking_git({
+                if let Err(e) = blocking_git("stage_files", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
                     let files = commit.files.clone();
@@ -312,7 +312,7 @@ where
                 }
 
                 // Commit
-                match blocking_git({
+                match blocking_git("commit", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
                     let msg = commit.message.clone();
@@ -344,7 +344,7 @@ where
             }
 
             // Snapshot ahead count before push to include pre-existing unpushed commits.
-            let ahead_before_push = blocking_git({
+            let ahead_before_push = blocking_git("repo_status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -358,7 +358,7 @@ where
                 .send_progress(total_steps, total_steps, "Pushing to remote")
                 .await;
 
-            if let Err(e) = blocking_git({
+            if let Err(e) = blocking_git("push", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.push(&root)
@@ -400,7 +400,7 @@ where
             sender.send_started().await;
 
             // Step 1: Discover repo
-            let repo_info = match blocking_git({
+            let repo_info = match blocking_git("discover_repo", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -422,7 +422,7 @@ where
             // Modified and untracked files are fine — git merge --ff-only handles
             // them safely (fails if they'd conflict). Only staged files indicate
             // an in-progress commit that shouldn't be disrupted.
-            match blocking_git({
+            match blocking_git("repo_status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -451,7 +451,7 @@ where
 
             // Step 3: Fetch
             sender.send_progress(1, 3, "Fetching from remote").await;
-            if let Err(e) = blocking_git({
+            if let Err(e) = blocking_git("fetch", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fetch(&root)
@@ -468,7 +468,7 @@ where
 
             // Step 4: Fast-forward merge
             sender.send_progress(2, 3, "Merging remote changes").await;
-            match blocking_git({
+            match blocking_git("fast_forward", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fast_forward(&root)
@@ -490,7 +490,7 @@ where
                     commit_count,
                 }) => {
                     // Diff old HEAD vs new HEAD to see what changed
-                    let changed_files = match blocking_git({
+                    let changed_files = match blocking_git("diff_commits", {
                         let git = git.clone();
                         let root = repo_info.root.clone();
                         let from = from.clone();
