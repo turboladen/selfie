@@ -71,12 +71,26 @@ where
     F: FnOnce() -> Result<T, GitSyncError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| GitSyncError::OperationFailed {
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        let message = if e.is_cancelled() {
+            "blocking task was cancelled".to_string()
+        } else if e.is_panic() {
+            let panic = e.into_panic();
+            if let Some(s) = panic.downcast_ref::<&str>() {
+                format!("blocking task panicked: {s}")
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                format!("blocking task panicked: {s}")
+            } else {
+                "blocking task panicked".to_string()
+            }
+        } else {
+            format!("blocking task failed: {e}")
+        };
+        GitSyncError::OperationFailed {
             operation: op.to_string(),
-            message: format!("task panicked: {e}"),
-        })?
+            message,
+        }
+    })?
 }
 
 impl<G, D> SyncService for SyncServiceImpl<G, D>
@@ -285,20 +299,17 @@ where
             let total_steps = commits.len() + 1; // +1 for the push step
             let mut commits_created = 0;
 
-            for (i, commit) in commits.iter().enumerate() {
+            for (i, commit) in commits.into_iter().enumerate() {
+                let ConfirmedCommit { files, message } = commit;
+
                 sender
-                    .send_progress(
-                        i + 1,
-                        total_steps,
-                        format!("Committing: {}", commit.message),
-                    )
+                    .send_progress(i + 1, total_steps, format!("Committing: {message}"))
                     .await;
 
-                // Stage files
+                // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
                 if let Err(e) = blocking_git("stage_files", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
-                    let files = commit.files.clone();
                     move || git.stage_files(&root, &files)
                 })
                 .await
@@ -311,23 +322,22 @@ where
                     return;
                 }
 
-                // Commit
+                // Commit — clone message for the closure, keep original for the event
+                let msg = message.clone();
                 match blocking_git("commit", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
-                    let msg = commit.message.clone();
                     move || git.commit(&root, &msg)
                 })
                 .await
                 {
                     Ok(commit_id) => {
-                        // Extract package name from the commit message for the event
-                        let package_name = extract_package_name_from_message(&commit.message);
+                        let package_name = extract_package_name_from_message(&message);
                         sender
                             .send(PackageEvent::SyncCommitCreated {
                                 operation_info: sender.operation_info(),
                                 package_name,
-                                message: format!("{commit_id} {}", commit.message),
+                                message: format!("{commit_id} {message}"),
                             })
                             .await;
                         commits_created += 1;
@@ -493,8 +503,6 @@ where
                     let changed_files = match blocking_git("diff_commits", {
                         let git = git.clone();
                         let root = repo_info.root.clone();
-                        let from = from.clone();
-                        let to = to.clone();
                         move || git.diff_commits(&root, &from, &to)
                     })
                     .await
