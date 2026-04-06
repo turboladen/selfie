@@ -39,7 +39,7 @@ which = "8.0"
 mockall.workspace = true
 tempfile = "3.17"
 test-common = { path = "../test-common/" }
-tokio = { version = "1.44", features = [
+tokio = { version = "1.51", features = [
   "io-std",
   "io-util",
   "macros",

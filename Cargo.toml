@@ -18,7 +18,7 @@ sha2 = "0.10"
 similar = "2"
 strum = { version = "0.28", features = ["derive"] }
 tempfile = "3.17.1"
-tokio = "1.44"
+tokio = "1.51"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
