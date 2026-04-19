@@ -1,15 +1,37 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "PreCompact": [
       {
-        "matcher": "Bash",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash -c 'COMMAND=$(jq -r .tool_input.command); if echo \"$COMMAND\" | grep -qE \"^\\s*git\\s+commit\"; then typos --write-changes 2>&1 || true; fi'",
-            "statusMessage": "Running typos --write-changes"
+            "command": "bd prime",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": ""
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "bash -c 'COMMAND=$(jq -r .tool_input.command); if echo \"$COMMAND\" | grep -qE \"^\\s*git\\s+commit\"; then typos --write-changes 2\u003e\u00261 || true; fi'",
+            "statusMessage": "Running typos --write-changes",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ]
   }
