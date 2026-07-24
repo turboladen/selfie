@@ -293,7 +293,7 @@ impl SelfieServer {
         let file_path = self
             .config
             .package_directory()
-            .join(format!("{}.yml", &params.package));
+            .join(format!("{}.yml", params.package));
 
         let package = Package::new(
             params.package,

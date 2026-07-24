@@ -81,6 +81,6 @@ impl ValidationTableReporter {
     }
 
     pub(crate) fn print(&self) {
-        eprintln!("{}", &self.table);
+        eprintln!("{}", self.table);
     }
 }

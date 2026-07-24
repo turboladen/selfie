@@ -430,7 +430,7 @@ mod tests {
 
         // Should find ripgrep.yaml
         let files = repo.find_package_files("ripgrep").unwrap();
-        assert_eq!(files.len(), 1, "{:#?}", &files);
+        assert_eq!(files.len(), 1, "{:#?}", files);
         assert_eq!(files[0], yaml_path);
 
         // Should find other.yml
@@ -490,15 +490,15 @@ mod tests {
             package_output.valid_packages().collect::<Vec<_>>().len(),
             2,
             "{:#?}",
-            &package_output
+            package_output
         );
         assert_eq!(
             package_output.invalid_packages().collect::<Vec<_>>().len(),
             1,
             "{:#?}",
-            &package_output
+            package_output
         );
-        assert_eq!(package_output.len(), 3, "{:#?}", &package_output);
+        assert_eq!(package_output.len(), 3, "{:#?}", package_output);
 
         // Check package details
         let ripgrep = package_output.get("ripgrep").unwrap();
