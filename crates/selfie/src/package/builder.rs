@@ -108,6 +108,7 @@ pub struct EnvironmentConfigBuilder {
     audit: Option<String>,
     dependencies: Vec<String>,
     recommends: Vec<String>,
+    dotfiles: Vec<DotfileEntry>,
 }
 impl EnvironmentConfigBuilder {
     /// Create a new environment configuration builder
@@ -163,6 +164,13 @@ impl EnvironmentConfigBuilder {
         self
     }
 
+    /// Set the environment-specific dotfile mappings
+    #[must_use]
+    pub fn dotfiles(mut self, dotfiles: Vec<DotfileEntry>) -> Self {
+        self.dotfiles = dotfiles;
+        self
+    }
+
     /// Build the final `EnvironmentConfig` instance
     ///
     /// Constructs an `EnvironmentConfig` with all the configured values.
@@ -174,6 +182,7 @@ impl EnvironmentConfigBuilder {
             audit: self.audit,
             dependencies: self.dependencies,
             recommends: self.recommends,
+            dotfiles: self.dotfiles,
         }
     }
 }

@@ -522,7 +522,7 @@ where
             continue;
         }
 
-        let dotfiles = package.dotfiles();
+        let dotfiles = package.dotfiles_for_environment(config.environment());
         if dotfiles.is_empty() {
             continue;
         }
@@ -535,7 +535,7 @@ where
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        for entry in dotfiles {
+        for entry in &dotfiles {
             let source_path = resolve_source_path(&base_dir, entry.source());
 
             // Runtime path traversal guard: verify resolved path stays within base_dir
@@ -749,7 +749,7 @@ where
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        for entry in package.dotfiles() {
+        for entry in &package.dotfiles_for_environment(config.environment()) {
             total_count += 1;
 
             let source_path = resolve_source_path(&base_dir, entry.source());

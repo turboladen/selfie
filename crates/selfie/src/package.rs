@@ -243,6 +243,12 @@ pub struct EnvironmentConfig {
     /// success/failure reported via events.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) recommends: Vec<String>,
+
+    /// Dotfiles deployed only in this environment. An entry whose `target`
+    /// matches a shared (top-level) dotfile overrides it; one with a new
+    /// `target` is added. See ADR-0001.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) dotfiles: Vec<DotfileEntry>,
 }
 
 impl EnvironmentConfig {
@@ -261,6 +267,7 @@ impl EnvironmentConfig {
             audit,
             dependencies,
             recommends,
+            dotfiles: Vec::new(),
         }
     }
 
@@ -292,6 +299,12 @@ impl EnvironmentConfig {
     #[must_use]
     pub fn recommends(&self) -> &[String] {
         &self.recommends
+    }
+
+    /// Get the environment-specific dotfile mappings
+    #[must_use]
+    pub fn dotfiles(&self) -> &[DotfileEntry] {
+        &self.dotfiles
     }
 }
 
@@ -339,6 +352,7 @@ impl Package {
                 audit: None,
                 dependencies: Vec::new(),
                 recommends: Vec::new(),
+                dotfiles: Vec::new(),
             },
         );
 
@@ -376,6 +390,42 @@ impl Package {
     #[must_use]
     pub fn dotfiles(&self) -> &[DotfileEntry] {
         &self.dotfiles
+    }
+
+    /// Compute the effective dotfiles for `environment`: the shared (top-level)
+    /// entries, with any whose `target` matches an environment-specific entry
+    /// replaced by it, plus environment-specific entries with new targets.
+    /// See ADR-0001.
+    #[must_use]
+    pub fn dotfiles_for_environment(&self, environment: &str) -> Vec<DotfileEntry> {
+        let env_dotfiles = self
+            .environments()
+            .get(environment)
+            .map(EnvironmentConfig::dotfiles)
+            .unwrap_or_default();
+
+        // Shared entries, each replaced by an environment-specific entry with
+        // the same target (override) when one exists.
+        let mut effective: Vec<DotfileEntry> = self
+            .dotfiles
+            .iter()
+            .map(|shared| {
+                env_dotfiles
+                    .iter()
+                    .find(|env| env.target() == shared.target())
+                    .unwrap_or(shared)
+                    .clone()
+            })
+            .collect();
+
+        // Environment-specific entries introducing a new target (presence).
+        for env in env_dotfiles {
+            if !self.dotfiles.iter().any(|s| s.target() == env.target()) {
+                effective.push(env.clone());
+            }
+        }
+
+        effective
     }
 
     /// Add a dotfile mapping to this package.
@@ -420,6 +470,66 @@ mod package_tests {
     use crate::package::port::PackageError;
 
     use super::*;
+
+    #[test]
+    fn dotfiles_for_environment_overrides_shared_and_adds_env_specific() {
+        let package = PackageBuilder::default()
+            .name("x")
+            .dotfiles(vec![DotfileEntry::new(
+                "bat/config",
+                "~/.config/bat/config",
+            )])
+            .environment("work", |b| {
+                b.install("brew install x").dotfiles(vec![
+                    // same target as the shared entry -> overrides it (variant)
+                    DotfileEntry::new("bat/work.config", "~/.config/bat/config"),
+                    // new target -> added for this environment only (presence)
+                    DotfileEntry::new("zscaler/work.conf", "~/.config/zscaler/config"),
+                ])
+            })
+            .build();
+
+        let effective = package.dotfiles_for_environment("work");
+
+        assert_eq!(
+            effective.len(),
+            2,
+            "shared bat is overridden in place (not duplicated) and zscaler is added"
+        );
+        let bat = effective
+            .iter()
+            .find(|e| e.target() == "~/.config/bat/config")
+            .expect("bat entry present");
+        assert_eq!(
+            bat.source(),
+            "bat/work.config",
+            "environment-specific source overrides the shared one"
+        );
+        assert!(
+            effective
+                .iter()
+                .any(|e| e.target() == "~/.config/zscaler/config"
+                    && e.source() == "zscaler/work.conf"),
+            "environment-only dotfile is added"
+        );
+    }
+
+    #[test]
+    fn dotfiles_for_environment_unknown_env_returns_shared_only() {
+        let package = PackageBuilder::default()
+            .name("x")
+            .dotfiles(vec![DotfileEntry::new(
+                "bat/config",
+                "~/.config/bat/config",
+            )])
+            .environment("home", |b| b.install("brew install x"))
+            .build();
+
+        let effective = package.dotfiles_for_environment("nonexistent");
+
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].source(), "bat/config");
+    }
 
     #[test]
     fn test_create_package_node() {

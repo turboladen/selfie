@@ -593,6 +593,7 @@ mod tests {
             audit: None,
             dependencies: vec![],
             recommends: vec![],
+            dotfiles: vec![],
         };
 
         package

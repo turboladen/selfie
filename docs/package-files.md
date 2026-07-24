@@ -103,6 +103,38 @@ keeps installation fast and gives you explicit control over when dotfiles are wr
 
 See [Dotfile Deployment](#dotfile-deployment) below for the full workflow.
 
+#### Environment-specific dotfiles
+
+The top-level `dotfiles` list is **shared** — it applies in every environment. When a config must
+differ per machine, add a `dotfiles` list inside an `environments.<name>` block. For the active
+environment, its entries are combined with the shared ones by `target`:
+
+- an entry whose `target` matches a shared entry **overrides** it (a variant), and
+- an entry with a new `target` is **added** for that environment only (present only there).
+
+```yaml
+dotfiles:
+  - source: bat/config # shared: deployed in every environment
+    target: ~/.config/bat/config
+
+environments:
+  macos-home:
+    install: brew install bat
+  macos-work:
+    install: brew install bat
+    dotfiles:
+      - source: bat/work.config # overrides the shared bat config on work only
+        target: ~/.config/bat/config
+      - source: zscaler/work.conf # present only on work
+        target: ~/.config/zscaler/config
+```
+
+There is intentionally no way to _exclude_ a shared entry from a single environment: a config that
+is not universal belongs in the relevant `environments.<name>.dotfiles` lists rather than the shared
+list. Per-machine differences that a single portable file can express — `~`-relative paths, runtime
+evaluation like `$(brew --prefix)`, or git's native `includeIf` for identity — are preferable to a
+variant.
+
 ### `post_install_note`
 
 An optional message displayed to the user after a fresh install. Use this for important setup steps
