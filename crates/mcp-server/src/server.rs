@@ -169,13 +169,12 @@ pub struct ApplyParam {
     /// Show what would change without writing files
     #[serde(default)]
     pub dry_run: bool,
-    /// Auto-accept overwrite for conflicts. MCP always defaults to true since there's no interactive prompt.
-    #[serde(default = "default_true")]
+    /// Overwrite a conflicting target (one that exists, is untracked by selfie,
+    /// and differs from the repo source). Defaults to `false`: conflicts are
+    /// skipped and reported with a diff rather than silently overwritten, since
+    /// the MCP path has no interactive prompt. Set `true` to force overwrite.
+    #[serde(default)]
     pub auto_accept: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -582,7 +581,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Detects conflicts and drift between repo sources and deployed targets."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Use dry_run=true to preview first."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -829,5 +828,25 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
         CallToolResult::success(vec![Content::text(json)])
     } else {
         CallToolResult::error(vec![Content::text(json)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_param_defaults_auto_accept_to_false() {
+        // Data-loss guard (selfie-45h): the MCP apply path has no interactive
+        // prompt, so an omitted `auto_accept` must deserialize to `false` — a
+        // conflicting target (exists, untracked, different content) is then
+        // skipped and reported with a diff rather than silently overwritten.
+        // Overwriting must require an explicit `auto_accept: true`.
+        let params: ApplyParam =
+            serde_json::from_str("{}").expect("empty params object should deserialize");
+        assert!(
+            !params.auto_accept,
+            "auto_accept must default to false to prevent silent overwrites of divergent configs"
+        );
     }
 }
