@@ -606,7 +606,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, source, and target for each entry. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), source, and target for each entry. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::package::port::PackageRepository;
@@ -618,10 +618,14 @@ impl SelfieServer {
         let mut entries: Vec<serde_json::Value> = Vec::new();
 
         if let Ok(output) = repo.list_packages() {
-            for pkg in output.valid_packages().filter(|p| !p.dotfiles().is_empty()) {
-                for entry in pkg.dotfiles() {
+            for pkg in output
+                .valid_packages()
+                .filter(|p| !p.dotfiles_with_scope().is_empty())
+            {
+                for (scope, entry) in pkg.dotfiles_with_scope() {
                     entries.push(serde_json::json!({
                         "package": pkg.name(),
+                        "environment": scope,
                         "source": entry.source(),
                         "target": entry.target(),
                         "origin": "packages",
@@ -634,10 +638,14 @@ impl SelfieServer {
         if dotfiles_dir.is_dir() {
             let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
             if let Ok(output) = dotfiles_repo.list_packages() {
-                for pkg in output.valid_packages().filter(|p| !p.dotfiles().is_empty()) {
-                    for entry in pkg.dotfiles() {
+                for pkg in output
+                    .valid_packages()
+                    .filter(|p| !p.dotfiles_with_scope().is_empty())
+                {
+                    for (scope, entry) in pkg.dotfiles_with_scope() {
                         entries.push(serde_json::json!({
                             "package": pkg.name(),
+                            "environment": scope,
                             "source": entry.source(),
                             "target": entry.target(),
                             "origin": "dotfiles",

@@ -57,11 +57,19 @@ where
             .await;
     }
 
-    // Step 2b: Check for dotfiles that may need cleanup
-    let dotfiles = get_package.package().dotfiles();
+    // Step 2b: Check for dotfiles that may need cleanup — across shared and
+    // environment-specific entries (deduped by target, since an environment
+    // override shares a target with the shared entry it replaces).
+    let dotfiles = get_package.package().dotfiles_with_scope();
     if !dotfiles.is_empty() {
-        let dotfile_targets: Vec<String> =
-            dotfiles.iter().map(|c| c.target().to_string()).collect();
+        // Preserve definition order (shared first, then environments) while
+        // deduping targets an environment override shares with a shared entry.
+        let mut seen = std::collections::HashSet::new();
+        let dotfile_targets: Vec<String> = dotfiles
+            .iter()
+            .map(|(_, c)| c.target().to_string())
+            .filter(|t| seen.insert(t.clone()))
+            .collect();
         sender
             .send_dotfile_cleanup_info(package_name.to_string(), dotfile_targets)
             .await;
@@ -288,5 +296,59 @@ mod tests {
             }
         }
         assert!(found_cleanup_info, "Expected DotfileCleanupInfo event");
+    }
+
+    #[tokio::test]
+    async fn test_remove_cleanup_includes_environment_dotfiles_deduped() {
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+
+        let package = PackageBuilder::default()
+            .name("cfg-pkg")
+            .dotfiles(vec![DotfileEntry::new(
+                "bat/config",
+                "~/.config/bat/config",
+            )])
+            .environment("work", |b| {
+                b.install("brew install cfg-pkg").dotfiles(vec![
+                    // overrides the shared target -> deduped in cleanup
+                    DotfileEntry::new("bat/work.config", "~/.config/bat/config"),
+                    // environment-only target -> must appear in cleanup
+                    DotfileEntry::new("zscaler/w.conf", "~/.config/zscaler/config"),
+                ])
+            })
+            .path("/test/packages/cfg-pkg.yml")
+            .build();
+
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/cfg-pkg.yml"));
+
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        mock_repo
+            .expect_find_dependent_packages()
+            .return_once(|_| Ok(vec![]));
+        mock_repo.expect_remove_package().return_once(|_| Ok(()));
+
+        let _ = handle_remove("cfg-pkg", &mock_repo, &config, &sender, &mut progress).await;
+
+        let mut found = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::package::event::PackageEvent::DotfileCleanupInfo {
+                dotfile_targets, ..
+            } = event
+            {
+                assert_eq!(
+                    dotfile_targets,
+                    vec!["~/.config/bat/config", "~/.config/zscaler/config"],
+                    "cleanup includes the environment-only target and dedupes the override"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "Expected DotfileCleanupInfo event");
     }
 }

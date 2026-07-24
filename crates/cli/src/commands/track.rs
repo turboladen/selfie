@@ -191,7 +191,7 @@ fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
     for repo in &repos {
         if let Ok(output) = repo.list_packages() {
             for pkg in output.valid_packages() {
-                for entry in pkg.dotfiles() {
+                for (_scope, entry) in pkg.dotfiles_with_scope() {
                     let entry_expanded =
                         selfie::dotfile_service::service::expand_user_path(&fs, entry.target());
                     if entry_expanded == expanded {

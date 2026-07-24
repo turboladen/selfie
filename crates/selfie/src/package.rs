@@ -428,6 +428,30 @@ impl Package {
         effective
     }
 
+    /// Every dotfile entry this package defines, paired with its scope: `None`
+    /// for a shared (top-level) entry, `Some(environment_name)` for an
+    /// environment-specific one. Unlike [`Self::dotfiles_for_environment`], this
+    /// lists all entries across every environment (overrides appear alongside the
+    /// shared entry they override) — useful for inventory, listing, and cleanup.
+    #[must_use]
+    pub fn dotfiles_with_scope(&self) -> Vec<(Option<&str>, &DotfileEntry)> {
+        let mut out: Vec<(Option<&str>, &DotfileEntry)> =
+            self.dotfiles.iter().map(|d| (None, d)).collect();
+
+        // Environments in a stable (name-sorted) order for deterministic output.
+        let mut env_names: Vec<&String> = self.environments().keys().collect();
+        env_names.sort();
+        for name in env_names {
+            if let Some(env) = self.environments().get(name) {
+                for d in env.dotfiles() {
+                    out.push((Some(name.as_str()), d));
+                }
+            }
+        }
+
+        out
+    }
+
     /// Add a dotfile mapping to this package.
     ///
     /// Skips the entry if a dotfile with the same target already exists,
@@ -511,6 +535,48 @@ mod package_tests {
                 .any(|e| e.target() == "~/.config/zscaler/config"
                     && e.source() == "zscaler/work.conf"),
             "environment-only dotfile is added"
+        );
+    }
+
+    #[test]
+    fn dotfiles_with_scope_lists_shared_and_environment_entries_labeled() {
+        let package = PackageBuilder::default()
+            .name("x")
+            .dotfiles(vec![DotfileEntry::new(
+                "bat/config",
+                "~/.config/bat/config",
+            )])
+            .environment("work", |b| {
+                b.install("echo i").dotfiles(vec![
+                    // override of the shared target
+                    DotfileEntry::new("bat/work.config", "~/.config/bat/config"),
+                    // environment-only
+                    DotfileEntry::new("zscaler/w.conf", "~/.config/zscaler/config"),
+                ])
+            })
+            .build();
+
+        let scoped = package.dotfiles_with_scope();
+
+        // shared bat + work's override + work's zscaler = 3 entries, all listed
+        assert_eq!(scoped.len(), 3);
+        assert!(
+            scoped
+                .iter()
+                .any(|(scope, e)| scope.is_none() && e.source() == "bat/config"),
+            "shared entry labeled as shared (None)"
+        );
+        assert!(
+            scoped
+                .iter()
+                .any(|(scope, e)| *scope == Some("work") && e.source() == "bat/work.config"),
+            "environment override labeled with its environment"
+        );
+        assert!(
+            scoped
+                .iter()
+                .any(|(scope, e)| *scope == Some("work") && e.source() == "zscaler/w.conf"),
+            "environment-only entry labeled with its environment"
         );
     }
 

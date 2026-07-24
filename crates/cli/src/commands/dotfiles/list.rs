@@ -46,13 +46,14 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
     print_base_directories(config, display, &packages);
 
     let mut table = create_formatted_table();
-    table.set_header(vec!["Package", "Source", "Target"]);
+    table.set_header(vec!["Package", "Environment", "Source", "Target"]);
 
     let mut total = 0;
     for (pkg, _origin) in &packages {
-        for entry in pkg.dotfiles() {
+        for (scope, entry) in pkg.dotfiles_with_scope() {
             table.add_row(vec![
                 pkg.name().to_string(),
+                scope.unwrap_or("(shared)").to_string(),
                 entry.source().to_string(),
                 shorten_path(entry.target()),
             ]);
@@ -143,7 +144,7 @@ fn load_dotfile_packages(
     match repo.list_packages() {
         Ok(output) => Ok(output
             .valid_packages()
-            .filter(|p| !p.dotfiles().is_empty())
+            .filter(|p| !p.dotfiles_with_scope().is_empty())
             .cloned()
             .collect()),
         Err(e) => {
