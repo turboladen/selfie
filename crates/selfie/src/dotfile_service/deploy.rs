@@ -16,6 +16,7 @@
 //!   produce a [`DeployDecision`] that the caller can act on.
 
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::state::DriftType;
@@ -24,7 +25,13 @@ use super::state::DriftType;
 pub fn compute_checksum(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Infallible: writing to a String never errors.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Resolve a config source path relative to the base directory.

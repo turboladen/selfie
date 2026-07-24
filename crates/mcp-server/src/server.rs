@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{
     ErrorData as McpError,
-    handler::server::{ServerHandler, tool::ToolRouter},
+    handler::server::ServerHandler,
     model::{
         CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo, ToolsCapability,
     },
@@ -44,7 +44,6 @@ pub struct SelfieServer {
     dotfile_service: Arc<ConcreteDotfileService>,
     sync_service: Arc<ConcreteSyncService>,
     config: SelfieConfig,
-    tool_router: ToolRouter<Self>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -234,7 +233,6 @@ impl SelfieServer {
             dotfile_service: Arc::new(dotfile_service),
             sync_service: Arc::new(sync_service),
             config,
-            tool_router: Self::tool_router(),
         }
     }
 
