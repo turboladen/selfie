@@ -32,15 +32,31 @@ impl FileSystem for RealFileSystem {
         use std::io::Write as _;
 
         let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
+        // The temporary file's name is random and the rename carries no path at all,
+        // so failures would otherwise name a file the operator never chose -- or
+        // nothing. Re-tag them with the target. `kind()` is preserved; only the raw
+        // OS error number is lost, which nothing here consumes.
+        let target_err = |e: std::io::Error| {
+            io_err(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", path.display()),
+            ))
+        };
 
         // The temporary file must live in the target's own directory: elsewhere it may
         // be on another filesystem, making the rename non-atomic, or world-readable.
-        // `parent()` yields Some("") for a bare relative name, so filter that out too.
+        //
+        // `parent()` yields Some("") for a bare relative name. Filtering that to "."
+        // is defensive normalisation rather than load-bearing: `create_dir_all("")` is
+        // a no-op returning `Ok` and `tempfile_in("")` already resolves to the current
+        // directory, so removing the filter would not change behaviour today. It is
+        // here so the parent is always a real directory rather than relying on those
+        // two coincidences holding.
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        fs::create_dir_all(parent).map_err(io_err)?;
+        fs::create_dir_all(parent).map_err(target_err)?;
 
         let mut builder = tempfile::Builder::new();
         builder.prefix(".selfie-");
@@ -53,18 +69,26 @@ impl FileSystem for RealFileSystem {
             builder.permissions(fs::Permissions::from_mode(0o600));
         }
 
-        // Randomly named and unlinked on drop, so a failure anywhere below leaves
-        // nothing behind and cannot collide with a concurrent write.
-        let mut tmp = builder.tempfile_in(parent).map_err(io_err)?;
-        tmp.write_all(data).map_err(io_err)?;
+        // Randomly named and unlinked on drop, so it cannot collide with a concurrent
+        // write and no *error* path leaves it behind. A crash is another matter: being
+        // killed or losing power between here and the rename leaves a `.selfie-*` file
+        // beside the target holding the complete secret. It is mode 0600, so this is
+        // debris rather than disclosure, but nothing sweeps it up.
+        let mut tmp = builder.tempfile_in(parent).map_err(target_err)?;
+        tmp.write_all(data).map_err(target_err)?;
         // Flush before the rename: otherwise a crash can leave the target name
         // pointing at a zero-length file.
-        tmp.as_file().sync_all().map_err(io_err)?;
+        tmp.as_file().sync_all().map_err(target_err)?;
 
         // Replaces the target by rename, so readers see either the old file or the
         // complete new one, a pre-existing mode is discarded rather than inherited,
         // and a symlink at the final component is replaced rather than followed.
-        tmp.persist(path).map_err(|e| io_err(e.error))?;
+        //
+        // The directory entry itself is not fsynced, so a crash immediately after this
+        // can still lose the rename and leave the old file in place. That costs the
+        // deploy, not the data -- a reader never sees a partial file either way -- so
+        // it is a durability gap, not a correctness one.
+        tmp.persist(path).map_err(|e| target_err(e.error))?;
         Ok(())
     }
 
@@ -405,15 +429,14 @@ mod tests {
 ///
 /// Grouped by what each test actually proves.
 ///
-/// The tests directly below, and `unix::errors_when_the_parent_directory_is_not_writable`,
-/// all still pass against [`FileSystem::write_file`]'s `create_dir_all` +
-/// `fs::write`, so they guard against gross breakage rather than against the
-/// defects this method exists to fix.
+/// The six tests directly below all still pass against [`FileSystem::write_file`]'s
+/// `create_dir_all` + `fs::write`, so they guard against gross breakage rather than
+/// against the defects this method exists to fix.
 ///
-/// The load-bearing ones are the other five in `unix`: temporarily swapping this
-/// implementation back to `create_dir_all` + `fs::write` was confirmed to fail
-/// exactly those five and nothing else. The `/dev/shm` test is Linux-only and so
-/// was not part of that check.
+/// Everything in `unix` is load-bearing: temporarily swapping this implementation
+/// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
+/// run there, and none of the six above. The `/dev/shm` test is Linux-only, so it was
+/// not part of that check.
 #[cfg(test)]
 mod private_write_tests {
     use super::*;
@@ -623,13 +646,17 @@ mod private_write_tests {
             let parent = dir.path().join("locked");
             fs::create_dir(&parent).unwrap();
             let target = parent.join("creds");
+            // The target must already exist for this to discriminate. Rewriting an
+            // existing file needs write permission on the *file*, not on its
+            // directory, so `write_file` succeeds here; an atomic replace still has to
+            // create a sibling, so it cannot.
+            fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
             let result = RealFileSystem.write_file_private(&target, b"secret");
 
-            // Unlike `write_file`, an atomic replace cannot succeed here even on an
-            // existing file, because it has to create a sibling first.
             assert!(result.is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
 
             // Restore write access so the temporary directory can be cleaned up.
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();

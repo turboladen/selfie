@@ -78,13 +78,22 @@ pub trait FileSystem: Send + Sync {
     /// through. Symlinked **parent** directories are still followed, so a planted
     /// directory symlink can still redirect where the file lands.
     ///
-    /// This applies to `path` **as given**. A caller that resolves the path first --
-    /// via [`expand_path`](FileSystem::expand_path) or anything else that
-    /// canonicalizes -- has already followed the symlink and forfeits this property.
-    /// It forfeits it precisely when a symlink is present, because canonicalization
-    /// only succeeds for a path that already exists: with no symlink planted there is
-    /// nothing to resolve, and with one planted the caller resolves it and hands this
-    /// method the attacker's chosen destination.
+    /// This applies to `path` **as given**, so a caller that resolves the path first
+    /// can forfeit it. The precise rule, for callers going through
+    /// [`expand_path`](FileSystem::expand_path): the guarantee survives exactly when
+    /// `expand_path` on the *full* path fails.
+    ///
+    /// `expand_path` canonicalizes, which only succeeds for a path that already
+    /// exists. So a symlink that **resolves** is followed by the caller, and this
+    /// method receives the destination rather than the symlink -- the guarantee is
+    /// gone. A **dangling** symlink makes canonicalization fail with `ENOENT`; a
+    /// caller that then falls back to resolving only the parent, or to the raw path,
+    /// hands over an unresolved final component and the guarantee **holds**.
+    ///
+    /// Do not read this as "canonicalizing callers always forfeit it" -- that is too
+    /// pessimistic -- nor as "it is forfeited whenever a symlink is planted", which is
+    /// too optimistic in the other direction. It turns on whether the full path
+    /// resolved.
     ///
     /// # Platform and metadata notes
     ///
@@ -95,9 +104,9 @@ pub trait FileSystem: Send + Sync {
     /// restrictive but never more permissive. On Windows the atomic replace still
     /// applies, but owner-only permissions are best-effort -- the file inherits the
     /// parent directory's ACL -- and the replace additionally fails if the target is
-    /// open in another process. On any other platform this method is unsupported and
-    /// always fails, because the underlying temporary-file backend has no
-    /// implementation there.
+    /// open in another process. On any other platform there is **no owner-only
+    /// guarantee at all**: the call may well succeed and simply create the file with
+    /// default permissions. Do not treat a non-Unix, non-Windows target as fail-safe.
     ///
     /// # Arguments
     ///
