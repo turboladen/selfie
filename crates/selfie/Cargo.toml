@@ -19,6 +19,7 @@ sha2.workspace = true
 shellexpand = "3.1"
 similar.workspace = true
 strum.workspace = true
+tempfile.workspace = true
 thiserror = "2.0"
 tokio-util.workspace = true
 tokio = { workspace = true, features = [
@@ -37,7 +38,6 @@ which = "8.0"
 
 [dev-dependencies]
 mockall.workspace = true
-tempfile = "3.17"
 test-common = { path = "../test-common/" }
 tokio = { version = "1.44", features = [
   "io-std",

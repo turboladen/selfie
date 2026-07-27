@@ -57,6 +57,67 @@ pub trait FileSystem: Send + Sync {
     /// - Any other IO error occurs during writing
     fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
 
+    /// Write data to a file readable only by its owner, replacing it atomically
+    ///
+    /// Unlike [`write_file`](FileSystem::write_file), this creates the file with
+    /// owner-only permissions from the outset (on Unix -- see the platform notes
+    /// below) and puts it in place with a rename, so there is no window in which the
+    /// content is world-readable, no partial write if interrupted, and no inheriting
+    /// of a laxer mode from an existing file.
+    ///
+    /// Intended for secret-bearing content.
+    ///
+    /// Creates parent directories as needed, but only the *file* is owner-only:
+    /// created directories get the usual `0o777 & !umask`, so a directory made by this
+    /// call is typically world-listable. The content is protected; the fact that the
+    /// file exists is not.
+    ///
+    /// # Symlinks
+    ///
+    /// A symlink at the **final component** of `path` is replaced rather than written
+    /// through. Symlinked **parent** directories are still followed, so a planted
+    /// directory symlink can still redirect where the file lands.
+    ///
+    /// This applies to `path` **as given**. A caller that resolves the path first --
+    /// via [`expand_path`](FileSystem::expand_path) or anything else that
+    /// canonicalizes -- has already followed the symlink and forfeits this property.
+    /// It forfeits it precisely when a symlink is present, because canonicalization
+    /// only succeeds for a path that already exists: with no symlink planted there is
+    /// nothing to resolve, and with one planted the caller resolves it and hands this
+    /// method the attacker's chosen destination.
+    ///
+    /// # Platform and metadata notes
+    ///
+    /// Because the file is replaced rather than modified, the new file does not
+    /// inherit the old one's extended attributes, POSIX ACLs, or SELinux label.
+    ///
+    /// On Unix the mode is `0o600` masked by the process umask, so it may be more
+    /// restrictive but never more permissive. On Windows the atomic replace still
+    /// applies, but owner-only permissions are best-effort -- the file inherits the
+    /// parent directory's ACL -- and the replace additionally fails if the target is
+    /// open in another process. On any other platform this method is unsupported and
+    /// always fails, because the underlying temporary-file backend has no
+    /// implementation there.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the file should be written
+    /// * `data` - Data to write to the file
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if:
+    /// - The parent directory cannot be created
+    /// - The temporary file cannot be created or written
+    /// - Flushing the temporary file to disk fails, which can happen after the write
+    ///   itself succeeded (for example `ENOSPC` surfacing only at flush time)
+    /// - The rename into place fails
+    ///
+    /// Note this differs from [`write_file`](FileSystem::write_file), which can still
+    /// succeed on an existing file inside a read-only directory; an atomic replace
+    /// cannot, because it must create a sibling first.
+    fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+
     /// Remove a file from the file system
     ///
     /// Deletes the file at the specified path. This operation is irreversible.
