@@ -880,8 +880,7 @@ fn dotfile_entry_json(
             map.insert("kind".into(), "invalid".into());
             map.insert(
                 "error".into(),
-                "set exactly one of 'source' or 'command', and 'vars' only alongside 'source'"
-                    .into(),
+                selfie::package::INVALID_CONTENT_SOURCE.into(),
             );
         }
     }

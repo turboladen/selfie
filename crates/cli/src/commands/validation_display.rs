@@ -41,18 +41,35 @@ pub(crate) fn display_validation_groups(
         .flat_map(|g| &g.rows)
         .filter(|r| r.level == "WARN")
         .count();
+    let total_notices: usize = groups
+        .iter()
+        .flat_map(|g| &g.rows)
+        .filter(|r| r.level == "INFO")
+        .count();
 
     let total = groups.iter().map(|g| g.rows.len()).sum::<usize>();
     if total == 0 {
         return;
     }
 
-    let header = match (total_errors, total_warnings) {
-        (e, w) if e > 0 && w > 0 => {
-            format!("Validation Issues ({e} error(s), {w} warning(s))")
-        }
-        (e, _) if e > 0 => format!("Validation Errors ({e})"),
-        (_, w) => format!("Validation Warnings ({w})"),
+    // Built from whichever levels are actually present. A fixed
+    // errors-or-warnings pair would render an informational-only group as
+    // "Validation Warnings (0)".
+    let mut counted = Vec::new();
+    if total_errors > 0 {
+        counted.push(format!("{total_errors} error(s)"));
+    }
+    if total_warnings > 0 {
+        counted.push(format!("{total_warnings} warning(s)"));
+    }
+    if total_notices > 0 {
+        counted.push(format!("{total_notices} notice(s)"));
+    }
+    let header = match (total_errors, total_warnings, total_notices) {
+        (e, 0, 0) if e > 0 => format!("Validation Errors ({e})"),
+        (0, w, 0) if w > 0 => format!("Validation Warnings ({w})"),
+        (0, 0, n) if n > 0 => format!("Validation Notices ({n})"),
+        _ => format!("Validation Issues ({})", counted.join(", ")),
     };
     display.println("");
     display.print_section_header(header);
@@ -62,15 +79,18 @@ pub(crate) fn display_validation_groups(
             continue;
         }
 
-        // File/package header
-        if use_colors {
-            display.println(format!(
-                "  {} {}",
-                style("✗").red(),
-                style(group.label).bold()
-            ));
+        // File/package header. A group holding only informational notices is not
+        // a failure, so it must not be marked with a red cross.
+        let blocking = group.rows.iter().any(|r| r.level != "INFO");
+        let (marker, marked) = if blocking {
+            ("✗", style("✗").red())
         } else {
-            display.println(format!("  ✗ {}", group.label));
+            ("ℹ", style("ℹ").blue())
+        };
+        if use_colors {
+            display.println(format!("  {} {}", marked, style(group.label).bold()));
+        } else {
+            display.println(format!("  {marker} {}", group.label));
         }
 
         let mut table = create_validation_table();

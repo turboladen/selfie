@@ -556,19 +556,33 @@ impl Package {
     ///
     /// Informational, not a warning: a package using `vars` correctly would warn
     /// on every validation, which is how warnings come to be ignored.
+    ///
+    /// Counts the worst case across environments rather than summing
+    /// [`Package::dotfiles_with_scope`], which lists a shared entry *and* each
+    /// environment that overrides it. Summing that would report three commands
+    /// for a single provider entry overridden on two machines, which overstates
+    /// what any one `selfie apply` runs.
     fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
-        let command_count: usize = self
-            .dotfiles_with_scope()
-            .iter()
-            .map(|(_, entry)| entry.command_count())
-            .sum();
+        let count_of = |entries: &[DotfileEntry]| -> usize {
+            entries.iter().map(DotfileEntry::command_count).sum()
+        };
+
+        // The shared set is the effective set for an environment that declares no
+        // dotfiles of its own, so it is a candidate in its own right.
+        let command_count = self
+            .environments()
+            .keys()
+            .map(|env| count_of(&self.dotfiles_for_environment(env)))
+            .chain(std::iter::once(count_of(&self.dotfiles)))
+            .max()
+            .unwrap_or(0);
 
         if command_count == 0 {
             return Vec::new();
         }
 
         vec![ValidationIssue::info(
-            ValidationErrorCategory::InvalidValue,
+            ValidationErrorCategory::Advisory,
             "dotfiles",
             &format!(
                 "'selfie apply' executes {command_count} command(s) for this package's dotfiles"
@@ -935,6 +949,43 @@ dotfiles:
         // One whole-file command plus two bindings.
         assert!(
             notice.message().contains("executes 3 command"),
+            "got: {}",
+            notice.message()
+        );
+    }
+
+    #[test]
+    fn the_apply_time_count_is_the_worst_single_environment_not_the_sum() {
+        // One provider entry, overridden on two machines. Any single `selfie
+        // apply` runs exactly one command; summing every scoped entry would
+        // report three and overstate what the user is agreeing to.
+        let yaml = r#"
+name: creds
+dotfiles:
+  - command: op read shared
+    target: ~/.creds
+environments:
+  home:
+    install: echo i
+    dotfiles:
+      - command: op read home
+        target: ~/.creds
+  work:
+    install: echo i
+    dotfiles:
+      - command: teller get work
+        target: ~/.creds
+"#;
+        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+
+        let issues = package.validate_dotfiles();
+        let notice = issues
+            .iter()
+            .find(|i| i.level() == ValidationLevel::Info)
+            .expect("expected an informational notice");
+
+        assert!(
+            notice.message().contains("executes 1 command"),
             "got: {}",
             notice.message()
         );

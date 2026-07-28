@@ -8,12 +8,13 @@
 //! [`ResolvedContent::bytes`].
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use super::deploy::resolve_source_path;
 use super::template;
 use crate::commands::CommandRunner;
 use crate::fs::filesystem::FileSystem;
@@ -65,6 +66,38 @@ pub(crate) enum ResolveError {
     NotSecretBearing { target: String },
     #[error("dotfile template '{template}' escapes the package directory")]
     TemplateEscapesPackage { template: String },
+}
+
+/// Resolve a template entry's path, refusing one that escapes `base_dir`.
+///
+/// The same runtime containment check the repository-file path applies, and it
+/// resolves against the same base via [`resolve_source_path`]. Apply never runs
+/// validation, so the static `..` check on `source` is not a gate — a package
+/// that was never validated reaches here intact, and without this a crafted
+/// `source` would splice the contents of a file outside the package directory
+/// into a deployed dotfile.
+fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError> {
+    let path = resolve_source_path(base_dir, source);
+
+    if is_within(&path, base_dir) {
+        Ok(path)
+    } else {
+        Err(ResolveError::TemplateEscapesPackage {
+            template: source.to_string(),
+        })
+    }
+}
+
+/// Everything that can be refused without running a command or reading a file.
+///
+/// Applied before a dry run reports what it would do, so a preview declines
+/// exactly what a real apply declines instead of promising to run commands for an
+/// entry that can never deploy.
+pub(crate) fn check_resolvable(entry: &DotfileEntry, base_dir: &Path) -> Result<(), ResolveError> {
+    match entry.content_source() {
+        ContentSource::Template { source, .. } => template_path(source, base_dir).map(|_| ()),
+        _ => Ok(()),
+    }
 }
 
 /// Resolve an entry's content, running any commands it declares.
@@ -123,17 +156,7 @@ where
         }
 
         ContentSource::Template { source, vars } => {
-            // The same runtime containment check the repository-file path applies.
-            // Apply never runs validation, so the static `..` check on `source` is
-            // not a gate — a package that was never validated reaches here intact,
-            // and without this a crafted `source` would splice the contents of a
-            // file outside the package directory into a deployed dotfile.
-            let template_path = base_dir.join(source);
-            if !is_within(&template_path, base_dir) {
-                return Err(ResolveError::TemplateEscapesPackage {
-                    template: source.to_string(),
-                });
-            }
+            let template_path = template_path(source, base_dir)?;
 
             let text = filesystem.read_file(&template_path).map_err(|e| {
                 ResolveError::TemplateUnreadable {

@@ -141,6 +141,33 @@ pub enum ContentSource<'a> {
     Invalid,
 }
 
+/// The single wording for "where this content comes from", shared by every
+/// consumer that has to say it: apply's events, `selfie dotfiles list`, and the
+/// MCP server's human-readable fallback.
+///
+/// Renders references only — a repository path, a command string, var *names* —
+/// never a resolved value. Nothing here runs a command or reads a template, so
+/// describing an entry can neither leak a secret nor trigger an authentication
+/// prompt. See ADR-0003.
+impl std::fmt::Display for ContentSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RepoFile(source) => f.write_str(source),
+            Self::Template { source, vars } => {
+                let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+                write!(f, "{source} (vars: {})", names.join(", "))
+            }
+            Self::Provider(command) => write!(f, "command: {command}"),
+            Self::Invalid => f.write_str(INVALID_CONTENT_SOURCE),
+        }
+    }
+}
+
+/// What to tell the user about an entry that is neither a file, a template, nor
+/// a provider. Stated once so apply, listing, and validation agree.
+pub const INVALID_CONTENT_SOURCE: &str =
+    "set exactly one of 'source' or 'command', and 'vars' only alongside 'source'";
+
 /// A dotfile mapping from a content source to a deployment target.
 ///
 /// Exactly one of `source` or `command` is valid; `vars` accompanies only
@@ -148,7 +175,15 @@ pub enum ContentSource<'a> {
 /// because `Package` is deserialized straight from YAML, and validation has to be
 /// able to observe "both set" and "neither set" in order to report them.
 /// [`content_source`](Self::content_source) is the abstraction over them.
+///
+/// Unknown keys are rejected. Every field here is now optional bar `target`, so
+/// without this a misspelling is silently dropped rather than caught: `var:` for
+/// `vars:` would leave a template entry looking like a plain repository file and
+/// deploy the template *unrendered* — literal `{{ api_key }}` — over a
+/// credentials target, with the content recorded in deploy state and shown in
+/// diffs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotfileEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
@@ -704,6 +739,20 @@ vars: {}
             ContentSource::RepoFile("bat/config")
         );
         assert!(!entry.is_secret_bearing());
+    }
+
+    #[test]
+    fn a_misspelled_dotfile_key_is_rejected_rather_than_silently_dropped() {
+        // Every field but `target` is optional, so a dropped key leaves a valid-
+        // looking entry: `var:` for `vars:` turns a template into a plain
+        // repository file and deploys it *unrendered* — literal `{{ api_key }}` —
+        // over a credentials target.
+        let err = serde_saphyr::from_str::<DotfileEntry>(
+            "source: creds.tpl\ntarget: ~/.gem/credentials\nvar:\n  api_key: op read x\n",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("var"), "got: {err}");
     }
 
     #[test]

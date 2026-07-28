@@ -18,12 +18,12 @@ use crate::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
-        resolve::resolve_content,
+        resolve::{check_resolvable, resolve_content},
         state::{DeployState, DriftType},
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
-        ContentSource, DotfileEntry, Package,
+        ContentSource, DotfileEntry, INVALID_CONTENT_SOURCE, Package,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -273,10 +273,16 @@ pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf 
 /// for the one path where the difference is load-bearing.
 fn expand_secret_target<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = if target.starts_with('~') {
-        // Expand only the leading `~` component, so both `~/x` and `~user/x` work
-        // — `expand_path` runs shellexpand, which handles the named form, and a
-        // home directory always exists so canonicalizing just that part succeeds.
-        // Everything after it is joined unresolved, which is the whole point.
+        // Expand only the leading `~` component; everything after it is joined
+        // unresolved, which is the whole point. A home directory always exists,
+        // so canonicalizing just that part succeeds.
+        //
+        // The named form `~user/x` is NOT supported: `expand_path` runs
+        // `shellexpand::tilde`, which expands a bare `~` and `~/…` only and
+        // returns `~user` unchanged, so canonicalizing it fails and the entry
+        // falls through to the literal path below and is then skipped as
+        // relative. Same as the repository-file path, which has never handled it
+        // either.
         let (tilde, rest) = match target.split_once('/') {
             Some((tilde, rest)) => (tilde, Some(rest)),
             None => (target, None),
@@ -469,17 +475,10 @@ where
 ///
 /// Commands and var names come from the package file and are references, not
 /// credentials, so they are safe to surface. Used as the `source` of the events
-/// this path emits.
+/// this path emits. The wording lives on [`ContentSource`] so that apply, `selfie
+/// dotfiles list`, and the MCP server cannot describe the same entry differently.
 fn secret_origin(entry: &DotfileEntry) -> String {
-    match entry.content_source() {
-        ContentSource::Provider(command) => format!("command: {command}"),
-        ContentSource::Template { source, vars } => {
-            let names: Vec<&str> = vars.keys().map(String::as_str).collect();
-            format!("{source} (vars: {})", names.join(", "))
-        }
-        ContentSource::RepoFile(source) => source.to_string(),
-        ContentSource::Invalid => String::new(),
-    }
+    entry.content_source().to_string()
 }
 
 /// A conflict summary describing shape without revealing content.
@@ -564,6 +563,17 @@ where
             ))
             .await;
         return SecretOutcome::Skipped;
+    }
+
+    // Everything refusable without running anything, applied before the dry-run
+    // short-circuit for the same reason the target check above is: a preview that
+    // promises to run commands for an entry a real apply would refuse outright is
+    // reporting something that will never happen.
+    if let Err(e) = check_resolvable(entry, base_dir) {
+        sender
+            .send_warning(format!("Failed to resolve '{}': {e}", entry.target()))
+            .await;
+        return SecretOutcome::Failed;
     }
 
     // Checked before resolving, not after. Resolving is what runs the user's
@@ -863,8 +873,7 @@ where
                 ContentSource::Invalid => {
                     sender
                         .send_warning(format!(
-                            "Skipping '{}': set exactly one of 'source' or 'command', and \
-                             'vars' only alongside 'source'",
+                            "Skipping '{}': {INVALID_CONTENT_SOURCE}",
                             entry.target()
                         ))
                         .await;
@@ -1127,8 +1136,7 @@ where
                 ContentSource::Invalid => {
                     sender
                         .send_warning(format!(
-                            "Skipping '{}': set exactly one of 'source' or 'command', and \
-                             'vars' only alongside 'source'",
+                            "Skipping '{}': {INVALID_CONTENT_SOURCE}",
                             entry.target()
                         ))
                         .await;

@@ -80,6 +80,12 @@ fn display_validation_result(
         ValidationStatus::Valid => {
             // Show success card for valid packages
             display_validation_success_card(validation_result, config, display);
+
+            // A valid package can still carry informational notices — the
+            // apply-time command count is one, and it exists precisely to be
+            // seen. Gating the table on the status would hide it from every
+            // package that has nothing else wrong, which is most of them.
+            display_validation_issues_table(validation_result, config, display);
         }
         ValidationStatus::HasWarnings | ValidationStatus::HasErrors => {
             // Show table for packages with issues

@@ -294,4 +294,12 @@ pub enum ValidationErrorCategory {
     /// Path format errors
     ///
     PathFormat,
+
+    /// Something the user should know that is not a defect
+    ///
+    /// Pairs with [`ValidationLevel::Info`]. The other categories all name a
+    /// kind of mistake, and filing a notice under one of them (`InvalidValue`,
+    /// say) mislabels it in every table and JSON payload that shows the
+    /// category.
+    Advisory,
 }

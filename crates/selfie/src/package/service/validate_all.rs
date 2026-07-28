@@ -6,8 +6,7 @@ use crate::{
     config::SelfieConfig,
     package::{
         event::{
-            EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
-            ValidationResultData, ValidationStatus,
+            EventSender, OperationResult, OperationSuccess, ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -60,46 +59,8 @@ where
     let mut warning_count: usize = 0;
 
     for package in &valid_packages {
-        let validation = package.validate(config.environment());
-        let mut all_issues = validation.issues().all_issues().to_vec();
-        all_issues.extend(super::validate::validate_package_templates(package, repo));
-        let issues: crate::validation::ValidationIssues = all_issues.into();
-        let issues = &issues;
-
-        let mut validation_issues = Vec::new();
-
-        for error in issues.errors() {
-            validation_issues.push(ValidationIssueData {
-                category: format!("{:?}", error.category()),
-                field: error.field().to_string(),
-                message: error.message().to_string(),
-                level: ValidationLevel::Error,
-                suggestion: error.suggestion().map(std::string::ToString::to_string),
-                location: error.location().map(str::to_string),
-            });
-        }
-
-        for warning in issues.warnings() {
-            validation_issues.push(ValidationIssueData {
-                category: format!("{:?}", warning.category()),
-                field: warning.field().to_string(),
-                message: warning.message().to_string(),
-                level: ValidationLevel::Warning,
-                suggestion: warning.suggestion().map(std::string::ToString::to_string),
-                location: warning.location().map(str::to_string),
-            });
-        }
-
-        for info in issues.infos() {
-            validation_issues.push(ValidationIssueData {
-                category: format!("{:?}", info.category()),
-                field: info.field().to_string(),
-                message: info.message().to_string(),
-                level: ValidationLevel::Info,
-                suggestion: info.suggestion().map(std::string::ToString::to_string),
-                location: info.location().map(str::to_string),
-            });
-        }
+        let issues = &super::validate::all_issues(package, repo, config.environment());
+        let validation_issues = super::validate::issue_payload(issues);
 
         let status = if issues.has_errors() {
             error_count += 1;
