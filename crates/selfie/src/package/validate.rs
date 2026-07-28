@@ -548,10 +548,10 @@ impl Package {
 
     /// Note how many commands `selfie apply` will run for this package's dotfiles.
     ///
-    /// Before provider-sourced dotfiles, `selfie apply` only copied files. It now
-    /// runs commands taken from the package file, which changes the trust model
-    /// for anyone treating a package directory as data — and matters more as
-    /// package directories are shared or overlaid. That has to be visible rather
+    /// `selfie apply` executes commands taken from the package file, rather than
+    /// only copying data out of it. That makes a package directory code, not
+    /// data, for anyone deciding whether to trust one — and it matters more as
+    /// package directories are shared or overlaid. It has to be visible rather
     /// than implicit.
     ///
     /// Informational, not a warning: a package using `vars` correctly would warn
