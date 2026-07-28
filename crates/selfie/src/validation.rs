@@ -30,15 +30,17 @@ impl ValidationIssues {
             .collect()
     }
 
-    /// Returns true if there are any issues at all, at any level
+    /// Returns true if there is anything wrong: an error or a warning
     ///
-    /// Includes informational notices, which are neither defects nor risks, so
-    /// this being true does not imply anything is wrong. Use
-    /// [`has_errors`](Self::has_errors) or [`has_warnings`](Self::has_warnings)
-    /// to ask that.
+    /// Informational notices are excluded. The name reads as "is anything
+    /// wrong", and a package carrying only a notice — which every package using
+    /// a provider-sourced dotfile does — is not. Counting those here would make
+    /// the first caller to trust the name treat correct packages as defective.
+    /// Use [`all_issues`](Self::all_issues) to ask whether there is anything at
+    /// all to display, and [`infos`](Self::infos) for the notices alone.
     #[must_use]
     pub fn has_issues(&self) -> bool {
-        !self.0.is_empty()
+        self.has_errors() || self.has_warnings()
     }
 
     /// Returns true if the validation has errors

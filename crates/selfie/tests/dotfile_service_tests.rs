@@ -1495,8 +1495,16 @@ mod secret_bearing {
 
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
+        // `starts_with`, not equality: a target seeded by `std::fs::write` is
+        // 0644, so this also takes the permissions-tightening branch, whose
+        // reason extends the same prefix. Both are in-sync skips, which is what
+        // this test is about; the two modes are covered separately below.
         let skipped = events.iter().any(|e| {
-            matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "already in sync")
+            matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. }
+                    if reason.starts_with("already in sync")
+            )
         });
         assert!(skipped, "expected an in-sync skip, got: {events:?}");
     }
@@ -1584,6 +1592,83 @@ mod secret_bearing {
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credential targets must be owner-only");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_sync_target_with_lax_permissions_is_tightened() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // The adoption path ADR-0003 names as the reason this design is safe: a
+        // machine with pre-existing config whose content already matches. Being
+        // told "already in sync" while the file stays world-readable would leave
+        // the user believing it is managed to the standard the docs promise
+        // unconditionally.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an in-sync target must still end up owner-only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            SECRET,
+            "content must be unchanged"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("permissions")
+            )),
+            "the tightening must be reported rather than done silently: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_sync_target_already_owner_only_is_left_completely_alone() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // The counterpart: tightening must be conditional. Rewriting a correct
+        // file on every apply would churn the inode and make "already in sync" a
+        // lie.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = std::fs::metadata(&target).unwrap().ino();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().ino(),
+            before,
+            "an already-correct target must not be rewritten"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. }
+                    if reason == "already in sync"
+            )),
+            "expected a plain in-sync skip, got: {events:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -644,8 +644,43 @@ where
     if let TargetState::Readable(current) = &current
         && current == &resolved.bytes
     {
+        // Matching content is not the whole guarantee. `write_file_private` is
+        // the only thing that establishes owner-only permissions, and returning
+        // here skips it — so a pre-existing world-readable target whose bytes
+        // happen to match would stay world-readable while being reported as
+        // managed. That is exactly the adoption case ADR-0003 calls out as the
+        // reason this design is safe, and the docs promise mode 0600 with no
+        // "unless the content already matched" attached.
+        //
+        // Tightening is conditional: rewriting a correct file on every apply
+        // would churn its inode and mtime and make "already in sync" a lie. An
+        // error reading the mode is treated as "nothing to do" rather than
+        // rewriting on a guess — the read above already succeeded, so this is
+        // close to unreachable.
+        if filesystem.is_owner_only(&target_path).unwrap_or(true) {
+            sender
+                .send_dotfile_skipped(&origin, target_path.display(), "already in sync")
+                .await;
+            return SecretOutcome::Skipped;
+        }
+
+        // Same content, written the one way that establishes the mode atomically.
+        if let Err(e) = filesystem.write_file_private(&target_path, &resolved.bytes) {
+            sender
+                .send_warning(format!(
+                    "Failed to tighten permissions on '{}': {e}",
+                    target_path.display()
+                ))
+                .await;
+            return SecretOutcome::Failed;
+        }
+
         sender
-            .send_dotfile_skipped(&origin, target_path.display(), "already in sync")
+            .send_dotfile_skipped(
+                &origin,
+                target_path.display(),
+                "already in sync (permissions tightened to owner-only)",
+            )
             .await;
         return SecretOutcome::Skipped;
     }
@@ -674,8 +709,9 @@ where
         let accept = if let Some(resolver) = &options.conflict_resolver {
             // The resolver is blocking and needs 'static, so the values are moved
             // in as owned buffers and the borrowed `ConflictDetail` is built
-            // inside the closure. Keeping the detail borrowed is what stops a
-            // resolver retaining the values past the call.
+            // inside the closure. That does not prevent a resolver copying the
+            // values — only retaining the borrow — but it keeps them off the
+            // 'static boundary, so any copy is one an adapter took on purpose.
             //
             // `incoming` is a clone because `resolved.bytes` is still needed to
             // write with if the answer is Accept. That is a second copy of the

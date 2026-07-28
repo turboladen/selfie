@@ -33,12 +33,27 @@ const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 2000;
 
 /// Content resolved for one dotfile entry.
-#[derive(Debug)]
 pub(crate) struct ResolvedContent {
     /// The file's content, exactly as produced.
     pub bytes: Vec<u8>,
     /// Non-fatal advisories. Never contains a resolved value — only var names.
     pub warnings: Vec<String>,
+}
+
+/// Prints the content's length, never the content.
+///
+/// Hand-written rather than derived because a derived `Debug` is a second exit
+/// for the bytes, opened silently by any future `{:?}`, `unwrap_err()`, or
+/// `expect()` on a `Result<ResolvedContent, _>`. The module header claims the
+/// bytes leave only as `ResolvedContent::bytes`; this is what makes that true
+/// rather than merely observed.
+impl std::fmt::Debug for ResolvedContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedContent")
+            .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
+            .field("warnings", &self.warnings)
+            .finish()
+    }
 }
 
 /// Why an entry's content could not be resolved.
@@ -76,6 +91,12 @@ pub(crate) enum ResolveError {
 /// that was never validated reaches here intact, and without this a crafted
 /// `source` would splice the contents of a file outside the package directory
 /// into a deployed dotfile.
+///
+/// The check is **lexical**: it resolves `.` and `..` textually and does not
+/// follow symlinks, so a symlink planted inside the package directory still
+/// reaches its target. That is not the security boundary here — a package that
+/// can plant a symlink can also just run an arbitrary `command:` — but the limit
+/// is worth stating rather than implying the check is stronger than it is.
 fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError> {
     let path = resolve_source_path(base_dir, source);
 

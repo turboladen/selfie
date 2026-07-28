@@ -96,6 +96,22 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
+    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Any group or other bit set means someone else can reach it.
+            Ok(metadata.permissions().mode() & 0o077 == 0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Ok(true)
+        }
+    }
+
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         fs::remove_file(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }

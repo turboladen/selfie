@@ -35,8 +35,11 @@ pub enum ConflictDetail<'a> {
     Diff { source: &'a str, diff: &'a str },
     /// The two candidate contents, plus a non-revealing structural summary.
     ///
-    /// Borrowed rather than owned so that a resolver cannot retain the values
-    /// beyond the call.
+    /// Borrowed rather than owned. This does not stop a resolver copying the
+    /// values — the CLI's reveal path necessarily does, to show them to a human.
+    /// What it buys is that the values are never moved wholesale across the
+    /// `'static` boundary the blocking resolver call requires, so the only copy
+    /// that exists is one an adapter took deliberately.
     Secret {
         summary: &'a str,
         incoming: &'a [u8],

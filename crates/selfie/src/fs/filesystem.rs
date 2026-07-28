@@ -147,6 +147,30 @@ pub trait FileSystem: Send + Sync {
     /// cannot, because it must create a sibling first.
     fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
 
+    /// Whether a file is readable only by its owner
+    ///
+    /// Companion to [`write_file_private`](FileSystem::write_file_private), for
+    /// deciding whether an existing file already meets the standard that method
+    /// establishes. Secret-bearing content that is already correct still has to
+    /// be checked: content and permissions are independent, and a target whose
+    /// bytes happen to match may still be world-readable.
+    ///
+    /// # Platform notes
+    ///
+    /// On Unix this is exact: true when no group or other permission bit is set.
+    /// Symlinks are followed, so this reports on the file the path resolves to.
+    ///
+    /// On every other platform this returns `true`, because there are no Unix
+    /// permission bits to inspect and nothing this method could meaningfully
+    /// report or a caller meaningfully fix. Callers use it to decide whether to
+    /// tighten, so `true` — "nothing to do" — is the correct answer there, not a
+    /// claim that the file is private.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if the file's metadata cannot be read.
+    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError>;
+
     /// Remove a file from the file system
     ///
     /// Deletes the file at the specified path. This operation is irreversible.
