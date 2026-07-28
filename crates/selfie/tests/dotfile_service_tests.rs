@@ -2178,6 +2178,36 @@ mod secret_bearing {
         );
     }
 
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_relative_target_the_same_way_a_real_apply_does() {
+        // The dry-run short-circuit must sit after the checks that would refuse
+        // the entry outright, or a preview claims it "would run N commands" for
+        // something a real apply would never touch.
+        let dirs = TestDirs::new();
+        let yaml = "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                    - command: \"op read x\"\n    target: \"relative/credentials\"\n";
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(runner.call_count(), 0);
+        assert!(
+            format!("{events:?}").contains("is not absolute"),
+            "a dry run should report the same refusal a real apply would, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("would run"),
+            "must not claim it would run commands for an entry that can never deploy"
+        );
+    }
+
     // ─── Leak regression: the failure path ──────────────────────────────────
 
     #[tokio::test]

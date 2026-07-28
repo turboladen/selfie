@@ -242,6 +242,14 @@ mod tests {
     const BASE: &str = "/pkg";
 
     /// A runner with a fixed answer per command, recording what it was asked.
+    ///
+    /// Deliberately not `test_common::FakeCommandRunner`, which is the same thing
+    /// and is used by this crate's integration tests. `test-common` depends on
+    /// `selfie`, so inside a unit-test build of `selfie` it links a *second* copy
+    /// of the lib; its `FakeCommandRunner` then implements a different
+    /// `CommandRunner` trait than the one in scope here and will not satisfy the
+    /// bound ("multiple different versions of crate `selfie` in the dependency
+    /// graph"). Integration tests under `tests/` link the real lib and do share it.
     #[derive(Default, Clone)]
     struct FakeRunner {
         /// command -> (exit code, stdout, stderr)

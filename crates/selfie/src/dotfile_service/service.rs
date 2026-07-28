@@ -554,6 +554,18 @@ where
 {
     let origin = secret_origin(entry);
 
+    let target_path = expand_secret_target(filesystem, entry.target());
+    if !target_path.is_absolute() {
+        sender
+            .send_warning(format!(
+                "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
+                entry.target(),
+                target_path.display()
+            ))
+            .await;
+        return SecretOutcome::Skipped;
+    }
+
     // Checked before resolving, not after. Resolving is what runs the user's
     // commands, and a preview must not do that: it reaches a secret store and can
     // raise a biometric or password prompt, which would make `--dry-run` an
@@ -563,7 +575,6 @@ where
     // that needs the content, and the content needs the commands. It reports what
     // it is declining to do instead.
     if options.dry_run {
-        let target_path = expand_secret_target(filesystem, entry.target());
         sender
             .send_dotfile_skipped(
                 &origin,
@@ -601,18 +612,6 @@ where
 
     for warning in &resolved.warnings {
         sender.send_warning(warning).await;
-    }
-
-    let target_path = expand_secret_target(filesystem, entry.target());
-    if !target_path.is_absolute() {
-        sender
-            .send_warning(format!(
-                "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
-                entry.target(),
-                target_path.display()
-            ))
-            .await;
-        return SecretOutcome::Skipped;
     }
 
     // Three distinct states, and conflating any two of them loses a credential.
