@@ -650,6 +650,7 @@ fn validate_changed_packages(
                 level: match i.level() {
                     crate::validation::ValidationLevel::Error => "ERROR".to_string(),
                     crate::validation::ValidationLevel::Warning => "WARN".to_string(),
+                    crate::validation::ValidationLevel::Info => "INFO".to_string(),
                 },
                 category: format!("{:?}", i.category()),
                 field: i.field().to_string(),

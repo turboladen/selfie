@@ -21,6 +21,15 @@ impl ValidationIssues {
         !self.has_errors()
     }
 
+    /// Get all informational notices (neither errors nor warnings)
+    #[must_use]
+    pub fn infos(&self) -> Vec<&ValidationIssue> {
+        self.0
+            .iter()
+            .filter(|issue| issue.level == ValidationLevel::Info)
+            .collect()
+    }
+
     /// Returns true if there are any issues (errors or warnings)
     #[must_use]
     pub fn has_issues(&self) -> bool {
@@ -138,6 +147,28 @@ impl ValidationIssue {
         }
     }
 
+    /// Create an informational notice.
+    ///
+    /// Reported alongside errors and warnings but never affects validity. Used
+    /// where the user needs to know something about a package that is not a
+    /// defect — a warning here would fire on every correct package and train
+    /// people to ignore warnings.
+    pub(super) fn info(
+        category: ValidationErrorCategory,
+        field: &str,
+        message: &str,
+        suggestion: Option<&str>,
+    ) -> Self {
+        Self {
+            category,
+            field: field.to_string(),
+            message: message.to_string(),
+            level: ValidationLevel::Info,
+            suggestion: suggestion.map(std::string::ToString::to_string),
+            location: None,
+        }
+    }
+
     /// Create a new validation error with source location
     pub(super) fn error_at(
         category: ValidationErrorCategory,
@@ -226,6 +257,9 @@ impl ValidationIssue {
 pub enum ValidationLevel {
     Error,
     Warning,
+    /// Neither a defect nor a risk: something about the package the user should
+    /// know. Does not affect whether validation passes.
+    Info,
 }
 
 /// Categories of package validation errors

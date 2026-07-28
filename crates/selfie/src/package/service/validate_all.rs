@@ -90,6 +90,17 @@ where
             });
         }
 
+        for info in issues.infos() {
+            validation_issues.push(ValidationIssueData {
+                category: format!("{:?}", info.category()),
+                field: info.field().to_string(),
+                message: info.message().to_string(),
+                level: ValidationLevel::Info,
+                suggestion: info.suggestion().map(std::string::ToString::to_string),
+                location: info.location().map(str::to_string),
+            });
+        }
+
         let status = if issues.has_errors() {
             error_count += 1;
             ValidationStatus::HasErrors

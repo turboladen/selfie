@@ -541,7 +541,46 @@ impl Package {
             }
         }
 
+        issues.extend(self.report_apply_time_commands());
+
         issues
+    }
+
+    /// Note how many commands `selfie apply` will run for this package's dotfiles.
+    ///
+    /// Before provider-sourced dotfiles, `selfie apply` only copied files. It now
+    /// runs commands taken from the package file, which changes the trust model
+    /// for anyone treating a package directory as data — and matters more as
+    /// package directories are shared or overlaid. That has to be visible rather
+    /// than implicit.
+    ///
+    /// Informational, not a warning: a package using `vars` correctly would warn
+    /// on every validation, which is how warnings come to be ignored.
+    fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
+        let command_count: usize = self
+            .dotfiles_with_scope()
+            .iter()
+            .map(|(_, entry)| match entry.content_source() {
+                ContentSource::Provider(_) => 1,
+                ContentSource::Template { vars, .. } => vars.len(),
+                ContentSource::RepoFile(_) | ContentSource::Invalid => 0,
+            })
+            .sum();
+
+        if command_count == 0 {
+            return Vec::new();
+        }
+
+        vec![ValidationIssue::info(
+            ValidationErrorCategory::InvalidValue,
+            "dotfiles",
+            &format!(
+                "'selfie apply' executes {command_count} command(s) for this package's dotfiles"
+            ),
+            Some(
+                "Review the 'command' and 'vars' entries before applying a package you did not write.",
+            ),
+        )]
     }
 
     /// Every templated dotfile entry, paired with the field path that names it.
@@ -871,6 +910,73 @@ environments:
         assert_eq!(sources, vec!["shared.tpl", "work.tpl"]);
         assert_eq!(refs[0].field, "dotfiles[0]");
         assert_eq!(refs[1].field, "environments.work.dotfiles[0]");
+    }
+
+    #[test]
+    fn validation_reports_that_apply_executes_commands() {
+        let yaml = r#"
+name: creds
+environments:
+  test:
+    install: echo i
+dotfiles:
+  - command: op read op://Private/key
+    target: ~/.ssh/id_ed25519
+  - source: creds/t.tpl
+    target: ~/.gem/credentials
+    vars:
+      api_key: op read a
+      corp: teller get B
+"#;
+        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+
+        let issues = package.validate_dotfiles();
+        let notice = issues
+            .iter()
+            .find(|i| i.level() == ValidationLevel::Info)
+            .expect("expected an informational notice");
+
+        // One whole-file command plus two bindings.
+        assert!(
+            notice.message().contains("executes 3 command"),
+            "got: {}",
+            notice.message()
+        );
+    }
+
+    #[test]
+    fn a_package_with_no_apply_time_commands_gets_no_notice() {
+        let package = PackageBuilder::default()
+            .name("bat")
+            .dotfiles(vec![DotfileEntry::new(
+                "bat/config",
+                "~/.config/bat/config",
+            )])
+            .environment("test", |b| b.install("echo i"))
+            .build();
+
+        assert!(
+            package
+                .validate_dotfiles()
+                .iter()
+                .all(|i| i.level() != ValidationLevel::Info),
+        );
+    }
+
+    #[test]
+    fn the_apply_time_notice_does_not_make_a_package_invalid() {
+        let yaml = r#"
+name: creds
+environments:
+  test:
+    install: echo i
+dotfiles:
+  - command: op read op://Private/key
+    target: ~/.ssh/id_ed25519
+"#;
+        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+
+        assert!(package.validate("test").issues().is_valid());
     }
 
     #[test]

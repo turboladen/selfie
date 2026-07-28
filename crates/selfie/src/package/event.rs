@@ -2218,6 +2218,7 @@ pub struct ValidationIssueData {
 pub enum ValidationLevel {
     Error,
     Warning,
+    Info,
 }
 
 /// Log levels for the `EventSender` log method

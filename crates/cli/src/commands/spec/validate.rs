@@ -117,6 +117,7 @@ fn display_validation_issues_table(
             let level = match issue.level {
                 selfie::package::event::ValidationLevel::Error => "ERROR",
                 selfie::package::event::ValidationLevel::Warning => "WARN",
+                selfie::package::event::ValidationLevel::Info => "INFO",
             };
             ValidationRow {
                 level,
