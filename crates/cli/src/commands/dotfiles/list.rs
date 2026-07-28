@@ -54,8 +54,7 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
             table.add_row(vec![
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
-                // Content-source-aware rendering lands with the enumeration work.
-                entry.source().unwrap_or("(command)").to_string(),
+                describe_content_source(entry),
                 shorten_path(entry.target()),
             ]);
             total += 1;
@@ -152,6 +151,26 @@ fn load_dotfile_packages(
             display.print_error(format!("Failed to load {label}: {e}"));
             Err(1)
         }
+    }
+}
+
+/// Describe where an entry's content comes from, for the Source column.
+///
+/// Shows var *names* for a template and the command for a provider. Both come
+/// from the package file and are references, not values: nothing here runs a
+/// command or renders a template, so listing never resolves a secret and never
+/// triggers an authentication prompt.
+fn describe_content_source(entry: &selfie::package::DotfileEntry) -> String {
+    use selfie::package::ContentSource;
+
+    match entry.content_source() {
+        ContentSource::RepoFile(source) => source.to_string(),
+        ContentSource::Template { source, vars } => {
+            let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+            format!("{source} (template: {})", names.join(", "))
+        }
+        ContentSource::Provider(command) => format!("command: {command}"),
+        ContentSource::Invalid => "(invalid: needs exactly one of source/command)".to_string(),
     }
 }
 

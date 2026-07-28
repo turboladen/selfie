@@ -1808,6 +1808,79 @@ mod secret_bearing {
         assert!(!target.exists());
     }
 
+    // ─── Enumeration must not resolve ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_drift_check_executes_no_binding() {
+        let dirs = TestDirs::new();
+        let provider_target = dirs.target_dir.join("provider.conf");
+        let template_target = dirs.target_dir.join("template.conf");
+
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        std::fs::write(dirs.package_dir.join("creds/t.tpl"), "key: {{ v }}\n").unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n  \
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+            provider_target.display(),
+            template_target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        // Scripted so that a resolve attempt would succeed rather than error —
+        // the assertion is that it never happens, not that it fails.
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read x", SECRET.as_bytes())
+            .succeeding("op read y", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.check_drift().await).await;
+
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "a read-only operation must not run a provider command: {:?}",
+            runner.calls()
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_drift_check_reports_secret_entries_without_counting_them_as_drift() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.check_drift().await).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+            )),
+            "secret entries should be identified, got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. })),
+            "counting them as drift would make sync status permanently dirty"
+        );
+
+        // The summary must agree: zero drift, not "one unverifiable therefore one
+        // drifted".
+        match get_operation_result(&events) {
+            Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count,
+                ..
+            })) => assert_eq!(*drift_count, 0),
+            other => panic!("expected a drift summary, got: {other:?}"),
+        }
+    }
+
     // ─── Leak regression ────────────────────────────────────────────────────
 
     #[tokio::test]

@@ -1039,10 +1039,39 @@ where
 
             let source = match entry.content_source() {
                 ContentSource::RepoFile(source) => source,
-                // Drift is a comparison against recorded deploy state, which
-                // secret-bearing entries deliberately do not have. Reporting them
-                // is handled where that path is built.
-                _ => continue,
+
+                // Secret-bearing entries hold no deploy state, so there is nothing
+                // to compare against. Resolving them here would run the user's
+                // commands — leaking content into a read-only operation and
+                // prompting for authentication from a command that should never
+                // need it.
+                //
+                // They are reported as unverifiable rather than counted as drift.
+                // Counting them would make `selfie dotfiles drift` — and the sync
+                // status that reads it — permanently dirty on any machine with one
+                // provider-sourced dotfile. ADR-0003 calls for identifying them
+                // rather than inventing a drift classification for them.
+                ContentSource::Template { .. } | ContentSource::Provider(_) => {
+                    sender
+                        .send_dotfile_skipped(
+                            secret_origin(entry),
+                            expand_secret_target(filesystem, entry.target()).display(),
+                            "provider-sourced (not verifiable without resolving)",
+                        )
+                        .await;
+                    continue;
+                }
+
+                ContentSource::Invalid => {
+                    sender
+                        .send_warning(format!(
+                            "Skipping '{}': set exactly one of 'source' or 'command', and \
+                             'vars' only alongside 'source'",
+                            entry.target()
+                        ))
+                        .await;
+                    continue;
+                }
             };
 
             let source_path = resolve_source_path(&base_dir, source);

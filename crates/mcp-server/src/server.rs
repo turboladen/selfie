@@ -610,7 +610,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), source, and target for each entry. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::package::port::PackageRepository;
@@ -627,13 +627,7 @@ impl SelfieServer {
                 .filter(|p| !p.dotfiles_with_scope().is_empty())
             {
                 for (scope, entry) in pkg.dotfiles_with_scope() {
-                    entries.push(serde_json::json!({
-                        "package": pkg.name(),
-                        "environment": scope,
-                        "source": entry.source(),
-                        "target": entry.target(),
-                        "origin": "packages",
-                    }));
+                    entries.push(dotfile_entry_json(pkg.name(), scope, entry, "packages"));
                 }
             }
         }
@@ -647,13 +641,7 @@ impl SelfieServer {
                     .filter(|p| !p.dotfiles_with_scope().is_empty())
                 {
                     for (scope, entry) in pkg.dotfiles_with_scope() {
-                        entries.push(serde_json::json!({
-                            "package": pkg.name(),
-                            "environment": scope,
-                            "source": entry.source(),
-                            "target": entry.target(),
-                            "origin": "dotfiles",
-                        }));
+                        entries.push(dotfile_entry_json(pkg.name(), scope, entry, "dotfiles"));
                     }
                 }
             }
@@ -841,6 +829,58 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
     } else {
         CallToolResult::error(vec![Content::text(json)])
     }
+}
+
+/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+///
+/// Reports where content comes from without producing any of it: var names and
+/// the command string come from the package file and are references, not values.
+/// Nothing here runs a command or renders a template, so enumeration cannot leak
+/// a secret or trigger an authentication prompt.
+fn dotfile_entry_json(
+    package: &str,
+    scope: Option<&str>,
+    entry: &selfie::package::DotfileEntry,
+    origin: &str,
+) -> serde_json::Value {
+    use selfie::package::ContentSource;
+
+    let mut value = serde_json::json!({
+        "package": package,
+        "environment": scope,
+        "target": entry.target(),
+        "origin": origin,
+    });
+    let map = value.as_object_mut().expect("constructed as an object");
+
+    match entry.content_source() {
+        ContentSource::RepoFile(source) => {
+            map.insert("kind".into(), "file".into());
+            map.insert("source".into(), source.into());
+        }
+        ContentSource::Template { source, vars } => {
+            map.insert("kind".into(), "template".into());
+            map.insert("source".into(), source.into());
+            map.insert(
+                "vars".into(),
+                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
+            );
+        }
+        ContentSource::Provider(command) => {
+            map.insert("kind".into(), "command".into());
+            map.insert("command".into(), command.into());
+        }
+        ContentSource::Invalid => {
+            map.insert("kind".into(), "invalid".into());
+            map.insert(
+                "error".into(),
+                "set exactly one of 'source' or 'command', and 'vars' only alongside 'source'"
+                    .into(),
+            );
+        }
+    }
+
+    value
 }
 
 #[cfg(test)]
