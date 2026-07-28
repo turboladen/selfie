@@ -27,13 +27,27 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
     /// List all YAML files in a directory.
     ///
+    /// List all YAML files in a directory, in sorted path order.
+    ///
+    /// The sort is load-bearing, not cosmetic. `read_dir` yields entries in
+    /// whatever order the filesystem stores them — insertion order on APFS,
+    /// hash order on ext4 — so without it every consumer of package enumeration
+    /// inherits that non-determinism.
+    ///
+    /// It matters most to `selfie apply` under `stop_on_error`: which packages
+    /// get deployed before the abort would otherwise depend on inode hashing, so
+    /// the same package directory failing the same way could leave two machines
+    /// in different states. For a tool whose purpose is making machines
+    /// converge, that is the wrong property to have. It also makes `spec list`,
+    /// `validate --all`, and `audit --all` report in a stable order, and makes
+    /// the "multiple files match this name" error name them predictably.
     fn list_yaml_files(&self, dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
         let entries = self
             .fs
             .list_directory(dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let yaml_files: Vec<PathBuf> = entries
+        let mut yaml_files: Vec<PathBuf> = entries
             .into_iter()
             .filter(|path| {
                 if let Some(ext) = path.extension() {
@@ -44,6 +58,12 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                 }
             })
             .collect();
+
+        // By path rather than by package name: names come from parsing, which
+        // has not happened yet and which fails for exactly the files whose
+        // ordering matters least. Filename and name agree by convention, and
+        // validation warns when they do not.
+        yaml_files.sort();
 
         Ok(yaml_files)
     }
@@ -528,6 +548,41 @@ mod tests {
         assert!(ripgrep.environments().contains_key("test-env"));
 
         assert!(fzf.environments().contains_key("other-env"));
+    }
+
+    #[test]
+    fn list_yaml_files_returns_them_in_sorted_order() {
+        // `read_dir` yields filesystem order — insertion order on APFS, hash
+        // order on ext4 — so this is the invariant that stops package
+        // enumeration inheriting it. Returned here deliberately unsorted, the
+        // way a real filesystem may.
+        let mut fs = MockFileSystem::default();
+        let dir = PathBuf::from("/test/dir");
+        let cloned = dir.clone();
+
+        fs.expect_list_directory()
+            .with(predicate::eq(dir.clone()))
+            .returning(move |_| {
+                Ok(vec![
+                    cloned.join("zzz.yml"),
+                    cloned.join("mmm.yaml"),
+                    cloned.join("aaa.yml"),
+                ])
+            });
+
+        let repo = YamlPackageRepository::new(fs, PathBuf::from("/dummy"));
+        let yaml_files = repo.list_yaml_files(&dir).unwrap();
+
+        assert_eq!(
+            yaml_files,
+            vec![
+                dir.join("aaa.yml"),
+                dir.join("mmm.yaml"),
+                dir.join("zzz.yml"),
+            ],
+            "enumeration must not depend on the order the filesystem happens to \
+             return entries in"
+        );
     }
 
     #[test]

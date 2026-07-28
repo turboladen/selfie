@@ -2361,7 +2361,12 @@ mod secret_bearing {
         // the next drift check report correctly-deployed files as untracked.
         let dirs = TestDirs::new();
 
-        // "aaa" sorts before "zzz", so the ordinary dotfile deploys first.
+        // Relies on packages being enumerated in sorted path order, so "aaa"
+        // is processed before "zzz" and the ordinary dotfile deploys before the
+        // provider fails. That ordering is a guarantee of the repository, pinned
+        // by `list_yaml_files_returns_them_in_sorted_order` — it is not an
+        // assumption about the filesystem. It was exactly that before, and CI on
+        // ext4 (hash order, unlike APFS) deployed "zzz" first and failed here.
         let source_dir = dirs.package_dir.join("aaa");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
