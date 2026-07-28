@@ -794,7 +794,15 @@ where
     let mut skipped_count: usize = 0;
     let mut conflict_count: usize = 0;
 
-    for package in packages {
+    // Set when `stop_on_error` aborts the run. Held rather than returned so the
+    // deploy state below is still saved.
+    //
+    // Note this flag currently governs secret-resolution failures only. The
+    // repository-file failure paths in this loop have always continued past an
+    // error, and changing that is a behaviour change beyond this feature.
+    let mut stopped: Option<String> = None;
+
+    'packages: for package in packages {
         // If filtering by name, skip non-matching packages
         if let Some(name) = filter_name
             && package.name() != name
@@ -833,13 +841,19 @@ where
                         SecretOutcome::Failed => {
                             skipped_count += 1;
                             if config.stop_on_error() {
-                                return OperationResult::Failure(OperationFailure::Generic(
-                                    format!(
-                                        "Stopped after failing to apply dotfile '{}' \
-                                         (stop_on_error is enabled)",
-                                        entry.target()
-                                    ),
+                                // Break rather than return: anything already
+                                // deployed in this run has been written to disk
+                                // and recorded in the in-memory deploy state, and
+                                // returning here would discard that record while
+                                // leaving the files in place. The next drift check
+                                // would then report correctly-deployed files as
+                                // untracked.
+                                stopped = Some(format!(
+                                    "Stopped after failing to apply dotfile '{}' \
+                                     (stop_on_error is enabled)",
+                                    entry.target()
                                 ));
+                                break 'packages;
                             }
                         }
                     }
@@ -1043,6 +1057,10 @@ where
         sender
             .send_warning(format!("Failed to save deploy state: {e}"))
             .await;
+    }
+
+    if let Some(message) = stopped {
+        return OperationResult::Failure(OperationFailure::Generic(message));
     }
 
     let total = deployed_count + skipped_count + conflict_count;

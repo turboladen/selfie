@@ -2208,6 +2208,57 @@ mod secret_bearing {
         );
     }
 
+    #[tokio::test]
+    async fn stopping_on_error_still_records_what_was_already_deployed() {
+        // An abort must not discard the deploy state for files already written in
+        // the same run: the files are on disk, so dropping their record would make
+        // the next drift check report correctly-deployed files as untracked.
+        let dirs = TestDirs::new();
+
+        // "aaa" sorts before "zzz", so the ordinary dotfile deploys first.
+        let source_dir = dirs.package_dir.join("aaa");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+        let ok_target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "aaa",
+            &[("aaa/config.toml", ok_target.to_str().unwrap())],
+        );
+
+        let bad_target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            bad_target.display()
+        );
+        std::fs::write(dirs.package_dir.join("zzz.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"not logged in");
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "the run should still report failure"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ok_target).unwrap(),
+            "key = \"value\"",
+            "the earlier dotfile really was deployed"
+        );
+
+        let state = std::fs::read_to_string(state_file(&dirs)).unwrap_or_default();
+        assert!(
+            state.contains("aaa/config.toml"),
+            "the successful deployment must still be recorded, got: {state}"
+        );
+    }
+
     // ─── Leak regression: the failure path ──────────────────────────────────
 
     #[tokio::test]
