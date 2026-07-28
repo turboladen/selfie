@@ -30,7 +30,12 @@ impl ValidationIssues {
             .collect()
     }
 
-    /// Returns true if there are any issues (errors or warnings)
+    /// Returns true if there are any issues at all, at any level
+    ///
+    /// Includes informational notices, which are neither defects nor risks, so
+    /// this being true does not imply anything is wrong. Use
+    /// [`has_errors`](Self::has_errors) or [`has_warnings`](Self::has_warnings)
+    /// to ask that.
     #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.0.is_empty()

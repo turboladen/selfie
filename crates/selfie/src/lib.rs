@@ -34,6 +34,7 @@ pub mod fs;
 pub mod git;
 pub mod namespace;
 pub mod package;
+pub(crate) mod paths;
 pub mod sync_service;
 pub mod validation;
 

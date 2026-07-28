@@ -2051,6 +2051,133 @@ mod secret_bearing {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_existing_but_unreadable_target_is_not_silently_overwritten() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // An unreadable file is still a file, and it may be the very credential an
+        // overwrite would destroy. Treating "cannot read" as "not there" would
+        // deploy over it with no prompt.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "existing credential").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+            "an unreadable target must be a conflict, got: {events:?}"
+        );
+
+        // Restore permissions so the content can be checked.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "existing credential",
+            "the unreadable target must not have been overwritten"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_target_conflict_says_so_rather_than_reporting_zero_lines() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "existing credential").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let summary = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                _ => None,
+            })
+            .expect("expected a conflict event");
+
+        assert!(
+            summary.contains("could not be read"),
+            "an empty-looking '0 lines' would understate what an overwrite \
+             destroys, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_source_escaping_the_package_directory_is_refused() {
+        // Apply never runs validation, so the static `..` check on `source` is not
+        // a gate. Without a runtime containment check, a crafted template source
+        // splices the contents of a file outside the package directory into a
+        // deployed dotfile.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.tpl");
+        std::fs::write(&outside, "STOLEN-FROM-OUTSIDE: {{ v }}\n").unwrap();
+
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!target.exists(), "the escaping template must not deploy");
+        assert!(
+            format!("{events:?}").contains("escapes the package directory"),
+            "expected a containment refusal, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("STOLEN-FROM-OUTSIDE"),
+            "the outside file's contents must not surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repo_file_source_escaping_the_package_directory_is_still_refused() {
+        // The pre-existing guard on the ordinary path, asserted here so moving it
+        // into a shared module cannot quietly drop it.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.conf");
+        std::fs::write(&outside, "outside content").unwrap();
+
+        let target = dirs.target_dir.join("escaped.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("../outside.conf", target.to_str().unwrap())],
+        );
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!target.exists(), "the escaping source must not deploy");
+        assert!(
+            format!("{events:?}").contains("escapes YAML base directory"),
+            "got: {events:?}"
+        );
+    }
+
     // ─── Leak regression: the failure path ──────────────────────────────────
 
     #[tokio::test]

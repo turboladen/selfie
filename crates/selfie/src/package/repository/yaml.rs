@@ -115,7 +115,19 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         relative_path: &str,
     ) -> Result<String, FileSystemError> {
         let base_dir = package_path.parent().unwrap_or_else(|| Path::new("."));
-        self.fs.read_file(&base_dir.join(relative_path))
+        let resolved = base_dir.join(relative_path);
+
+        // A package names its referenced files with paths relative to its own
+        // directory, and nothing stops one naming `../../../etc/passwd`. Reading
+        // it would let validation report the contents of an arbitrary file.
+        if !crate::paths::is_within(&resolved, base_dir) {
+            return Err(FileSystemError::IoError(Arc::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("'{relative_path}' escapes the package directory"),
+            ))));
+        }
+
+        self.fs.read_file(&resolved)
     }
 
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {

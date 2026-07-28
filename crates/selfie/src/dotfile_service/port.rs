@@ -62,8 +62,13 @@ pub struct ApplyOptions {
     /// Auto-accept overwrite for conflicts (--yes flag)
     pub auto_accept: bool,
     /// Interactive conflict resolver. When set, conflicts call this instead of
-    /// emitting a `DotfileConflict` event and skipping. Ignored when
-    /// `auto_accept` is true.
+    /// emitting a `DotfileConflict` event and skipping.
+    ///
+    /// For an ordinary repository-file conflict this is ignored when
+    /// `auto_accept` is true. For a secret-bearing entry it is the **only** way
+    /// to accept an overwrite: `auto_accept` is not consulted there at all, so a
+    /// caller that supplies no resolver always gets the conflict reported and
+    /// skipped. See ADR-0003.
     pub conflict_resolver: Option<Arc<dyn ConflictResolver>>,
 }
 

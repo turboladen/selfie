@@ -30,6 +30,7 @@ use crate::{
         },
         port::PackageRepository,
     },
+    paths::{is_within, normalize_path},
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -299,47 +300,6 @@ fn expand_secret_target<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf 
     normalize_path(&raw)
 }
 
-/// Validate that a resolved source path doesn't escape the YAML base directory.
-///
-/// Prevents path traversal attacks where a malicious package YAML could use
-/// `../` sequences to read files outside the YAML file's parent directory.
-///
-/// Uses a component-level normalization that resolves `..` without requiring
-/// the path to exist on disk (unlike `canonicalize`).
-fn validate_source_path(source_path: &Path, base_dir: &Path) -> bool {
-    match (
-        std::path::absolute(source_path),
-        std::path::absolute(base_dir),
-    ) {
-        (Ok(abs_source), Ok(abs_base)) => {
-            normalize_path(&abs_source).starts_with(normalize_path(&abs_base))
-        }
-        _ => false,
-    }
-}
-
-/// Normalize a path by resolving `.` and `..` components without touching the filesystem.
-///
-/// Unlike `canonicalize`, this works on paths that don't exist yet. It processes
-/// components left-to-right, popping on `..` and skipping `.`.
-fn normalize_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut parts: Vec<Component<'_>> = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                // Only pop Normal components; don't pop past root/prefix
-                if matches!(parts.last(), Some(Component::Normal(_))) {
-                    parts.pop();
-                }
-            }
-            Component::CurDir => {} // skip "."
-            other => parts.push(other),
-        }
-    }
-    parts.iter().collect()
-}
-
 impl<R, F, CR> DotfileService for DotfileServiceImpl<R, F, CR>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -528,19 +488,40 @@ fn secret_origin(entry: &DotfileEntry) -> String {
 /// file (1 line vs 12 lines), which is the distinction a user needs in order to
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
-fn secret_conflict_summary(entry: &DotfileEntry, incoming: &[u8], current: &[u8]) -> String {
+fn secret_conflict_summary(
+    entry: &DotfileEntry,
+    incoming: &[u8],
+    current: Option<&[u8]>,
+) -> String {
     // Counts separators plus one, so a trailing newline reads as an extra line.
     // Exact line semantics do not matter here; the comparison between the two
     // sides does.
     let lines = |b: &[u8]| b.iter().filter(|c| **c == b'\n').count() + 1;
 
+    let current_side = match current {
+        Some(bytes) => format!("{} lines", lines(bytes)),
+        // Said plainly rather than shown as "0 lines", which would read as an
+        // empty file and understate what an overwrite destroys.
+        None => "exists but could not be read".to_string(),
+    };
+
     format!(
         "  {}\n  target exists and differs from resolved output\n\n  \
-         resolved output : {} lines\n  current target  : {} lines\n  (content hidden)",
+         resolved output : {} lines\n  current target  : {current_side}\n  (content hidden)",
         secret_origin(entry),
         lines(incoming),
-        lines(current),
     )
+}
+
+/// What is at a secret-bearing entry's target when apply reaches it.
+///
+/// Kept distinct from `Option<Vec<u8>>` because "absent" and "present but
+/// unreadable" call for opposite handling: the first is safe to write, the second
+/// must never be overwritten without asking.
+enum TargetState {
+    Absent,
+    Readable(Vec<u8>),
+    Unreadable,
 }
 
 /// Outcome of handling one secret-bearing entry.
@@ -634,25 +615,42 @@ where
         return SecretOutcome::Skipped;
     }
 
-    let target_exists = filesystem.path_exists(&target_path);
-
+    // Three distinct states, and conflating any two of them loses a credential.
     // Compared as raw bytes: neither side is guaranteed to be UTF-8, and a lossy
     // decode would report two different files as identical.
-    let current = if target_exists {
-        filesystem.read_file_bytes(&target_path).ok()
+    let current = if filesystem.path_exists(&target_path) {
+        match filesystem.read_file_bytes(&target_path) {
+            Ok(bytes) => TargetState::Readable(bytes),
+            // Present but unreadable — an unreadable file is still a file, and it
+            // may well be the credential we would be destroying. Treating this as
+            // absent would overwrite it with no prompt, which is what the
+            // repository-file path avoids by routing an unreadable target into a
+            // conflict.
+            Err(_) => TargetState::Unreadable,
+        }
     } else {
-        None
+        TargetState::Absent
     };
 
-    if current.as_deref() == Some(resolved.bytes.as_slice()) {
+    if let TargetState::Readable(current) = &current
+        && current == &resolved.bytes
+    {
         sender
             .send_dotfile_skipped(&origin, target_path.display(), "already in sync")
             .await;
         return SecretOutcome::Skipped;
     }
 
-    if let Some(current) = current {
-        let summary = secret_conflict_summary(entry, &resolved.bytes, &current);
+    if !matches!(current, TargetState::Absent) {
+        // `None` for an unreadable target: there is nothing to describe or
+        // reveal. The resolver is still consulted, because replacing a file only
+        // needs write permission on its directory — so an overwrite may well be
+        // possible and the user is entitled to choose it.
+        let current: Option<&[u8]> = match &current {
+            TargetState::Readable(bytes) => Some(bytes),
+            _ => None,
+        };
+        let summary = secret_conflict_summary(entry, &resolved.bytes, current);
 
         // `auto_accept` is deliberately NOT consulted here, unlike the repo-file
         // path below. It is a caller-settable parameter — the MCP server exposes
@@ -677,6 +675,7 @@ where
             let resolver = Arc::clone(resolver);
             let target = target_path.display().to_string();
             let incoming = resolved.bytes.clone();
+            let current = current.unwrap_or_default().to_vec();
             let summary = summary.clone();
             tokio::task::spawn_blocking(move || {
                 resolver.resolve(
@@ -864,7 +863,7 @@ where
             let source_path = resolve_source_path(&base_dir, source);
 
             // Runtime path traversal guard: verify resolved path stays within base_dir
-            if !validate_source_path(&source_path, &base_dir) {
+            if !is_within(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
                         "Skipping '{source}': source path escapes YAML base directory"
@@ -1136,7 +1135,7 @@ where
             }
 
             // Runtime path traversal guard (same as handle_apply)
-            if !validate_source_path(&source_path, &base_dir) {
+            if !is_within(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
                         "Skipping '{source}': source path escapes YAML base directory"
@@ -1431,31 +1430,6 @@ where
 mod tests {
     use super::*;
     use crate::fs::RealFileSystem;
-    use std::path::Path;
-
-    #[test]
-    fn test_validate_source_path_valid() {
-        assert!(validate_source_path(
-            Path::new("/configs/app/file.toml"),
-            Path::new("/configs")
-        ));
-    }
-
-    #[test]
-    fn test_validate_source_path_traversal() {
-        assert!(!validate_source_path(
-            Path::new("/configs/../etc/passwd"),
-            Path::new("/configs")
-        ));
-    }
-
-    #[test]
-    fn test_validate_source_path_within_nested() {
-        assert!(validate_source_path(
-            Path::new("/configs/deep/nested/file"),
-            Path::new("/configs")
-        ));
-    }
 
     #[test]
     fn test_expand_user_path_absolute() {

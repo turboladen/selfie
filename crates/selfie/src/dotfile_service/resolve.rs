@@ -18,6 +18,7 @@ use super::template;
 use crate::commands::CommandRunner;
 use crate::fs::filesystem::FileSystem;
 use crate::package::{ContentSource, DotfileEntry};
+use crate::paths::is_within;
 
 /// Upper bound on resolved content.
 ///
@@ -62,6 +63,8 @@ pub(crate) enum ResolveError {
     TemplateUnreadable { template: String, message: String },
     #[error("dotfile for '{target}' has no content to resolve")]
     NotSecretBearing { target: String },
+    #[error("dotfile template '{template}' escapes the package directory")]
+    TemplateEscapesPackage { template: String },
 }
 
 /// Resolve an entry's content, running any commands it declares.
@@ -120,7 +123,19 @@ where
         }
 
         ContentSource::Template { source, vars } => {
-            let text = filesystem.read_file(&base_dir.join(source)).map_err(|e| {
+            // The same runtime containment check the repository-file path applies.
+            // Apply never runs validation, so the static `..` check on `source` is
+            // not a gate — a package that was never validated reaches here intact,
+            // and without this a crafted `source` would splice the contents of a
+            // file outside the package directory into a deployed dotfile.
+            let template_path = base_dir.join(source);
+            if !is_within(&template_path, base_dir) {
+                return Err(ResolveError::TemplateEscapesPackage {
+                    template: source.to_string(),
+                });
+            }
+
+            let text = filesystem.read_file(&template_path).map_err(|e| {
                 ResolveError::TemplateUnreadable {
                     template: source.to_string(),
                     message: e.to_string(),
