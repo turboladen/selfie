@@ -19,6 +19,10 @@ These are cheap, they apply everywhere, and each one is here because skipping it
 - `git show --stat` **truncates long paths**; a grep over it reports false negatives.
 - `grep -A N` windows **cut off** before the thing you are looking for.
 - A build or test run in a working tree **another agent is editing** measures their work, not yours.
+- `gh pr checks` returns an **empty list** before CI registers, so a loop waiting for "zero pending"
+  exits immediately and reports no checks. Wait for the expected count first.
+- **Issue IDs must be looked up, never recalled.** Four of four bead IDs cited from memory in a PR
+  description were wrong. `bd list` or `bd search`, then grep the output.
 
 Before reporting a negative result — "it isn't there", "the gate fails", "no test covers this" —
 confirm it a second way. Two of this session's accusations were withdrawn after doing so.
@@ -40,5 +44,12 @@ is a write.
 before committing. A tree can change between reading a diff and committing it, and `-A` is what lets
 a stale read authorise a commit — that is how unreviewed code got committed here under someone
 else's name.
+
+Better still, `git commit -- <paths>`. It commits exactly what you name and leaves another writer's
+index alone; plain staging does not, and a concurrently staged deletion will otherwise ride your
+commit.
+
+To commit to a different branch while someone else holds the working tree, use
+`git worktree add <scratch> <branch>` rather than switching branches under them.
 
 Commit before running any mutation or experiment, so reverting it cannot destroy work.
