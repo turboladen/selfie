@@ -113,6 +113,11 @@ dotfiles:
 Set **exactly one** of `source` or `command`. `vars` goes only with `source`: with `command` there
 is no template to render, and that combination is rejected rather than ignored.
 
+Any other key inside a dotfile entry is a parse error. Only `target` is required, so a misspelling
+would otherwise be dropped silently — writing `var:` for `vars:` would leave a valid-looking
+repository-file entry and deploy the template _unrendered_, placeholders and all, over the file it
+was meant to fill in.
+
 Dotfiles are deployed with `selfie apply`, not during `selfie package install`. This separation
 keeps installation fast and gives you explicit control over when dotfiles are written to disk.
 

@@ -2209,6 +2209,44 @@ mod secret_bearing {
     }
 
     #[tokio::test]
+    async fn a_dry_run_refuses_an_escaping_template_the_same_way_a_real_apply_does() {
+        // Containment is decidable from the path alone, so the preview can and must
+        // apply it. Same rule as the relative-target case above: a dry run that says
+        // it "would run 1 command(s)" for an entry a real apply refuses outright is
+        // describing something that will never happen.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.tpl");
+        std::fs::write(&outside, "STOLEN: {{ v }}\n").unwrap();
+
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(runner.call_count(), 0);
+        assert!(
+            format!("{events:?}").contains("escapes the package directory"),
+            "a dry run should report the same refusal a real apply would, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("would run"),
+            "must not claim it would run commands for an entry that can never deploy"
+        );
+    }
+
+    #[tokio::test]
     async fn stopping_on_error_still_records_what_was_already_deployed() {
         // An abort must not discard the deploy state for files already written in
         // the same run: the files are on disk, so dropping their record would make
