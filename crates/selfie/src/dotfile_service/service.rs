@@ -95,8 +95,26 @@ where
     ) -> Result<(Vec<Package>, Vec<String>), String> {
         let mut warnings = Vec::new();
 
+        // A package file that does not parse is dropped by `valid_packages`, and
+        // silence there is dangerous for this command specifically: apply is what
+        // people run, and a dotfile that quietly stops deploying surfaces much
+        // later as an authentication failure nobody traces back to a typo. The
+        // run would otherwise report success having done nothing at all.
+        let note_unparseable = |output: &crate::package::port::ListPackagesOutput,
+                                warnings: &mut Vec<String>| {
+            for invalid in output.invalid_packages() {
+                warnings.push(format!(
+                    "Skipping unparseable package file {}: {invalid}",
+                    invalid.package_path().display()
+                ));
+            }
+        };
+
         let mut packages = match package_repo.list_packages() {
-            Ok(output) => output.valid_packages().cloned().collect::<Vec<_>>(),
+            Ok(output) => {
+                note_unparseable(&output, &mut warnings);
+                output.valid_packages().cloned().collect::<Vec<_>>()
+            }
             Err(e) => return Err(format!("Failed to load packages: {e}")),
         };
 
@@ -104,7 +122,10 @@ where
 
         if let Some(dotfiles) = dotfiles_repo {
             match dotfiles.list_packages() {
-                Ok(output) => packages.extend(output.valid_packages().cloned()),
+                Ok(output) => {
+                    note_unparseable(&output, &mut warnings);
+                    packages.extend(output.valid_packages().cloned());
+                }
                 Err(e) => {
                     warnings.push(format!("Failed to load standalone dotfiles: {e}"));
                 }

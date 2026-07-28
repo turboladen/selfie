@@ -2405,6 +2405,68 @@ mod secret_bearing {
         );
     }
 
+    #[tokio::test]
+    async fn an_unparseable_package_is_named_rather_than_silently_dropped() {
+        // `deny_unknown_fields` makes a misspelled key a parse error, and
+        // `valid_packages()` drops parse failures. Without a warning, a package
+        // directory holding exactly one typo'd package produces a successful
+        // apply that deployed nothing — and the user's credentials dotfile
+        // quietly stops deploying, surfacing later as an auth failure nobody
+        // traces back to a typo.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    var:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let rendered = format!("{events:?}");
+        assert!(
+            rendered.contains("creds.yml"),
+            "the warning must name the file, got: {events:?}"
+        );
+        assert!(
+            rendered.contains("unparseable"),
+            "the warning must say why it was skipped, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_package_still_applies_alongside_an_unparseable_one() {
+        // The warning must not become an abort: one bad file should not stop the
+        // rest of the directory deploying.
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("broken.yml"),
+            "name: broken\ndotfiles:\n  - nope: 1\n",
+        )
+        .unwrap();
+
+        let good_target = dirs.target_dir.join("credentials");
+        provider_package(
+            &dirs.package_dir,
+            good_target.to_str().unwrap(),
+            "op read x",
+        );
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(std::fs::read_to_string(&good_target).unwrap(), SECRET);
+        assert!(
+            format!("{events:?}").contains("broken.yml"),
+            "the unparseable file must still be named: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
     // ─── Leak regression: the failure path ──────────────────────────────────
 
     #[tokio::test]

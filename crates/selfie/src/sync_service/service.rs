@@ -651,13 +651,27 @@ fn validate_changed_packages(
             .issues()
             .all_issues()
             .iter()
-            .filter(|i| i.level() != crate::validation::ValidationLevel::Info)
+            // Positive, not negative: naming the levels that block a push means a
+            // level added later is absent here and absent from the match below,
+            // which fails the build at the one place that has to decide about it.
+            // A `!= Info` filter plus a wildcard would silently classify it as a
+            // warning and silently block every push.
+            .filter(|i| {
+                matches!(
+                    i.level(),
+                    crate::validation::ValidationLevel::Error
+                        | crate::validation::ValidationLevel::Warning
+                )
+            })
             .map(|i| PackageValidationIssue {
-                // `Info` is filtered out above, so only the two blocking levels
-                // reach here.
                 level: match i.level() {
                     crate::validation::ValidationLevel::Error => "ERROR".to_string(),
-                    _ => "WARN".to_string(),
+                    crate::validation::ValidationLevel::Warning => "WARN".to_string(),
+                    // Filtered out above; kept exhaustive so a new level is a
+                    // compile error rather than a silent reclassification.
+                    crate::validation::ValidationLevel::Info => {
+                        unreachable!("Info is filtered out before this map")
+                    }
                 },
                 category: format!("{:?}", i.category()),
                 field: i.field().to_string(),

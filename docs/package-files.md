@@ -649,6 +649,13 @@ commands. It reports the entry and how many commands it is declining to run. The
 preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
 executing operation.
 
+A dry run does still apply every check that can be made without running anything — a target that is
+not absolute, a template escaping the package directory — and reports the same refusal a real apply
+would. Because those refusals are failures, `stop_on_error` (default `true`) ends the preview at the
+first one rather than listing every remaining problem entry. That is deliberate: a preview that
+continued past an error a real apply would stop on would be describing a different run from the one
+you are about to perform. Set `stop_on_error: false` to see them all.
+
 #### Diagnostics do not carry line numbers
 
 Most package validation errors report the YAML line and column they came from. Dotfile entries do
