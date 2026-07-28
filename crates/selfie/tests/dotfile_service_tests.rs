@@ -2406,7 +2406,7 @@ mod secret_bearing {
     }
 
     #[tokio::test]
-    async fn an_unparseable_package_is_named_rather_than_silently_dropped() {
+    async fn an_unparsable_package_is_named_rather_than_silently_dropped() {
         // `deny_unknown_fields` makes a misspelled key a parse error, and
         // `valid_packages()` drops parse failures. Without a warning, a package
         // directory holding exactly one typo'd package produces a successful
@@ -2431,13 +2431,13 @@ mod secret_bearing {
             "the warning must name the file, got: {events:?}"
         );
         assert!(
-            rendered.contains("unparseable"),
+            rendered.contains("unparsable"),
             "the warning must say why it was skipped, got: {events:?}"
         );
     }
 
     #[tokio::test]
-    async fn a_valid_package_still_applies_alongside_an_unparseable_one() {
+    async fn a_valid_package_still_applies_alongside_an_unparsable_one() {
         // The warning must not become an abort: one bad file should not stop the
         // rest of the directory deploying.
         let dirs = TestDirs::new();
@@ -2462,7 +2462,7 @@ mod secret_bearing {
         assert_eq!(std::fs::read_to_string(&good_target).unwrap(), SECRET);
         assert!(
             format!("{events:?}").contains("broken.yml"),
-            "the unparseable file must still be named: {events:?}"
+            "the unparsable file must still be named: {events:?}"
         );
         assert_no_event_mentions(&events, SECRET);
     }

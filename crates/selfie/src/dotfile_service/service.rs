@@ -100,11 +100,11 @@ where
         // people run, and a dotfile that quietly stops deploying surfaces much
         // later as an authentication failure nobody traces back to a typo. The
         // run would otherwise report success having done nothing at all.
-        let note_unparseable = |output: &crate::package::port::ListPackagesOutput,
-                                warnings: &mut Vec<String>| {
+        let note_unparsable = |output: &crate::package::port::ListPackagesOutput,
+                               warnings: &mut Vec<String>| {
             for invalid in output.invalid_packages() {
                 warnings.push(format!(
-                    "Skipping unparseable package file {}: {invalid}",
+                    "Skipping unparsable package file {}: {invalid}",
                     invalid.package_path().display()
                 ));
             }
@@ -112,7 +112,7 @@ where
 
         let mut packages = match package_repo.list_packages() {
             Ok(output) => {
-                note_unparseable(&output, &mut warnings);
+                note_unparsable(&output, &mut warnings);
                 output.valid_packages().cloned().collect::<Vec<_>>()
             }
             Err(e) => return Err(format!("Failed to load packages: {e}")),
@@ -123,7 +123,7 @@ where
         if let Some(dotfiles) = dotfiles_repo {
             match dotfiles.list_packages() {
                 Ok(output) => {
-                    note_unparseable(&output, &mut warnings);
+                    note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
                 }
                 Err(e) => {
