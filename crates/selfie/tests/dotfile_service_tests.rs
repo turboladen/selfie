@@ -1649,15 +1649,24 @@ mod secret_bearing {
         // entries would splice one entry's secret into the other's file.
         let dirs = TestDirs::new();
         std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
-        std::fs::write(dirs.package_dir.join("creds/a.tpl"), "value: {{ v }}\n").unwrap();
-        std::fs::write(dirs.package_dir.join("creds/b.tpl"), "value: {{ v }}\n").unwrap();
+        std::fs::write(dirs.package_dir.join("creds/a.tpl"), "value: {{ va }}\n").unwrap();
+        // b.tpl references a name it does not declare — `va` belongs to the first
+        // entry. Per-entry bindings leave it verbatim; a binding map reused across
+        // entries would resolve it and splice the first entry's secret in here.
+        // The two entries must use *different* names for this to be observable at
+        // all: with a shared name the second binding simply overwrites the first.
+        std::fs::write(
+            dirs.package_dir.join("creds/b.tpl"),
+            "value: {{ vb }}\nborrowed: {{ va }}\n",
+        )
+        .unwrap();
 
         let target_a = dirs.target_dir.join("a.conf");
         let target_b = dirs.target_dir.join("b.conf");
         let yaml = format!(
             "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
-             - source: \"creds/a.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"read-a\"\n  \
-             - source: \"creds/b.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"read-b\"\n",
+             - source: \"creds/a.tpl\"\n    target: \"{}\"\n    vars:\n      va: \"read-a\"\n  \
+             - source: \"creds/b.tpl\"\n    target: \"{}\"\n    vars:\n      vb: \"read-b\"\n",
             target_a.display(),
             target_b.display()
         );
@@ -1673,8 +1682,10 @@ mod secret_bearing {
         let a = std::fs::read_to_string(&target_a).unwrap();
         let b = std::fs::read_to_string(&target_b).unwrap();
         assert_eq!(a, "value: AAAAAAAA\n");
-        assert_eq!(b, "value: BBBBBBBB\n");
-        assert!(!a.contains("BBBBBBBB"), "b's value bled into a: {a}");
+        assert_eq!(
+            b, "value: BBBBBBBB\nborrowed: {{ va }}\n",
+            "the first entry's binding must not be visible to the second"
+        );
         assert!(!b.contains("AAAAAAAA"), "a's value bled into b: {b}");
     }
 
