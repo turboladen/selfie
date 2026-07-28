@@ -53,6 +53,32 @@ pub trait PackageRepository: Send + Sync {
     /// - File system access fails
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError>;
 
+    /// Read a file that a package refers to but does not contain
+    ///
+    /// Resolved relative to the package file's own directory — the same base
+    /// `dotfiles` sources resolve against. Used for dotfile templates, whose
+    /// contents validation inspects.
+    ///
+    /// This lives on the repository because the repository owns access to package
+    /// storage. Validation operates on an already-loaded [`Package`] and has no
+    /// file system of its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `package_path` - Path to the package's own YAML file
+    /// * `relative_path` - Path of the referenced file, relative to that YAML's
+    ///   parent directory
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if the file does not exist, cannot be read, or
+    /// is not valid UTF-8.
+    fn read_referenced_file(
+        &self,
+        package_path: &Path,
+        relative_path: &str,
+    ) -> Result<String, FileSystemError>;
+
     /// List all available packages in the package directory
     ///
     /// Discovers and attempts to load all package definition files in the

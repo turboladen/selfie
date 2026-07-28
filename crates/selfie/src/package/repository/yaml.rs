@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    fs::FileSystem,
+    fs::{FileSystem, filesystem::FileSystemError},
     package::{
         GetPackage, Package,
         port::{
@@ -109,6 +109,15 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 }
 
 impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
+    fn read_referenced_file(
+        &self,
+        package_path: &Path,
+        relative_path: &str,
+    ) -> Result<String, FileSystemError> {
+        let base_dir = package_path.parent().unwrap_or_else(|| Path::new("."));
+        self.fs.read_file(&base_dir.join(relative_path))
+    }
+
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
         // Check if package directory exists first
         if !self.fs.path_exists(&self.package_dir) {

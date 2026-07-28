@@ -1,10 +1,81 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_saphyr::Location;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::{DotfileEntry, Package};
+use super::{ContentSource, DotfileEntry, Package};
+
+/// A templated dotfile entry whose file has still to be read.
+///
+/// Produced by [`Package::template_dotfiles`] and consumed by
+/// [`validate_template_vars`], which together let validation check a template's
+/// placeholders without validation itself touching the file system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateReference<'a> {
+    /// Field path naming the entry, e.g. `dotfiles[0]`.
+    pub field: String,
+    /// The template's path, relative to the package file's directory.
+    pub source: &'a str,
+    /// The entry's declared bindings.
+    pub vars: &'a BTreeMap<String, String>,
+}
+
+/// Check that every declared variable is actually referenced by its template.
+///
+/// An unused name is an error rather than a warning because it is the only signal
+/// available for a misspelling: a typo in the template leaves that placeholder
+/// verbatim, and the correctly-spelled declared name then goes unused. See
+/// ADR-0004.
+///
+/// Takes the template's contents rather than its path — reading it is the
+/// caller's job, which keeps validation free of file system access.
+#[must_use]
+pub fn validate_template_vars(
+    template: &str,
+    reference: &TemplateReference<'_>,
+) -> Vec<ValidationIssue> {
+    let referenced = crate::dotfile_service::template::placeholders(template);
+
+    reference
+        .vars
+        .keys()
+        .filter(|name| !referenced.contains(*name))
+        .map(|name| {
+            ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                &format!("{}.vars", reference.field),
+                &format!(
+                    "Dotfile var '{name}' is declared but never used in template '{}'",
+                    reference.source
+                ),
+                Some("Check for a misspelling in the template or in the var name."),
+            )
+        })
+        .collect()
+}
+
+/// Report a template that could not be read.
+///
+/// Separate from [`validate_template_vars`] so that the caller, which is the one
+/// doing the reading, has a single place to turn a read failure into a
+/// diagnostic.
+#[must_use]
+pub fn unreadable_template_issue(
+    reference: &TemplateReference<'_>,
+    error: &impl std::fmt::Display,
+) -> ValidationIssue {
+    ValidationIssue::error(
+        ValidationErrorCategory::InvalidValue,
+        &format!("{}.source", reference.field),
+        &format!(
+            "Dotfile template '{}' cannot be read: {error}",
+            reference.source
+        ),
+        Some("Templates are read during validation to check their placeholders."),
+    )
+}
 
 /// Known top-level keys in a package YAML file.
 ///
@@ -473,11 +544,91 @@ impl Package {
         issues
     }
 
+    /// Every templated dotfile entry, paired with the field path that names it.
+    ///
+    /// Checking a template's placeholders requires reading it, which validation
+    /// cannot do itself. This enumerates what needs reading so the service layer
+    /// can fetch each file through the repository and hand the contents to
+    /// [`validate_template_vars`].
+    #[must_use]
+    pub fn template_dotfiles(&self) -> Vec<TemplateReference<'_>> {
+        let mut refs = Vec::new();
+
+        for (i, entry) in self.dotfiles.iter().enumerate() {
+            if let ContentSource::Template { source, vars } = entry.content_source() {
+                refs.push(TemplateReference {
+                    field: format!("dotfiles[{i}]"),
+                    source,
+                    vars,
+                });
+            }
+        }
+
+        for (env_name, env) in self.environments() {
+            for (i, entry) in env.dotfiles().iter().enumerate() {
+                if let ContentSource::Template { source, vars } = entry.content_source() {
+                    refs.push(TemplateReference {
+                        field: format!("environments.{env_name}.dotfiles[{i}]"),
+                        source,
+                        vars,
+                    });
+                }
+            }
+        }
+
+        refs
+    }
+
     /// Structural checks for a single dotfile entry. `field` prefixes the
     /// diagnostics (e.g. `dotfiles[0]` or `environments.work.dotfiles[1]`).
     fn validate_dotfile_entry(dotfile: &DotfileEntry, field: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         let target = dotfile.target();
+
+        // Content-source shape. All of these checks are offline: validation must
+        // work without network access and must never trigger an authentication
+        // prompt, so no binding is ever executed here.
+        match (dotfile.source(), dotfile.command()) {
+            (Some(_), Some(_)) => issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                field,
+                "Dotfile sets both 'source' and 'command'; exactly one is required",
+                Some(
+                    "Use 'source' for a file in the repository, or 'command' for content produced \
+                     by a command.",
+                ),
+            )),
+            (None, None) => issues.push(ValidationIssue::error(
+                ValidationErrorCategory::RequiredField,
+                field,
+                "Dotfile sets neither 'source' nor 'command'; exactly one is required",
+                Some(
+                    "Use 'source' for a file in the repository, or 'command' for content produced \
+                     by a command.",
+                ),
+            )),
+            (None, Some(_)) if !dotfile.vars().is_empty() => issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                &format!("{field}.vars"),
+                "Dotfile sets both 'command' and 'vars', but there is no template to render",
+                Some(
+                    "Drop 'vars', or replace 'command' with a 'source' template that references \
+                     them.",
+                ),
+            )),
+            _ => {}
+        }
+
+        for name in dotfile.vars().keys() {
+            if !crate::dotfile_service::template::is_valid_name(name) {
+                issues.push(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.vars"),
+                    &format!("Dotfile var name '{name}' is not valid"),
+                    Some("Names must match [A-Za-z_][A-Za-z0-9_]*."),
+                ));
+            }
+        }
 
         // Source-path checks apply only to entries that have a source. A provider
         // entry's content comes from a command, so there is no path to check.
@@ -568,6 +719,159 @@ mod tests {
     };
 
     use super::*;
+
+    fn entry_from_yaml(yaml: &str) -> DotfileEntry {
+        serde_saphyr::from_str(yaml).expect("dotfile entry should parse")
+    }
+
+    fn entry_issues(yaml: &str) -> Vec<ValidationIssue> {
+        Package::validate_dotfile_entry(&entry_from_yaml(yaml), "dotfiles[0]")
+    }
+
+    fn messages(issues: &[ValidationIssue]) -> String {
+        issues
+            .iter()
+            .map(|i| format!("{}: {}", i.field(), i.message()))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    #[test]
+    fn rejects_entry_with_neither_source_nor_command() {
+        let issues = entry_issues("target: ~/.x");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message().contains("neither 'source' nor 'command'")),
+            "got: {}",
+            messages(&issues)
+        );
+    }
+
+    #[test]
+    fn rejects_entry_with_both_source_and_command() {
+        let issues = entry_issues("source: a.tpl\ncommand: op read x\ntarget: ~/.x");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message().contains("both 'source' and 'command'")),
+            "got: {}",
+            messages(&issues)
+        );
+    }
+
+    #[test]
+    fn rejects_command_combined_with_vars() {
+        let issues = entry_issues("command: op read x\ntarget: ~/.x\nvars:\n  a: op read y");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message().contains("no template to render")),
+            "got: {}",
+            messages(&issues)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_var_name() {
+        let issues =
+            entry_issues("source: a.tpl\ntarget: ~/.x\nvars:\n  \"not-a-name\": op read y");
+        assert!(
+            issues.iter().any(|i| i.message().contains("not-a-name")),
+            "got: {}",
+            messages(&issues)
+        );
+    }
+
+    #[test]
+    fn accepts_a_well_formed_provider_entry() {
+        let issues = entry_issues("command: op read op://Private/key\ntarget: ~/.ssh/id_ed25519");
+        assert!(issues.is_empty(), "got: {}", messages(&issues));
+    }
+
+    #[test]
+    fn accepts_a_well_formed_template_entry() {
+        let issues = entry_issues(
+            "source: r/creds.tpl\ntarget: ~/.gem/credentials\nvars:\n  api_key: op read x",
+        );
+        assert!(issues.is_empty(), "got: {}", messages(&issues));
+    }
+
+    #[test]
+    fn a_provider_entry_is_not_asked_for_a_relative_source_path() {
+        // The source-path rules (non-empty, relative, no `..`) must not fire for an
+        // entry that legitimately has no source.
+        let issues = entry_issues("command: cat /etc/hosts\ntarget: ~/.x");
+        assert!(
+            !issues.iter().any(|i| i.field().ends_with(".source")),
+            "got: {}",
+            messages(&issues)
+        );
+    }
+
+    #[test]
+    fn rejects_declared_var_missing_from_template() {
+        let vars = BTreeMap::from([
+            ("api_key".to_string(), "op read a".to_string()),
+            ("unused".to_string(), "op read b".to_string()),
+        ]);
+        let reference = TemplateReference {
+            field: "dotfiles[0]".to_string(),
+            source: "rubygems/credentials.tpl",
+            vars: &vars,
+        };
+
+        let issues = validate_template_vars("key: {{ api_key }}", &reference);
+
+        assert_eq!(issues.len(), 1, "got: {}", messages(&issues));
+        assert!(issues[0].message().contains("unused"));
+        assert!(issues[0].message().contains("rubygems/credentials.tpl"));
+    }
+
+    #[test]
+    fn accepts_template_where_every_var_is_used() {
+        let vars = BTreeMap::from([
+            ("x".to_string(), "op read a".to_string()),
+            ("y".to_string(), "op read b".to_string()),
+        ]);
+        let reference = TemplateReference {
+            field: "dotfiles[0]".to_string(),
+            source: "t.tpl",
+            vars: &vars,
+        };
+
+        assert!(validate_template_vars("a: {{ x }}\nb: {{ y }}", &reference).is_empty());
+    }
+
+    #[test]
+    fn template_dotfiles_enumerates_shared_and_environment_templates() {
+        let yaml = r#"
+name: creds
+dotfiles:
+  - source: shared.tpl
+    target: ~/.shared
+    vars:
+      a: op read a
+  - source: plain.conf
+    target: ~/.plain
+environments:
+  work:
+    install: echo i
+    dotfiles:
+      - source: work.tpl
+        target: ~/.work
+        vars:
+          b: teller get B
+"#;
+        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+
+        let refs = package.template_dotfiles();
+        let sources: Vec<_> = refs.iter().map(|r| r.source).collect();
+
+        assert_eq!(sources, vec!["shared.tpl", "work.tpl"]);
+        assert_eq!(refs[0].field, "dotfiles[0]");
+        assert_eq!(refs[1].field, "environments.work.dotfiles[0]");
+    }
 
     #[test]
     fn test_validate_valid_package() {

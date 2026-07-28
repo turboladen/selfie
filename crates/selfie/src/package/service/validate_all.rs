@@ -61,7 +61,10 @@ where
 
     for package in &valid_packages {
         let validation = package.validate(config.environment());
-        let issues = validation.issues();
+        let mut all_issues = validation.issues().all_issues().to_vec();
+        all_issues.extend(super::validate::validate_package_templates(package, repo));
+        let issues: crate::validation::ValidationIssues = all_issues.into();
+        let issues = &issues;
 
         let mut validation_issues = Vec::new();
 

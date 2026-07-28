@@ -5,14 +5,38 @@
 use crate::{
     config::SelfieConfig,
     package::{
+        Package,
         event::{
             EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
             ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
+        validate::{unreadable_template_issue, validate_template_vars},
     },
+    validation::{ValidationIssue, ValidationIssues},
 };
+
+/// Check every templated dotfile's placeholders against its declared bindings.
+///
+/// Reads each template through the repository, since `Package::validate` is a
+/// pure, offline check with no file system of its own. Never executes a binding:
+/// validation must work offline and must not trigger an authentication prompt.
+pub(super) fn validate_package_templates<PR>(package: &Package, repo: &PR) -> Vec<ValidationIssue>
+where
+    PR: PackageRepository,
+{
+    package
+        .template_dotfiles()
+        .iter()
+        .flat_map(
+            |reference| match repo.read_referenced_file(package.path(), reference.source) {
+                Ok(template) => validate_template_vars(&template, reference),
+                Err(e) => vec![unreadable_template_issue(reference, &e)],
+            },
+        )
+        .collect()
+}
 
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
@@ -43,7 +67,10 @@ where
     progress.next(sender, "Validating package definition").await;
 
     let validation_result = package_blob.package.validate(config.environment());
-    let issues = validation_result.issues();
+    let mut all_issues = validation_result.issues().all_issues().to_vec();
+    all_issues.extend(validate_package_templates(&package_blob.package, repo));
+    let issues: ValidationIssues = all_issues.into();
+    let issues = &issues;
 
     // Step 3: Process validation results
     progress.next(sender, "Processing validation results").await;
