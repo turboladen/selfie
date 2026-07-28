@@ -28,6 +28,70 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
+    fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
+        use std::io::Write as _;
+
+        let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
+        // The temporary file's name is random and the rename carries no path at all,
+        // so failures would otherwise name a file the operator never chose -- or
+        // nothing. Re-tag them with the target. `kind()` is preserved; only the raw
+        // OS error number is lost, which nothing here consumes.
+        let target_err = |e: std::io::Error| {
+            io_err(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", path.display()),
+            ))
+        };
+
+        // The temporary file must live in the target's own directory: elsewhere it may
+        // be on another filesystem, making the rename non-atomic, or world-readable.
+        //
+        // `parent()` yields Some("") for a bare relative name. Filtering that to "."
+        // is defensive normalisation rather than load-bearing: `create_dir_all("")` is
+        // a no-op returning `Ok` and `tempfile_in("")` already resolves to the current
+        // directory, so removing the filter would not change behaviour today. It is
+        // here so the parent is always a real directory rather than relying on those
+        // two coincidences holding.
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(target_err)?;
+
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".selfie-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Applied by the creating syscall, so the content is never briefly
+            // world-readable. The umask may restrict this further but can never
+            // loosen it.
+            builder.permissions(fs::Permissions::from_mode(0o600));
+        }
+
+        // Randomly named and unlinked on drop, so it cannot collide with a concurrent
+        // write and no *error* path leaves it behind. A crash is another matter: being
+        // killed or losing power between here and the rename leaves a `.selfie-*` file
+        // beside the target holding the complete secret. It is mode 0600, so this is
+        // debris rather than disclosure, but nothing sweeps it up.
+        let mut tmp = builder.tempfile_in(parent).map_err(target_err)?;
+        tmp.write_all(data).map_err(target_err)?;
+        // Flush before the rename: otherwise a crash can leave the target name
+        // pointing at a zero-length file.
+        tmp.as_file().sync_all().map_err(target_err)?;
+
+        // Replaces the target by rename, so readers see either the old file or the
+        // complete new one, a pre-existing mode is discarded rather than inherited,
+        // and a symlink at the final component is replaced rather than followed.
+        //
+        // The directory entry itself is not fsynced, so a crash immediately after this
+        // can still lose the rename and leave the old file in place. That costs the
+        // deploy, not the data -- a reader never sees a partial file either way -- so
+        // it is a durability gap, not a correctness one.
+        tmp.persist(path).map_err(|e| target_err(e.error))?;
+        Ok(())
+    }
+
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         fs::remove_file(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
@@ -357,6 +421,285 @@ mod tests {
                 assert_eq!(inner.to_string(), "test error");
             }
             FileSystemError::HomeDirNotFound => panic!("Expected IoError variant"),
+        }
+    }
+}
+
+/// Tests for [`FileSystem::write_file_private`].
+///
+/// Grouped by what each test actually proves.
+///
+/// The six tests directly below all still pass against [`FileSystem::write_file`]'s
+/// `create_dir_all` + `fs::write`, so they guard against gross breakage rather than
+/// against the defects this method exists to fix.
+///
+/// Everything in `unix` is load-bearing: temporarily swapping this implementation
+/// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
+/// run there, and none of the six above. The `/dev/shm` test is Linux-only, so it was
+/// not part of that check.
+#[cfg(test)]
+mod private_write_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Names of everything in `dir`, for asserting that no temporary file survived.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn writes_content_to_a_new_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("creds");
+
+        RealFileSystem
+            .write_file_private(&target, b"secret")
+            .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn replaces_the_content_of_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("creds");
+        fs::write(&target, b"a much longer previous value").unwrap();
+
+        RealFileSystem.write_file_private(&target, b"new").unwrap();
+
+        // Not merely overwritten in place: nothing of the old value survives.
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn creates_missing_parent_directories() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("nested").join("deeper").join("creds");
+
+        RealFileSystem
+            .write_file_private(&target, b"secret")
+            .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn writes_empty_data() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("creds");
+
+        RealFileSystem.write_file_private(&target, b"").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"");
+    }
+
+    #[test]
+    fn leaves_no_temporary_file_behind_on_success() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("creds");
+
+        RealFileSystem
+            .write_file_private(&target, b"secret")
+            .unwrap();
+
+        assert_eq!(entries(dir.path()), ["creds"]);
+    }
+
+    #[test]
+    fn leaves_no_temporary_file_behind_when_the_rename_fails() {
+        let dir = tempdir().unwrap();
+        // A directory at the target path cannot be replaced by a rename, so the
+        // write gets as far as the temporary file and then fails. The specific
+        // error differs by platform, so only the failure itself is asserted.
+        let target = dir.path().join("creds");
+        fs::create_dir(&target).unwrap();
+
+        let err = RealFileSystem.write_file_private(&target, b"secret");
+
+        assert!(err.is_err());
+        assert_eq!(entries(dir.path()), ["creds"]);
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        fn mode_of(path: &Path) -> u32 {
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        /// The security property, asserted the only way that cannot flake: the
+        /// umask may restrict the mode further than the 0o600 we request, but it
+        /// can never loosen it, so group and other bits must be clear.
+        fn assert_owner_only(path: &Path) {
+            assert_eq!(
+                mode_of(path) & 0o077,
+                0,
+                "group/other bits set on {}: {:04o}",
+                path.display(),
+                mode_of(path)
+            );
+        }
+
+        #[test]
+        fn creates_new_file_owner_only() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("creds");
+
+            RealFileSystem
+                .write_file_private(&target, b"secret")
+                .unwrap();
+
+            assert_owner_only(&target);
+        }
+
+        #[test]
+        fn tightens_mode_of_an_existing_world_readable_file() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("creds");
+            fs::write(&target, b"old").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+
+            RealFileSystem.write_file_private(&target, b"new").unwrap();
+
+            // `OpenOptions::mode` applies only when a file is created, so an
+            // implementation that opens the target directly would silently leave
+            // this at 0644 while passing every other test here.
+            assert_owner_only(&target);
+            assert_eq!(fs::read(&target).unwrap(), b"new");
+        }
+
+        #[test]
+        fn replaces_a_symlink_instead_of_writing_through_it() {
+            let dir = tempdir().unwrap();
+            let elsewhere = dir.path().join("elsewhere");
+            fs::write(&elsewhere, b"untouched").unwrap();
+            let target = dir.path().join("creds");
+            std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+
+            RealFileSystem
+                .write_file_private(&target, b"secret")
+                .unwrap();
+
+            assert_eq!(fs::read(&elsewhere).unwrap(), b"untouched");
+            assert!(
+                !fs::symlink_metadata(&target)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"secret");
+            assert_owner_only(&target);
+        }
+
+        #[test]
+        fn does_not_follow_a_dangling_symlink() {
+            let dir = tempdir().unwrap();
+            let never_created = dir.path().join("never-created");
+            let target = dir.path().join("creds");
+            std::os::unix::fs::symlink(&never_created, &target).unwrap();
+
+            RealFileSystem
+                .write_file_private(&target, b"secret")
+                .unwrap();
+
+            // `fs::write` would have created the file the symlink points at.
+            assert!(!never_created.exists());
+            assert_eq!(fs::read(&target).unwrap(), b"secret");
+            assert_owner_only(&target);
+        }
+
+        #[test]
+        fn replaces_by_rename_rather_than_truncating_in_place() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("creds");
+            fs::write(&target, b"old").unwrap();
+
+            // Holding the original open keeps its inode allocated, so it cannot be
+            // recycled for the replacement and make the comparison below flaky.
+            let held = fs::File::open(&target).unwrap();
+            let before = fs::metadata(&target).unwrap().ino();
+
+            RealFileSystem.write_file_private(&target, b"new").unwrap();
+
+            let after = fs::metadata(&target).unwrap().ino();
+            assert_ne!(
+                before, after,
+                "target kept its inode, so it was modified in place rather than replaced"
+            );
+            drop(held);
+        }
+
+        #[test]
+        fn errors_when_the_parent_directory_is_not_writable() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!("SKIP errors_when_the_parent_directory_is_not_writable: running as root");
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("locked");
+            fs::create_dir(&parent).unwrap();
+            let target = parent.join("creds");
+            // The target must already exist for this to discriminate. Rewriting an
+            // existing file needs write permission on the *file*, not on its
+            // directory, so `write_file` succeeds here; an atomic replace still has to
+            // create a sibling, so it cannot.
+            fs::write(&target, b"old").unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+
+            let result = RealFileSystem.write_file_private(&target, b"secret");
+
+            assert!(result.is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
+
+            // Restore write access so the temporary directory can be cleaned up.
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        /// Pins the temporary file to the target's own directory.
+        ///
+        /// This is only observable where the target and `$TMPDIR` are on different
+        /// filesystems: a temporary file created anywhere else would then fail to
+        /// rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
+        /// `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
+        /// so it skips rather than asserting something vacuous — each skip path says
+        /// so, since an early return is otherwise indistinguishable from a pass.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn creates_the_temporary_file_in_the_targets_own_directory() {
+            const SKIP: &str = "SKIP creates_the_temporary_file_in_the_targets_own_directory:";
+
+            let Ok(shm) = fs::metadata("/dev/shm") else {
+                eprintln!("{SKIP} /dev/shm is not present");
+                return;
+            };
+            let Ok(tmp) = fs::metadata(std::env::temp_dir()) else {
+                eprintln!("{SKIP} $TMPDIR is not readable");
+                return;
+            };
+            if shm.dev() == tmp.dev() {
+                eprintln!("{SKIP} /dev/shm and $TMPDIR are on the same filesystem");
+                return;
+            }
+            let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+                eprintln!("{SKIP} /dev/shm is not writable");
+                return;
+            };
+
+            let target = dir.path().join("creds");
+
+            RealFileSystem
+                .write_file_private(&target, b"secret")
+                .unwrap();
+
+            assert_eq!(fs::read(&target).unwrap(), b"secret");
+            assert_owner_only(&target);
         }
     }
 }

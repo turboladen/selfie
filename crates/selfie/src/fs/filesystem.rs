@@ -57,6 +57,76 @@ pub trait FileSystem: Send + Sync {
     /// - Any other IO error occurs during writing
     fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
 
+    /// Write data to a file readable only by its owner, replacing it atomically
+    ///
+    /// Unlike [`write_file`](FileSystem::write_file), this creates the file with
+    /// owner-only permissions from the outset (on Unix -- see the platform notes
+    /// below) and puts it in place with a rename, so there is no window in which the
+    /// content is world-readable, no partial write if interrupted, and no inheriting
+    /// of a laxer mode from an existing file.
+    ///
+    /// Intended for secret-bearing content.
+    ///
+    /// Creates parent directories as needed, but only the *file* is owner-only:
+    /// created directories get the usual `0o777 & !umask`, so a directory made by this
+    /// call is typically world-listable. The content is protected; the fact that the
+    /// file exists is not.
+    ///
+    /// # Symlinks
+    ///
+    /// A symlink at the **final component** of `path` is replaced rather than written
+    /// through. Symlinked **parent** directories are still followed, so a planted
+    /// directory symlink can still redirect where the file lands.
+    ///
+    /// This applies to `path` **as given**, so a caller that resolves the path first
+    /// can forfeit it. The precise rule, for callers going through
+    /// [`expand_path`](FileSystem::expand_path): the guarantee survives exactly when
+    /// `expand_path` on the *full* path fails.
+    ///
+    /// `expand_path` canonicalizes, which only succeeds for a path that already
+    /// exists. So a symlink that **resolves** is followed by the caller, and this
+    /// method receives the destination rather than the symlink -- the guarantee is
+    /// gone. A **dangling** symlink makes canonicalization fail with `ENOENT`; a
+    /// caller that then falls back to resolving only the parent, or to the raw path,
+    /// hands over an unresolved final component and the guarantee **holds**.
+    ///
+    /// Do not read this as "canonicalizing callers always forfeit it" -- that is too
+    /// pessimistic -- nor as "it is forfeited whenever a symlink is planted", which is
+    /// too optimistic in the other direction. It turns on whether the full path
+    /// resolved.
+    ///
+    /// # Platform and metadata notes
+    ///
+    /// Because the file is replaced rather than modified, the new file does not
+    /// inherit the old one's extended attributes, POSIX ACLs, or SELinux label.
+    ///
+    /// On Unix the mode is `0o600` masked by the process umask, so it may be more
+    /// restrictive but never more permissive. On Windows the atomic replace still
+    /// applies, but owner-only permissions are best-effort -- the file inherits the
+    /// parent directory's ACL -- and the replace additionally fails if the target is
+    /// open in another process. On any other platform there is **no owner-only
+    /// guarantee at all**: the call may well succeed and simply create the file with
+    /// default permissions. Do not treat a non-Unix, non-Windows target as fail-safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the file should be written
+    /// * `data` - Data to write to the file
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if:
+    /// - The parent directory cannot be created
+    /// - The temporary file cannot be created or written
+    /// - Flushing the temporary file to disk fails, which can happen after the write
+    ///   itself succeeded (for example `ENOSPC` surfacing only at flush time)
+    /// - The rename into place fails
+    ///
+    /// Note this differs from [`write_file`](FileSystem::write_file), which can still
+    /// succeed on an existing file inside a read-only directory; an atomic replace
+    /// cannot, because it must create a sibling first.
+    fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+
     /// Remove a file from the file system
     ///
     /// Deletes the file at the specified path. This operation is irreversible.
