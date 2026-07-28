@@ -612,6 +612,14 @@ A symlink **at the target** is replaced rather than written through. This is a d
 change: writing through the link would send the credential wherever the link points. A symlinked
 **parent directory** is still followed.
 
+There is one case where whether the link is replaced depends on something other than the deploy
+itself. When the content already matches, selfie only rewrites the target if its permissions need
+tightening, and the permission check follows the link — so it reports on the file the link points
+at. A symlinked target whose destination is already owner-only is left completely alone and the link
+survives; one whose destination is group- or world-readable is tightened, which replaces the link
+with a regular file. Both outcomes are consistent with the rule above, but which one you get depends
+on the destination's mode rather than on anything about the link.
+
 #### What is shown, and what is not
 
 Resolved content never appears in selfie's output — not in a progress message, a log line, an error,
