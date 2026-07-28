@@ -67,6 +67,23 @@ impl FakeCommandRunner {
         self
     }
 
+    /// Script a command that exits non-zero while also writing to stdout.
+    ///
+    /// Used to check the failure path: a provider's stdout is the secret, and a
+    /// failure must not forward it.
+    #[must_use]
+    pub fn failing_with_stdout(mut self, command: &str, stdout: &[u8], stderr: &[u8]) -> Self {
+        self.responses.insert(
+            command.to_string(),
+            Response {
+                exit_code: 1,
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+            },
+        );
+        self
+    }
+
     /// Script a command that exits non-zero with `stderr`.
     #[must_use]
     pub fn failing(mut self, command: &str, stderr: &[u8]) -> Self {

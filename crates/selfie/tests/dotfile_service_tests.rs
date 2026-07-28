@@ -1423,6 +1423,26 @@ mod secret_bearing {
         }
     }
 
+    /// A resolver that accepts every conflict.
+    ///
+    /// Secret-bearing entries ignore `auto_accept`, so a test needing the
+    /// overwrite path has to go through a resolver — the same route a human at a
+    /// terminal takes.
+    struct AlwaysAcceptSecret;
+
+    impl ConflictResolver for AlwaysAcceptSecret {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            ConflictResolution::Accept
+        }
+    }
+
+    fn accepting() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(Arc::new(AlwaysAcceptSecret)),
+            ..Default::default()
+        }
+    }
+
     fn state_file(dirs: &TestDirs) -> PathBuf {
         dirs.state_dir.join("deploy-state.yml")
     }
@@ -1559,11 +1579,7 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_runner(runner);
 
-        let options = ApplyOptions {
-            auto_accept: true,
-            ..Default::default()
-        };
-        let _ = collect_events(service.apply_all(options).await).await;
+        let _ = collect_events(service.apply_all(accepting()).await).await;
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credential targets must be owner-only");
@@ -1583,11 +1599,7 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_runner(runner);
 
-        let options = ApplyOptions {
-            auto_accept: true,
-            ..Default::default()
-        };
-        let _ = collect_events(service.apply_all(options).await).await;
+        let _ = collect_events(service.apply_all(accepting()).await).await;
 
         assert_eq!(
             std::fs::read_to_string(&elsewhere).unwrap(),
@@ -1766,13 +1778,13 @@ mod secret_bearing {
     }
 
     #[tokio::test]
-    async fn a_dry_run_resolves_but_writes_nothing() {
+    async fn a_dry_run_executes_no_command_at_all() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
-        let service = dirs.service_with_runner(runner);
+        let service = dirs.service_with_runner(runner.clone());
 
         let options = ApplyOptions {
             dry_run: true,
@@ -1780,7 +1792,22 @@ mod secret_bearing {
         };
         let events = collect_events(service.apply_all(options).await).await;
 
+        // Resolving is what runs the user's commands, and a preview must not do
+        // that — it reaches a secret store and can raise a biometric prompt.
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "--dry-run must not execute a provider command: {:?}",
+            runner.calls()
+        );
         assert!(!target.exists(), "dry run must not write");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("dry run")
+            )),
+            "the dry run should still report the entry, got: {events:?}"
+        );
         assert_no_event_mentions(&events, SECRET);
     }
 
@@ -1958,6 +1985,149 @@ mod secret_bearing {
             conflict.contains("op read x"),
             "the command is a reference, not a credential, and should be shown: {conflict}"
         );
+    }
+
+    #[tokio::test]
+    async fn auto_accept_does_not_overwrite_a_secret_target() {
+        // `auto_accept` is caller-settable — the MCP server exposes it to an
+        // assistant — so honouring it would let a non-interactive caller silently
+        // overwrite a hand-edited credentials file. The spec requires provider
+        // conflicts to be reported and skipped without an interactive resolver,
+        // whatever auto_accept says.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "hand-edited credential").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hand-edited credential",
+            "auto_accept must not force-overwrite a secret-bearing target"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+            "the conflict must still be reported, got: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn auto_accept_still_overwrites_an_ordinary_repo_file() {
+        // The guard above is specific to secret-bearing entries; `--yes` keeps
+        // working for ordinary dotfiles, which have a diff and a recorded state.
+        let dirs = TestDirs::new();
+        let source_dir = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"from-repo\"").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "key = \"hand-edited\"").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let service = dirs.service();
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let _ = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "key = \"from-repo\""
+        );
+    }
+
+    // ─── Leak regression: the failure path ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_failing_provider_does_not_leak_its_stdout() {
+        // The likeliest leak of all: `CommandFailure::ExecutionFailed` carries
+        // `stdout`, `PackageEvent::Completed` carries that, and the CLI prints it
+        // verbatim line by line. A provider's stdout IS the secret, so the resolve
+        // path must never route a failure through `OperationFailure::from`.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "op read x",
+            SECRET.as_bytes(),
+            b"error: vault sealed",
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+
+        // Positive control: the failure really was reported, so this is not
+        // passing because nothing happened.
+        assert!(
+            format!("{events:?}").contains("vault sealed"),
+            "the failure must stay diagnosable: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_length_output_failure_does_not_leak_stderr() {
+        // Empty stdout is an error, and on that path stderr was never a failure
+        // signal — the command exited zero — so it must not be forwarded either.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding_noisy(
+            "op read x",
+            b"",
+            format!("debug: retrieved token={SECRET}").as_bytes(),
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert!(
+            format!("{events:?}").contains("produced no output"),
+            "the empty-output error must still be reported: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_binding_does_not_leak_its_stdout() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read a")],
+        );
+
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "op read a",
+            SECRET.as_bytes(),
+            b"error: not logged in",
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert!(format!("{events:?}").contains("not logged in"));
     }
 
     /// A resolver that records what it was handed and always accepts.

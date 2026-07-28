@@ -39,6 +39,7 @@ which = "8.0"
 [dev-dependencies]
 mockall.workspace = true
 test-common = { path = "../test-common/" }
+tracing-subscriber.workspace = true
 tokio = { version = "1.44", features = [
   "io-std",
   "io-util",

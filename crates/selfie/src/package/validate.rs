@@ -560,11 +560,7 @@ impl Package {
         let command_count: usize = self
             .dotfiles_with_scope()
             .iter()
-            .map(|(_, entry)| match entry.content_source() {
-                ContentSource::Provider(_) => 1,
-                ContentSource::Template { vars, .. } => vars.len(),
-                ContentSource::RepoFile(_) | ContentSource::Invalid => 0,
-            })
+            .map(|(_, entry)| entry.command_count())
             .sum();
 
         if command_count == 0 {

@@ -125,7 +125,9 @@ impl ConflictResolver for InteractiveConflictResolver {
 
                 // Reveal is offered only on a terminal. Without one there is
                 // nobody to read it and no way to confirm the second prompt.
-                let can_reveal = console::Term::stdout().is_term();
+                // Uses the display's own check, which covers stdout and stderr,
+                // rather than a fresh stdout-only probe.
+                let can_reveal = self.display.is_tty();
 
                 match self.prompt(can_reveal) {
                     Some(1) => ConflictResolution::Accept,

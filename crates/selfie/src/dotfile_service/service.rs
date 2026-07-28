@@ -271,9 +271,25 @@ pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf 
 /// Repository-file entries keep using `expand_user_path`; this is a narrower rule
 /// for the one path where the difference is load-bearing.
 fn expand_secret_target<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
-    let raw = if let Some(rest) = target.strip_prefix("~/") {
-        match filesystem.expand_path(Path::new("~")) {
-            Ok(home) => home.join(rest),
+    let raw = if target.starts_with('~') {
+        // Expand only the leading `~` component, so both `~/x` and `~user/x` work
+        // — `expand_path` runs shellexpand, which handles the named form, and a
+        // home directory always exists so canonicalizing just that part succeeds.
+        // Everything after it is joined unresolved, which is the whole point.
+        let (tilde, rest) = match target.split_once('/') {
+            Some((tilde, rest)) => (tilde, Some(rest)),
+            None => (target, None),
+        };
+
+        match filesystem.expand_path(Path::new(tilde)) {
+            Ok(home) => match rest {
+                Some(rest) => home.join(rest),
+                None => home,
+            },
+            // No home directory, or no such user. Falling back to the literal path
+            // leaves it relative, and the caller's absolute-path guard then refuses
+            // it — better to skip than to write a credential into a directory
+            // literally named `~` beneath the current directory.
             Err(_) => PathBuf::from(target),
         }
     } else {
@@ -557,6 +573,30 @@ where
 {
     let origin = secret_origin(entry);
 
+    // Checked before resolving, not after. Resolving is what runs the user's
+    // commands, and a preview must not do that: it reaches a secret store and can
+    // raise a biometric or password prompt, which would make `--dry-run` an
+    // executing operation.
+    //
+    // The cost is that a dry run cannot say whether this entry would change —
+    // that needs the content, and the content needs the commands. It reports what
+    // it is declining to do instead.
+    if options.dry_run {
+        let target_path = expand_secret_target(filesystem, entry.target());
+        sender
+            .send_dotfile_skipped(
+                &origin,
+                target_path.display(),
+                format!(
+                    "dry run: would run {} command(s); content not resolved, so no \
+                     comparison is possible",
+                    entry.command_count()
+                ),
+            )
+            .await;
+        return SecretOutcome::Skipped;
+    }
+
     let resolved = match resolve_content(
         entry,
         base_dir,
@@ -611,23 +651,29 @@ where
         return SecretOutcome::Skipped;
     }
 
-    if options.dry_run {
-        sender
-            .send_dotfile_skipped(&origin, target_path.display(), "dry run")
-            .await;
-        return SecretOutcome::Skipped;
-    }
-
     if let Some(current) = current {
         let summary = secret_conflict_summary(entry, &resolved.bytes, &current);
 
-        let accept = if options.auto_accept {
-            true
-        } else if let Some(resolver) = &options.conflict_resolver {
+        // `auto_accept` is deliberately NOT consulted here, unlike the repo-file
+        // path below. It is a caller-settable parameter — the MCP server exposes
+        // it to an assistant — and honouring it would let a non-interactive caller
+        // silently overwrite a hand-edited credentials file with provider output,
+        // with no human ever seeing the conflict. A credential is not recoverable
+        // afterwards, because nothing about it was recorded.
+        //
+        // The spec is explicit: provider conflicts are never auto-resolved in
+        // non-interactive contexts; they are reported and skipped. The only way
+        // past this point is an interactive resolver actively returning Accept.
+        let accept = if let Some(resolver) = &options.conflict_resolver {
             // The resolver is blocking and needs 'static, so the values are moved
             // in as owned buffers and the borrowed `ConflictDetail` is built
             // inside the closure. Keeping the detail borrowed is what stops a
             // resolver retaining the values past the call.
+            //
+            // `incoming` is a clone because `resolved.bytes` is still needed to
+            // write with if the answer is Accept. That is a second copy of the
+            // secret in memory, consistent with the documented absence of any
+            // scrubbing guarantee.
             let resolver = Arc::clone(resolver);
             let target = target_path.display().to_string();
             let incoming = resolved.bytes.clone();

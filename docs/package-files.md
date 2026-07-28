@@ -565,7 +565,12 @@ almost always means a failure that did not set a non-zero status. Whitespace-onl
 not empty.
 
 `command_timeout` (default 60s, enough for a biometric prompt) applies **per command**, so an entry
-with several bindings can take longer in total. Resolved content is capped at 8 MiB.
+with several bindings can take longer in total.
+
+Resolved content larger than 8 MiB is rejected with an error. Note what that does and does not do:
+it bounds what selfie compares and writes, **not** what the command produces. The command's whole
+output is buffered before the check can run — as it already is for every install and check command —
+so this is not a memory bound against a genuinely unbounded provider.
 
 A failing command respects `stop_on_error`, which defaults to true, so by default a failure aborts
 the apply. When a binding fails, the error names that binding and the remaining bindings for that
@@ -625,6 +630,26 @@ references, not credentials.
 At an interactive prompt `selfie apply` offers to reveal the two values, behind its own warning and
 its own keypress. It is never the default and is never reachable by accepting one. The MCP server
 provides no interactive resolver at all, so it cannot reach that path.
+
+`--yes` / `auto_accept` does **not** apply to these entries. For an ordinary dotfile it forces the
+overwrite; for a secret-bearing one the conflict is always reported and skipped, and only an
+interactive answer can overwrite. The reason is asymmetric risk: an ordinary target that gets
+overwritten wrongly can be recovered from the repository, whereas a credential can not, because
+selfie recorded nothing about it. This matters most for non-interactive callers such as the MCP
+server, which can set the flag but has no human behind it.
+
+`--dry-run` does not run any provider or `vars` command. That means it cannot tell you whether a
+secret-bearing entry would change — knowing that needs the content, and the content needs the
+commands. It reports the entry and how many commands it is declining to run. The alternative, a
+preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
+executing operation.
+
+#### Diagnostics do not carry line numbers
+
+Most package validation errors report the YAML line and column they came from. Dotfile entries do
+not: their fields are plain strings rather than the span-carrying type the rest of the schema uses,
+so a dotfile diagnostic names a field path such as `dotfiles[0].vars` instead of a location. This is
+a known gap rather than an intentional design.
 
 #### Limitations
 

@@ -173,6 +173,12 @@ pub struct ApplyParam {
     /// and differs from the repo source). Defaults to `false`: conflicts are
     /// skipped and reported with a diff rather than silently overwritten, since
     /// the MCP path has no interactive prompt. Set `true` to force overwrite.
+    ///
+    /// Does NOT apply to secret-bearing dotfiles — those whose content comes from
+    /// a `command` or from a `source` with `vars`. Their conflicts are always
+    /// reported and skipped here, whatever this is set to, because their content
+    /// is a credential that was never recorded and so could not be recovered
+    /// after being overwritten.
     #[serde(default)]
     pub auto_accept: bool,
 }
@@ -585,7 +591,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Use dry_run=true to preview first."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change."
     )]
     async fn selfie_apply_dotfiles(
         &self,

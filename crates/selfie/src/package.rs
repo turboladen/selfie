@@ -214,6 +214,19 @@ impl DotfileEntry {
         }
     }
 
+    /// How many commands `selfie apply` runs to produce this entry's content.
+    ///
+    /// Zero for a repository file. One for a provider. One per binding for a
+    /// template. Used to report apply-time execution and to say what a dry run is
+    /// declining to do.
+    pub fn command_count(&self) -> usize {
+        match self.content_source() {
+            ContentSource::Provider(_) => 1,
+            ContentSource::Template { vars, .. } => vars.len(),
+            ContentSource::RepoFile(_) | ContentSource::Invalid => 0,
+        }
+    }
+
     /// Whether this entry's content is produced by running commands.
     ///
     /// Secret-bearing entries hold no deploy state and their content never enters
