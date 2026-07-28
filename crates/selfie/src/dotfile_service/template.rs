@@ -49,9 +49,6 @@ pub(crate) fn placeholders(template: &str) -> BTreeSet<String> {
 ///
 /// Returns bytes rather than a string: a bound value is not guaranteed to be
 /// UTF-8, and lossily decoding one would corrupt it.
-// Exercised by this module's tests; its production consumer is apply-time content
-// resolution, which lands next.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render(template: &str, bindings: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     scan(template, |name| bindings.get(name).map(Vec::as_slice))
 }

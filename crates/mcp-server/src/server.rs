@@ -34,7 +34,7 @@ type ConcreteService = PackageServiceImpl<
 >;
 
 type ConcreteDotfileService =
-    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem>;
+    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner>;
 
 type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
 
@@ -217,7 +217,11 @@ impl SelfieServer {
     pub fn new(service: ConcreteService, config: SelfieConfig) -> Self {
         let repo =
             YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
-        let mut dotfile_service = DotfileServiceImpl::new(repo, RealFileSystem, config.clone());
+        // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
+        // and provider commands (`op`, `teller`) live on the user's PATH.
+        let runner = ShellCommandRunner::login_shell(config.command_timeout());
+        let mut dotfile_service =
+            DotfileServiceImpl::new(repo, RealFileSystem, runner, config.clone());
 
         // Add standalone dotfiles repository if the directory exists
         let dotfiles_dir = config.dotfiles_directory();

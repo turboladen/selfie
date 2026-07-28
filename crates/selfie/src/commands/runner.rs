@@ -182,6 +182,29 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+    /// Build a `CommandOutput` from its parts.
+    ///
+    /// For test doubles that stand in for a real runner. Gated behind
+    /// `with_mocks` so that production code cannot fabricate the result of a
+    /// command that never ran.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_parts(
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
+            duration,
+        }
+    }
+
     /// Get the command's exit code
     ///
     /// Returns the exit status code of the command, or -1 if the exit code

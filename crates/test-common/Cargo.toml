@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-selfie = { path = "../selfie/" }
+selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
 serde-saphyr.workspace = true
 futures.workspace = true
 tokio-util.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -19,6 +19,10 @@ impl FileSystem for RealFileSystem {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
+    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
+        fs::read(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
     fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {

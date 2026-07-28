@@ -7,8 +7,11 @@
 use std::sync::Arc;
 
 use selfie::{
+    commands::ShellCommandRunner,
     dotfile_service::{
-        port::{ApplyOptions, ConflictResolution, ConflictResolver, DotfileService},
+        port::{
+            ApplyOptions, ConflictDetail, ConflictResolution, ConflictResolver, DotfileService,
+        },
         service::DotfileServiceImpl,
     },
     fs::real::RealFileSystem,
@@ -26,38 +29,117 @@ use crate::{
 
 /// Interactive conflict resolver that prompts the user via the terminal.
 ///
-/// Shows the diff and asks whether to overwrite the target with the repo
-/// version or keep the target as-is.
+/// For an ordinary file this shows the diff and asks whether to overwrite the
+/// target. For a secret-bearing file there is no diff to show — only a summary of
+/// each side's shape — so it additionally offers to reveal the two values.
 struct InteractiveConflictResolver {
     display: DisplayManager,
 }
 
+impl InteractiveConflictResolver {
+    /// Ask how to resolve, offering reveal only when `reveal` is set.
+    ///
+    /// Accept is never the default for a secret-bearing conflict, and reveal is
+    /// never reachable by accepting a default: both require a deliberate
+    /// selection.
+    fn prompt(&self, reveal: bool) -> Option<usize> {
+        let mut items = vec![
+            "Skip (keep target as-is)",
+            "Accept (overwrite target with the new content)",
+        ];
+        if reveal {
+            items.push("Reveal the two values, then choose");
+        }
+
+        dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt("How should this conflict be resolved?")
+            .items(&items)
+            .default(0)
+            .interact()
+            .ok()
+    }
+
+    /// Print both values after an explicit confirmation.
+    ///
+    /// The warning names scrollback and session capture specifically: those
+    /// persist beyond selfie's control and are the actual residual risk of
+    /// showing a credential at all.
+    ///
+    /// Output goes through `DisplayManager`, which writes straight to the
+    /// terminal. It must not be routed through `tracing`, which would put the
+    /// values in the log file.
+    fn reveal(&self, incoming: &[u8], current: &[u8]) {
+        self.display.print_warning(
+            "This prints secret values to your terminal. They will remain in scrollback and \
+             in any session recording or shared screen.",
+        );
+
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt("Show values?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if !confirmed {
+            return;
+        }
+
+        self.display.println(format!(
+            "--- incoming ---\n{}",
+            String::from_utf8_lossy(incoming)
+        ));
+        self.display.println(format!(
+            "--- current ---\n{}",
+            String::from_utf8_lossy(current)
+        ));
+    }
+}
+
 impl ConflictResolver for InteractiveConflictResolver {
-    fn resolve(&self, source: &str, target: &str, diff: &str) -> ConflictResolution {
-        let short_source = shorten_path(source);
+    fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
         let short_target = shorten_path(target);
 
         // Blank line for breathing room before the conflict block
         self.display.println("");
         self.display
             .print_warning(format!("  Conflict: {short_target}"));
-        self.display
-            .print_progress(format!("{short_source} → {short_target}"));
-        self.display.print_diff(diff);
 
-        let items = &[
-            "Accept (overwrite target with repo version)",
-            "Skip (keep target as-is)",
-        ];
-        let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("How should this conflict be resolved?")
-            .items(items)
-            .default(0)
-            .interact();
+        match detail {
+            ConflictDetail::Diff { source, diff } => {
+                self.display
+                    .print_progress(format!("{} → {short_target}", shorten_path(source)));
+                self.display.print_diff(diff);
 
-        match selection {
-            Ok(0) => ConflictResolution::Accept,
-            _ => ConflictResolution::Skip,
+                match self.prompt(false) {
+                    Some(1) => ConflictResolution::Accept,
+                    _ => ConflictResolution::Skip,
+                }
+            }
+
+            ConflictDetail::Secret {
+                summary,
+                incoming,
+                current,
+            } => {
+                self.display.println(summary);
+
+                // Reveal is offered only on a terminal. Without one there is
+                // nobody to read it and no way to confirm the second prompt.
+                let can_reveal = console::Term::stdout().is_term();
+
+                match self.prompt(can_reveal) {
+                    Some(1) => ConflictResolution::Accept,
+                    Some(2) => {
+                        self.reveal(incoming, current);
+                        // Ask again, without offering reveal a second time.
+                        match self.prompt(false) {
+                            Some(1) => ConflictResolution::Accept,
+                            _ => ConflictResolution::Skip,
+                        }
+                    }
+                    _ => ConflictResolution::Skip,
+                }
+            }
         }
     }
 }
@@ -84,7 +166,11 @@ pub(crate) async fn handle_apply(
 
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+    let runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.selfie_config().command_timeout(),
+    );
+    let mut service = DotfileServiceImpl::new(repo, fs, runner, config.selfie_config().clone());
 
     // Add standalone dotfiles repository if the directory exists
     let dotfiles_dir = config.selfie_config().dotfiles_directory();

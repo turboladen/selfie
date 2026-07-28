@@ -38,6 +38,26 @@ pub trait FileSystem: Send + Sync {
     /// - Any other IO error occurs during reading
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
+    /// Read a file and return its raw bytes
+    ///
+    /// Unlike [`read_file`](FileSystem::read_file), imposes no encoding
+    /// requirement. Use this wherever the content is compared or written rather
+    /// than displayed — secret-bearing dotfile content is not guaranteed to be
+    /// UTF-8, and decoding it lossily before a comparison would report two
+    /// different files as identical.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to read
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if:
+    /// - The file does not exist
+    /// - Permission is denied to read the file
+    /// - Any other IO error occurs during reading
+    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
+
     /// Write data to a file
     ///
     /// Writes the provided data to the specified file path, creating the file

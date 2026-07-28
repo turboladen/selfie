@@ -9,13 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
+    commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
-        port::ConflictResolution,
+        port::{ConflictDetail, ConflictResolution},
+        resolve::resolve_content,
         state::{DeployState, DriftType},
     },
     fs::filesystem::{FileSystem, FileSystemError},
@@ -43,24 +46,28 @@ const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 /// directory). When present, both repositories are scanned during apply and drift
 /// operations.
 #[derive(Debug, Clone)]
-pub struct DotfileServiceImpl<R, F> {
+pub struct DotfileServiceImpl<R, F, CR> {
     package_repository: R,
     dotfiles_repository: Option<R>,
     filesystem: F,
+    /// Runs the commands that produce secret-bearing dotfile content.
+    runner: CR,
     config: SelfieConfig,
 }
 
-impl<R, F> DotfileServiceImpl<R, F>
+impl<R, F, CR> DotfileServiceImpl<R, F, CR>
 where
     R: PackageRepository + Clone + Send + Sync + 'static,
     F: FileSystem + Clone + Send + Sync + 'static,
+    CR: CommandRunner + Clone + Send + Sync + 'static,
 {
     /// Create a new dotfile service instance
-    pub fn new(package_repository: R, filesystem: F, config: SelfieConfig) -> Self {
+    pub fn new(package_repository: R, filesystem: F, runner: CR, config: SelfieConfig) -> Self {
         Self {
             package_repository,
             dotfiles_repository: None,
             filesystem,
+            runner,
             config,
         }
     }
@@ -249,6 +256,33 @@ pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf 
     raw
 }
 
+/// Expand a secret-bearing entry's target without resolving its final component.
+///
+/// Deliberately not [`expand_user_path`]: that canonicalizes, and
+/// [`FileSystem::write_file_private`]'s promise to replace a symlinked target
+/// rather than write through it applies to the path **as given**. Handing it an
+/// already-resolved path forfeits exactly the protection ADR-0003 relies on for
+/// credential targets, so this expands `~` and normalizes `.`/`..` textually and
+/// leaves the last component alone.
+///
+/// A symlinked *parent* directory is still followed. That limitation is inherent
+/// to `write_file_private` and is documented rather than papered over.
+///
+/// Repository-file entries keep using `expand_user_path`; this is a narrower rule
+/// for the one path where the difference is load-bearing.
+fn expand_secret_target<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
+    let raw = if let Some(rest) = target.strip_prefix("~/") {
+        match filesystem.expand_path(Path::new("~")) {
+            Ok(home) => home.join(rest),
+            Err(_) => PathBuf::from(target),
+        }
+    } else {
+        PathBuf::from(target)
+    };
+
+    normalize_path(&raw)
+}
+
 /// Validate that a resolved source path doesn't escape the YAML base directory.
 ///
 /// Prevents path traversal attacks where a malicious package YAML could use
@@ -290,15 +324,17 @@ fn normalize_path(path: &Path) -> PathBuf {
     parts.iter().collect()
 }
 
-impl<R, F> DotfileService for DotfileServiceImpl<R, F>
+impl<R, F, CR> DotfileService for DotfileServiceImpl<R, F, CR>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+    CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
         let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
+        let runner = self.runner.clone();
         let config = self.config.clone();
 
         Self::create_event_stream(move |tx| async move {
@@ -317,7 +353,7 @@ where
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
-                    handle_apply(&packages, &fs, &config, &sender, &options, None).await
+                    handle_apply(&packages, &fs, &runner, &config, &sender, &options, None).await
                 }
                 Err(e) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
@@ -332,6 +368,7 @@ where
         let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
+        let runner = self.runner.clone();
         let config = self.config.clone();
         let name = name.to_string();
 
@@ -351,7 +388,16 @@ where
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
-                    handle_apply(&packages, &fs, &config, &sender, &options, Some(&name)).await
+                    handle_apply(
+                        &packages,
+                        &fs,
+                        &runner,
+                        &config,
+                        &sender,
+                        &options,
+                        Some(&name),
+                    )
+                    .await
                 }
                 Err(e) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
@@ -443,6 +489,194 @@ where
     }
 }
 
+/// Identify a secret-bearing entry by what produces it, never by its content.
+///
+/// Commands and var names come from the package file and are references, not
+/// credentials, so they are safe to surface. Used as the `source` of the events
+/// this path emits.
+fn secret_origin(entry: &DotfileEntry) -> String {
+    match entry.content_source() {
+        ContentSource::Provider(command) => format!("command: {command}"),
+        ContentSource::Template { source, vars } => {
+            let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+            format!("{source} (vars: {})", names.join(", "))
+        }
+        ContentSource::RepoFile(source) => source.to_string(),
+        ContentSource::Invalid => String::new(),
+    }
+}
+
+/// A conflict summary describing shape without revealing content.
+///
+/// Line counts distinguish a rotated value (1 line vs 1 line) from a hand-edited
+/// file (1 line vs 12 lines), which is the distinction a user needs in order to
+/// choose between overwrite and skip. They are the most this can say: anything
+/// derived from the bytes themselves is content.
+fn secret_conflict_summary(entry: &DotfileEntry, incoming: &[u8], current: &[u8]) -> String {
+    // Counts separators plus one, so a trailing newline reads as an extra line.
+    // Exact line semantics do not matter here; the comparison between the two
+    // sides does.
+    let lines = |b: &[u8]| b.iter().filter(|c| **c == b'\n').count() + 1;
+
+    format!(
+        "  {}\n  target exists and differs from resolved output\n\n  \
+         resolved output : {} lines\n  current target  : {} lines\n  (content hidden)",
+        secret_origin(entry),
+        lines(incoming),
+        lines(current),
+    )
+}
+
+/// Outcome of handling one secret-bearing entry.
+enum SecretOutcome {
+    Deployed,
+    Skipped,
+    Conflicted,
+    /// Resolution failed; the caller decides whether to abort based on
+    /// `stop_on_error`.
+    Failed,
+}
+
+/// Deploy one secret-bearing entry.
+///
+/// Holds the resolved content in memory only: it is compared against the target
+/// directly, written with owner-only permissions, and never recorded in deploy
+/// state. Nothing derived from it reaches an event. See ADR-0003.
+async fn apply_secret_entry<F, CR>(
+    entry: &DotfileEntry,
+    base_dir: &Path,
+    filesystem: &F,
+    runner: &CR,
+    config: &SelfieConfig,
+    sender: &EventSender,
+    options: &ApplyOptions,
+) -> SecretOutcome
+where
+    F: FileSystem,
+    CR: CommandRunner,
+{
+    let origin = secret_origin(entry);
+
+    let resolved = match resolve_content(
+        entry,
+        base_dir,
+        filesystem,
+        runner,
+        config.command_timeout(),
+        &CancellationToken::new(),
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // `ResolveError`'s Display names commands, var names, and (on failure
+            // only) truncated stderr. It never carries resolved content.
+            sender
+                .send_warning(format!("Failed to resolve '{}': {e}", entry.target()))
+                .await;
+            return SecretOutcome::Failed;
+        }
+    };
+
+    for warning in &resolved.warnings {
+        sender.send_warning(warning).await;
+    }
+
+    let target_path = expand_secret_target(filesystem, entry.target());
+    if !target_path.is_absolute() {
+        sender
+            .send_warning(format!(
+                "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
+                entry.target(),
+                target_path.display()
+            ))
+            .await;
+        return SecretOutcome::Skipped;
+    }
+
+    let target_exists = filesystem.path_exists(&target_path);
+
+    // Compared as raw bytes: neither side is guaranteed to be UTF-8, and a lossy
+    // decode would report two different files as identical.
+    let current = if target_exists {
+        filesystem.read_file_bytes(&target_path).ok()
+    } else {
+        None
+    };
+
+    if current.as_deref() == Some(resolved.bytes.as_slice()) {
+        sender
+            .send_dotfile_skipped(&origin, target_path.display(), "already in sync")
+            .await;
+        return SecretOutcome::Skipped;
+    }
+
+    if options.dry_run {
+        sender
+            .send_dotfile_skipped(&origin, target_path.display(), "dry run")
+            .await;
+        return SecretOutcome::Skipped;
+    }
+
+    if let Some(current) = current {
+        let summary = secret_conflict_summary(entry, &resolved.bytes, &current);
+
+        let accept = if options.auto_accept {
+            true
+        } else if let Some(resolver) = &options.conflict_resolver {
+            // The resolver is blocking and needs 'static, so the values are moved
+            // in as owned buffers and the borrowed `ConflictDetail` is built
+            // inside the closure. Keeping the detail borrowed is what stops a
+            // resolver retaining the values past the call.
+            let resolver = Arc::clone(resolver);
+            let target = target_path.display().to_string();
+            let incoming = resolved.bytes.clone();
+            let summary = summary.clone();
+            tokio::task::spawn_blocking(move || {
+                resolver.resolve(
+                    &target,
+                    ConflictDetail::Secret {
+                        summary: &summary,
+                        incoming: &incoming,
+                        current: &current,
+                    },
+                )
+            })
+            .await
+            .unwrap_or(ConflictResolution::Skip)
+                == ConflictResolution::Accept
+        } else {
+            false
+        };
+
+        if !accept {
+            // Only the summary reaches the event. The values went to the resolver
+            // and nowhere else.
+            sender
+                .send_dotfile_conflict(&origin, target_path.display(), &summary)
+                .await;
+            return SecretOutcome::Conflicted;
+        }
+    }
+
+    // Owner-only and atomic: no window in which the credential is world-readable,
+    // and no interrupted write leaving a truncated one behind.
+    if let Err(e) = filesystem.write_file_private(&target_path, &resolved.bytes) {
+        sender
+            .send_warning(format!("Failed to write '{}': {e}", target_path.display()))
+            .await;
+        return SecretOutcome::Failed;
+    }
+
+    sender
+        .send_dotfile_deployed(&origin, target_path.display())
+        .await;
+
+    // No deploy state is recorded: a stored checksum of a credential is a
+    // confirmation oracle. See ADR-0003.
+    SecretOutcome::Deployed
+}
+
 /// Describes a single config file deployment operation
 struct DeployUnit<'a> {
     source_path: &'a Path,
@@ -497,9 +731,10 @@ async fn perform_deploy<F: FileSystem>(
 }
 
 /// Core logic for applying config files
-async fn handle_apply<F>(
+async fn handle_apply<F, CR>(
     packages: &[Package],
     filesystem: &F,
+    runner: &CR,
     config: &SelfieConfig,
     sender: &EventSender,
     options: &ApplyOptions,
@@ -507,6 +742,7 @@ async fn handle_apply<F>(
 ) -> OperationResult
 where
     F: FileSystem,
+    CR: CommandRunner,
 {
     let mut deploy_state = load_deploy_state(filesystem, config);
 
@@ -538,13 +774,39 @@ where
         for entry in &dotfiles {
             let source = match entry.content_source() {
                 ContentSource::RepoFile(source) => source,
-                // Secret-bearing entries resolve their content by running commands
-                // and take a separate deploy path; malformed ones are not
-                // deployable at all. Both are handled where that path is built.
-                _ => {
+
+                // Secret-bearing entries resolve their content by running
+                // commands, compare it in memory, and record nothing.
+                ContentSource::Template { .. } | ContentSource::Provider(_) => {
+                    match apply_secret_entry(
+                        entry, &base_dir, filesystem, runner, config, sender, options,
+                    )
+                    .await
+                    {
+                        SecretOutcome::Deployed => deployed_count += 1,
+                        SecretOutcome::Skipped => skipped_count += 1,
+                        SecretOutcome::Conflicted => conflict_count += 1,
+                        SecretOutcome::Failed => {
+                            skipped_count += 1;
+                            if config.stop_on_error() {
+                                return OperationResult::Failure(OperationFailure::Generic(
+                                    format!(
+                                        "Stopped after failing to apply dotfile '{}' \
+                                         (stop_on_error is enabled)",
+                                        entry.target()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                ContentSource::Invalid => {
                     sender
                         .send_warning(format!(
-                            "Skipping '{}': entry is not a plain repository file",
+                            "Skipping '{}': set exactly one of 'source' or 'command', and \
+                             'vars' only alongside 'source'",
                             entry.target()
                         ))
                         .await;
@@ -680,9 +942,17 @@ where
                         let tgt = target_path.display().to_string();
                         let d = diff.clone();
                         let r = Arc::clone(resolver);
-                        tokio::task::spawn_blocking(move || r.resolve(&src, &tgt, &d))
-                            .await
-                            .unwrap_or(ConflictResolution::Skip)
+                        tokio::task::spawn_blocking(move || {
+                            r.resolve(
+                                &tgt,
+                                ConflictDetail::Diff {
+                                    source: &src,
+                                    diff: &d,
+                                },
+                            )
+                        })
+                        .await
+                        .unwrap_or(ConflictResolution::Skip)
                             == ConflictResolution::Accept
                     } else {
                         false

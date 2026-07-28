@@ -14,12 +14,14 @@
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
 //! - [`diff`] — Unified diff generation for conflict display
+//! - [`resolve`] — Apply-time content resolution for secret-bearing entries
 //! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
 //! - [`template`] — Named-value substitution for templated dotfiles
 
 pub mod deploy;
 pub mod diff;
 pub mod port;
+pub(crate) mod resolve;
 pub mod semantic;
 pub mod service;
 pub mod state;
