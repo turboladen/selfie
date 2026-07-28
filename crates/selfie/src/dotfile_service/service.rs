@@ -18,7 +18,7 @@ use crate::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
-        resolve::{check_resolvable, resolve_content},
+        resolve::{ResolvedContent, check_resolvable, resolve_content},
         state::{DeployState, DriftType},
     },
     fs::filesystem::{FileSystem, FileSystemError},
@@ -554,238 +554,367 @@ enum SecretOutcome {
     Failed,
 }
 
-/// Deploy one secret-bearing entry.
+/// A phase either lets the apply continue, or ends it with an outcome.
 ///
-/// Holds the resolved content in memory only: it is compared against the target
+/// `?` then reads as "stop here if this phase decided the entry's fate", which
+/// is what every one of these steps does.
+type Phase<T = ()> = Result<T, SecretOutcome>;
+
+/// One entry's identity, settled once so every phase names the same things.
+struct SecretTarget<'a> {
+    entry: &'a DotfileEntry,
+    /// How the entry is named in events: the command, or the template and its
+    /// var names. A reference drawn from the package file, never a value.
+    origin: String,
+    /// Expanded and absolute — and deliberately not canonicalized, so
+    /// `write_file_private` still sees an unresolved final component.
+    path: PathBuf,
+}
+
+/// Deploying the secret-bearing entries of one package.
+///
+/// The seven phases below were one function. Splitting them needed this struct
+/// first: each phase wants most of this context, so as free functions they all
+/// carried six or seven parameters, which is what kept them welded together.
+///
+/// Holds resolved content in memory only: it is compared against the target
 /// directly, written with owner-only permissions, and never recorded in deploy
 /// state. Nothing derived from it reaches an event. See ADR-0003.
-async fn apply_secret_entry<F, CR>(
-    entry: &DotfileEntry,
-    base_dir: &Path,
-    filesystem: &F,
-    runner: &CR,
-    config: &SelfieConfig,
-    sender: &EventSender,
-    options: &ApplyOptions,
-) -> SecretOutcome
+struct SecretApply<'a, F, CR> {
+    /// The package file's directory. Repository sources resolve against it and
+    /// provider commands run in it.
+    base_dir: &'a Path,
+    filesystem: &'a F,
+    runner: &'a CR,
+    config: &'a SelfieConfig,
+    sender: &'a EventSender,
+    options: &'a ApplyOptions,
+}
+
+impl<F, CR> SecretApply<'_, F, CR>
 where
     F: FileSystem,
     CR: CommandRunner,
 {
-    let origin = secret_origin(entry);
-
-    let target_path = expand_secret_target(filesystem, entry.target());
-    if !target_path.is_absolute() {
-        sender
-            .send_warning(format!(
-                "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
-                entry.target(),
-                target_path.display()
-            ))
-            .await;
-        return SecretOutcome::Skipped;
-    }
-
-    // Everything refusable without running anything, applied before the dry-run
-    // short-circuit for the same reason the target check above is: a preview that
-    // promises to run commands for an entry a real apply would refuse outright is
-    // reporting something that will never happen.
-    if let Err(e) = check_resolvable(entry, base_dir) {
-        sender
-            .send_warning(format!("Failed to resolve '{}': {e}", entry.target()))
-            .await;
-        return SecretOutcome::Failed;
-    }
-
-    // Checked before resolving, not after. Resolving is what runs the user's
-    // commands, and a preview must not do that: it reaches a secret store and can
-    // raise a biometric or password prompt, which would make `--dry-run` an
-    // executing operation.
-    //
-    // The cost is that a dry run cannot say whether this entry would change —
-    // that needs the content, and the content needs the commands. It reports what
-    // it is declining to do instead.
-    if options.dry_run {
-        sender
-            .send_dotfile_skipped(
-                &origin,
-                target_path.display(),
-                format!(
-                    "dry run: would run {} command(s); content not resolved, so no \
-                     comparison is possible",
-                    entry.command_count()
-                ),
-            )
-            .await;
-        return SecretOutcome::Skipped;
-    }
-
-    let resolved = match resolve_content(
-        entry,
-        base_dir,
-        filesystem,
-        runner,
-        config.command_timeout(),
-        &CancellationToken::new(),
-    )
-    .await
-    {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            // `ResolveError`'s Display names commands, var names, and (on failure
-            // only) truncated stderr. It never carries resolved content.
-            sender
-                .send_warning(format!("Failed to resolve '{}': {e}", entry.target()))
-                .await;
-            return SecretOutcome::Failed;
+    /// Deploy one secret-bearing entry.
+    ///
+    /// Reads as the sequence it is: refuse what can be refused without running
+    /// anything, short-circuit a preview, resolve, then decide against what is
+    /// already on disk.
+    async fn apply(&self, entry: &DotfileEntry) -> SecretOutcome {
+        match self.run(entry).await {
+            Ok(outcome) | Err(outcome) => outcome,
         }
-    };
-
-    for warning in &resolved.warnings {
-        sender.send_warning(warning).await;
     }
 
-    // Three distinct states, and conflating any two of them loses a credential.
-    // Compared as raw bytes: neither side is guaranteed to be UTF-8, and a lossy
-    // decode would report two different files as identical.
-    let current = if filesystem.path_exists(&target_path) {
-        match filesystem.read_file_bytes(&target_path) {
+    async fn run(&self, entry: &DotfileEntry) -> Phase<SecretOutcome> {
+        let target = self.usable_target(entry).await?;
+        self.refuse_unresolvable(&target).await?;
+        self.short_circuit_dry_run(&target).await?;
+
+        let resolved = self.resolve(&target).await?;
+        for warning in &resolved.warnings {
+            self.sender.send_warning(warning).await;
+        }
+
+        let current = self.read_target(&target);
+        self.settle_in_sync(&target, &resolved, &current).await?;
+        self.settle_conflict(&target, &resolved, &current).await?;
+
+        Ok(self.write(&target, &resolved).await)
+    }
+
+    /// Expand the target and refuse it if it is not absolute.
+    ///
+    /// A relative target would write relative to the current directory, which is
+    /// both surprising and dangerous for a credential.
+    async fn usable_target<'e>(&self, entry: &'e DotfileEntry) -> Phase<SecretTarget<'e>> {
+        let path = expand_secret_target(self.filesystem, entry.target());
+
+        if !path.is_absolute() {
+            self.sender
+                .send_warning(format!(
+                    "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
+                    entry.target(),
+                    path.display()
+                ))
+                .await;
+            return Err(SecretOutcome::Skipped);
+        }
+
+        Ok(SecretTarget {
+            entry,
+            origin: secret_origin(entry),
+            path,
+        })
+    }
+
+    /// Refuse anything decidable without running a command or reading a file.
+    ///
+    /// Applied before the dry-run short-circuit for the same reason the target
+    /// check is: a preview that promises to run commands for an entry a real
+    /// apply would refuse outright is reporting something that will never happen.
+    async fn refuse_unresolvable(&self, target: &SecretTarget<'_>) -> Phase {
+        if let Err(e) = check_resolvable(target.entry, self.base_dir) {
+            self.sender
+                .send_warning(format!(
+                    "Failed to resolve '{}': {e}",
+                    target.entry.target()
+                ))
+                .await;
+            return Err(SecretOutcome::Failed);
+        }
+        Ok(())
+    }
+
+    /// End a dry run here, before anything is resolved.
+    ///
+    /// Resolving is what runs the user's commands, and a preview must not do
+    /// that: it reaches a secret store and can raise a biometric or password
+    /// prompt, which would make `--dry-run` an executing operation.
+    ///
+    /// The cost is that a dry run cannot say whether this entry would change —
+    /// that needs the content, and the content needs the commands. It reports
+    /// what it is declining to do instead.
+    async fn short_circuit_dry_run(&self, target: &SecretTarget<'_>) -> Phase {
+        if self.options.dry_run {
+            self.sender
+                .send_dotfile_skipped(
+                    &target.origin,
+                    target.path.display(),
+                    format!(
+                        "dry run: would run {} command(s); content not resolved, so no \
+                         comparison is possible",
+                        target.entry.command_count()
+                    ),
+                )
+                .await;
+            return Err(SecretOutcome::Skipped);
+        }
+        Ok(())
+    }
+
+    /// Run the entry's commands and produce its content.
+    async fn resolve(&self, target: &SecretTarget<'_>) -> Phase<ResolvedContent> {
+        match resolve_content(
+            target.entry,
+            self.base_dir,
+            self.filesystem,
+            self.runner,
+            self.config.command_timeout(),
+            &CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(resolved) => Ok(resolved),
+            Err(e) => {
+                // Safe to surface: `ResolveError`'s Display names commands, var
+                // names, and — on failure only — truncated stderr. It never
+                // carries resolved content.
+                self.sender
+                    .send_warning(format!(
+                        "Failed to resolve '{}': {e}",
+                        target.entry.target()
+                    ))
+                    .await;
+                Err(SecretOutcome::Failed)
+            }
+        }
+    }
+
+    /// What is at the target: absent, readable, or present but unreadable.
+    ///
+    /// Conflating any two of those loses a credential. Read as raw bytes because
+    /// neither side is guaranteed to be UTF-8, and a lossy decode would report
+    /// two different files as identical.
+    fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
+        if !self.filesystem.path_exists(&target.path) {
+            return TargetState::Absent;
+        }
+
+        match self.filesystem.read_file_bytes(&target.path) {
             Ok(bytes) => TargetState::Readable(bytes),
-            // Present but unreadable — an unreadable file is still a file, and it
-            // may well be the credential we would be destroying. Treating this as
-            // absent would overwrite it with no prompt, which is what the
-            // repository-file path avoids by routing an unreadable target into a
-            // conflict.
+            // An unreadable file is still a file, and it may well be the
+            // credential we would be destroying. Treating it as absent would
+            // overwrite it with no prompt, which is what the repository-file
+            // path avoids by routing an unreadable target into a conflict.
             Err(_) => TargetState::Unreadable,
         }
-    } else {
-        TargetState::Absent
-    };
+    }
 
-    if let TargetState::Readable(current) = &current
-        && current == &resolved.bytes
-    {
-        // Matching content is not the whole guarantee. `write_file_private` is
-        // the only thing that establishes owner-only permissions, and returning
-        // here skips it — so a pre-existing world-readable target whose bytes
-        // happen to match would stay world-readable while being reported as
-        // managed. That is exactly the adoption case ADR-0003 calls out as the
-        // reason this design is safe, and the docs promise mode 0600 with no
-        // "unless the content already matched" attached.
-        //
-        // Tightening is conditional: rewriting a correct file on every apply
-        // would churn its inode and mtime and make "already in sync" a lie. An
-        // error reading the mode is treated as "nothing to do" rather than
-        // rewriting on a guess — the read above already succeeded, so this is
-        // close to unreachable.
-        if filesystem.is_owner_only(&target_path).unwrap_or(true) {
-            sender
-                .send_dotfile_skipped(&origin, target_path.display(), "already in sync")
+    /// Settle a target whose content already matches — including its mode.
+    ///
+    /// Matching content is not the whole guarantee. `write_file_private` is the
+    /// only thing that establishes owner-only permissions, so returning here
+    /// without it would leave a pre-existing world-readable target
+    /// world-readable while reporting it as managed. That is exactly the
+    /// adoption case ADR-0003 cites as the reason this design is safe, and the
+    /// docs promise mode `0600` with no "unless the content already matched"
+    /// attached.
+    ///
+    /// Tightening is conditional: rewriting a correct file on every apply would
+    /// churn its inode and mtime and make "already in sync" a lie. A failure to
+    /// read the mode is treated as "nothing to do" rather than rewriting on a
+    /// guess — the content read above already succeeded, so it is close to
+    /// unreachable.
+    async fn settle_in_sync(
+        &self,
+        target: &SecretTarget<'_>,
+        resolved: &ResolvedContent,
+        current: &TargetState,
+    ) -> Phase {
+        let TargetState::Readable(bytes) = current else {
+            return Ok(());
+        };
+        if bytes != &resolved.bytes {
+            return Ok(());
+        }
+
+        if self.filesystem.is_owner_only(&target.path).unwrap_or(true) {
+            self.sender
+                .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
                 .await;
-            return SecretOutcome::Skipped;
+            return Err(SecretOutcome::Skipped);
         }
 
         // Same content, written the one way that establishes the mode atomically.
-        if let Err(e) = filesystem.write_file_private(&target_path, &resolved.bytes) {
-            sender
+        if let Err(e) = self
+            .filesystem
+            .write_file_private(&target.path, &resolved.bytes)
+        {
+            self.sender
                 .send_warning(format!(
                     "Failed to tighten permissions on '{}': {e}",
-                    target_path.display()
+                    target.path.display()
                 ))
                 .await;
-            return SecretOutcome::Failed;
+            return Err(SecretOutcome::Failed);
         }
 
-        sender
+        self.sender
             .send_dotfile_skipped(
-                &origin,
-                target_path.display(),
+                &target.origin,
+                target.path.display(),
                 "already in sync (permissions tightened to owner-only)",
             )
             .await;
-        return SecretOutcome::Skipped;
+        Err(SecretOutcome::Skipped)
     }
 
-    if !matches!(current, TargetState::Absent) {
+    /// Settle a target that exists and differs.
+    ///
+    /// `auto_accept` is deliberately NOT consulted, unlike the repository-file
+    /// path. It is a caller-settable parameter — the MCP server exposes it to an
+    /// assistant — and honouring it would let a non-interactive caller silently
+    /// overwrite a hand-edited credentials file with provider output, with no
+    /// human ever seeing the conflict. A credential is not recoverable
+    /// afterwards, because nothing about it was recorded.
+    ///
+    /// The spec is explicit: provider conflicts are never auto-resolved in
+    /// non-interactive contexts; they are reported and skipped. The only way
+    /// past this point is an interactive resolver actively returning Accept.
+    ///
+    /// Returning `Ok` means the caller may write: either the resolver accepted,
+    /// or there was nothing at the target to begin with.
+    async fn settle_conflict(
+        &self,
+        target: &SecretTarget<'_>,
+        resolved: &ResolvedContent,
+        current: &TargetState,
+    ) -> Phase {
+        if matches!(current, TargetState::Absent) {
+            return Ok(());
+        }
+
         // `None` for an unreadable target: there is nothing to describe or
         // reveal. The resolver is still consulted, because replacing a file only
         // needs write permission on its directory — so an overwrite may well be
         // possible and the user is entitled to choose it.
-        let current: Option<&[u8]> = match &current {
+        let current: Option<&[u8]> = match current {
             TargetState::Readable(bytes) => Some(bytes),
             _ => None,
         };
-        let summary = secret_conflict_summary(entry, &resolved.bytes, current);
+        let summary = secret_conflict_summary(target.entry, &resolved.bytes, current);
 
-        // `auto_accept` is deliberately NOT consulted here, unlike the repo-file
-        // path below. It is a caller-settable parameter — the MCP server exposes
-        // it to an assistant — and honouring it would let a non-interactive caller
-        // silently overwrite a hand-edited credentials file with provider output,
-        // with no human ever seeing the conflict. A credential is not recoverable
-        // afterwards, because nothing about it was recorded.
-        //
-        // The spec is explicit: provider conflicts are never auto-resolved in
-        // non-interactive contexts; they are reported and skipped. The only way
-        // past this point is an interactive resolver actively returning Accept.
-        let accept = if let Some(resolver) = &options.conflict_resolver {
-            // The resolver is blocking and needs 'static, so the values are moved
-            // in as owned buffers and the borrowed `ConflictDetail` is built
-            // inside the closure. That does not prevent a resolver copying the
-            // values — only retaining the borrow — but it keeps them off the
-            // 'static boundary, so any copy is one an adapter took on purpose.
-            //
-            // `incoming` is a clone because `resolved.bytes` is still needed to
-            // write with if the answer is Accept. That is a second copy of the
-            // secret in memory, consistent with the documented absence of any
-            // scrubbing guarantee.
-            let resolver = Arc::clone(resolver);
-            let target = target_path.display().to_string();
-            let incoming = resolved.bytes.clone();
-            let current = current.unwrap_or_default().to_vec();
-            let summary = summary.clone();
-            tokio::task::spawn_blocking(move || {
-                resolver.resolve(
-                    &target,
-                    ConflictDetail::Secret {
-                        summary: &summary,
-                        incoming: &incoming,
-                        current: &current,
-                    },
-                )
-            })
-            .await
-            .unwrap_or(ConflictResolution::Skip)
-                == ConflictResolution::Accept
-        } else {
-            false
+        if self.ask_resolver(target, resolved, current, &summary).await {
+            return Ok(());
+        }
+
+        // Only the summary reaches the event. The values went to the resolver
+        // and nowhere else.
+        self.sender
+            .send_dotfile_conflict(&target.origin, target.path.display(), &summary)
+            .await;
+        Err(SecretOutcome::Conflicted)
+    }
+
+    /// Put the conflict to the injected resolver, if there is one.
+    ///
+    /// The resolver is blocking and needs `'static`, so the values are moved in
+    /// as owned buffers and the borrowed `ConflictDetail` is built inside the
+    /// closure. That does not prevent a resolver copying the values — only
+    /// retaining the borrow — but it keeps them off the `'static` boundary, so
+    /// any copy is one an adapter took on purpose.
+    ///
+    /// `incoming` is a clone because `resolved.bytes` is still needed to write
+    /// with if the answer is Accept. That is a second copy of the secret in
+    /// memory, consistent with the documented absence of any scrubbing
+    /// guarantee.
+    async fn ask_resolver(
+        &self,
+        target: &SecretTarget<'_>,
+        resolved: &ResolvedContent,
+        current: Option<&[u8]>,
+        summary: &str,
+    ) -> bool {
+        let Some(resolver) = &self.options.conflict_resolver else {
+            return false;
         };
 
-        if !accept {
-            // Only the summary reaches the event. The values went to the resolver
-            // and nowhere else.
-            sender
-                .send_dotfile_conflict(&origin, target_path.display(), &summary)
+        let resolver = Arc::clone(resolver);
+        let path = target.path.display().to_string();
+        let incoming = resolved.bytes.clone();
+        let current = current.unwrap_or_default().to_vec();
+        let summary = summary.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            resolver.resolve(
+                &path,
+                ConflictDetail::Secret {
+                    summary: &summary,
+                    incoming: &incoming,
+                    current: &current,
+                },
+            )
+        })
+        .await
+        .unwrap_or(ConflictResolution::Skip)
+            == ConflictResolution::Accept
+    }
+
+    /// Write the resolved content and report it.
+    ///
+    /// Owner-only and atomic: no window in which the credential is
+    /// world-readable, and no interrupted write leaving a truncated one behind.
+    async fn write(&self, target: &SecretTarget<'_>, resolved: &ResolvedContent) -> SecretOutcome {
+        if let Err(e) = self
+            .filesystem
+            .write_file_private(&target.path, &resolved.bytes)
+        {
+            self.sender
+                .send_warning(format!("Failed to write '{}': {e}", target.path.display()))
                 .await;
-            return SecretOutcome::Conflicted;
+            return SecretOutcome::Failed;
         }
-    }
 
-    // Owner-only and atomic: no window in which the credential is world-readable,
-    // and no interrupted write leaving a truncated one behind.
-    if let Err(e) = filesystem.write_file_private(&target_path, &resolved.bytes) {
-        sender
-            .send_warning(format!("Failed to write '{}': {e}", target_path.display()))
+        self.sender
+            .send_dotfile_deployed(&target.origin, target.path.display())
             .await;
-        return SecretOutcome::Failed;
+
+        // No deploy state is recorded: a stored checksum of a credential is a
+        // confirmation oracle. See ADR-0003.
+        SecretOutcome::Deployed
     }
-
-    sender
-        .send_dotfile_deployed(&origin, target_path.display())
-        .await;
-
-    // No deploy state is recorded: a stored checksum of a credential is a
-    // confirmation oracle. See ADR-0003.
-    SecretOutcome::Deployed
 }
 
 /// Describes a single config file deployment operation
@@ -890,6 +1019,15 @@ where
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
+        let secret_apply = SecretApply {
+            base_dir: &base_dir,
+            filesystem,
+            runner,
+            config,
+            sender,
+            options,
+        };
+
         for entry in &dotfiles {
             let source = match entry.content_source() {
                 ContentSource::RepoFile(source) => source,
@@ -897,11 +1035,7 @@ where
                 // Secret-bearing entries resolve their content by running
                 // commands, compare it in memory, and record nothing.
                 ContentSource::Template { .. } | ContentSource::Provider(_) => {
-                    match apply_secret_entry(
-                        entry, &base_dir, filesystem, runner, config, sender, options,
-                    )
-                    .await
-                    {
+                    match secret_apply.apply(entry).await {
                         SecretOutcome::Deployed => deployed_count += 1,
                         SecretOutcome::Skipped => skipped_count += 1,
                         SecretOutcome::Conflicted => conflict_count += 1,
