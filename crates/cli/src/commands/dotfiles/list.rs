@@ -54,7 +54,8 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
             table.add_row(vec![
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
-                entry.source().to_string(),
+                // Content-source-aware rendering lands with the enumeration work.
+                entry.source().unwrap_or("(command)").to_string(),
                 shorten_path(entry.target()),
             ]);
             total += 1;

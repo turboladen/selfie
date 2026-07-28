@@ -20,7 +20,7 @@ use crate::{
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
-        DotfileEntry, Package,
+        ContentSource, DotfileEntry, Package,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -536,14 +536,30 @@ where
             .to_path_buf();
 
         for entry in &dotfiles {
-            let source_path = resolve_source_path(&base_dir, entry.source());
+            let source = match entry.content_source() {
+                ContentSource::RepoFile(source) => source,
+                // Secret-bearing entries resolve their content by running commands
+                // and take a separate deploy path; malformed ones are not
+                // deployable at all. Both are handled where that path is built.
+                _ => {
+                    sender
+                        .send_warning(format!(
+                            "Skipping '{}': entry is not a plain repository file",
+                            entry.target()
+                        ))
+                        .await;
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+
+            let source_path = resolve_source_path(&base_dir, source);
 
             // Runtime path traversal guard: verify resolved path stays within base_dir
             if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes YAML base directory",
-                        entry.source()
+                        "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
                 skipped_count += 1;
@@ -596,8 +612,7 @@ where
             };
 
             // Detect drift
-            let drift =
-                deploy_state.detect_drift(entry.source(), &source_checksum, &target_checksum);
+            let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
             let decision =
                 deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
@@ -606,7 +621,7 @@ where
                 target_path: &target_path,
                 source_content: &source_content,
                 source_checksum: &source_checksum,
-                source_key: entry.source(),
+                source_key: source,
             };
 
             match decision {
@@ -635,7 +650,7 @@ where
                     // record the state so future runs see DriftType::None.
                     if drift == DriftType::NotTracked && !options.dry_run {
                         deploy_state.record_deployment(
-                            entry.source(),
+                            source,
                             &target_path.to_string_lossy(),
                             &source_checksum,
                         );
@@ -752,7 +767,15 @@ where
         for entry in &package.dotfiles_for_environment(config.environment()) {
             total_count += 1;
 
-            let source_path = resolve_source_path(&base_dir, entry.source());
+            let source = match entry.content_source() {
+                ContentSource::RepoFile(source) => source,
+                // Drift is a comparison against recorded deploy state, which
+                // secret-bearing entries deliberately do not have. Reporting them
+                // is handled where that path is built.
+                _ => continue,
+            };
+
+            let source_path = resolve_source_path(&base_dir, source);
             let target_path = expand_user_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
@@ -771,8 +794,7 @@ where
             if !validate_source_path(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
-                        "Skipping '{}': source path escapes YAML base directory",
-                        entry.source()
+                        "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
                 continue;
@@ -803,8 +825,7 @@ where
                 String::new()
             };
 
-            let drift =
-                deploy_state.detect_drift(entry.source(), &source_checksum, &target_checksum);
+            let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
 
             if drift != DriftType::None {
                 sender

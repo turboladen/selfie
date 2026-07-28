@@ -477,37 +477,40 @@ impl Package {
     /// diagnostics (e.g. `dotfiles[0]` or `environments.work.dotfiles[1]`).
     fn validate_dotfile_entry(dotfile: &DotfileEntry, field: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
-        let source = dotfile.source();
         let target = dotfile.target();
 
-        if source.is_empty() {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{field}.source"),
-                "Dotfile source path cannot be empty",
-                Some("Provide a relative path to the dotfile within the repository."),
-            ));
-        }
+        // Source-path checks apply only to entries that have a source. A provider
+        // entry's content comes from a command, so there is no path to check.
+        if let Some(source) = dotfile.source() {
+            if source.is_empty() {
+                issues.push(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.source"),
+                    "Dotfile source path cannot be empty",
+                    Some("Provide a relative path to the dotfile within the repository."),
+                ));
+            }
 
-        if std::path::Path::new(source)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{field}.source"),
-                "Dotfile source path must not contain '..' (path traversal)",
-                Some("Use a relative path without parent directory references."),
-            ));
-        }
+            if std::path::Path::new(source)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                issues.push(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.source"),
+                    "Dotfile source path must not contain '..' (path traversal)",
+                    Some("Use a relative path without parent directory references."),
+                ));
+            }
 
-        if source.starts_with('/') || source.starts_with('~') {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{field}.source"),
-                "Dotfile source path must be relative",
-                Some("Use a path relative to the dotfiles directory, e.g., 'pkg/config.toml'."),
-            ));
+            if source.starts_with('/') || source.starts_with('~') {
+                issues.push(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.source"),
+                    "Dotfile source path must be relative",
+                    Some("Use a path relative to the dotfiles directory, e.g., 'pkg/config.toml'."),
+                ));
+            }
         }
 
         if !target.starts_with('/') && !target.starts_with('~') {
