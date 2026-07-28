@@ -1637,6 +1637,29 @@ mod secret_bearing {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn an_in_sync_target_readable_only_by_its_group_is_still_tightened() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // 0640 leaks to the group but not to others, so a check that only looks
+        // at the "other" bits would pass it. On a shared machine the group is
+        // exactly who you are hiding a credential from.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "group-readable is not owner-only");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn an_in_sync_target_already_owner_only_is_left_completely_alone() {
         use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
