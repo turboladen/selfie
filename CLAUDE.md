@@ -98,6 +98,9 @@ they are relevant rather than in every session:
 `verification.md` loads every session; the rest load when you touch matching files. Read the
 relevant one before working in an area rather than inferring the convention from nearby code.
 
+A problem found while doing other work goes in a **bead**, not a PR description or a code comment. A
+PR body is read once and buried; a bead is queryable and shows up in `bd ready`.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 
 ## Beads Issue Tracker
@@ -119,8 +122,6 @@ bd close <id>         # Complete work
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-- A problem found while doing other work goes in a **bead**, not a PR description or a code comment.
-  A PR body is read once and buried; a bead is queryable and shows up in `bd ready`.
 
 ## Session Completion
 
