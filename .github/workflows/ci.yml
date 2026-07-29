@@ -61,3 +61,9 @@ jobs:
         run: cargo build
       - name: Run tests
         run: cargo test
+      # Workspace `cargo test` unifies `with_mocks` in, so only the crate alone
+      # catches the library losing access to it. Runs last, and runs even when
+      # the workspace suite failed, so neither result can hide the other.
+      - name: Test the library crate alone
+        if: ${{ !cancelled() }}
+        run: cargo test -p selfie
