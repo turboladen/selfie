@@ -874,8 +874,14 @@ credentials file. That is the same hazard as writing `var:` for `vars:`, which i
 same treatment: `selfie spec validate` reports it, `selfie apply` skips the entry, and commands that
 rewrite the file refuse to save it. See [Unrecognized keys](#unrecognized-keys).
 
-The fix is to **rename the anchor** — `_creds: &v` works exactly as well. Only these four names are
-affected, and only inside a dotfile entry:
+The fix depends on which you meant, and selfie says so rather than guessing:
+
+```
+'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'
+```
+
+**Rename the anchor** — `_creds: &v` works exactly as well — or, if you meant the field, drop the
+underscore. Only these four names are affected, and only inside a dotfile entry:
 
 - `_brew`, `_anchor`, `_targets` inside an entry are fine — none of them is a field name.
 - `_target: &target …` at the **top level** of the file is fine, as in the example above. Top-level

@@ -228,14 +228,20 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 ///
 /// Shared by [`InvalidEntry`]'s `Display` and
 /// `Package::validate_unknown_dotfile_fields`, so apply and `selfie spec
-/// validate` cannot describe the same key differently. The two cases need
-/// different advice: a misspelling is corrected, an anchor is *renamed* — its
-/// key is not unknown at all, it was chosen deliberately and happens to collide.
+/// validate` cannot describe the same key differently.
+///
+/// The collision message must hold for **both** readings of the key, because
+/// selfie cannot tell them apart — that ambiguity is the entire reason the key
+/// is refused. Saying "'target' is not set" was true of the misspelling and
+/// **false** of the genuine anchor, where `target: *t` is set and the user would
+/// have been told something untrue about their own file. So it names the
+/// ambiguity rather than asserting a consequence, and offers the remedy for
+/// each reading: rename it if it is an anchor, spell it correctly if it is not.
 pub(crate) fn describe_unknown_key(key: &str) -> String {
     if let Some(field) = key.strip_prefix('_').filter(|_| shadows_dotfile_field(key)) {
         format!(
-            "anchor '{key}' collides with the '{field}' field, so '{field}' is not set; \
-             rename the anchor"
+            "'{key}' cannot be told apart from a misspelling of the '{field}' field; \
+             rename it, or correct it to '{field}'"
         )
     } else {
         format!(
@@ -1058,10 +1064,51 @@ vars: {}
                     .content_source()
                     .unwrap_err()
                     .to_string()
-                    .contains("rename the anchor"),
-                "the advice for a collision is to rename, not to correct a spelling"
+                    .contains("cannot be told apart from a misspelling"),
+                "the message must name the ambiguity, which is the one thing true of \
+                 both readings of the key"
+            );
+            // A genuine anchor really does set the field it collides with, so a
+            // message asserting otherwise would tell that user something false
+            // about their own file.
+            assert!(
+                !entry
+                    .content_source()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is not set"),
+                "the refusal must not claim the field is unset"
             );
         }
+    }
+
+    #[test]
+    fn the_refusal_holds_for_a_genuine_anchor_that_really_does_set_its_field() {
+        // The case that constitutes the behavior break, and the one a message
+        // asserting "'target' is not set" got wrong: here `_target` is a real
+        // anchor and `target: *t` really does set the field from it. Refusing is
+        // still correct — nothing in the file distinguishes this from a typo —
+        // but the diagnostic must not tell this user something false about their
+        // own YAML, or every other diagnostic reads as guesswork.
+        let entry = entry_from_yaml(
+            "_target: &t \"~/.config/bat/config\"\nsource: bat/config\ntarget: *t\n",
+        );
+
+        assert_eq!(
+            entry.target(),
+            "~/.config/bat/config",
+            "the alias must have resolved — otherwise this fixture proves nothing"
+        );
+
+        let refusal = entry.content_source().unwrap_err().to_string();
+        assert!(
+            refusal.contains("cannot be told apart from a misspelling"),
+            "got: {refusal}"
+        );
+        assert!(
+            !refusal.contains("is not set"),
+            "the field IS set here; claiming otherwise contradicts the user's file: {refusal}"
+        );
     }
 
     #[test]

@@ -79,26 +79,13 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
     );
 }
 
-#[test]
-fn listing_a_refused_entry_runs_none_of_its_commands() {
-    // Describing an entry must never execute anything: `op read x` reaches a
-    // secret store and can raise a biometric prompt. The command is deliberately
-    // one that would fail loudly if it ran in this environment.
-    let temp = setup_default_test_config();
-    write_packages(&temp);
-
-    let output = get_command_with_test_config(&temp)
-        .args(["dotfiles", "list"])
-        .output()
-        .unwrap();
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert!(
-        !combined.contains("command not found") && !combined.contains("op:"),
-        "listing must not execute the binding command, got:\n{combined}"
-    );
-}
+// There is deliberately no test here asserting that listing runs no command.
+// `selfie dotfiles list` has no `CommandRunner` wired into it at all, so such a
+// test cannot fail for the reason its name would promise, and the only proxy
+// available from outside the process — grepping stdout for a shell error — passes
+// on any machine where `op` happens to be installed. A test that cannot observe
+// the invariant it names is the failure mode `.claude/rules/testing.md` records.
+// The real guard is `a_var_name_that_cannot_be_substituted_runs_no_command` in
+// `crates/selfie/tests/dotfile_service_tests.rs`, which asserts `call_count() == 0`
+// against an injected runner and has a positive control proving that runner
+// records calls on the same path.

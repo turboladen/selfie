@@ -153,9 +153,12 @@ where
         // invalid entry is not deployable at all. Returning an error rather than
         // panicking: the invariant that keeps these out is enforced by a caller in
         // another module, which is too far away to be worth a panic.
-        Ok(ContentSource::RepoFile(_)) | Err(_) => Err(ResolveError::NotSecretBearing {
-            target: entry.target().to_string(),
-        }),
+        Ok(ContentSource::RepoFile(_))
+        | Err(InvalidEntry::Shape | InvalidEntry::UnknownKeys(_) | InvalidEntry::VarName(_)) => {
+            Err(ResolveError::NotSecretBearing {
+                target: entry.target().to_string(),
+            })
+        }
 
         Ok(ContentSource::Provider(command)) => {
             let bytes = run_capture(command, base_dir, runner, timeout, token)

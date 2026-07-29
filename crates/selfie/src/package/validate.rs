@@ -103,9 +103,10 @@ fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationI
 
     for (i, entry) in entries.iter().enumerate() {
         for key in entry.unknown_keys() {
-            // A colliding anchor needs different advice from a misspelling: its
-            // key is not unknown, it was named deliberately and happens to match
-            // a field, so the fix is to rename it rather than to correct it.
+            // A collision needs different advice from a plain misspelling. The
+            // key is not unknown — it may have been named deliberately — and
+            // which remedy applies depends on which the user meant, so the
+            // suggestion explains the rule rather than prescribing one fix.
             let suggestion = if shadows_dotfile_field(key) {
                 "Anchors are legal here; only a name matching a field of this entry is refused, \
                  because it cannot be told apart from a misspelling of that field."
@@ -988,13 +989,19 @@ mod tests {
 
         assert_eq!(issue.level(), ValidationLevel::Error);
         assert!(
-            issue.message().contains("rename the anchor"),
-            "got: {}",
+            issue
+                .message()
+                .contains("rename it, or correct it to 'vars'"),
+            "the message must offer the remedy for each reading, got: {}",
             issue.message()
         );
+        // The collision is refused precisely because selfie cannot tell an anchor
+        // from a typo, so the message must not assert a consequence that holds
+        // for only one of them. A genuine `_vars: &v` anchor leaves `vars` unset;
+        // a genuine `_target: &t` anchor aliased by `target: *t` does not.
         assert!(
-            issue.message().contains("'vars' is not set"),
-            "the message must say what the collision costs, got: {}",
+            !issue.message().contains("is not set"),
+            "the message must hold for both readings of the key, got: {}",
             issue.message()
         );
     }

@@ -2791,8 +2791,8 @@ mod secret_bearing {
             );
             assert_eq!(runner.call_count(), 0, "for _{field}");
             assert!(
-                format!("{events:?}").contains("rename the anchor"),
-                "the refusal must say to rename the anchor, got: {events:?}"
+                format!("{events:?}").contains("cannot be told apart from a misspelling"),
+                "the refusal must name the ambiguity, got: {events:?}"
             );
         }
     }
