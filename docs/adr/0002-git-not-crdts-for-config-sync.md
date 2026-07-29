@@ -1,4 +1,4 @@
-# 2. Git, not CRDTs, for reconciling divergent configuration
+# 0002. Git, not CRDTs, for reconciling divergent configuration
 
 Date: 2026-07-23
 

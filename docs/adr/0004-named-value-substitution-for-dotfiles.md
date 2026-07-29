@@ -1,4 +1,4 @@
-# 4. Named-value substitution for dotfiles
+# 0004. Named-value substitution for dotfiles
 
 Date: 2026-07-24
 

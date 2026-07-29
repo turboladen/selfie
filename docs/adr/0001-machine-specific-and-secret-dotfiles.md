@@ -1,4 +1,4 @@
-# 1. Per-environment and externally-sourced dotfiles
+# 0001. Per-environment and externally-sourced dotfiles
 
 Date: 2026-07-23
 

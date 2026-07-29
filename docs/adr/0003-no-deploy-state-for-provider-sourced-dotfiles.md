@@ -1,4 +1,4 @@
-# 3. No deploy state for provider-sourced dotfiles
+# 0003. No deploy state for provider-sourced dotfiles
 
 Date: 2026-07-24
 
