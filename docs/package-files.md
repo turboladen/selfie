@@ -347,6 +347,33 @@ install: |
   echo "Installation complete"
 ```
 
+### Command Output
+
+**Your commands' output is shown to whoever is running selfie. Write them as if everything they
+print will be read.**
+
+- **`install` output is streamed live**, line by line, as the command runs — both stdout and stderr,
+  whether the command succeeds or fails. When selfie is driven through its MCP server rather than
+  the terminal, those same lines are included in the structured response the AI assistant receives.
+- **`check` output is displayed** when you run `selfie package check`, so that a check reporting
+  "not installed" can tell you why.
+
+This is deliberate: watching an install run and reading a check's explanation are the point. But it
+means **a command that prints a credential prints it to the terminal and to any connected MCP
+client**. If a command needs a token, pass it through the environment or have the command read it
+directly — do not `echo` it.
+
+Failure reports are narrower. When a command exits non-zero, what selfie reports about the failure
+itself is the command and its exit code — and, to a terminal, its standard error, cut to the first
+2000 bytes with `… (truncated)` appended when there was more. The same limit applies to a failing
+`command` or `vars` dotfile entry. It does not repeat the command's standard output. Anything else
+you see about a failed command reached you through one of the channels above, as it ran.
+
+If a dotfile's content is itself a secret, use a `command` or `vars` dotfile entry rather than an
+install command — selfie treats those as secret-bearing and never puts their content in a message, a
+log line, or an error. See
+[Provider-sourced and templated dotfiles](#provider-sourced-and-templated-dotfiles).
+
 ## Advanced Features
 
 ### Environment Variables
@@ -711,8 +738,8 @@ a known gap rather than an intentional design.
 #### Limitations
 
 - **A command's stderr is forwarded when it fails.** A provider run with a verbose or debug flag can
-  echo secret material to stderr, and that text will appear in the failure message. It is not
-  forwarded when the command succeeds.
+  echo secret material to stderr, and that text will appear in the failure message, up to the limit
+  described under [Command Output](#command-output). It is not forwarded when the command succeeds.
 - **Do not put a literal secret in a var command.** `echo hunter2` stores the secret in the package
   file and exposes it in process listings. A binding should retrieve a value, never contain one.
 - **Resolved values are not reliably erasable from process memory.** String and buffer reallocation

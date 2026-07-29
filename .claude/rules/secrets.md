@@ -37,13 +37,22 @@ Test egress at the **boundary**, not by listing known paths:
   No test can see this exit, because nothing formats the struct today — which is the argument for
   removing it by construction rather than testing for it.
 - **`CommandError::NonZeroExit` carries stdout.** Its `Display` omits the field; its `Debug` does
-  not. Worse, `From<CommandError> for OperationFailure` moves that stdout into
-  `CommandFailure::ExecutionFailed`, which reaches `PackageEvent::Completed`, is printed verbatim
-  line-by-line by the CLI (`display_manager.rs`), and is serialized by MCP. A provider's stdout _is_
-  the secret. Use `to_string()`, never `{:?}`, and never route a resolve failure through
-  `OperationFailure::from(CommandError)` or `command_failed`.
+  not, so a `{:?}` on any `Result` holding one prints the command's whole output. Use `to_string()`,
+  never `{:?}`. `CommandFailure::ExecutionFailed` deliberately has **no** `stdout` field so that the
+  conversion has nowhere to put it, and forwards stderr only, truncated — do not add one back. A
+  provider's stdout _is_ the secret, and the general failure path cannot know which commands produce
+  one. Still prefer the resolve path's own error type over `OperationFailure::from(CommandError)` or
+  `command_failed`: those say "a command failed", not which entry or which var, and the resolve
+  variants carry that.
 - **Forward command stderr on failure only**, truncated. It is content selfie does not control; a
-  provider run with a verbose flag can echo secret material there.
+  provider run with a verbose flag can echo secret material there. `truncate_stderr` in
+  `commands/runner.rs` is the one bound; call it rather than deciding a limit per site.
+- **Streamed command output is unconditional egress to every adapter.** `execute_command_streaming`
+  sends each line of an install command's stdout **and** stderr as `PackageEvent::Info`, on success
+  and on failure alike. The CLI prints those verbatim and the MCP server serializes them into its
+  JSON. Nothing on that path is truncated, redacted, or conditional, which makes it broader than any
+  other exit named in this file. A dotfile provider does not use it — the resolve path runs its own
+  non-streaming execution — but any install command that echoes a credential is exposed by it.
 - **`auto_accept` must not apply to secret-bearing entries.** Their conflicts are always reported
   and skipped without an interactive resolver. Default-false is not the same as cannot-be-set-true,
   and MCP exposes it as a caller-settable parameter.

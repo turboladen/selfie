@@ -367,11 +367,12 @@ where
                 context.package_name
             ))
             .await;
+        // The install command's stdout has already been streamed to the caller
+        // line by line as it ran; it is deliberately not repeated here.
         return OperationResult::Failure(OperationFailure::command_failed(
             context.install_cmd.to_string(),
             Some(install_output.exit_code()),
-            install_output.stdout_str().to_string(),
-            install_output.stderr_str().to_string(),
+            install_output.stderr_str().as_ref(),
         ));
     }
 

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::deploy::resolve_source_path;
 use super::template;
 use crate::commands::CommandRunner;
+use crate::commands::runner::truncate_stderr;
 use crate::fs::filesystem::FileSystem;
 use crate::package::{ContentSource, DotfileEntry};
 use crate::paths::is_within;
@@ -28,9 +29,6 @@ use crate::paths::is_within;
 /// as it already does for every install and check command. A genuinely unbounded
 /// provider is therefore still bounded only by the runner's own behavior.
 const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
-
-/// Maximum length of forwarded command stderr.
-const MAX_STDERR_BYTES: usize = 2000;
 
 /// Content resolved for one dotfile entry.
 pub(crate) struct ResolvedContent {
@@ -256,21 +254,6 @@ async fn run_capture<CR: CommandRunner>(
         Ok(output.stdout().to_vec())
     } else {
         Err(truncate_stderr(output.stderr()))
-    }
-}
-
-/// Bound forwarded stderr, which is content selfie does not control.
-///
-/// Truncates the bytes and then decodes, rather than slicing a `String`: a
-/// multi-byte character straddling the cut would panic on a string slice.
-fn truncate_stderr(stderr: &[u8]) -> String {
-    if stderr.len() <= MAX_STDERR_BYTES {
-        String::from_utf8_lossy(stderr).into_owned()
-    } else {
-        format!(
-            "{}… (truncated)",
-            String::from_utf8_lossy(&stderr[..MAX_STDERR_BYTES])
-        )
     }
 }
 
@@ -667,21 +650,5 @@ mod tests {
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
 
         assert!(err.to_string().contains("no content to resolve"), "{err}");
-    }
-
-    #[test]
-    fn truncate_stderr_does_not_split_a_multibyte_character() {
-        // A multi-byte character straddling the cut would panic a string slice.
-        let mut stderr = vec![b'a'; MAX_STDERR_BYTES - 1];
-        stderr.extend_from_slice("é".as_bytes());
-
-        let truncated = truncate_stderr(&stderr);
-
-        assert!(truncated.ends_with("… (truncated)"));
-    }
-
-    #[test]
-    fn truncate_stderr_leaves_short_input_alone() {
-        assert_eq!(truncate_stderr(b"not logged in"), "not logged in");
     }
 }
