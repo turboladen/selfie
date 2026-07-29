@@ -9,16 +9,24 @@ and operating systems.
 ## Commands
 
 ```bash
-cargo build                    # Build all crates
-cargo test                     # Run all tests
-cargo test -p selfie           # Test library only
-cargo test -p selfie-cli       # Test CLI only
-cargo run -- <args>            # Run the CLI (from workspace root)
-cargo clippy --all-targets     # Lint
-cargo fmt --check              # Check formatting
-dprint fmt                     # Format Markdown/YAML (CI checks this)
-dprint check                   # Verify Markdown/YAML formatting
+cargo build                                    # Build all crates
+cargo test                                     # Run all tests
+cargo test -p selfie --features with_mocks     # Test library only (see below)
+cargo test -p selfie-cli                       # Test CLI only
+cargo run -- <args>                            # Run the CLI (from workspace root)
+cargo clippy --all-targets -- -D warnings      # Lint, CI form (see below)
+cargo fmt --check                              # Check formatting
+dprint fmt                                     # Format Markdown/YAML (CI checks this)
+dprint check                                   # Verify Markdown/YAML formatting
 ```
+
+Two gate commands differ from the obvious form, and both let work pass locally that CI rejects:
+
+- `cargo clippy --all-targets` **does not fail on warnings**. CI runs it with `-- -D warnings`
+  (`.github/workflows/ci.yml`). Use the CI form locally or a warning ships to a red build.
+- `cargo test -p selfie` **does not compile** — the mocks are behind `with_mocks`, so it fails on
+  unresolved `MockFileSystem` / `MockPackageRepository` imports. Workspace `cargo test` works only
+  because `selfie-cli`'s dev-dependencies unify the feature in. Tracked as selfie-4b7.
 
 ### Pre-commit checklist
 
@@ -26,7 +34,7 @@ Before every commit (unless instructed otherwise), run all four and fix any issu
 
 1. `cargo fmt` — auto-fix formatting
 2. `dprint fmt` — auto-fix Markdown/YAML formatting
-3. `cargo clippy --all-targets` — fix all warnings (zero warnings policy)
+3. `cargo clippy --all-targets -- -D warnings` — zero warnings policy; the bare form under-reports
 4. `cargo test` — all tests must pass
 
 ### Documentation rule
@@ -36,6 +44,9 @@ When adding user-facing features, update `docs/` before considering the feature 
 - `docs/package-files.md` — New YAML fields or behaviors
 - `docs/configuration.md` — New config settings
 - `README.md` — Status section and examples
+
+Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` in CI does not
+catch British forms, because they are real words.
 
 When testing the CLI crate, enable mocks: the `selfie` dev-dependency already uses
 `features = ["with_mocks"]`.
@@ -73,127 +84,19 @@ other language.
 
 Additionally, `assets/branding` contains logos and icons can be used in documentation and such.
 
-## Design Patterns
+## Rules
 
-Follow the Hexagonal Architecture design (aka Ports and Adapters), particularly for the core library
-(`selfie`); the CLI crate will follow this too, but may also apply other patterns (like Command) as
-needed. Hexagonal design usually means using generics and monomorphism in the library (`selfie`),
-and generics (`&impl Trait`) in the calling crates (`selfie-cli`). Async trait methods use RPITIT
-(`fn method() -> impl Future + Send`) for zero-cost `Send` bounds, which makes traits
-non-dyn-compatible; this is an intentional tradeoff — `impl Trait` parameters give the same
-flexibility for testing (any concrete type satisfying the bound works) without heap allocation.
+Detailed instructions live in `.claude/rules/`, scoped by the files they apply to so they load when
+they are relevant rather than in every session:
 
-Messaging about work that `selfie` does should be communicated via "events" so that the caller can
-decide how to display information about that event to the user in the current UI context.
+- `architecture.md` — hexagonal design, key abstractions, boundary rules, MCP server, Rust gotchas
+- `domain.md` — what packages, environments and dotfiles are; configuration keys
+- `secrets.md` — handling credential-bearing dotfile content; egress, permissions, path rules
+- `testing.md` — why a green test proves little here, and the mutation practice that does
+- `verification.md` — confirm before asserting; verify in a copy, never in a shared tree
 
-### Key Abstractions
-
-- **Ports (traits):** `PackageService`, `DotfileService`, `PackageRepository`, `CommandRunner`,
-  `FileSystem`
-- **Adapters:** `PackageServiceImpl<R, CR>`, `YamlPackageRepository<F>`, `ShellCommandRunner`,
-  `RealFileSystem`
-- **Event system:** Operations return `EventStream` (pinned Stream of `PackageEvent`). The library
-  emits events via `EventSender`; the CLI consumes them via `EventProcessor` with custom handlers;
-  the MCP server consumes them via `McpEventCollector` which converts events to structured JSON.
-- **Progress:** `ProgressTracker` provides step-based progress (e.g., "Installing package (2/5)").
-- **Service orchestration:** `PackageServiceImpl::execute_operation_with_deps()` is the standard
-  pattern — creates channel, spawns async task, returns stream.
-- **Post-save formatting:** `YamlPackageRepository::save_package()` runs `dprint fmt` on the saved
-  file as a best-effort post-processing step. Silently skipped if `dprint` is not installed.
-
-### Boundary Rules
-
-- The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
-- **Config is split by concern:** `SelfieConfig` (library) holds operational settings
-  (`environment`, `package_directory`, `command_timeout`, `stop_on_error`, `max_concurrency`).
-  `CliConfig` (CLI crate) wraps `SelfieConfig` and adds presentation settings (`verbose`,
-  `use_colors`). The config file uses top-level keys for core settings and a `cli:` section for
-  CLI-specific ones. Each frontend reads only its own section; the library ignores unknown keys.
-- CLI and MCP server commands should call `SpecService` or `PackageService` methods, not use
-  `PackageRepository` directly. Tests should exercise the same service interface that production
-  code uses, with mocked repositories injected into `PackageServiceImpl`.
-- CLI command handlers accept `&CliConfig`, which delegates core getters to `SelfieConfig`. Pass
-  `config.selfie_config()` when calling into library service methods.
-- **Event consumer tests** (e.g., `EventProcessor`) should construct `EventStream` directly via
-  `stream::iter(vec![...])`, not spin up a real service. This avoids adapter dependencies.
-
-### MCP Server (`selfie-mcp`)
-
-The MCP server (`crates/mcp-server/`) is a second driving adapter alongside the CLI. Key differences
-from the CLI:
-
-- Uses `ShellCommandRunner::login_shell()` (not `default_shell()`) to source the user's login
-  profile, since GUI-launched processes don't inherit terminal PATH.
-- Recovers `HOME` env var via `getpwuid` if not set (macOS GUI apps may not set it).
-- Uses `McpEventCollector` (in `event_collector.rs`) to convert `EventStream` into structured JSON.
-- Status labels are AI-friendly (`"installed"`, `"not installed"`, `"error"`) rather than CLI log
-  phrases (`"successfully"`, `"with failures"`).
-- Bulk tools (`get_all_specs`, `validate_all`) bypass the service layer for fast file reads.
-- Tool descriptions are written to guide AI assistants — be specific about what's returned and when
-  to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
-
-## Gotchas
-
-- **`selfie-cli` is a binary crate**: No lib target, so `cargo test -p selfie-cli --lib` won't work.
-  Use `cargo test -p selfie-cli` instead.
-- **`uuid` is a workspace dep**: Declared in the root `Cargo.toml` with `serde` + `v4` features.
-- **Rust 2024 edition**: All crates use `edition = "2024"`. This affects import syntax and some
-  trait behavior.
-- **`with_mocks` feature flag**: The `selfie` crate exposes `mockall`-generated mocks behind
-  `features = ["with_mocks"]`. The CLI's dev-dependencies already enable this.
-- **Workspace dependencies**: Common deps (`tokio`, `console`, `tracing`, etc.) are defined in the
-  root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
-- **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native PATH
-  lookup. It finds filesystem executables only — not shell builtins like `cd` or `test`. This is
-  intentional: selfie checks for package manager binaries (`brew`, `npm`, `apt`).
-
-## `selfie` Concepts
-
-We're incrementally implementing this functionality. selfie is a personal meta-package manager: it
-doesn't install packages directly, it runs whatever commands the user configures per package. It's a
-glorified command runner, scoped to user-defined environments.
-
-### Packages
-
-Package files are YAML, represented by `selfie::package::Package`. Each package file defines
-per-environment install and check commands. Packages may also declare `dotfiles` (dotfile mappings
-deployed via `selfie apply`), `post_install_note` (first-install guidance), and per-environment
-`recommends` (soft dependencies that warn on failure instead of failing the parent). Example:
-`bash-language-server` might use Homebrew on macOS and `npm` on Ubuntu -- the user decides per
-environment, then just runs `selfie install bash-language-server` regardless of which machine
-they're on.
-
-Package operations:
-
-- **Validate**: Check that a package file follows the spec.
-- **Check**: Run the user-defined check command to see if a package is installed.
-- **Audit**: Run the user-defined audit command to detect installation sources and conflicts.
-- **List**: List all YAML files in the configured package directory.
-- **Create / Edit / Info / Update / Remove**: CRUD for package files in `package_directory`.
-- **Apply**: Deploy dotfiles defined in a package's `dotfiles` field to their target locations.
-
-### Environments
-
-An environment is an arbitrary user-chosen label (typically per OS/distro). Package files have
-`environment` sections tying install/check commands to these labels. The user sets their current
-environment in config so selfie knows which commands to run.
-
-### Configuration
-
-Config file: `~/.config/selfie/config.yml`. Also settable via CLI flags.
-
-Core settings (top-level, read by `SelfieConfig`):
-
-- `environment`: The current environment label.
-- `package_directory`: Directory containing selfie package files.
-- `dotfiles_directory`: Directory containing dotfile source files for `selfie apply`.
-- `state_directory`: Directory for deploy state tracking (checksums, drift detection).
-- `command_timeout`, `stop_on_error`, `max_concurrency`: Execution settings.
-
-CLI settings (under `cli:` section, read by `CliConfig`):
-
-- `verbose`: Enable debug logging.
-- `use_colors`: Enable colored terminal output.
+`verification.md` loads every session; the rest load when you touch matching files. Read the
+relevant one before working in an area rather than inferring the convention from nearby code.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 
@@ -216,6 +119,8 @@ bd close <id>         # Complete work
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- A problem found while doing other work goes in a **bead**, not a PR description or a code comment.
+  A PR body is read once and buried; a bead is queryable and shows up in `bd ready`.
 
 ## Session Completion
 
