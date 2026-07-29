@@ -2411,21 +2411,75 @@ mod secret_bearing {
     }
 
     #[tokio::test]
-    async fn an_unparsable_package_is_named_rather_than_silently_dropped() {
-        // `deny_unknown_fields` makes a misspelled key a parse error, and
-        // `valid_packages()` drops parse failures. Without a warning, a package
-        // directory holding exactly one typo'd package produces a successful
-        // apply that deployed nothing — and the user's credentials dotfile
-        // quietly stops deploying, surfacing later as an auth failure nobody
-        // traces back to a typo.
+    async fn a_misspelled_dotfile_key_is_skipped_with_a_warning_while_the_package_still_applies() {
+        // `var:` for `vars:` leaves a template indistinguishable from a plain
+        // repository file. Deploying it would write the *unrendered* template —
+        // literal `{{ api_key }}` — over the credentials target and record that
+        // content in deploy state, so the entry has to be refused outright.
+        //
+        // The template file really exists and really contains a placeholder: if
+        // the entry were treated as a repository file the target would be written
+        // with that body, so `exists=false` can only mean the entry was skipped.
+        // A missing template would make this pass for the wrong reason.
         let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        std::fs::write(
+            dirs.package_dir.join("creds/t.tpl"),
+            "api_key = \"{{ api_key }}\"\n",
+        )
+        .unwrap();
+
+        let bad_target = dirs.target_dir.join("credentials");
+        let good_target = dirs.target_dir.join("bat.conf");
+        std::fs::write(dirs.package_dir.join("bat.conf"), "fine\n").unwrap();
+
         let yaml = format!(
             "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
-             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    var:\n      v: \"op read x\"\n",
-            target.display()
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    var:\n      api_key: \"op read x\"\n  \
+             - source: \"bat.conf\"\n    target: \"{}\"\n",
+            bad_target.display(),
+            good_target.display()
         );
         std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !bad_target.exists(),
+            "the typo'd entry must not deploy, got: {:?}",
+            std::fs::read_to_string(&bad_target)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&good_target).unwrap(),
+            "fine\n",
+            "the package's other dotfile must still deploy"
+        );
+
+        let rendered = format!("{events:?}");
+        assert!(
+            rendered.contains(bad_target.to_str().unwrap()),
+            "the warning must name the skipped target, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_package_is_named_rather_than_silently_dropped() {
+        // `valid_packages()` drops parse failures. Without a warning, a package
+        // directory holding exactly one unparsable package produces a successful
+        // apply that deployed nothing — and the user's credentials dotfile
+        // quietly stops deploying, surfacing later as an auth failure nobody
+        // traces back to the package file.
+        //
+        // The fixture is malformed YAML rather than a schema violation on
+        // purpose: this test was defanged once already when the schema changed
+        // under it, and a syntax error cannot stop being a parse failure.
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("creds.yml"),
+            "name: creds\ndotfiles:\n  - [unclosed\n",
+        )
+        .unwrap();
 
         let service = dirs.service();
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
@@ -2445,10 +2499,15 @@ mod secret_bearing {
     async fn a_valid_package_still_applies_alongside_an_unparsable_one() {
         // The warning must not become an abort: one bad file should not stop the
         // rest of the directory deploying.
+        //
+        // Malformed YAML, not a schema violation: the previous fixture
+        // (`- nope: 1`) was unparsable only incidentally, because it omitted the
+        // required `target` — so it kept passing while testing something other
+        // than what its name claims.
         let dirs = TestDirs::new();
         std::fs::write(
             dirs.package_dir.join("broken.yml"),
-            "name: broken\ndotfiles:\n  - nope: 1\n",
+            "name: broken\ndotfiles:\n  - [unclosed\n",
         )
         .unwrap();
 

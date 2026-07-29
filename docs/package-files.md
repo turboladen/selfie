@@ -113,10 +113,11 @@ dotfiles:
 Set **exactly one** of `source` or `command`. `vars` goes only with `source`: with `command` there
 is no template to render, and that combination is rejected rather than ignored.
 
-Any other key inside a dotfile entry is a parse error. Only `target` is required, so a misspelling
-would otherwise be dropped silently — writing `var:` for `vars:` would leave a valid-looking
-repository-file entry and deploy the template _unrendered_, placeholders and all, over the file it
-was meant to fill in.
+Any other key inside a dotfile entry — except an underscore-prefixed [YAML anchor](#yaml-anchors) —
+is an error, and the entry is skipped rather than deployed. Only `target` is required, so a
+misspelling would otherwise be dropped silently: writing `var:` for `vars:` would leave a
+valid-looking repository-file entry and deploy the template _unrendered_, placeholders and all, over
+the file it was meant to fill in. See [Unrecognized keys](#unrecognized-keys).
 
 Dotfiles are deployed with `selfie apply`, not during `selfie package install`. This separation
 keeps installation fast and gives you explicit control over when dotfiles are written to disk.
@@ -727,8 +728,65 @@ source→target mapping, and record initial deploy state for drift detection.
 - `source` must not be empty
 - `source` must not contain path traversal sequences (`../`)
 - `target` must be an absolute path (or start with `~`)
+- A dotfile entry accepts only `source`, `command`, `vars` and `target`
 
 Selfie validates these rules when you run `selfie spec validate`.
+
+#### Unrecognized keys
+
+Every field of a dotfile entry except `target` is optional, so a misspelled key would otherwise be
+dropped without a word. Writing `var:` instead of `vars:` would leave a template looking like an
+ordinary repository file and deploy it **unrendered** — with a literal `{{ api_key }}` — over the
+target.
+
+An entry carrying a key selfie does not recognize is therefore refused:
+
+- `selfie spec validate` reports an error naming the entry and the key, such as `dotfiles[0].var` or
+  `environments.macos.dotfiles[1].var`.
+- `selfie apply` **skips that entry** with a warning naming its target, and continues with the rest
+  of the package. Only the offending entry is skipped; the package's other dotfiles and its install
+  and check commands are unaffected.
+- Commands that rewrite the file **refuse to save** it, naming the key: `selfie spec edit`,
+  `selfie package track-dotfile`, and the `selfie_spec_update` MCP tool. A rewrite is produced from
+  the fields selfie understands, so saving would delete the unrecognized key and quietly turn an
+  entry that was being skipped into one that deploys.
+
+  Correct the key by editing the package file in your editor directly. `selfie spec edit` cannot be
+  used for this: it saves the package before opening your editor, so on an affected file it refuses
+  and exits without opening anything. `selfie spec remove` is unaffected — it deletes the file
+  rather than rewriting it.
+
+## YAML anchors
+
+Keys beginning with an underscore are ignored by selfie, so a package file can define YAML anchors
+and reuse them with aliases. This works both at the top level of the file and inside an individual
+dotfile entry, and an underscore-prefixed key is never reported as an unrecognized key:
+
+```yaml
+_brew: &brew brew install ripgrep
+_target: &target ~/.config/bat/config
+
+name: ripgrep
+environments:
+  macos:
+    install: *brew
+  work-macos:
+    install: *brew
+dotfiles:
+  - source: bat/config
+    target: *target
+```
+
+Any other unrecognized key is an error — see [Unrecognized keys](#unrecognized-keys). Anchors are a
+convenience for writing the file; they are resolved when it is read, and are not preserved if selfie
+rewrites the file (for example via `selfie spec edit`).
+
+> **The underscore silences the check completely.** It is not "an anchor named like a field" —
+> selfie does not look at the rest of the name at all. Inside a dotfile entry that cuts both ways:
+> `_vars:` is read as an anchor definition rather than as a misspelling of `vars:`, so the entry is
+> **not** flagged and **not** skipped; it deploys as a plain repository file, with the template
+> unrendered and the bindings you meant to declare silently absent. Reserve the underscore prefix
+> for keys you really do intend as anchor definitions.
 
 ## Common Patterns
 

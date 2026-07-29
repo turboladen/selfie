@@ -1808,6 +1808,11 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             crate::package::port::PackageRepoError::FileSystemError(fs_err) => {
                 OperationFailure::Generic(format!("File system error: {fs_err}"))
             }
+            // Rendered by its own `Display`, which already names the offending
+            // field paths — the message is worth stating in exactly one place.
+            err @ crate::package::port::PackageRepoError::UnknownDotfileFields { .. } => {
+                OperationFailure::Generic(err.to_string())
+            }
         }
     }
 }

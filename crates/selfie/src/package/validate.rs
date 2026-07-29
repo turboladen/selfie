@@ -5,7 +5,7 @@ use serde_saphyr::Location;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::{ContentSource, DotfileEntry, Package};
+use super::{ContentSource, DotfileEntry, KNOWN_DOTFILE_FIELDS, Package};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -90,6 +90,32 @@ pub(crate) const KNOWN_PACKAGE_FIELDS: &[&str] = &[
     "environments",
 ];
 
+/// Flag unrecognized keys in a `dotfiles` list, naming the entry carrying each.
+///
+/// Reads the keys off the entries rather than re-parsing the raw YAML, so this
+/// works for a programmatically built `Package` too — unlike the top-level check
+/// above, which is inert when `raw_yaml` is empty.
+///
+/// `path` names the list (`dotfiles` or `environments.<env>.dotfiles`), matching
+/// the field paths `validate_dotfiles` already reports.
+fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationIssue> {
+    let expected = KNOWN_DOTFILE_FIELDS.join(", ");
+    let mut issues = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        for key in entry.unknown_keys() {
+            issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                &format!("{path}[{i}].{key}"),
+                &format!("unknown field '{key}'; expected one of: {expected}"),
+                Some("This entry is skipped by 'selfie apply' until the key is corrected or removed."),
+            ));
+        }
+    }
+
+    issues
+}
+
 /// Format a `Location` as a human-readable string, returning `None` for unknown locations.
 fn location_string(loc: &Location) -> Option<String> {
     if *loc == Location::UNKNOWN {
@@ -151,6 +177,7 @@ impl Package {
 
         issues.extend(self.validate_required_fields());
         issues.extend(self.validate_unknown_fields());
+        issues.extend(self.validate_unknown_dotfile_fields());
         issues.extend(self.validate_urls());
         issues.extend(self.validate_environments_contents(current_env));
         issues.extend(self.validate_command_syntax());
@@ -218,6 +245,24 @@ impl Package {
                 )
             })
             .collect()
+    }
+
+    /// Flag unrecognized keys inside dotfile entries, shared and per-environment.
+    ///
+    /// Separate from [`validate_unknown_fields`](Self::validate_unknown_fields)
+    /// because the two read from different places: top-level keys come from the
+    /// raw YAML, dotfile keys from the entries themselves.
+    pub(crate) fn validate_unknown_dotfile_fields(&self) -> Vec<ValidationIssue> {
+        let mut issues = unknown_dotfile_keys(&self.dotfiles, "dotfiles");
+
+        for (env_name, env) in self.environments() {
+            issues.extend(unknown_dotfile_keys(
+                env.dotfiles(),
+                &format!("environments.{env_name}.dotfiles"),
+            ));
+        }
+
+        issues
     }
 
     /// Validate the package name format
@@ -775,6 +820,123 @@ mod tests {
 
     fn entry_issues(yaml: &str) -> Vec<ValidationIssue> {
         Package::validate_dotfile_entry(&entry_from_yaml(yaml), "dotfiles[0]")
+    }
+
+    /// Parse a whole package file the way the repository does.
+    ///
+    /// Deliberately not `PackageBuilder`: a built package has no unrecognized
+    /// keys to find, so a builder-based fixture would pass whatever the check did.
+    fn package_from_yaml(yaml: &str) -> Package {
+        serde_saphyr::from_str(yaml).expect("package should parse")
+    }
+
+    fn unknown_dotfile_fields(yaml: &str) -> Vec<(String, String)> {
+        package_from_yaml(yaml)
+            .validate_unknown_dotfile_fields()
+            .into_iter()
+            .map(|i| (i.field.clone(), i.message.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_misspelled_key_in_a_shared_dotfile_is_a_field_level_error() {
+        // The package still parses: the typo costs the user one entry, not the
+        // whole file. Before selfie-6lz4 was fixed, `var:` failed the entire
+        // package to parse and took the second dotfile and the install command
+        // with it.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n  \
+             - source: bat/config\n    target: ~/.config/bat/config\n",
+        );
+
+        assert_eq!(package.dotfiles.len(), 2, "the good entry must survive");
+        assert_eq!(
+            package.environments.value["test"].install(),
+            "echo i",
+            "the rest of the package must survive"
+        );
+
+        let issues = package.validate_unknown_dotfile_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].field, "dotfiles[0].var");
+        assert!(issues[0].message.contains("var"), "got: {issues:?}");
+    }
+
+    #[test]
+    fn an_anchor_key_in_a_shared_dotfile_is_not_an_error() {
+        // Control for the test above: byte-identical shape, one leading `_`.
+        // Without the pair, "no issues" could pass because the walk never ran.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - _anchor: &a creds.tpl\n    source: *a\n    target: ~/.creds\n",
+        );
+
+        assert_eq!(
+            package.dotfiles[0].source(),
+            Some("creds.tpl"),
+            "the alias must resolve, proving the anchor key was parsed"
+        );
+        assert!(
+            package.validate_unknown_dotfile_fields().is_empty(),
+            "got: {:?}",
+            package.validate_unknown_dotfile_fields()
+        );
+    }
+
+    #[test]
+    fn a_misspelled_key_in_an_environment_dotfile_is_reported_with_its_environment() {
+        // A single environment on purpose: `environments` is a HashMap, so two
+        // would make the issue order nondeterministic. Assert on content, never
+        // on order, and do not add a second environment here.
+        let issues = unknown_dotfile_fields(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
+             - source: e.tpl\n        target: ~/.e\n        vasr: 1\n",
+        );
+
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].0, "environments.test.dotfiles[0].vasr");
+    }
+
+    #[test]
+    fn unknown_dotfile_keys_are_reported_for_a_package_that_was_never_parsed_from_a_file() {
+        // `validate_unknown_fields` reads `raw_yaml` and goes quiet when it is
+        // empty. This check reads the entries instead, so it still works for a
+        // package assembled in memory.
+        let package = PackageBuilder::default()
+            .name("creds")
+            .dotfiles(vec![entry_from_yaml(
+                "source: creds.tpl\ntarget: ~/.creds\nvar:\n  k: op read x\n",
+            )])
+            .environment("test", |b| b.install("echo i"))
+            .build();
+
+        assert!(package.raw_yaml.is_empty(), "fixture must have no raw YAML");
+
+        let issues = package.validate_unknown_dotfile_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].field, "dotfiles[0].var");
+    }
+
+    #[test]
+    fn validate_surfaces_an_unknown_dotfile_key_as_an_error() {
+        // Guards the wiring: the check is useless if `validate` does not call it.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n",
+        );
+
+        let result = package.validate("test");
+
+        assert!(
+            result
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|i| i.field == "dotfiles[0].var" && i.level() == ValidationLevel::Error),
+            "got: {:?}",
+            result.issues()
+        );
     }
 
     fn messages(issues: &[ValidationIssue]) -> String {

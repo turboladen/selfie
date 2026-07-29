@@ -12,6 +12,7 @@ use crate::{
             PackageRepoError, PackageRepository,
         },
     },
+    validation::ValidationIssue,
 };
 
 #[derive(Debug, Clone)]
@@ -237,6 +238,24 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
+        // A save rewrites the file from the struct, dropping every key the struct
+        // does not model. In a dotfile entry that key is what makes
+        // `content_source()` return `Invalid`, so writing the file would launder a
+        // refused entry into a deployable one: `var:` for `vars:` would vanish and
+        // the next apply would write the *unrendered* template — literal
+        // `{{ api_key }}` — over the target. Refuse the write instead.
+        //
+        // The guard lives here rather than at the call sites because this is where
+        // the key is destroyed, and a fourth caller cannot forget it. See selfie-6lz4.
+        let unknown = package.validate_unknown_dotfile_fields();
+        if !unknown.is_empty() {
+            let fields: Vec<&str> = unknown.iter().map(ValidationIssue::field).collect();
+            return Err(PackageRepoError::UnknownDotfileFields {
+                path: path.to_path_buf(),
+                fields: fields.join(", "),
+            });
+        }
+
         // Serialize the package to YAML
         let yaml_content = serde_saphyr::to_string(package).map_err(|e| {
             PackageRepoError::IoError(Arc::new(std::io::Error::new(
@@ -1111,6 +1130,93 @@ environments:
         // Test saving the package
         let result = repo.save_package(&package, &package_path);
         assert!(result.is_ok());
+    }
+
+    /// A package YAML with one well-formed dotfile and one carrying `var:`.
+    fn package_with_typo() -> Package {
+        serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n",
+        )
+        .expect("fixture must parse — the typo is a validation error, not a parse error")
+    }
+
+    #[test]
+    fn save_package_refuses_an_entry_carrying_an_unrecognized_key() {
+        // Saving rewrites the file from the struct, which drops `var:` entirely.
+        // The entry would stop being `Invalid` and the next apply would write the
+        // unrendered template over the credentials target — so the write must not
+        // happen at all. `times(0)` is the assertion that matters: refusing after
+        // writing would already have destroyed the key.
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.expect_write_file().times(0);
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        let err = repo
+            .save_package(&package_with_typo(), &package_path)
+            .expect_err("a package with an unrecognized dotfile key must not be rewritten");
+
+        assert!(
+            matches!(err, PackageRepoError::UnknownDotfileFields { .. }),
+            "got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("dotfiles[0].var"),
+            "the diagnostic must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_package_refuses_an_environment_scoped_entry_carrying_an_unrecognized_key() {
+        // The guard has to reach `environments.<env>.dotfiles` too. Kept separate
+        // from the shared-dotfiles test because dropping the environments loop from
+        // `validate_unknown_dotfile_fields` leaves that one green — someone
+        // deleting the loop would otherwise see every save test still pass.
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.expect_write_file().times(0);
+
+        let package: Package = serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
+             - source: creds.tpl\n        target: ~/.creds\n        var:\n          k: op read x\n",
+        )
+        .expect("fixture must parse");
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("an environment-scoped unrecognized key must not be rewritten");
+
+        assert!(
+            err.to_string()
+                .contains("environments.test.dotfiles[0].var"),
+            "the diagnostic must name the environment and entry, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_package_still_writes_a_package_whose_dotfiles_are_all_recognized() {
+        // Control for the test above: the guard must refuse the typo, not every
+        // package that happens to declare dotfiles.
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.mock_write_file(&package_path);
+
+        let package: Package = serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    vars:\n      k: op read x\n",
+        )
+        .unwrap();
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        assert!(repo.save_package(&package, &package_path).is_ok());
     }
 
     #[test]
