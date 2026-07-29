@@ -2673,6 +2673,7 @@ mod secret_bearing {
 #[cfg(unix)]
 mod symlinked_targets {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     fn repo_source(dirs: &TestDirs, relative: &str, content: &str) {
@@ -3120,6 +3121,79 @@ mod symlinked_targets {
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
         assert_eq!(deploy_counts(&events), (1, 0, 0));
+    }
+
+    /// The deploy state file names every path selfie manages here, so it must not
+    /// be readable by anyone but its owner.
+    #[tokio::test]
+    async fn the_deploy_state_file_is_owner_only() {
+        let dirs = TestDirs::new();
+        repo_source(&dirs, "myapp/config.toml", "REPO");
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        // The control says what an ordinary write produces in this environment.
+        // Under a umask of 077 an owner-only assertion passes whatever the code
+        // does, so without this the test could be green while proving nothing.
+        let control = dirs.state_dir.join("control");
+        std::fs::write(&control, b"x").unwrap();
+        let control_mode = std::fs::metadata(&control).unwrap().permissions().mode();
+        if control_mode & 0o077 == 0 {
+            let message = "the ambient umask makes ordinary writes owner-only, so this \
+                           cannot tell an owner-only write from a default one";
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "the_deploy_state_file_is_owner_only: {message}"
+            );
+            eprintln!("SKIP the_deploy_state_file_is_owner_only: {message}");
+            return;
+        }
+
+        let state_file = dirs.state_dir.join("deploy-state.yml");
+        let mode = std::fs::metadata(&state_file).unwrap().permissions().mode();
+        // `& 0o077`, not `& 0o007`: group-readable exposes the map to exactly the
+        // people it is being kept from on a shared machine.
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "group/other bits set on the deploy state file: {:04o}",
+            mode & 0o777
+        );
+    }
+
+    /// A state file left world-readable by an earlier version is corrected.
+    #[tokio::test]
+    async fn an_existing_world_readable_state_file_is_tightened() {
+        let dirs = TestDirs::new();
+        repo_source(&dirs, "myapp/config.toml", "REPO");
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        let state_file = dirs.state_dir.join("deploy-state.yml");
+        std::fs::write(&state_file, "deployed: {}\n").unwrap();
+        std::fs::set_permissions(&state_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        // An implementation that opened the existing file and truncated it would
+        // leave the old mode in place, since a creation mode applies only when the
+        // file is created.
+        let mode = std::fs::metadata(&state_file).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "a pre-existing state file kept its permissive mode: {:04o}",
+            mode & 0o777
+        );
     }
 }
 

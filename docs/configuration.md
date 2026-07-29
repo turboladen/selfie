@@ -177,6 +177,16 @@ state_directory: ~/.local/state/selfie
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
 
+On Unix it is written readable only by its owner (mode `0600`). On Windows it inherits the parent
+directory's ACL, and on any other platform it gets default permissions — treat owner-only as a Unix
+guarantee, not a portable one. Its contents are not credentials, but they list each repository-file
+dotfile selfie manages here alongside its target path, which is a useful map to anyone else with an
+account on the machine.
+
+Provider-sourced and templated dotfiles are not recorded at all, so this is not a complete list of
+what selfie manages — see
+[No deploy state, and what follows from it](package-files.md#no-deploy-state-and-what-follows-from-it).
+
 ### Global Behavior
 
 #### `verbose`

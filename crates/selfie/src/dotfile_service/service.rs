@@ -219,7 +219,23 @@ fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> De
     }
 }
 
-/// Save the deploy state to disk
+/// Save the deploy state to disk, owner-only where the platform allows it.
+///
+/// The contents are not credentials, but they map each repository-file dotfile
+/// selfie manages on this machine to its target path, with checksums of the
+/// repository files behind them — those it deployed, and those it found already
+/// matching. At the process umask default that is typically
+/// world-readable — a reconnaissance aid on a shared host, readable by people who
+/// cannot read several of the files it describes.
+///
+/// Secret-bearing entries are *not* in here: they record nothing at all, per
+/// ADR-0003. So this is not a complete list of what selfie manages, and tightening
+/// it does not make ADR-0003's argument moot — that turns on what a stored checksum
+/// of a credential would be, and there still is none.
+///
+/// Owner-only comes from `write_file_private`, the same method the secret-bearing
+/// targets use, so the two cannot drift apart again. See its documentation for what
+/// that does and does not guarantee away from Unix.
 fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
@@ -229,7 +245,7 @@ fn save_deploy_state<F: FileSystem>(
     let yaml = serde_saphyr::to_string(state).map_err(|e| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
     })?;
-    filesystem.write_file(&path, yaml.as_bytes())
+    filesystem.write_file_private(&path, yaml.as_bytes())
 }
 
 /// Check that a name is safe for use as a filesystem path component.
