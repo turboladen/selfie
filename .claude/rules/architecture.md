@@ -76,8 +76,20 @@ from the CLI:
 - **`uuid` is a workspace dep**: Declared in the root `Cargo.toml` with `serde` + `v4` features.
 - **Rust 2024 edition**: All crates use `edition = "2024"`. This affects import syntax and some
   trait behavior.
-- **`with_mocks` feature flag**: The `selfie` crate exposes `mockall`-generated mocks behind
-  `features = ["with_mocks"]`. The CLI's dev-dependencies already enable this.
+- **`with_mocks` feature flag**: **Do not drop `features = ["with_mocks"]` from
+  `crates/test-common/Cargo.toml:7`.** `cargo test -p selfie` compiles without a flag only because
+  of that line; remove it and the build fails inside `test-common`, naming a crate you did not
+  touch: `no associated function or constant named from_parts found for struct CommandOutput`. The
+  feature gates both the `mockall`-generated mocks and `CommandOutput::from_parts`
+  (`crates/selfie/src/commands/runner.rs:190`). `test-common` needs it for `from_parts`, which its
+  fake runner calls (`crates/test-common/src/runner.rs:194`), not for the mocks, which it never
+  uses. Because `test-common` is in turn a `[dev-dependencies]` entry of `selfie` itself
+  (`crates/selfie/Cargo.toml:41`), Cargo unifies the feature into `selfie`'s own test build.
+  `selfie-cli` enables it separately for its own tests. **This cannot be replaced by `cfg(test)`:
+  `test-common` is a separate crate, and `cfg(test)` is not set when it is compiled as a
+  dependency.** `from_parts` is deliberately gated on the feature alone, where most `automock` sites
+  use `any(test, ...)`: widening it would let production code fabricate the result of a command that
+  never ran (see its doc comment).
 - **Workspace dependencies**: Common deps (`tokio`, `console`, `tracing`, etc.) are defined in the
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
 - **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native PATH

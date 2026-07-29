@@ -11,7 +11,7 @@ and operating systems.
 ```bash
 cargo build                                    # Build all crates
 cargo test                                     # Run all tests
-cargo test -p selfie --features with_mocks     # Test library only (see below)
+cargo test -p selfie                           # Test library only (see below)
 cargo test -p selfie-cli                       # Test CLI only
 cargo run -- <args>                            # Run the CLI (from workspace root)
 cargo clippy --all-targets -- -D warnings      # Lint, CI form (see below)
@@ -20,13 +20,15 @@ dprint fmt                                     # Format Markdown/YAML (CI checks
 dprint check                                   # Verify Markdown/YAML formatting
 ```
 
-Two gate commands differ from the obvious form, and both let work pass locally that CI rejects:
+Two of those gate commands come with a catch:
 
-- `cargo clippy --all-targets` **does not fail on warnings**. CI runs it with `-- -D warnings`
-  (`.github/workflows/ci.yml`). Use the CI form locally or a warning ships to a red build.
-- `cargo test -p selfie` **does not compile** — the mocks are behind `with_mocks`, so it fails on
-  unresolved `MockFileSystem` / `MockPackageRepository` imports. Workspace `cargo test` works only
-  because `selfie-cli`'s dev-dependencies unify the feature in. Tracked as selfie-4b7.
+- `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
+  rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form locally.
+- `cargo test -p selfie` takes no feature flag — `Justfile:31` (`just test-lib`) is the canonical
+  form. It compiles only because `crates/test-common/Cargo.toml:7` requests
+  `features = ["with_mocks"]`. **Do not drop that line**, or the build fails inside `test-common`
+  with an error naming a crate you did not touch. `.claude/rules/architecture.md` explains the
+  mechanism. The command genuinely did not compile before PR #67; selfie-4b7 tracks that.
 
 ### Pre-commit checklist
 
