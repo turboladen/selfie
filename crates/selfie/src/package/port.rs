@@ -232,6 +232,28 @@ pub enum PackageRepoError {
     /// File system error during repository operation
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+
+    /// Refused to rewrite a package whose dotfile entries carry unrecognized keys.
+    ///
+    /// Saving re-serializes from the struct, so a key the struct does not model
+    /// is dropped. For a dotfile entry that key is exactly what makes
+    /// [`content_source`](crate::package::DotfileEntry::content_source) refuse
+    /// the entry, so the rewrite would turn an entry `selfie apply` skips into
+    /// one it deploys. See selfie-6lz4.
+    // The remedy names editing the file rather than a selfie command on purpose:
+    // every command that could rewrite the file is refused by this same guard, so
+    // pointing at one would send the user back to a tool that just refused them.
+    #[error(
+        "refusing to rewrite {path}: unrecognized {fields}. \
+         Saving would delete the key and silently make the entry deployable. \
+         Edit {path} directly to correct or remove the key."
+    )]
+    UnknownDotfileFields {
+        /// The file that would have been rewritten.
+        path: PathBuf,
+        /// The offending field paths, e.g. `dotfiles[0].var`.
+        fields: String,
+    },
 }
 
 impl From<PackageError> for PackageRepoError {

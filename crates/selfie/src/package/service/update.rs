@@ -133,6 +133,10 @@ where
     all_issues.extend(package.validate_required_fields());
     all_issues.extend(package.validate_urls());
     all_issues.extend(package.validate_environments_contents(config.environment()));
+    // `save_package` refuses a package carrying these anyway; reporting them here
+    // gives the field path and the expected key names rather than a bare save
+    // failure, and refuses before the file is touched.
+    all_issues.extend(package.validate_unknown_dotfile_fields());
 
     // Validate command syntax only for environments we actually touched
     if modified_envs.is_empty() {

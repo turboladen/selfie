@@ -131,7 +131,8 @@ pub enum ContentSource<'a> {
     /// A command whose standard output is the entire content.
     Provider(&'a str),
     /// A shape that is not one of the three valid ones: neither `source` nor
-    /// `command` is set, both are, or `command` is combined with `vars`.
+    /// `command` is set, both are, `command` is combined with `vars`, or the
+    /// entry carries an unrecognized key (see [`DotfileEntry::unknown_keys`]).
     ///
     /// This variant exists because **apply does not run validation**. Package
     /// loading splits on parse failures alone (`ListPackagesOutput::valid_packages`
@@ -165,8 +166,12 @@ impl std::fmt::Display for ContentSource<'_> {
 
 /// What to tell the user about an entry that is neither a file, a template, nor
 /// a provider. Stated once so apply, listing, and validation agree.
-pub const INVALID_CONTENT_SOURCE: &str =
-    "set exactly one of 'source' or 'command', and 'vars' only alongside 'source'";
+///
+/// Covers the unrecognized-key shape too, because apply reports this one string
+/// and cannot name the offending key; `selfie spec validate` is where the
+/// field-level diagnostic lives.
+pub const INVALID_CONTENT_SOURCE: &str = "set exactly one of 'source' or 'command', 'vars' only alongside 'source', \
+     and remove any unrecognized keys";
 
 /// A dotfile mapping from a content source to a deployment target.
 ///
@@ -176,22 +181,136 @@ pub const INVALID_CONTENT_SOURCE: &str =
 /// able to observe "both set" and "neither set" in order to report them.
 /// [`content_source`](Self::content_source) is the abstraction over them.
 ///
-/// Unknown keys are rejected. Every field here is now optional bar `target`, so
-/// without this a misspelling is silently dropped rather than caught: `var:` for
-/// `vars:` would leave a template entry looking like a plain repository file and
-/// deploy the template *unrendered* — literal `{{ api_key }}` — over a
+/// Every field here is optional bar `target`, so a misspelled key is silently
+/// dropped rather than caught unless something looks for it: `var:` for `vars:`
+/// would otherwise leave a template entry looking like a plain repository file
+/// and deploy the template *unrendered* — literal `{{ api_key }}` — over a
 /// credentials target, with the content recorded in deploy state and shown in
 /// diffs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Unrecognized keys are therefore recorded in [`unknown_keys`](Self::unknown_keys)
+/// during deserialization, which makes [`content_source`](Self::content_source)
+/// report [`ContentSource::Invalid`] so apply refuses the entry, and lets
+/// `Package::validate_unknown_dotfile_fields` name the key. `#[serde(deny_unknown_fields)]`
+/// cannot be used for this: it rejects `_`-prefixed YAML anchor definitions
+/// (selfie-6lz4), and a rejected key fails the *whole package file* to parse,
+/// taking every other dotfile and command in it down with the typo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DotfileEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // No `#[serde(default)]`: `Deserialize` is hand-written below and supplies its
+    // own defaults, so the attribute would be inert. `skip_serializing_if` still
+    // applies — it is read by the derived `Serialize`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     vars: BTreeMap<String, String>,
     target: String,
+
+    /// Keys present in the YAML that are not fields of this struct, excluding
+    /// `_`-prefixed anchor definitions. Not serialized: a saved package is
+    /// written from the struct, so an unknown key is dropped rather than
+    /// round-tripped back into the file.
+    #[serde(skip)]
+    unknown_keys: Vec<String>,
+}
+
+/// Field names a dotfile entry accepts, in the order they are reported.
+///
+/// The single source of truth for both the deserializer below and
+/// `Package::validate_unknown_dotfile_fields`; `test_known_dotfile_fields_matches_struct`
+/// checks it against what `DotfileEntry` actually serializes.
+pub(crate) const KNOWN_DOTFILE_FIELDS: &[&str] = &["source", "command", "vars", "target"];
+
+/// Hand-written so unrecognized keys can be *recorded* rather than rejected.
+///
+/// A derived impl offers only "ignore silently" or `deny_unknown_fields`, and
+/// both are wrong here — see the type's documentation. Written as a visitor
+/// rather than `#[serde(flatten)]` into a catch-all map because flatten forces
+/// serde's buffering path, which would foreclose putting `Spanned<T>` on these
+/// fields to give dotfile diagnostics source locations (selfie-2wb); flatten on
+/// `Package` had to be backed out for that exact reason in d96b82c.
+impl<'de> Deserialize<'de> for DotfileEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = DotfileEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a dotfile entry")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<DotfileEntry, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                // Each slot's outer `Option` records only whether the key was
+                // seen, so the inner type stays exactly what the field declares.
+                // `source` and `command` are therefore `Option<Option<String>>`:
+                // deserializing them as bare `String` would reject `source: ~`,
+                // which the derived impl accepted as `None`.
+                let mut source: Option<Option<String>> = None;
+                let mut command: Option<Option<String>> = None;
+                let mut vars: Option<BTreeMap<String, String>> = None;
+                let mut target: Option<String> = None;
+                let mut unknown_keys = Vec::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    /// Take a field, refusing a second occurrence.
+                    ///
+                    /// serde-saphyr rejects duplicate mapping keys in the parser
+                    /// under its default `DuplicateKeyPolicy::Error`, so this
+                    /// branch is unreachable today. It is kept because
+                    /// `MapAccess` does not itself promise unique keys: were that
+                    /// policy ever relaxed, silently taking the last value is the
+                    /// one outcome a dotfile entry must not have.
+                    macro_rules! once {
+                        ($slot:ident, $name:literal) => {{
+                            if $slot.is_some() {
+                                return Err(M::Error::duplicate_field($name));
+                            }
+                            $slot = Some(map.next_value()?);
+                        }};
+                    }
+
+                    match key.as_str() {
+                        "source" => once!(source, "source"),
+                        "command" => once!(command, "command"),
+                        "vars" => once!(vars, "vars"),
+                        "target" => once!(target, "target"),
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                            // `_`-prefixed keys are YAML anchor definitions
+                            // (`_anchor: &a …`), not data. Allowing them is the
+                            // whole reason this is not `deny_unknown_fields`, and
+                            // it matches the rule already applied to a package's
+                            // top-level keys.
+                            if !key.starts_with('_') {
+                                unknown_keys.push(key);
+                            }
+                        }
+                    }
+                }
+
+                Ok(DotfileEntry {
+                    source: source.flatten(),
+                    command: command.flatten(),
+                    vars: vars.unwrap_or_default(),
+                    target: target.ok_or_else(|| M::Error::missing_field("target"))?,
+                    unknown_keys,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EntryVisitor)
+    }
 }
 
 impl DotfileEntry {
@@ -202,7 +321,16 @@ impl DotfileEntry {
             command: None,
             vars: BTreeMap::new(),
             target: target.into(),
+            unknown_keys: Vec::new(),
         }
+    }
+
+    /// Keys the YAML carried that this type does not recognize.
+    ///
+    /// Empty for a programmatically built entry. `_`-prefixed anchor definitions
+    /// are not included — they are legal.
+    pub fn unknown_keys(&self) -> &[String] {
+        &self.unknown_keys
     }
 
     /// Get the repository source path, if this entry has one.
@@ -235,6 +363,14 @@ impl DotfileEntry {
     /// guessing. See that variant's documentation for why an invalid entry can
     /// reach a consumer at all.
     pub fn content_source(&self) -> ContentSource<'_> {
+        // An unrecognized key means a field was meant and did not land: `var:`
+        // for `vars:` leaves a template indistinguishable from a plain repository
+        // file, so deploying it would write the *unrendered* template over the
+        // target. Refuse the entry rather than deploy the wrong content.
+        if !self.unknown_keys.is_empty() {
+            return ContentSource::Invalid;
+        }
+
         match (self.source.as_deref(), self.command.as_deref()) {
             (Some(source), None) if !self.vars.is_empty() => ContentSource::Template {
                 source,
@@ -747,12 +883,41 @@ vars: {}
         // looking entry: `var:` for `vars:` turns a template into a plain
         // repository file and deploys it *unrendered* — literal `{{ api_key }}` —
         // over a credentials target.
-        let err = serde_saphyr::from_str::<DotfileEntry>(
+        //
+        // The refusal has to live here, on the entry, rather than only in
+        // `Package::validate`: apply never runs validation, so a validation-only
+        // check would let the unrendered template deploy.
+        let entry = entry_from_yaml(
             "source: creds.tpl\ntarget: ~/.gem/credentials\nvar:\n  api_key: op read x\n",
-        )
-        .unwrap_err();
+        );
 
-        assert!(err.to_string().contains("var"), "got: {err}");
+        assert_eq!(entry.unknown_keys(), ["var"]);
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::Invalid,
+            "a misspelled key must not leave a deployable-looking entry"
+        );
+    }
+
+    #[test]
+    fn an_underscore_prefixed_key_is_an_anchor_definition_not_a_misspelling() {
+        // The control for the test above, differing only in the leading `_`:
+        // `_anchor: &a …` is how a package defines a YAML anchor, and rejecting
+        // it is the regression selfie-6lz4 records. Consuming the alias proves
+        // the key was really parsed rather than merely tolerated.
+        let entry =
+            entry_from_yaml("_anchor: &a creds.tpl\nsource: *a\ntarget: ~/.gem/credentials\n");
+
+        assert!(
+            entry.unknown_keys().is_empty(),
+            "got: {:?}",
+            entry.unknown_keys()
+        );
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::RepoFile("creds.tpl"),
+            "the alias must resolve to the anchored value"
+        );
     }
 
     #[test]
@@ -772,6 +937,86 @@ vars: {}
 
         assert!(!yaml.contains("source"), "got: {yaml}");
         assert_eq!(entry, serde_saphyr::from_str(&yaml).unwrap());
+    }
+
+    #[test]
+    fn an_explicitly_null_source_parses_rather_than_failing_the_file() {
+        // `source: ~` is degenerate but legal, and the derived impl accepted it
+        // as `None`. Deserializing the slot as a bare `String` would reject it —
+        // and because an entry lives inside a package, that rejection would fail
+        // the *whole file*, which is the harm selfie-6lz4 is about.
+        for yaml in [
+            "source: ~\ntarget: ~/.x\n",
+            "source:\ntarget: ~/.x\n",
+            "command: ~\ntarget: ~/.x\n",
+        ] {
+            let entry = entry_from_yaml(yaml);
+            assert_eq!(entry.source(), None, "got: {yaml}");
+            assert_eq!(entry.command(), None, "got: {yaml}");
+            assert_eq!(
+                entry.content_source(),
+                ContentSource::Invalid,
+                "a null source is still not deployable, got: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_target_is_still_rejected() {
+        // The control for the test above: `target` is required and non-optional,
+        // so relaxing `source`/`command` must not relax it too.
+        assert!(
+            serde_saphyr::from_str::<DotfileEntry>("source: a\ntarget: ~\n").is_err(),
+            "a null target must not deserialize"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_not_written_back_when_an_entry_is_saved() {
+        // `save_package` re-serializes from the struct, so an unrecognized key is
+        // dropped rather than round-tripped into the user's file. Asserted so the
+        // capture field cannot start leaking into saved packages unnoticed.
+        let entry = entry_from_yaml("source: a\ntarget: ~/.x\nvar:\n  k: v\n");
+        let yaml = serde_saphyr::to_string(&entry).unwrap();
+
+        assert!(!yaml.contains("var"), "got: {yaml}");
+        assert!(
+            !yaml.contains("unknown_keys"),
+            "the capture field must never serialize, got: {yaml}"
+        );
+    }
+
+    /// Keeps `KNOWN_DOTFILE_FIELDS` in sync with what `DotfileEntry` serializes.
+    ///
+    /// Two fixtures, not one: every field but `target` is `skip_serializing_if`,
+    /// so a single entry can never emit all four keys and a one-fixture version
+    /// would silently stop covering `command` or `vars`.
+    #[test]
+    fn test_known_dotfile_fields_matches_struct() {
+        let template = entry_from_yaml("source: a.tpl\ntarget: ~/.a\nvars:\n  k: op read x\n");
+        let provider = entry_from_yaml("command: op read x\ntarget: ~/.b");
+
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in [&template, &provider] {
+            let yaml = serde_saphyr::to_string(entry).unwrap();
+            let raw: HashMap<String, serde_json::Value> = serde_saphyr::from_str(&yaml).unwrap();
+            seen.extend(raw.into_keys());
+        }
+
+        for key in &seen {
+            assert!(
+                KNOWN_DOTFILE_FIELDS.contains(&key.as_str()),
+                "DotfileEntry serialized '{key}', which is not in KNOWN_DOTFILE_FIELDS — \
+                 add it there and to the deserializer's match arms"
+            );
+        }
+        for known in KNOWN_DOTFILE_FIELDS {
+            assert!(
+                seen.contains(*known),
+                "KNOWN_DOTFILE_FIELDS lists '{known}' but no fixture emits it; \
+                 the list or the fixtures are stale"
+            );
+        }
     }
 
     #[test]
