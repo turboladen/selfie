@@ -359,6 +359,41 @@ mod tests {
         }
     }
 
+    /// A failed command's output must not reach the JSON an assistant reads.
+    ///
+    /// This passes today and is a lock, not a fix: failures are rendered with
+    /// `Display`, which names the command and its exit code and nothing else. The
+    /// secret is placed on **stderr** deliberately — `CommandFailure::ExecutionFailed`
+    /// has no `stdout` field, so a secret on stdout could not reach this code by
+    /// any route and the test would pass without observing anything.
+    #[tokio::test]
+    async fn a_failed_command_leaks_no_output_into_the_json() {
+        const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Failure(OperationFailure::command_failed(
+                "install-with-token".to_string(),
+                Some(1),
+                &format!("error: vault sealed, TOKEN={SECRET}"),
+            )),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+        let json = serde_json::to_string(&result.data).unwrap();
+
+        assert!(
+            !json.contains(SECRET),
+            "a failed command's stderr reached the MCP payload:\n{json}"
+        );
+        // Control: the failure was rendered at all, and stays diagnosable.
+        assert!(!result.success);
+        assert!(
+            json.contains("install-with-token"),
+            "the failing command must still be named:\n{json}"
+        );
+    }
+
     #[tokio::test]
     async fn test_collect_success_with_check_result() {
         let events = vec![

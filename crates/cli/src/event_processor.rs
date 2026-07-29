@@ -179,7 +179,6 @@ impl EventProcessor {
                     command: None,
                     exit_code: None,
                     stderr: None,
-                    stdout: None,
                     message: format!("{message}: {error}"),
                 });
                 self.display.print_error(format!("{message}: {error}"));
@@ -203,14 +202,12 @@ impl EventProcessor {
                             command,
                             exit_code,
                             stderr,
-                            stdout,
                         }) => ErrorDetail {
                             package_name: operation_info.package_name,
                             operation: operation_info.operation_type.to_string(),
                             command: Some(command.clone()),
                             exit_code: *exit_code,
                             stderr: Some(stderr.clone()),
-                            stdout: Some(stdout.clone()),
                             message: err.to_string(),
                         },
                         _ => ErrorDetail {
@@ -219,7 +216,6 @@ impl EventProcessor {
                             command: None,
                             exit_code: None,
                             stderr: None,
-                            stdout: None,
                             message: err.to_string(),
                         },
                     };
@@ -678,7 +674,6 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "brew install fail-pkg".to_string(),
                     exit_code: Some(1),
-                    stdout: String::new(),
                     stderr: "not found".to_string(),
                 },
             )),
@@ -696,7 +691,74 @@ mod tests {
         assert_eq!(errors[0].command.as_deref(), Some("brew install fail-pkg"));
         assert_eq!(errors[0].exit_code, Some(1));
         assert_eq!(errors[0].stderr.as_deref(), Some("not found"));
-        assert_eq!(errors[0].stdout.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn the_error_summary_does_not_print_a_failed_commands_stdout() {
+        // Built from a `CommandError` rather than a `CommandFailure` on purpose:
+        // the conversion is where a command's stdout would re-enter, so testing
+        // from the runner's own error type survives changes to the failure type.
+        //
+        // Two failures because `format_summary` suppresses itself below two. Note
+        // that the library cannot currently produce two collected errors in one
+        // run — `EventSender::send_error` has no callers, so `PackageEvent::Error`
+        // is never emitted and one `Completed` arrives per operation. This summary
+        // is therefore unreachable in production today; the test exists so that it
+        // is safe on the day something makes it reachable.
+        use crate::display_manager::ErrorCollector;
+        use selfie::commands::runner::CommandError;
+        use selfie::package::event::{OperationFailure, OperationResult};
+
+        const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+
+        let failure = OperationFailure::from(CommandError::NonZeroExit {
+            command: "install-with-token".to_string(),
+            exit_code: 1,
+            stdout: format!("TOKEN={SECRET}\n"),
+            stderr: "error: vault sealed".to_string(),
+            working_directory: std::path::PathBuf::from("/tmp"),
+            execution_duration: std::time::Duration::from_secs(1),
+        });
+
+        let events: Vec<PackageEvent> = vec![
+            PackageEvent::Completed {
+                operation_info: make_operation_info("a"),
+                result: OperationResult::Failure(failure),
+            },
+            PackageEvent::Completed {
+                operation_info: make_operation_info("b"),
+                result: OperationResult::Failure(OperationFailure::Generic("other".to_string())),
+            },
+        ];
+
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        let processor = EventProcessor::new(display);
+        processor
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+
+        let mut collector = ErrorCollector::default();
+        for error in display_clone.collected_errors() {
+            collector.collect(error);
+        }
+        let summary = collector
+            .format_summary()
+            .expect("two collected errors must produce a summary");
+
+        assert!(
+            !summary.contains(SECRET),
+            "the failed command's stdout was printed verbatim:\n{summary}"
+        );
+        // Controls: the summary really was rendered, and the diagnostic survived.
+        assert!(
+            summary.contains("vault sealed"),
+            "stderr must still be shown or the failure is undebuggable:\n{summary}"
+        );
+        assert!(
+            summary.contains("install-with-token"),
+            "the failing command must be named:\n{summary}"
+        );
     }
 
     #[tokio::test]

@@ -50,12 +50,22 @@ a difference, and both are treated as a conflict. Editing a credentials file by 
 enough that silently overwriting it is not acceptable, and no mechanism can separate the two cases
 without persisting something derived from the secret.
 
-Secret-bearing content must not reach the event stream, a log line, or an error message. Because the
-event stream is the library's only unconditional egress, this is enforced where events are
-constructed rather than at each call site. A conflict is reported there with the target path, the
-command or template that produced the content, and the number of lines on each side — enough to
-distinguish a rotated value from a hand-edited file without revealing either. Commands and variable
-names are shown, being references rather than values.
+Secret-bearing content must not reach the event stream, a log line, or an error message. There is
+more than one unconditional egress — the event stream and the process's tracing subscriber are
+separate exits, and a log call that bypasses the event sender reaches only the second — so no single
+construction point can enforce this.
+
+What enforces it is the shape of the resolved value. Content is held in a type with no `Display`,
+whose `Debug` prints a byte count, so it cannot be formatted into an event or a log record by
+accident; putting it there requires reaching past the type to the bytes it holds. What the events
+then carry is chosen where they are sent: the target path, the command or template that produced the
+content, and the number of lines on each side — enough to distinguish a rotated value from a
+hand-edited file without revealing either. Commands and variable names are shown, being references
+rather than values.
+
+Because that last step is a call-site decision and not a compile-time guarantee, it must be covered
+by regression tests that scan every emitted event, and a captured tracing subscriber, for the
+resolved value — each with a control asserting the run genuinely produced it.
 
 Interactive conflict resolution is a separate channel. The resolver is supplied by the calling
 adapter, so an interactive front end may offer to display the two values on explicit request, while

@@ -312,3 +312,67 @@ pub enum CommandError {
     #[error("Error while processing command: {0}")]
     Callback(OutputChunk),
 }
+
+/// Maximum length of forwarded command stderr.
+///
+/// Stated as a number in `docs/package-files.md`, because a user who sees the
+/// truncation marker needs to know how much was lost. Change both together.
+pub(crate) const MAX_STDERR_BYTES: usize = 2000;
+
+/// Bound forwarded stderr, which is content selfie does not control.
+///
+/// A command run with a verbose or debug flag can echo secret material to stderr,
+/// so every path that forwards it bounds it here rather than deciding for itself.
+/// Lives beside [`CommandError`] because both the dotfile resolve path and the
+/// general failure path forward the same bytes and must treat them the same way.
+///
+/// Truncates the bytes and then decodes, rather than slicing a `String`: a
+/// multi-byte character straddling the cut would panic on a string slice.
+pub(crate) fn truncate_stderr(stderr: &[u8]) -> String {
+    if stderr.len() <= MAX_STDERR_BYTES {
+        String::from_utf8_lossy(stderr).into_owned()
+    } else {
+        format!(
+            "{}… (truncated)",
+            String::from_utf8_lossy(&stderr[..MAX_STDERR_BYTES])
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_stderr_does_not_split_a_multibyte_character() {
+        // A multi-byte character straddling the cut would panic a string slice.
+        let mut stderr = vec![b'a'; MAX_STDERR_BYTES - 1];
+        stderr.extend_from_slice("é".as_bytes());
+
+        let truncated = truncate_stderr(&stderr);
+
+        assert!(truncated.ends_with("… (truncated)"));
+    }
+
+    #[test]
+    fn truncate_stderr_leaves_short_input_alone() {
+        assert_eq!(truncate_stderr(b"not logged in"), "not logged in");
+    }
+
+    #[test]
+    fn truncate_stderr_bounds_a_long_stderr() {
+        // The bound is the point of the function; without this the two tests
+        // above pass against an implementation that marks the output as
+        // truncated without cutting it.
+        let stderr = vec![b'x'; MAX_STDERR_BYTES * 3];
+
+        let truncated = truncate_stderr(&stderr);
+
+        assert!(truncated.ends_with("… (truncated)"));
+        assert_eq!(
+            truncated.chars().filter(|c| *c == 'x').count(),
+            MAX_STDERR_BYTES,
+            "exactly the bound should survive"
+        );
+    }
+}

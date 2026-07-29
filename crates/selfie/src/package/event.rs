@@ -876,10 +876,18 @@ pub enum OperationFailure {
 /// Command execution failure details
 #[derive(Debug, Clone)]
 pub enum CommandFailure {
+    /// A command ran and exited non-zero.
+    ///
+    /// Deliberately carries **no** `stdout`. selfie runs user-defined commands and
+    /// cannot know which of them print a credential, so a general failure value has
+    /// nowhere safe to put a command's whole output: this variant is cloned into
+    /// [`PackageEvent::Completed`], which every adapter receives. `stderr` is
+    /// forwarded because a failure has to stay diagnosable, and is truncated at
+    /// construction for the same reason it is bounded on the dotfile resolve path.
+    /// Do not add a `stdout` field back.
     ExecutionFailed {
         command: String,
         exit_code: Option<i32>,
-        stdout: String,
         stderr: String,
     },
     CommandNotFound {
@@ -1262,14 +1270,12 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             crate::commands::runner::CommandError::NonZeroExit {
                 command,
                 exit_code,
-                stdout,
                 stderr,
                 ..
             } => OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                 command,
                 exit_code: Some(exit_code),
-                stdout,
-                stderr,
+                stderr: crate::commands::runner::truncate_stderr(stderr.as_bytes()),
             }),
             crate::commands::runner::CommandError::IoError { command, .. } => {
                 OperationFailure::CommandError(CommandFailure::CommandNotFound { command })
@@ -1701,19 +1707,17 @@ impl OperationFailure {
         })
     }
 
-    /// Creates a command execution failed error
+    /// Creates a command execution failed error.
+    ///
+    /// Takes no `stdout`: see [`CommandFailure::ExecutionFailed`]. `stderr` is
+    /// truncated here so that every construction path is bounded, rather than
+    /// leaving each caller to remember.
     #[must_use]
-    pub fn command_failed(
-        command: String,
-        exit_code: Option<i32>,
-        stdout: String,
-        stderr: String,
-    ) -> Self {
+    pub fn command_failed(command: String, exit_code: Option<i32>, stderr: &str) -> Self {
         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
             command,
             exit_code,
-            stdout,
-            stderr,
+            stderr: crate::commands::runner::truncate_stderr(stderr.as_bytes()),
         })
     }
 

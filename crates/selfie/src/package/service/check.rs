@@ -170,10 +170,11 @@ fn create_operation_result(
             check_result.result.clone(),
             (progress.current_step(), progress.total_steps()).into(),
         )),
+        // `stdout` stays in the `CheckResult` this was built from — which
+        // `selfie package check` displays deliberately — and is not copied into
+        // the failure value, which reaches every adapter.
         CheckResult::Failed {
-            stdout,
-            stderr,
-            exit_code,
+            stderr, exit_code, ..
         } => {
             let command = check_result
                 .check_command
@@ -182,8 +183,7 @@ fn create_operation_result(
             OperationResult::Failure(OperationFailure::command_failed(
                 command.to_string(),
                 *exit_code,
-                stdout.clone(),
-                stderr.clone(),
+                stderr,
             ))
         }
         CheckResult::Error(error) => {

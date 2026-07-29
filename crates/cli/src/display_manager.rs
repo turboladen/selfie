@@ -32,8 +32,9 @@ pub(crate) struct ErrorDetail {
     pub operation: String,
     pub command: Option<String>,
     pub exit_code: Option<i32>,
+    /// Already truncated by the library. There is deliberately no `stdout`
+    /// counterpart: see `CommandFailure::ExecutionFailed`.
     pub stderr: Option<String>,
-    pub stdout: Option<String>,
     pub message: String,
 }
 
@@ -84,15 +85,6 @@ impl ErrorCollector {
                 if !stderr.is_empty() {
                     lines.push("  stderr:".to_string());
                     for line in stderr.lines() {
-                        lines.push(format!("    {line}"));
-                    }
-                }
-            }
-            if let Some(stdout) = &error.stdout {
-                let stdout = stdout.trim();
-                if !stdout.is_empty() {
-                    lines.push("  stdout:".to_string());
-                    for line in stdout.lines() {
                         lines.push(format!("    {line}"));
                     }
                 }
@@ -716,7 +708,6 @@ mod tests {
             command: Some("brew install test-pkg".to_string()),
             exit_code: Some(1),
             stderr: Some("Error: not found".to_string()),
-            stdout: None,
             message: "Installation failed".to_string(),
         });
 
@@ -736,7 +727,6 @@ mod tests {
             command: Some("brew install test-pkg".to_string()),
             exit_code: Some(1),
             stderr: Some("Error: not found".to_string()),
-            stdout: None,
             message: "Installation failed".to_string(),
         });
         collector.collect(ErrorDetail {
@@ -745,7 +735,6 @@ mod tests {
             command: Some("brew install other-pkg".to_string()),
             exit_code: Some(1),
             stderr: None,
-            stdout: None,
             message: "Also failed".to_string(),
         });
 
@@ -770,7 +759,6 @@ mod tests {
             command: None,
             exit_code: None,
             stderr: None,
-            stdout: None,
             message: "test error".to_string(),
         });
 
@@ -790,7 +778,6 @@ mod tests {
             command: None,
             exit_code: None,
             stderr: None,
-            stdout: None,
             message: "shared error".to_string(),
         });
 
