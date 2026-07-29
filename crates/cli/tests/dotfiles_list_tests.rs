@@ -62,6 +62,15 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
         stdout.contains("not-a-name"),
         "and it must say why it cannot deploy, got:\n{stdout}"
     );
+    // Naming the var is not enough on its own: a listing that treated the entry
+    // as a perfectly good template would render `creds/credentials.tpl (vars:
+    // not-a-name)`, which also contains the name. This is what tells the two
+    // apart, and it is checked this way rather than on the refusal wording so a
+    // narrow terminal wrapping the cell cannot make it flap.
+    assert!(
+        !stdout.contains("(vars:"),
+        "an entry that cannot deploy must not be listed as a working template, got:\n{stdout}"
+    );
     // The control: the listing really did run and really did render entries, so
     // the assertions above cannot pass by finding text in an error message.
     assert!(
