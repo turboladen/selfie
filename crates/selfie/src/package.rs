@@ -130,16 +130,6 @@ pub enum ContentSource<'a> {
     },
     /// A command whose standard output is the entire content.
     Provider(&'a str),
-    /// A shape that is not one of the three valid ones: neither `source` nor
-    /// `command` is set, both are, `command` is combined with `vars`, or the
-    /// entry carries an unrecognized key (see [`DotfileEntry::unknown_keys`]).
-    ///
-    /// This variant exists because **apply does not run validation**. Package
-    /// loading splits on parse failures alone (`ListPackagesOutput::valid_packages`
-    /// is `filter_map(Result::ok)`), and `selfie spec validate` is a separate,
-    /// advisory command. A malformed entry therefore reaches the deploy path, and every
-    /// consumer has to refuse it explicitly rather than guess at what was meant.
-    Invalid,
 }
 
 /// The single wording for "where this content comes from", shared by every
@@ -159,19 +149,101 @@ impl std::fmt::Display for ContentSource<'_> {
                 write!(f, "{source} (vars: {})", names.join(", "))
             }
             Self::Provider(command) => write!(f, "command: {command}"),
-            Self::Invalid => f.write_str(INVALID_CONTENT_SOURCE),
         }
     }
 }
 
-/// What to tell the user about an entry that is neither a file, a template, nor
-/// a provider. Stated once so apply, listing, and validation agree.
+/// Why an entry has no content source, and therefore cannot be deployed.
 ///
-/// Covers the unrecognized-key shape too, because apply reports this one string
-/// and cannot name the offending key; `selfie spec validate` is where the
-/// field-level diagnostic lives.
-pub const INVALID_CONTENT_SOURCE: &str = "set exactly one of 'source' or 'command', 'vars' only alongside 'source', \
-     and remove any unrecognized keys";
+/// This is an error rather than a fourth [`ContentSource`] variant because
+/// **apply does not run validation**. Package loading splits on parse failures
+/// alone (`ListPackagesOutput::valid_packages` is `filter_map(Result::ok)`), and
+/// `selfie spec validate` is a separate, advisory command, so a malformed entry
+/// reaches the deploy path intact.
+///
+/// As a variant it was an *affordance*: [`ContentSource`]'s `Display` had an
+/// `Invalid` arm, so a malformed entry could be printed as though it named a
+/// source, and a consumer could pattern-match past it without the compiler
+/// saying anything. Moving it into the `Err` of
+/// [`DotfileEntry::content_source`] does not make dropping it impossible — a
+/// caller can still write `let Ok(source) = … else { continue }` — but it does
+/// make every consumer *state* a decision at the point of use, and leaves the
+/// residual cases greppable rather than invisible.
+///
+/// Carries the reason, so a caller that refuses an entry can say which key or
+/// which name was at fault instead of reciting all three possibilities.
+/// Borrows from the entry: describing a refusal must not allocate on a path
+/// that may be hot, and the strings all outlive the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidEntry<'a> {
+    /// Neither `source` nor `command` is set, both are, or `command` is
+    /// combined with `vars`.
+    Shape,
+    /// The entry carries keys this type does not model — a misspelling such as
+    /// `var:` for `vars:`, or an anchor definition whose name collides with a
+    /// real field. See [`DotfileEntry::unknown_keys`].
+    UnknownKeys(&'a [String]),
+    /// A `vars` name that [`template::render`](crate::dotfile_service) can never
+    /// substitute, so the placeholder would deploy verbatim.
+    VarName(&'a str),
+}
+
+impl std::fmt::Display for InvalidEntry<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shape => f.write_str(
+                "set exactly one of 'source' or 'command', with 'vars' only alongside 'source'",
+            ),
+            Self::UnknownKeys(keys) => {
+                let described: Vec<String> = keys.iter().map(|k| describe_unknown_key(k)).collect();
+                f.write_str(&described.join("; "))
+            }
+            Self::VarName(name) => write!(
+                f,
+                "dotfile var name '{name}' cannot be substituted, so the placeholder would deploy \
+                 verbatim; names must match [A-Za-z_][A-Za-z0-9_]*"
+            ),
+        }
+    }
+}
+
+/// Whether `key` is an underscore-prefixed anchor definition whose name
+/// collides with a field a dotfile entry actually has.
+///
+/// `_`-prefixed keys are otherwise legal anywhere — that is what lets a package
+/// file define YAML anchors without `deny_unknown_fields` rejecting them
+/// (selfie-6lz4). The collision is the exception: `_vars:` is indistinguishable
+/// from a typo for `vars:`, and reading it as an anchor deploys the template
+/// *unrendered* with the bindings silently absent (selfie-kj5y).
+///
+/// Deliberately checks against dotfile fields only, and is applied only inside a
+/// dotfile entry. A package's top-level `_target: &target …` is an ordinary
+/// anchor — `docs/package-files.md` uses exactly that — and must stay legal.
+pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
+    key.strip_prefix('_')
+        .is_some_and(|rest| KNOWN_DOTFILE_FIELDS.contains(&rest))
+}
+
+/// Say what is wrong with one unrecognized key, and what to do about it.
+///
+/// Shared by [`InvalidEntry`]'s `Display` and
+/// `Package::validate_unknown_dotfile_fields`, so apply and `selfie spec
+/// validate` cannot describe the same key differently. The two cases need
+/// different advice: a misspelling is corrected, an anchor is *renamed* — its
+/// key is not unknown at all, it was chosen deliberately and happens to collide.
+pub(crate) fn describe_unknown_key(key: &str) -> String {
+    if let Some(field) = key.strip_prefix('_').filter(|_| shadows_dotfile_field(key)) {
+        format!(
+            "anchor '{key}' collides with the '{field}' field, so '{field}' is not set; \
+             rename the anchor"
+        )
+    } else {
+        format!(
+            "unknown field '{key}'; expected one of: {}",
+            KNOWN_DOTFILE_FIELDS.join(", ")
+        )
+    }
+}
 
 /// A dotfile mapping from a content source to a deployment target.
 ///
@@ -190,7 +262,7 @@ pub const INVALID_CONTENT_SOURCE: &str = "set exactly one of 'source' or 'comman
 ///
 /// Unrecognized keys are therefore recorded in [`unknown_keys`](Self::unknown_keys)
 /// during deserialization, which makes [`content_source`](Self::content_source)
-/// report [`ContentSource::Invalid`] so apply refuses the entry, and lets
+/// report [`InvalidEntry::UnknownKeys`] so apply refuses the entry, and lets
 /// `Package::validate_unknown_dotfile_fields` name the key. `#[serde(deny_unknown_fields)]`
 /// cannot be used for this: it rejects `_`-prefixed YAML anchor definitions
 /// (selfie-6lz4), and a rejected key fails the *whole package file* to parse,
@@ -292,7 +364,13 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                             // whole reason this is not `deny_unknown_fields`, and
                             // it matches the rule already applied to a package's
                             // top-level keys.
-                            if !key.starts_with('_') {
+                            //
+                            // The exception is an anchor whose name collides with
+                            // a field of this entry: `_vars:` cannot be told apart
+                            // from a typo for `vars:`, and treating it as an anchor
+                            // deploys the template unrendered with the bindings
+                            // absent. See `shadows_dotfile_field`.
+                            if !key.starts_with('_') || shadows_dotfile_field(&key) {
                                 unknown_keys.push(key);
                             }
                         }
@@ -328,7 +406,9 @@ impl DotfileEntry {
     /// Keys the YAML carried that this type does not recognize.
     ///
     /// Empty for a programmatically built entry. `_`-prefixed anchor definitions
-    /// are not included — they are legal.
+    /// are not included — they are legal — unless the name collides with a field
+    /// of this entry, which is indistinguishable from a misspelling of it. See
+    /// [`shadows_dotfile_field`].
     pub fn unknown_keys(&self) -> &[String] {
         &self.unknown_keys
     }
@@ -357,31 +437,52 @@ impl DotfileEntry {
         &self.target
     }
 
-    /// Where this entry's content comes from.
+    /// Where this entry's content comes from, or why it has nowhere.
     ///
-    /// Returns [`ContentSource::Invalid`] for a malformed entry rather than
-    /// guessing. See that variant's documentation for why an invalid entry can
-    /// reach a consumer at all.
-    pub fn content_source(&self) -> ContentSource<'_> {
+    /// The **only** accessor the deploy path uses — `source()`, `command()` and
+    /// `vars()` have no production callers outside this module — which is what
+    /// makes one fallible constructor enough to put every consumer in front of
+    /// the invalid case. See [`InvalidEntry`] for what that does and does not
+    /// guarantee.
+    ///
+    /// Every check here is offline: it reads the entry and nothing else. Asking
+    /// where content comes from must never run a command or touch a file, or
+    /// merely listing dotfiles could raise an authentication prompt.
+    pub fn content_source(&self) -> Result<ContentSource<'_>, InvalidEntry<'_>> {
         // An unrecognized key means a field was meant and did not land: `var:`
         // for `vars:` leaves a template indistinguishable from a plain repository
         // file, so deploying it would write the *unrendered* template over the
         // target. Refuse the entry rather than deploy the wrong content.
         if !self.unknown_keys.is_empty() {
-            return ContentSource::Invalid;
+            return Err(InvalidEntry::UnknownKeys(&self.unknown_keys));
+        }
+
+        // A name the renderer cannot substitute makes the entry undeployable
+        // whatever else is right about it: `template::render` copies the
+        // placeholder verbatim, so the file lands with `{{ not-a-name }}` where
+        // the credential belongs. Refusing here rather than in the deploy path
+        // means the binding's command — which is a real credential fetch, and can
+        // raise a biometric prompt — never runs for a value that provably cannot
+        // be used. See selfie-3c5a.
+        if let Some(name) = self
+            .vars
+            .keys()
+            .find(|name| !crate::dotfile_service::template::is_valid_name(name))
+        {
+            return Err(InvalidEntry::VarName(name));
         }
 
         match (self.source.as_deref(), self.command.as_deref()) {
-            (Some(source), None) if !self.vars.is_empty() => ContentSource::Template {
+            (Some(source), None) if !self.vars.is_empty() => Ok(ContentSource::Template {
                 source,
                 vars: &self.vars,
-            },
-            (Some(source), None) => ContentSource::RepoFile(source),
+            }),
+            (Some(source), None) => Ok(ContentSource::RepoFile(source)),
             // `vars` with `command` is rejected rather than ignored: silently
             // discarding bindings the user wrote would deploy a file they did not
             // ask for.
-            (None, Some(command)) if self.vars.is_empty() => ContentSource::Provider(command),
-            _ => ContentSource::Invalid,
+            (None, Some(command)) if self.vars.is_empty() => Ok(ContentSource::Provider(command)),
+            _ => Err(InvalidEntry::Shape),
         }
     }
 
@@ -392,21 +493,24 @@ impl DotfileEntry {
     /// declining to do.
     pub fn command_count(&self) -> usize {
         match self.content_source() {
-            ContentSource::Provider(_) => 1,
-            ContentSource::Template { vars, .. } => vars.len(),
-            ContentSource::RepoFile(_) | ContentSource::Invalid => 0,
+            Ok(ContentSource::Provider(_)) => 1,
+            Ok(ContentSource::Template { vars, .. }) => vars.len(),
+            Ok(ContentSource::RepoFile(_)) => 0,
+            // An entry that cannot deploy runs nothing, so the advisory notice
+            // counting apply-time commands correctly omits it.
+            Err(_) => 0,
         }
     }
 
     /// Whether this entry's content is produced by running commands.
     ///
     /// Secret-bearing entries hold no deploy state and their content never enters
-    /// an event. See ADR-0003. An [`Invalid`](ContentSource::Invalid) entry is not
-    /// secret-bearing — it is not deployable at all.
+    /// an event. See ADR-0003. An [`InvalidEntry`] is not secret-bearing — it is
+    /// not deployable at all.
     pub fn is_secret_bearing(&self) -> bool {
         matches!(
             self.content_source(),
-            ContentSource::Template { .. } | ContentSource::Provider(_)
+            Ok(ContentSource::Template { .. } | ContentSource::Provider(_))
         )
     }
 }
@@ -777,7 +881,7 @@ mod package_tests {
         let entry = DotfileEntry::new("fnm/init.fish", "~/.config/fish/conf.d/fnm.fish");
         assert_eq!(
             entry.content_source(),
-            ContentSource::RepoFile("fnm/init.fish")
+            Ok(ContentSource::RepoFile("fnm/init.fish"))
         );
         assert!(!entry.is_secret_bearing());
     }
@@ -794,7 +898,7 @@ vars:
         );
 
         match entry.content_source() {
-            ContentSource::Template { source, vars } => {
+            Ok(ContentSource::Template { source, vars }) => {
                 assert_eq!(source, "rubygems/credentials.tpl");
                 assert_eq!(vars["api_key"], "op read op://Private/rubygems/token");
             }
@@ -814,7 +918,9 @@ target: ~/.ssh/id_ed25519
 
         assert_eq!(
             entry.content_source(),
-            ContentSource::Provider("op read op://Private/ssh-key/private")
+            Ok(ContentSource::Provider(
+                "op read op://Private/ssh-key/private"
+            ))
         );
         assert!(entry.is_secret_bearing());
     }
@@ -829,7 +935,7 @@ target: ~/.x
 "#,
         );
 
-        assert_eq!(entry.content_source(), ContentSource::Invalid);
+        assert_eq!(entry.content_source(), Err(InvalidEntry::Shape));
         assert!(
             !entry.is_secret_bearing(),
             "an undeployable entry is not secret-bearing"
@@ -839,7 +945,7 @@ target: ~/.x
     #[test]
     fn entry_with_neither_source_nor_command_is_invalid() {
         let entry = entry_from_yaml("target: ~/.x");
-        assert_eq!(entry.content_source(), ContentSource::Invalid);
+        assert_eq!(entry.content_source(), Err(InvalidEntry::Shape));
     }
 
     #[test]
@@ -855,7 +961,7 @@ vars:
 
         assert_eq!(
             entry.content_source(),
-            ContentSource::Invalid,
+            Err(InvalidEntry::Shape),
             "bindings must not be silently discarded"
         );
     }
@@ -872,7 +978,7 @@ vars: {}
 
         assert_eq!(
             entry.content_source(),
-            ContentSource::RepoFile("bat/config")
+            Ok(ContentSource::RepoFile("bat/config"))
         );
         assert!(!entry.is_secret_bearing());
     }
@@ -894,7 +1000,7 @@ vars: {}
         assert_eq!(entry.unknown_keys(), ["var"]);
         assert_eq!(
             entry.content_source(),
-            ContentSource::Invalid,
+            Err(InvalidEntry::UnknownKeys(&["var".to_string()])),
             "a misspelled key must not leave a deployable-looking entry"
         );
     }
@@ -915,9 +1021,140 @@ vars: {}
         );
         assert_eq!(
             entry.content_source(),
-            ContentSource::RepoFile("creds.tpl"),
+            Ok(ContentSource::RepoFile("creds.tpl")),
             "the alias must resolve to the anchored value"
         );
+    }
+
+    #[test]
+    fn an_anchor_named_like_a_dotfile_field_is_refused() {
+        // `_vars:` cannot be told apart from a typo for `vars:`, and reading it as
+        // an anchor leaves a template looking like a plain repository file — which
+        // deploys it *unrendered*, placeholders and all, over the target. The
+        // whole set of colliding names is checked rather than `_vars` alone: a
+        // fix hard-coded to one of them passes a one-name test. See selfie-kj5y.
+        for field in KNOWN_DOTFILE_FIELDS {
+            let key = format!("_{field}");
+            let entry = entry_from_yaml(&format!(
+                "{key}: &a creds.tpl\nsource: creds.tpl\ntarget: ~/.gem/credentials\n"
+            ));
+
+            assert_eq!(
+                entry.unknown_keys(),
+                std::slice::from_ref(&key),
+                "for {key}"
+            );
+            assert_eq!(
+                entry.content_source(),
+                Err(InvalidEntry::UnknownKeys(std::slice::from_ref(&key))),
+                "an anchor colliding with '{field}' must not leave a deployable entry"
+            );
+            assert!(
+                entry
+                    .content_source()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("rename the anchor"),
+                "the advice for a collision is to rename, not to correct a spelling"
+            );
+        }
+    }
+
+    #[test]
+    fn an_underscore_key_not_named_like_a_dotfile_field_stays_legal() {
+        // The control for the test above, and the one that keeps anchors working:
+        // only a *collision* is refused. `__vars` is included because its
+        // remainder is `_vars`, not `vars` — a rule that strips underscores
+        // repeatedly, or matches on "contains", would wrongly refuse it.
+        for key in ["_anchor", "_brew", "_targets", "__vars", "_"] {
+            let entry = entry_from_yaml(&format!(
+                "{key}: &a creds.tpl\nsource: *a\ntarget: ~/.gem/credentials\n"
+            ));
+
+            assert!(
+                entry.unknown_keys().is_empty(),
+                "'{key}' is an ordinary anchor, got: {:?}",
+                entry.unknown_keys()
+            );
+            assert_eq!(
+                entry.content_source(),
+                Ok(ContentSource::RepoFile("creds.tpl")),
+                "'{key}' must still deploy, and its alias must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn a_var_name_that_cannot_be_substituted_is_refused() {
+        // `template::render` copies a placeholder it cannot parse verbatim, so
+        // this entry would deploy with `{{ not-a-name }}` where the credential
+        // belongs — after running the binding's command to fetch a value that is
+        // then discarded. Refused here so no command runs. See selfie-3c5a.
+        let entry = entry_from_yaml(
+            "source: creds.tpl\ntarget: ~/.gem/credentials\nvars:\n  not-a-name: op read x\n",
+        );
+
+        assert_eq!(
+            entry.content_source(),
+            Err(InvalidEntry::VarName("not-a-name"))
+        );
+        assert!(
+            !entry.is_secret_bearing(),
+            "an entry that cannot deploy has no secret to bear"
+        );
+        assert_eq!(
+            entry.command_count(),
+            0,
+            "apply runs nothing for it, so the advisory must not promise otherwise"
+        );
+    }
+
+    #[test]
+    fn a_valid_var_name_is_still_a_template() {
+        // The control: same shape, one character different in the name. Without
+        // it, the test above could pass because the fixture never reached the
+        // var-name check at all.
+        let entry = entry_from_yaml(
+            "source: creds.tpl\ntarget: ~/.gem/credentials\nvars:\n  not_a_name: op read x\n",
+        );
+
+        assert!(matches!(
+            entry.content_source(),
+            Ok(ContentSource::Template { .. })
+        ));
+        assert_eq!(entry.command_count(), 1);
+    }
+
+    #[test]
+    fn var_name_rule_matches_the_content_source_refusal() {
+        // `Package::validate_dotfile_entry` reports a bad name and
+        // `content_source` refuses it; both call `is_valid_name`, and the two must
+        // agree or `selfie spec validate` and `selfie apply` would disagree about
+        // which names are usable. Checks the *decision*, not the predicate, so
+        // moving either check still holds them together.
+        for name in ["ok", "_ok", "Ok9", "not-a-name", "1st", "", "a b", "a.b"] {
+            let entry = entry_from_yaml(&format!(
+                "source: creds.tpl\ntarget: ~/.x\nvars:\n  \"{name}\": op read x\n"
+            ));
+            let refused_by_apply = matches!(entry.content_source(), Err(InvalidEntry::VarName(_)));
+
+            let package: Package = serde_saphyr::from_str(&format!(
+                "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+                 - source: creds.tpl\n    target: ~/.x\n    vars:\n      \"{name}\": op read x\n"
+            ))
+            .expect("fixture must parse");
+            let reported_by_validate = package
+                .validate("test")
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|i| i.message().contains("is not valid"));
+
+            assert_eq!(
+                refused_by_apply, reported_by_validate,
+                "'{name}': apply refuses={refused_by_apply}, validate reports={reported_by_validate}"
+            );
+        }
     }
 
     #[test]
@@ -955,7 +1192,7 @@ vars: {}
             assert_eq!(entry.command(), None, "got: {yaml}");
             assert_eq!(
                 entry.content_source(),
-                ContentSource::Invalid,
+                Err(InvalidEntry::Shape),
                 "a null source is still not deployable, got: {yaml}"
             );
         }

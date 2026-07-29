@@ -5,7 +5,7 @@ use serde_saphyr::Location;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::{ContentSource, DotfileEntry, KNOWN_DOTFILE_FIELDS, Package};
+use super::{ContentSource, DotfileEntry, Package, describe_unknown_key, shadows_dotfile_field};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -99,16 +99,25 @@ pub(crate) const KNOWN_PACKAGE_FIELDS: &[&str] = &[
 /// `path` names the list (`dotfiles` or `environments.<env>.dotfiles`), matching
 /// the field paths `validate_dotfiles` already reports.
 fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationIssue> {
-    let expected = KNOWN_DOTFILE_FIELDS.join(", ");
     let mut issues = Vec::new();
 
     for (i, entry) in entries.iter().enumerate() {
         for key in entry.unknown_keys() {
+            // A colliding anchor needs different advice from a misspelling: its
+            // key is not unknown, it was named deliberately and happens to match
+            // a field, so the fix is to rename it rather than to correct it.
+            let suggestion = if shadows_dotfile_field(key) {
+                "Anchors are legal here; only a name matching a field of this entry is refused, \
+                 because it cannot be told apart from a misspelling of that field."
+            } else {
+                "This entry is skipped by 'selfie apply' until the key is corrected or removed."
+            };
+
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{path}[{i}].{key}"),
-                &format!("unknown field '{key}'; expected one of: {expected}"),
-                Some("This entry is skipped by 'selfie apply' until the key is corrected or removed."),
+                &describe_unknown_key(key),
+                Some(suggestion),
             ));
         }
     }
@@ -607,6 +616,12 @@ impl Package {
     /// environment that overrides it. Summing that would report three commands
     /// for a single provider entry overridden on two machines, which overstates
     /// what any one `selfie apply` runs.
+    ///
+    /// A refused entry contributes zero, so a package whose only dotfile has a
+    /// bad var name loses this notice entirely. That is right rather than a gap:
+    /// apply refuses the entry before resolving it, so no command runs and there
+    /// is nothing to review before applying. The var-name error is reported on
+    /// its own account by [`validate_dotfile_entry`](Self::validate_dotfile_entry).
     fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
         let count_of = |entries: &[DotfileEntry]| -> usize {
             entries.iter().map(DotfileEntry::command_count).sum()
@@ -644,12 +659,20 @@ impl Package {
     /// cannot do itself. This enumerates what needs reading so the service layer
     /// can fetch each file through the repository and hand the contents to
     /// [`validate_template_vars`].
+    ///
+    /// An entry that is not a template *at all* is omitted, which now includes
+    /// one refused by [`DotfileEntry::content_source`]. So a single bad var name
+    /// suppresses that entry's placeholder cross-check: `validate_template_vars`
+    /// never runs for it, and "declared but never used" is not reported. Nothing
+    /// important is lost — [`validate_dotfile_entry`](Self::validate_dotfile_entry)
+    /// reads `vars()` directly and still names the bad name — and the entry
+    /// cannot deploy in that state anyway, so one precise error beats two.
     #[must_use]
     pub fn template_dotfiles(&self) -> Vec<TemplateReference<'_>> {
         let mut refs = Vec::new();
 
         for (i, entry) in self.dotfiles.iter().enumerate() {
-            if let ContentSource::Template { source, vars } = entry.content_source() {
+            if let Ok(ContentSource::Template { source, vars }) = entry.content_source() {
                 refs.push(TemplateReference {
                     field: format!("dotfiles[{i}]"),
                     source,
@@ -660,7 +683,7 @@ impl Package {
 
         for (env_name, env) in self.environments() {
             for (i, entry) in env.dotfiles().iter().enumerate() {
-                if let ContentSource::Template { source, vars } = entry.content_source() {
+                if let Ok(ContentSource::Template { source, vars }) = entry.content_source() {
                     refs.push(TemplateReference {
                         field: format!("environments.{env_name}.dotfiles[{i}]"),
                         source,
@@ -713,6 +736,11 @@ impl Package {
             _ => {}
         }
 
+        // The same predicate `DotfileEntry::content_source` refuses on, reported
+        // here with a field path and a suggestion. Both must stay in step, or
+        // `selfie spec validate` and `selfie apply` would disagree about which
+        // names are usable; `var_name_rule_matches_the_content_source_refusal`
+        // holds them together.
         for name in dotfile.vars().keys() {
             if !crate::dotfile_service::template::is_valid_name(name) {
                 issues.push(ValidationIssue::error(
@@ -935,6 +963,84 @@ mod tests {
                 .iter()
                 .any(|i| i.field == "dotfiles[0].var" && i.level() == ValidationLevel::Error),
             "got: {:?}",
+            result.issues()
+        );
+    }
+
+    #[test]
+    fn validate_names_an_anchor_colliding_with_a_dotfile_field() {
+        // The kj5y case: `selfie spec validate` reported *nothing* for this, so
+        // the entry deployed unrendered with no diagnostic anywhere. The message
+        // has to say "rename", not "unknown field" — the key is not unknown, it
+        // was named deliberately and happens to collide.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    _vars:\n      k: op read x\n",
+        );
+
+        let result = package.validate("test");
+        let issue = result
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles[0]._vars")
+            .unwrap_or_else(|| panic!("got: {:?}", result.issues()));
+
+        assert_eq!(issue.level(), ValidationLevel::Error);
+        assert!(
+            issue.message().contains("rename the anchor"),
+            "got: {}",
+            issue.message()
+        );
+        assert!(
+            issue.message().contains("'vars' is not set"),
+            "the message must say what the collision costs, got: {}",
+            issue.message()
+        );
+    }
+
+    #[test]
+    fn validate_names_a_colliding_anchor_in_an_environment_scoped_entry() {
+        // Kept separate from the shared case for the same reason the save-refusal
+        // tests are: dropping the environments loop from
+        // `validate_unknown_dotfile_fields` leaves the shared test green.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
+             - source: creds.tpl\n        target: ~/.creds\n        _source:\n          k: v\n",
+        );
+
+        let result = package.validate("test");
+
+        assert!(
+            result
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|i| i.field == "environments.test.dotfiles[0]._source"
+                    && i.level() == ValidationLevel::Error),
+            "got: {:?}",
+            result.issues()
+        );
+    }
+
+    #[test]
+    fn validate_leaves_an_anchor_not_named_like_a_field_alone() {
+        // The control that keeps YAML anchors working. Without it, a fix that
+        // flags every `_` key inside an entry passes every test above.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - _brew: &a creds.tpl\n    source: *a\n    target: ~/.creds\n",
+        );
+
+        let result = package.validate("test");
+
+        assert!(
+            !result
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|i| i.field.contains("_brew")),
+            "an ordinary anchor must not be flagged, got: {:?}",
             result.issues()
         );
     }

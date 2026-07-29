@@ -2663,6 +2663,190 @@ mod secret_bearing {
 
         assert_no_event_mentions(&events, SECRET);
     }
+
+    // ─── Entries refused before anything runs (selfie-n310/3c5a/kj5y) ────────
+    //
+    // `DotfileEntry::content_source` returns a `Result`, so every consumer has to
+    // state what it does with a refusal. That is a compile-time nudge, not a
+    // proof: `let Ok(..) else { continue }` still builds. These tests are the
+    // guard for that residual gap — one per consumer path, each asserting the
+    // refused entry is *reported*, so a future consumer that silently drops it
+    // fails a test rather than compiling quietly.
+
+    /// A template whose var name cannot be substituted, plus its template file.
+    ///
+    /// The template really exists and really contains the placeholder: if the
+    /// entry were treated as any kind of deployable entry the target would be
+    /// written, so `!target.exists()` can only mean it was refused.
+    fn bad_var_name_package(package_dir: &std::path::Path, target: &str, var: &str) {
+        std::fs::create_dir_all(package_dir.join("creds")).unwrap();
+        std::fs::write(
+            package_dir.join("creds/credentials.tpl"),
+            format!("api_key: {{{{ {var} }}}}\n"),
+        )
+        .unwrap();
+
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds/credentials.tpl\"\n    target: \"{target}\"\n    vars:\n      \
+             \"{var}\": \"op read x\"\n"
+        );
+        std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_var_name_that_cannot_be_substituted_runs_no_command() {
+        // selfie-3c5a. `template::render` cannot substitute `not-a-name`, so this
+        // entry provably cannot produce the file it describes — yet apply used to
+        // run `op read x` anyway, a REAL credential fetch that can raise a
+        // biometric or password prompt, discard the value, and deploy the
+        // placeholder verbatim over the credentials target.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        bad_var_name_package(&dirs.package_dir, target.to_str().unwrap(), "not-a-name");
+
+        // Scripted to succeed: the assertion is that the fetch never happens, not
+        // that it fails.
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "no command may run for a binding that cannot be substituted: {:?}",
+            runner.calls()
+        );
+        assert!(!target.exists(), "the entry must not deploy");
+        assert!(
+            format!("{events:?}").contains("not-a-name"),
+            "the refusal must name the var, got: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_valid_var_name_still_runs_its_command_and_renders_it() {
+        // The control for the test above. `FakeCommandRunner` records every call
+        // unconditionally, before it looks a response up, so a call whose output
+        // was discarded would still show in `call_count()` — but only if this path
+        // reaches the runner at all. This proves it does, on a fixture differing
+        // by one character. Asserting the *rendered* content matters too:
+        // "a command ran" alone could hold while the entry took another branch.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        bad_var_name_package(&dirs.package_dir, target.to_str().unwrap(), "not_a_name");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(runner.call_count(), 1, "got: {:?}", runner.calls());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            format!("api_key: {SECRET}\n"),
+            "the binding must actually be substituted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anchor_colliding_with_a_dotfile_field_is_refused_before_deploying() {
+        // selfie-kj5y. `_vars:` was read as a YAML anchor definition and dropped,
+        // leaving a template that looked like a plain repository file — so it
+        // deployed *unrendered*, literal `{{ api_key }}`, over the credentials
+        // target, with the bindings silently absent and `selfie spec validate`
+        // reporting nothing at all.
+        //
+        // Every colliding name is exercised, not `_vars` alone: a fix hard-coded
+        // to one of them passes a single-name test.
+        for field in ["vars", "source", "command", "target"] {
+            let dirs = TestDirs::new();
+            std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+            std::fs::write(
+                dirs.package_dir.join("creds/credentials.tpl"),
+                "api_key: {{ api_key }}\n",
+            )
+            .unwrap();
+
+            let target = dirs.target_dir.join("credentials");
+            let yaml = format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"creds/credentials.tpl\"\n    target: \"{}\"\n    _{field}:\n      \
+                 api_key: \"op read x\"\n",
+                target.display()
+            );
+            std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+            let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+            let service = dirs.service_with_runner(runner.clone());
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert!(
+                !target.exists(),
+                "'_{field}' must not deploy, got: {:?}",
+                std::fs::read_to_string(&target)
+            );
+            assert_eq!(runner.call_count(), 0, "for _{field}");
+            assert!(
+                format!("{events:?}").contains("rename the anchor"),
+                "the refusal must say to rename the anchor, got: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_anchor_not_named_like_a_dotfile_field_still_deploys() {
+        // The control that keeps YAML anchors working, and the reason the rule is
+        // a *collision* rule rather than "no underscore keys inside an entry".
+        // Consuming the alias proves the key was really parsed, not just
+        // tolerated.
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("bat.conf"), "fine\n").unwrap();
+
+        let target = dirs.target_dir.join("bat.conf");
+        let yaml = format!(
+            "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - _anchor: &a \"bat.conf\"\n    source: *a\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("bat.yml"), yaml).unwrap();
+
+        let service = dirs.service();
+        collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fine\n");
+    }
+
+    #[tokio::test]
+    async fn a_drift_check_reports_a_refused_entry_rather_than_calling_it_unverifiable() {
+        // The drift consumer. A refused entry reported as "provider-sourced (not
+        // verifiable without resolving)" would be filed under the one status a
+        // user is trained to ignore, hiding a dotfile that can never deploy.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        bad_var_name_package(&dirs.package_dir, target.to_str().unwrap(), "not-a-name");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.check_drift().await).await;
+
+        assert_eq!(runner.call_count(), 0, "got: {:?}", runner.calls());
+        assert!(
+            format!("{events:?}").contains("not-a-name"),
+            "drift must name the refused entry, got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+            )),
+            "an undeployable entry is not merely unverifiable, got: {events:?}"
+        );
+    }
 }
 
 /// Deploying a repository file onto a symlinked target, and the permissions of the

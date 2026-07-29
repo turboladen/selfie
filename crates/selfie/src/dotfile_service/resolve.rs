@@ -114,8 +114,15 @@ fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError>
 /// entry that can never deploy.
 pub(crate) fn check_resolvable(entry: &DotfileEntry, base_dir: &Path) -> Result<(), ResolveError> {
     match entry.content_source() {
-        ContentSource::Template { source, .. } => template_path(source, base_dir).map(|_| ()),
-        _ => Ok(()),
+        Ok(ContentSource::Template { source, .. }) => template_path(source, base_dir).map(|_| ()),
+        // A provider has no path to contain, and a repository file is not
+        // resolved here at all.
+        Ok(ContentSource::Provider(_) | ContentSource::RepoFile(_)) => Ok(()),
+        // Spelled out rather than folded into a catch-all: an entry that cannot
+        // deploy is refused by `handle_apply` before this module is reached, so
+        // there is nothing left to decide — but the next reason a `content_source`
+        // can fail should have to be looked at here rather than swallowed by `_`.
+        Err(_) => Ok(()),
     }
 }
 
@@ -140,13 +147,11 @@ where
         // invalid entry is not deployable at all. Returning an error rather than
         // panicking: the invariant that keeps these out is enforced by a caller in
         // another module, which is too far away to be worth a panic.
-        ContentSource::RepoFile(_) | ContentSource::Invalid => {
-            Err(ResolveError::NotSecretBearing {
-                target: entry.target().to_string(),
-            })
-        }
+        Ok(ContentSource::RepoFile(_)) | Err(_) => Err(ResolveError::NotSecretBearing {
+            target: entry.target().to_string(),
+        }),
 
-        ContentSource::Provider(command) => {
+        Ok(ContentSource::Provider(command)) => {
             let bytes = run_capture(command, base_dir, runner, timeout, token)
                 .await
                 .map_err(|stderr| ResolveError::CommandFailed {
@@ -174,7 +179,7 @@ where
             })
         }
 
-        ContentSource::Template { source, vars } => {
+        Ok(ContentSource::Template { source, vars }) => {
             let template_path = template_path(source, base_dir)?;
 
             let text = filesystem.read_file(&template_path).map_err(|e| {

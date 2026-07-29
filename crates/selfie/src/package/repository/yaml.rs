@@ -1170,6 +1170,36 @@ environments:
     }
 
     #[test]
+    fn save_package_refuses_an_entry_carrying_an_anchor_that_collides_with_a_field() {
+        // Same hazard as `var:`, reached a different way: a rewrite drops `_vars`
+        // and the entry stops being refused, so the next apply writes the
+        // unrendered template over the credentials target. The refusal has to
+        // cover it, or the fix for selfie-kj5y is undone by the first `selfie
+        // spec edit`.
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.expect_write_file().times(0);
+
+        let package: Package = serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    _vars:\n      k: op read x\n",
+        )
+        .expect("fixture must parse — the collision is a validation error, not a parse error");
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("a colliding anchor must not be rewritten away");
+
+        assert!(
+            err.to_string().contains("dotfiles[0]._vars"),
+            "the diagnostic must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
     fn save_package_refuses_an_environment_scoped_entry_carrying_an_unrecognized_key() {
         // The guard has to reach `environments.<env>.dotfiles` too. Kept separate
         // from the shared-dotfiles test because dropping the environments loop from

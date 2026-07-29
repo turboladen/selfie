@@ -860,11 +860,11 @@ fn dotfile_entry_json(
     let map = value.as_object_mut().expect("constructed as an object");
 
     match entry.content_source() {
-        ContentSource::RepoFile(source) => {
+        Ok(ContentSource::RepoFile(source)) => {
             map.insert("kind".into(), "file".into());
             map.insert("source".into(), source.into());
         }
-        ContentSource::Template { source, vars } => {
+        Ok(ContentSource::Template { source, vars }) => {
             map.insert("kind".into(), "template".into());
             map.insert("source".into(), source.into());
             map.insert(
@@ -872,16 +872,16 @@ fn dotfile_entry_json(
                 vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
             );
         }
-        ContentSource::Provider(command) => {
+        Ok(ContentSource::Provider(command)) => {
             map.insert("kind".into(), "command".into());
             map.insert("command".into(), command.into());
         }
-        ContentSource::Invalid => {
+        // The reason, not a generic string: an assistant reading this is the
+        // caller least able to guess which of the possible defects applies, and
+        // naming the key or the var is what lets it propose the actual fix.
+        Err(invalid) => {
             map.insert("kind".into(), "invalid".into());
-            map.insert(
-                "error".into(),
-                selfie::package::INVALID_CONTENT_SOURCE.into(),
-            );
+            map.insert("error".into(), invalid.to_string().into());
         }
     }
 
@@ -905,5 +905,59 @@ mod tests {
             !params.auto_accept,
             "auto_accept must default to false to prevent silent overwrites of divergent configs"
         );
+    }
+
+    fn entry(yaml: &str) -> selfie::package::DotfileEntry {
+        serde_saphyr::from_str(yaml).expect("fixture must parse")
+    }
+
+    #[test]
+    fn a_refused_entry_is_reported_as_invalid_with_the_reason() {
+        // `content_source()` returns a `Result`, and this is the consumer where a
+        // silent drop is least visible: an assistant that never sees the entry
+        // cannot tell the user why their dotfile does not deploy. It has to be
+        // listed, and the reason has to name the offending var or key rather than
+        // reciting every way an entry can be malformed.
+        for (yaml, needle) in [
+            (
+                "source: creds.tpl\ntarget: ~/.creds\nvars:\n  not-a-name: op read x\n",
+                "not-a-name",
+            ),
+            (
+                "source: creds.tpl\ntarget: ~/.creds\n_vars:\n  api_key: op read x\n",
+                "_vars",
+            ),
+            (
+                "source: a.tpl\ncommand: op read x\ntarget: ~/.creds\n",
+                "exactly one of",
+            ),
+        ] {
+            let json = dotfile_entry_json("creds", None, &entry(yaml), "packages");
+
+            assert_eq!(json["kind"], "invalid", "for {yaml}");
+            assert_eq!(json["target"], "~/.creds", "for {yaml}");
+            assert!(
+                json["error"].as_str().unwrap().contains(needle),
+                "the reason must name what is wrong, got: {}",
+                json["error"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_deployable_entry_is_still_described_by_its_source() {
+        // The control: without it the test above could pass on a change that
+        // reported every entry as invalid.
+        let json = dotfile_entry_json(
+            "creds",
+            Some("macos"),
+            &entry("source: creds.tpl\ntarget: ~/.creds\nvars:\n  api_key: op read x\n"),
+            "packages",
+        );
+
+        assert_eq!(json["kind"], "template");
+        assert_eq!(json["source"], "creds.tpl");
+        assert_eq!(json["vars"][0], "api_key");
+        assert!(json.get("error").is_none());
     }
 }

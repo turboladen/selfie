@@ -23,7 +23,7 @@ use crate::{
     },
     fs::filesystem::{FileSystem, FileSystemError},
     package::{
-        ContentSource, DotfileEntry, INVALID_CONTENT_SOURCE, Package,
+        ContentSource, DotfileEntry, Package,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -513,8 +513,13 @@ where
 /// credentials, so they are safe to surface. Used as the `source` of the events
 /// this path emits. The wording lives on [`ContentSource`] so that apply, `selfie
 /// dotfiles list`, and the MCP server cannot describe the same entry differently.
-fn secret_origin(entry: &DotfileEntry) -> String {
-    entry.content_source().to_string()
+///
+/// Takes the content source rather than the entry so there is no refusal wording
+/// to choose here: what this returns goes into the event stream and thence into
+/// MCP's JSON, and an entry that cannot deploy has no business being named as
+/// though it had a source. Callers hold the matched `ContentSource` already.
+fn secret_origin(content: &ContentSource<'_>) -> String {
+    content.to_string()
 }
 
 /// A conflict summary describing shape without revealing content.
@@ -523,11 +528,7 @@ fn secret_origin(entry: &DotfileEntry) -> String {
 /// file (1 line vs 12 lines), which is the distinction a user needs in order to
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
-fn secret_conflict_summary(
-    entry: &DotfileEntry,
-    incoming: &[u8],
-    current: Option<&[u8]>,
-) -> String {
+fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>) -> String {
     // Counts separators plus one, so a trailing newline reads as an extra line.
     // Exact line semantics do not matter here; the comparison between the two
     // sides does.
@@ -543,7 +544,7 @@ fn secret_conflict_summary(
     format!(
         "  {}\n  target exists and differs from resolved output\n\n  \
          resolved output : {} lines\n  current target  : {current_side}\n  (content hidden)",
-        secret_origin(entry),
+        origin,
         lines(incoming),
     )
 }
@@ -616,14 +617,14 @@ where
     /// Reads as the sequence it is: refuse what can be refused without running
     /// anything, short-circuit a preview, resolve, then decide against what is
     /// already on disk.
-    async fn apply(&self, entry: &DotfileEntry) -> SecretOutcome {
-        match self.run(entry).await {
+    async fn apply(&self, entry: &DotfileEntry, origin: String) -> SecretOutcome {
+        match self.run(entry, origin).await {
             Ok(outcome) | Err(outcome) => outcome,
         }
     }
 
-    async fn run(&self, entry: &DotfileEntry) -> Phase<SecretOutcome> {
-        let target = self.usable_target(entry).await?;
+    async fn run(&self, entry: &DotfileEntry, origin: String) -> Phase<SecretOutcome> {
+        let target = self.usable_target(entry, origin).await?;
         self.refuse_unresolvable(&target).await?;
         self.short_circuit_dry_run(&target).await?;
 
@@ -643,7 +644,11 @@ where
     ///
     /// A relative target would write relative to the current directory, which is
     /// both surprising and dangerous for a credential.
-    async fn usable_target<'e>(&self, entry: &'e DotfileEntry) -> Phase<SecretTarget<'e>> {
+    async fn usable_target<'e>(
+        &self,
+        entry: &'e DotfileEntry,
+        origin: String,
+    ) -> Phase<SecretTarget<'e>> {
         let path = expand_target_path(self.filesystem, entry.target());
 
         if !path.is_absolute() {
@@ -659,7 +664,7 @@ where
 
         Ok(SecretTarget {
             entry,
-            origin: secret_origin(entry),
+            origin,
             path,
         })
     }
@@ -849,7 +854,7 @@ where
             TargetState::Readable(bytes) => Some(bytes),
             _ => None,
         };
-        let summary = secret_conflict_summary(target.entry, &resolved.bytes, current);
+        let summary = secret_conflict_summary(&target.origin, &resolved.bytes, current);
 
         if self.ask_resolver(target, resolved, current, &summary).await {
             return Ok(());
@@ -1075,12 +1080,12 @@ where
 
         for entry in &dotfiles {
             let source = match entry.content_source() {
-                ContentSource::RepoFile(source) => source,
+                Ok(ContentSource::RepoFile(source)) => source,
 
                 // Secret-bearing entries resolve their content by running
                 // commands, compare it in memory, and record nothing.
-                ContentSource::Template { .. } | ContentSource::Provider(_) => {
-                    match secret_apply.apply(entry).await {
+                Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
+                    match secret_apply.apply(entry, secret_origin(&content)).await {
                         SecretOutcome::Deployed => deployed_count += 1,
                         SecretOutcome::Skipped => skipped_count += 1,
                         SecretOutcome::Conflicted => conflict_count += 1,
@@ -1106,12 +1111,13 @@ where
                     continue;
                 }
 
-                ContentSource::Invalid => {
+                // Refused before anything runs. For a template that means the
+                // binding commands — real credential fetches, which can raise a
+                // biometric prompt — never execute for a file that provably
+                // cannot be rendered.
+                Err(invalid) => {
                     sender
-                        .send_warning(format!(
-                            "Skipping '{}': {INVALID_CONTENT_SOURCE}",
-                            entry.target()
-                        ))
+                        .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
                     skipped_count += 1;
                     continue;
@@ -1378,7 +1384,7 @@ where
             total_count += 1;
 
             let source = match entry.content_source() {
-                ContentSource::RepoFile(source) => source,
+                Ok(ContentSource::RepoFile(source)) => source,
 
                 // Secret-bearing entries hold no deploy state, so there is nothing
                 // to compare against. Resolving them here would run the user's
@@ -1391,10 +1397,10 @@ where
                 // status that reads it — permanently dirty on any machine with one
                 // provider-sourced dotfile. ADR-0003 calls for identifying them
                 // rather than inventing a drift classification for them.
-                ContentSource::Template { .. } | ContentSource::Provider(_) => {
+                Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
                     sender
                         .send_dotfile_skipped(
-                            secret_origin(entry),
+                            secret_origin(&content),
                             expand_target_path(filesystem, entry.target()).display(),
                             "provider-sourced (not verifiable without resolving)",
                         )
@@ -1402,12 +1408,13 @@ where
                     continue;
                 }
 
-                ContentSource::Invalid => {
+                // Refused for the same reasons apply refuses it, and worded the
+                // same way. A drift check that reported an undeployable entry as
+                // merely unverifiable would hide it behind the one status a user
+                // is trained to ignore.
+                Err(invalid) => {
                     sender
-                        .send_warning(format!(
-                            "Skipping '{}': {INVALID_CONTENT_SOURCE}",
-                            entry.target()
-                        ))
+                        .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
                     continue;
                 }
