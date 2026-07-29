@@ -113,11 +113,12 @@ dotfiles:
 Set **exactly one** of `source` or `command`. `vars` goes only with `source`: with `command` there
 is no template to render, and that combination is rejected rather than ignored.
 
-Any other key inside a dotfile entry — except an underscore-prefixed [YAML anchor](#yaml-anchors) —
-is an error, and the entry is skipped rather than deployed. Only `target` is required, so a
-misspelling would otherwise be dropped silently: writing `var:` for `vars:` would leave a
-valid-looking repository-file entry and deploy the template _unrendered_, placeholders and all, over
-the file it was meant to fill in. See [Unrecognized keys](#unrecognized-keys).
+Any other key inside a dotfile entry — except an underscore-prefixed [YAML anchor](#yaml-anchors)
+that is not named after one of these fields — is an error, and the entry is skipped rather than
+deployed. Only `target` is required, so a misspelling would otherwise be dropped silently: writing
+`var:` for `vars:` would leave a valid-looking repository-file entry and deploy the template
+_unrendered_, placeholders and all, over the file it was meant to fill in. See
+[Unrecognized keys](#unrecognized-keys).
 
 Dotfiles are deployed with `selfie apply`, not during `selfie package install`. This separation
 keeps installation fast and gives you explicit control over when dotfiles are written to disk.
@@ -593,7 +594,10 @@ something else on another.
 
 - `{{ name }}` is replaced only when `name` is declared in `vars`. Whitespace inside the braces is
   optional.
-- Names match `[A-Za-z_][A-Za-z0-9_]*`.
+- Names match `[A-Za-z_][A-Za-z0-9_]*`. A name that does not — `not-a-name`, say — makes the whole
+  entry undeployable, because its placeholder could only ever be copied out verbatim. `selfie apply`
+  skips the entry **before running any of its commands**, so no credential is fetched for a value
+  that could not be used.
 - Any other placeholder-like text is left exactly as written, so a file that legitimately contains
   brace syntax passes through unchanged and no escape mechanism is needed.
 - Every declared name must appear at least once in the template; an unused name is a validation
@@ -802,7 +806,10 @@ dropped without a word. Writing `var:` instead of `vars:` would leave a template
 ordinary repository file and deploy it **unrendered** — with a literal `{{ api_key }}` — over the
 target.
 
-An entry carrying a key selfie does not recognize is therefore refused:
+An entry carrying a key selfie does not recognize is therefore refused. The same applies to an
+anchor inside the entry whose name matches one of the entry's fields, such as `_vars` — see
+[YAML anchors](#yaml-anchors) — and to a `vars` name that cannot be substituted, such as
+`not-a-name`, which would leave its placeholder in the deployed file:
 
 - `selfie spec validate` reports an error naming the entry and the key, such as `dotfiles[0].var` or
   `environments.macos.dotfiles[1].var`.
@@ -823,7 +830,9 @@ An entry carrying a key selfie does not recognize is therefore refused:
 
 Keys beginning with an underscore are ignored by selfie, so a package file can define YAML anchors
 and reuse them with aliases. This works both at the top level of the file and inside an individual
-dotfile entry, and an underscore-prefixed key is never reported as an unrecognized key:
+dotfile entry, and an underscore-prefixed key is not reported as an unrecognized key — with one
+exception, described below, for an anchor inside a dotfile entry whose name matches one of that
+entry's own fields:
 
 ```yaml
 _brew: &brew brew install ripgrep
@@ -844,12 +853,45 @@ Any other unrecognized key is an error — see [Unrecognized keys](#unrecognized
 convenience for writing the file; they are resolved when it is read, and are not preserved if selfie
 rewrites the file (for example via `selfie spec edit`).
 
-> **The underscore silences the check completely.** It is not "an anchor named like a field" —
-> selfie does not look at the rest of the name at all. Inside a dotfile entry that cuts both ways:
-> `_vars:` is read as an anchor definition rather than as a misspelling of `vars:`, so the entry is
-> **not** flagged and **not** skipped; it deploys as a plain repository file, with the template
-> unrendered and the bindings you meant to declare silently absent. Reserve the underscore prefix
-> for keys you really do intend as anchor definitions.
+### An anchor inside an entry may not be named after one of that entry's fields
+
+Inside a dotfile entry, an underscore-prefixed key whose remaining name is `source`, `command`,
+`vars` or `target` is an **error**, and the entry is skipped rather than deployed:
+
+```yaml
+dotfiles:
+  # Refused: is `_vars` an anchor, or a typo for `vars`?
+  - source: rubygems/credentials.tpl
+    target: ~/.gem/credentials
+    _vars: &v
+      api_key: op read op://Private/rubygems/token
+```
+
+Nothing in the file can tell those two readings apart, and they have opposite consequences. Read as
+an anchor, the entry has no `vars` at all, so it is an ordinary repository file — and selfie deploys
+the template **unrendered**, with a literal `{{ api_key }}` where the credential belongs, over your
+credentials file. That is the same hazard as writing `var:` for `vars:`, which is why it gets the
+same treatment: `selfie spec validate` reports it, `selfie apply` skips the entry, and commands that
+rewrite the file refuse to save it. See [Unrecognized keys](#unrecognized-keys).
+
+The fix depends on which you meant, and selfie says so rather than guessing:
+
+```
+'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'
+```
+
+**Rename the anchor** — `_creds: &v` works exactly as well — or, if you meant the field, drop the
+underscore. Only these four names are affected, and only inside a dotfile entry:
+
+- `_brew`, `_anchor`, `_targets` inside an entry are fine — none of them is a field name.
+- `_target: &target …` at the **top level** of the file is fine, as in the example above. Top-level
+  keys are a different namespace, and `target` is not a top-level field.
+
+> **At the top level, the underscore still silences the check completely.** Selfie does not look at
+> the rest of the name there, so `_dotfiles:` is read as an anchor definition rather than as a
+> misspelling of `dotfiles:` — the package then has no dotfiles at all, `selfie apply` reports
+> success having deployed nothing, and `selfie spec validate` says nothing. Tracked as selfie-g199.
+> Reserve the underscore prefix for keys you really do intend as anchor definitions.
 
 ## Common Patterns
 

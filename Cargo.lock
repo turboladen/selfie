@@ -2958,6 +2958,7 @@ dependencies = [
  "schemars",
  "selfie",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "tokio",
  "tokio-util",

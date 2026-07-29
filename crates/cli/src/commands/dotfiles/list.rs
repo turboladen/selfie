@@ -57,7 +57,14 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
                 // Renders var names and command strings, never a resolved value:
                 // listing runs nothing, so it cannot leak a secret or raise an
                 // authentication prompt.
-                entry.content_source().to_string(),
+                //
+                // A refused entry is shown as the reason it was refused rather
+                // than omitted: it is in the package file, `selfie apply` will
+                // report skipping it, and a listing that hid it would leave the
+                // user looking for a dotfile the table says does not exist.
+                entry
+                    .content_source()
+                    .map_or_else(|invalid| invalid.to_string(), |source| source.to_string()),
                 shorten_path(entry.target()),
             ]);
             total += 1;

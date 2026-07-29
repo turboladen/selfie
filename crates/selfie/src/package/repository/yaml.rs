@@ -240,10 +240,11 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
         // A save rewrites the file from the struct, dropping every key the struct
         // does not model. In a dotfile entry that key is what makes
-        // `content_source()` return `Invalid`, so writing the file would launder a
-        // refused entry into a deployable one: `var:` for `vars:` would vanish and
-        // the next apply would write the *unrendered* template — literal
-        // `{{ api_key }}` — over the target. Refuse the write instead.
+        // `content_source()` return `Err(InvalidEntry::UnknownKeys(_))`, so writing
+        // the file would launder a refused entry into a deployable one: `var:` for
+        // `vars:` — or an anchor named `_vars:` — would vanish and the next apply
+        // would write the *unrendered* template — literal `{{ api_key }}` — over
+        // the target. Refuse the write instead.
         //
         // The guard lives here rather than at the call sites because this is where
         // the key is destroyed, and a fourth caller cannot forget it. See selfie-6lz4.
@@ -1144,7 +1145,7 @@ environments:
     #[test]
     fn save_package_refuses_an_entry_carrying_an_unrecognized_key() {
         // Saving rewrites the file from the struct, which drops `var:` entirely.
-        // The entry would stop being `Invalid` and the next apply would write the
+        // The entry would stop being refused and the next apply would write the
         // unrendered template over the credentials target — so the write must not
         // happen at all. `times(0)` is the assertion that matters: refusing after
         // writing would already have destroyed the key.
@@ -1165,6 +1166,36 @@ environments:
         );
         assert!(
             err.to_string().contains("dotfiles[0].var"),
+            "the diagnostic must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_package_refuses_an_entry_carrying_an_anchor_that_collides_with_a_field() {
+        // Same hazard as `var:`, reached a different way: a rewrite drops `_vars`
+        // and the entry stops being refused, so the next apply writes the
+        // unrendered template over the credentials target. The refusal has to
+        // cover it, or the fix for selfie-kj5y is undone by the first `selfie
+        // spec edit`.
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.expect_write_file().times(0);
+
+        let package: Package = serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    _vars:\n      k: op read x\n",
+        )
+        .expect("fixture must parse — the collision is a validation error, not a parse error");
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("a colliding anchor must not be rewritten away");
+
+        assert!(
+            err.to_string().contains("dotfiles[0]._vars"),
             "the diagnostic must name the offending key, got: {err}"
         );
     }
