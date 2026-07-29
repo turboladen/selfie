@@ -14,6 +14,21 @@ use super::filesystem::{FileSystem, FileSystemError};
 #[derive(Clone, Copy, Debug)]
 pub struct RealFileSystem;
 
+/// [`FileSystemError::SymlinkedTarget`] if `path`'s final component is a symlink.
+///
+/// `symlink_metadata` does not follow that component, so a symlink is reported as a
+/// symlink rather than as whatever it points at. Returns `None` for anything else,
+/// including a path that does not exist.
+fn symlink_refusal(path: &Path) -> Option<FileSystemError> {
+    fs::symlink_metadata(path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_symlink())
+        .map(|_| FileSystemError::SymlinkedTarget {
+            path: path.to_path_buf(),
+            points_to: fs::read_link(path).ok(),
+        })
+}
+
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
@@ -94,6 +109,69 @@ impl FileSystem for RealFileSystem {
         // it is a durability gap, not a correctness one.
         tmp.persist(path).map_err(|e| target_err(e.error))?;
         Ok(())
+    }
+
+    fn write_file_no_follow(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
+        use std::io::Write as _;
+
+        let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
+
+        // Matches `write_file`: a target whose directory does not exist yet is
+        // created rather than refused.
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_err)?;
+        }
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // The kernel refuses the open when the final component is a symlink, so
+            // there is no interval between deciding and writing for a planter to
+            // win. Checking first and then writing would be exactly that race.
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        {
+            // No equivalent flag here, so this is a check and therefore racy. Said
+            // plainly rather than presented as the guarantee the Unix path gives.
+            //
+            // Written out rather than reusing `symlink_refusal`, which answers "is
+            // it a symlink" and folds a failed stat into "no". That is right where
+            // it only classifies an open that already failed, and wrong here, where
+            // it is the whole enforcement: a stat that fails for any reason other
+            // than the path being absent leaves us unable to tell, and proceeding
+            // would write through a link we simply could not see.
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(FileSystemError::SymlinkedTarget {
+                        path: path.to_path_buf(),
+                        points_to: fs::read_link(path).ok(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err(e)),
+            }
+        }
+
+        let mut file = match options.open(path) {
+            Ok(file) => file,
+            // Classified by asking what is at the path rather than by matching an
+            // errno. What a caller has to tell apart is a refusal from a failure,
+            // and `symlink_metadata` answers that directly -- so this needs no
+            // errno constant, and therefore makes no claim about which one any
+            // platform returns for `O_NOFOLLOW`.
+            Err(e) => return Err(symlink_refusal(path).unwrap_or_else(|| io_err(e))),
+        };
+
+        file.write_all(data).map_err(io_err)
+    }
+
+    fn symlink_refusal(&self, path: &Path) -> Option<FileSystemError> {
+        symlink_refusal(path)
     }
 
     fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError> {
@@ -383,7 +461,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
+            other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
     }
 
@@ -399,7 +477,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
+            other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
     }
 
@@ -415,7 +493,7 @@ mod tests {
             FileSystemError::IoError(io_error) => {
                 assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
             }
-            FileSystemError::HomeDirNotFound => panic!("Expected IoError with NotFound"),
+            other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
     }
 
@@ -440,7 +518,7 @@ mod tests {
                 assert_eq!(inner.kind(), std::io::ErrorKind::Other);
                 assert_eq!(inner.to_string(), "test error");
             }
-            FileSystemError::HomeDirNotFound => panic!("Expected IoError variant"),
+            other => panic!("Expected IoError variant, got {other:?}"),
         }
     }
 }
@@ -720,6 +798,228 @@ mod private_write_tests {
 
             assert_eq!(fs::read(&target).unwrap(), b"secret");
             assert_owner_only(&target);
+        }
+    }
+}
+
+/// Tests for [`FileSystem::write_file_no_follow`].
+///
+/// The plain-file tests below hold equally for [`FileSystem::write_file`], so they
+/// guard against gross breakage rather than against the defect this method exists
+/// to fix.
+///
+/// In `unix`, the three refusal tests are the ones that fail against `write_file`;
+/// the two mode tests are the ones that fail against
+/// [`FileSystem::write_file_private`], which would tighten a dotfile nobody asked to
+/// have tightened. Neither group covers both neighbors, which is why both are here.
+/// `a_symlinked_parent_directory_is_still_followed` passes against all three: it
+/// pins a documented limitation so it cannot later be overstated, and is not a
+/// distinguishing test. Stated per-test rather than as a blanket claim, because the
+/// blanket version was not true of all six.
+#[cfg(test)]
+mod no_follow_write_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn writes_content_to_a_new_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+
+        RealFileSystem
+            .write_file_no_follow(&target, b"content")
+            .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"content");
+    }
+
+    #[test]
+    fn truncates_an_existing_file_rather_than_overwriting_in_place() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+        fs::write(&target, b"a much longer previous value").unwrap();
+
+        RealFileSystem
+            .write_file_no_follow(&target, b"new")
+            .unwrap();
+
+        // Without O_TRUNC the tail of the old value would survive past the new one.
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn creates_missing_parent_directories() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("nested").join("deeper").join("config");
+
+        RealFileSystem
+            .write_file_no_follow(&target, b"content")
+            .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"content");
+    }
+
+    #[test]
+    fn writes_empty_data() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+
+        RealFileSystem.write_file_no_follow(&target, b"").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_directory_at_the_target_is_an_ordinary_error() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+        fs::create_dir(&target).unwrap();
+
+        let err = RealFileSystem
+            .write_file_no_follow(&target, b"content")
+            .unwrap_err();
+
+        // Not every failure is a refusal. Misclassifying this one would report
+        // "target is a symlink" for a path that is nothing of the kind.
+        assert!(
+            matches!(err, FileSystemError::IoError(_)),
+            "expected an IO error, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn mode_of(path: &Path) -> u32 {
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn refuses_a_symlink_and_leaves_its_destination_alone() {
+            let dir = tempdir().unwrap();
+            let destination = dir.path().join("destination");
+            fs::write(&destination, b"untouched").unwrap();
+            let target = dir.path().join("config");
+            std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+            let err = RealFileSystem
+                .write_file_no_follow(&target, b"content")
+                .unwrap_err();
+
+            assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
+            assert_eq!(fs::read(&destination).unwrap(), b"untouched");
+            assert!(
+                fs::symlink_metadata(&target)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the link itself must be left in place"
+            );
+        }
+
+        #[test]
+        fn refuses_a_dangling_symlink_without_creating_its_destination() {
+            let dir = tempdir().unwrap();
+            let never_created = dir.path().join("never-created");
+            let target = dir.path().join("config");
+            std::os::unix::fs::symlink(&never_created, &target).unwrap();
+
+            let err = RealFileSystem
+                .write_file_no_follow(&target, b"content")
+                .unwrap_err();
+
+            assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
+            // `fs::write` would have created the file the link points at, which is
+            // the case a caller cannot see by looking at the target afterwards.
+            assert!(!never_created.exists());
+        }
+
+        #[test]
+        fn the_refusal_names_the_destination() {
+            let dir = tempdir().unwrap();
+            let destination = dir.path().join("destination");
+            let target = dir.path().join("config");
+            std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+            match RealFileSystem
+                .write_file_no_follow(&target, b"content")
+                .unwrap_err()
+            {
+                FileSystemError::SymlinkedTarget { path, points_to } => {
+                    // Without the destination a user is told their deploy was
+                    // refused but not where the link would have sent it, which is
+                    // the one fact they need in order to act.
+                    assert_eq!(path, target);
+                    assert_eq!(points_to.as_deref(), Some(destination.as_path()));
+                }
+                other => panic!("expected SymlinkedTarget, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn leaves_an_existing_files_mode_alone() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("script");
+            fs::write(&target, b"old").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+
+            RealFileSystem
+                .write_file_no_follow(&target, b"new")
+                .unwrap();
+
+            // An executable dotfile stays executable. This is where the method
+            // parts company with `write_file_private`, which would replace the
+            // file and discard the mode.
+            assert_eq!(mode_of(&target), 0o755);
+        }
+
+        #[test]
+        fn creates_a_new_file_at_the_umask_default_not_owner_only() {
+            let dir = tempdir().unwrap();
+            // The control establishes what an ordinary write produces here. Without
+            // it, an implementation that made every target owner-only would pass
+            // under a restrictive umask, which is the vacuous pass this guards
+            // against -- an ordinary dotfile is not a credential and this method
+            // must not quietly tighten one.
+            let control = dir.path().join("control");
+            RealFileSystem.write_file(&control, b"x").unwrap();
+            if mode_of(&control) & 0o077 == 0 {
+                let message = "the ambient umask makes ordinary writes owner-only, \
+                               so this cannot tell the two apart";
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "creates_a_new_file_at_the_umask_default_not_owner_only: {message}"
+                );
+                eprintln!("SKIP creates_a_new_file_at_the_umask_default_not_owner_only: {message}");
+                return;
+            }
+
+            let target = dir.path().join("config");
+            RealFileSystem
+                .write_file_no_follow(&target, b"content")
+                .unwrap();
+
+            assert_eq!(mode_of(&target), mode_of(&control));
+        }
+
+        #[test]
+        fn a_symlinked_parent_directory_is_still_followed() {
+            let dir = tempdir().unwrap();
+            let real = dir.path().join("real");
+            fs::create_dir(&real).unwrap();
+            let linked = dir.path().join("linked");
+            std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+            RealFileSystem
+                .write_file_no_follow(&linked.join("config"), b"content")
+                .unwrap();
+
+            // Asserted rather than only documented, so the limitation cannot be
+            // quietly overstated later: `O_NOFOLLOW` covers the final component
+            // only.
+            assert!(real.join("config").exists());
         }
     }
 }

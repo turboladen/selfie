@@ -493,6 +493,38 @@ file changes, selfie detects this as a conflict:
 
 Without `--yes`, conflicts are reported but the target file is left untouched.
 
+### Symlinked targets
+
+This section covers repository-file entries — a `source` with no `vars`. Provider-sourced and
+templated entries never write through a link either, but their link is
+[replaced rather than refused](#deploy-behavior-and-permissions).
+
+selfie deploys by copying, so a symlink at a target is not a supported setup. When one is there and
+selfie would otherwise write, it **refuses and skips that entry** with a warning naming the target
+and where the link points. The link and the file it points at are both left exactly as they were,
+and a dangling link's destination is not created. `selfie apply --dry-run` reports the same refusal
+rather than previewing a deploy that would not happen.
+
+```
+⚠ Skipping 'git/gitconfig': /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write through it
+```
+
+Writing through the link would send the content somewhere other than the path you configured —
+possibly somewhere chosen by whoever created the link. Replacing the link instead would discard it
+on the first apply after any edit to the repository file, which is not selfie's to decide.
+
+The refusal applies only when selfie was going to write. A symlinked target whose contents already
+match is in sync, so it is skipped as usual with no refusal reported. `--yes` does not lift the
+refusal, and neither does answering an interactive conflict prompt — in fact you will not be asked,
+since a refused entry is settled before the prompt. Overwriting a conflict and writing through a
+link are separate questions, and `--yes` speaks only to the first.
+
+To put a target under selfie's management, replace the symlink with a regular file
+(`rm ~/.gitconfig` before the next `selfie apply`, which then writes it), or point the entry's
+`target` at the path the link points to.
+
+A symlinked **parent directory** is still followed. Only the final component is checked.
+
 ### Provider-sourced and templated dotfiles
 
 Where a config file holds a credential, the value can come from a command run at deploy time instead
@@ -609,9 +641,13 @@ Targets are created readable only by their owner (mode `0600` on Unix) and put i
 so there is no window in which the content is world-readable and no interrupted write can leave a
 truncated credential.
 
-A symlink **at the target** is replaced rather than written through. This is a deliberate behavior
-change: writing through the link would send the credential wherever the link points. A symlinked
-**parent directory** is still followed.
+A symlink **at the target** is replaced rather than written through: writing through the link would
+send the credential wherever the link points. A symlinked **parent directory** is still followed.
+
+Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
+rather than replaced. Neither writes through the link. They differ in what happens next because the
+costs differ: a skipped repository file is still in the repository, whereas a skipped credential
+leaves you without the file and with nothing recorded about it.
 
 There is one case where whether the link is replaced depends on something other than the deploy
 itself. When the content already matches, selfie only rewrites the target if its permissions need

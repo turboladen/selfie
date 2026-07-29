@@ -147,6 +147,82 @@ pub trait FileSystem: Send + Sync {
     /// cannot, because it must create a sibling first.
     fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
 
+    /// Write data to a file, refusing a symlink at the final component
+    ///
+    /// Behaves like [`write_file`](FileSystem::write_file) for an ordinary target --
+    /// parent directories are created, an existing file is truncated and overwritten,
+    /// and its mode is left alone -- except that a symlink at the **final component**
+    /// of `path` is refused with [`FileSystemError::SymlinkedTarget`] rather than
+    /// written through. Nothing is written in that case: neither the link nor what it
+    /// points at is modified, and a dangling link's destination is not created.
+    ///
+    /// Intended for deploy targets. A target names a path the user asked selfie to
+    /// manage; writing through a link there sends the content wherever the link
+    /// points, which may be somewhere chosen by whoever planted it.
+    ///
+    /// This is deliberately **not** [`write_file_private`](FileSystem::write_file_private),
+    /// and the two differ in more than one way. Neither writes *through* a link, but
+    /// that method **replaces** the link and succeeds, where this one **refuses** and
+    /// returns an error the caller has to handle. It also makes the file owner-only,
+    /// which is right for a credential and wrong for an ordinary dotfile.
+    ///
+    /// # Symlinks
+    ///
+    /// The refusal applies to `path` **as given**. A caller that resolves the path
+    /// first forfeits it entirely: `canonicalize` returns the link's destination, so
+    /// this method is handed an ordinary file and writes to it. Targets must arrive
+    /// here unresolved -- see `expand_target_path`, which exists for this reason.
+    ///
+    /// Symlinked **parent** directories are still followed, so a planted directory
+    /// symlink can still redirect where the file lands. Same limitation as
+    /// [`write_file_private`](FileSystem::write_file_private).
+    ///
+    /// # Platform notes
+    ///
+    /// On Unix the refusal is enforced by the **kernel**, through `O_NOFOLLOW` on the
+    /// creating `open(2)`. There is no interval between deciding and writing, so a
+    /// link planted concurrently is refused just the same.
+    ///
+    /// On every other platform this is a `symlink_metadata` check performed before the
+    /// write, which a concurrent planter can win. It is a mitigation there, not the
+    /// guarantee Unix gives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError::SymlinkedTarget`] if the final component is a
+    /// symlink, or [`FileSystemError`] if:
+    /// - The parent directory cannot be created
+    /// - Permission is denied to write to the file or directory
+    /// - Any other IO error occurs during writing
+    ///
+    /// The *refusal* is exact, but its *classification* is not quite: the failed open
+    /// is identified by looking at the path afterwards, so a link deleted in that
+    /// window surfaces as an `IoError` rather than `SymlinkedTarget`. Nothing was
+    /// written either way -- only the wording of the report differs.
+    fn write_file_no_follow(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+
+    /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
+    /// give for `path`, if it would refuse
+    ///
+    /// `Some` exactly when the final component is a symlink, carrying the same
+    /// [`SymlinkedTarget`](FileSystemError::SymlinkedTarget) that method would return
+    /// -- including its `None` destination when the link itself cannot be read, which
+    /// is why this answers with the error rather than with the destination. A caller
+    /// asking "would this be refused, and what do I tell the user" gets one answer to
+    /// both questions, worded identically to the real thing.
+    ///
+    /// For **describing** a path without writing to it: previewing what an apply
+    /// would refuse, or reporting it before asking the user a question that could not
+    /// be honored. Advisory and inherently racy -- the answer can be stale by the
+    /// time a caller acts on it.
+    ///
+    /// Never use it to decide whether a write is safe.
+    /// [`write_file_no_follow`](FileSystem::write_file_no_follow) refuses on its own,
+    /// on Unix in the kernel. Checking here and writing there would reintroduce
+    /// exactly the race that method avoids; this only ever moves *when the user is
+    /// told*, never whether the write happens.
+    fn symlink_refusal(&self, path: &Path) -> Option<FileSystemError>;
+
     /// Whether a file is readable only by its owner
     ///
     /// Companion to [`write_file_private`](FileSystem::write_file_private), for
@@ -289,6 +365,26 @@ pub enum FileSystemError {
     /// Home directory could not be determined (needed for path expansion)
     #[error("Home directory not found")]
     HomeDirNotFound,
+
+    /// A write was refused because the final path component is a symlink
+    ///
+    /// Kept distinct from [`IoError`](FileSystemError::IoError) because it is the
+    /// one outcome here that is a deliberate refusal rather than something going
+    /// wrong. Callers report it differently, and having it as a variant means they
+    /// do not have to inspect an errno -- which would put a platform detail in a
+    /// layer this port exists to keep it out of.
+    ///
+    /// `points_to` is optional because reading the link is a second syscall that
+    /// can fail on its own; the refusal still stands when it does.
+    #[error(
+        "{}: target is a symlink{} and selfie will not write through it",
+        .path.display(),
+        .points_to.as_deref().map_or(String::new(), |dest| format!(" to '{}'", dest.display()))
+    )]
+    SymlinkedTarget {
+        path: PathBuf,
+        points_to: Option<PathBuf>,
+    },
 }
 
 #[cfg(feature = "with_mocks")]

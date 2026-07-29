@@ -232,11 +232,6 @@ fn save_deploy_state<F: FileSystem>(
     filesystem.write_file(&path, yaml.as_bytes())
 }
 
-/// Expand a target path, handling tilde expansion via the filesystem abstraction.
-///
-/// Tries `expand_path` (which does tilde expansion + canonicalize) first. If that
-/// fails (e.g., target doesn't exist yet), expands just the tilde prefix using the
-/// filesystem and constructs the rest of the path without requiring it to exist.
 /// Check that a name is safe for use as a filesystem path component.
 ///
 /// Rejects names containing path separators, `..`, or characters outside
@@ -248,51 +243,55 @@ fn is_safe_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Expand a user-provided path, resolving `~` and symlinks where possible.
+/// Expand a deploy target without resolving its final component.
 ///
-/// Tries full canonicalization first. Falls back to tilde expansion via the
-/// `FileSystem` trait if the path doesn't exist yet.
-pub fn expand_user_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
-    let raw = PathBuf::from(target);
-
-    // Try full canonicalization first (works if path exists)
-    if let Ok(p) = filesystem.expand_path(&raw) {
-        return p;
-    }
-
-    // For tilde paths, expand just "~" to get the home directory via filesystem
-    if let Some(rest) = target.strip_prefix("~/") {
-        let tilde_only = PathBuf::from("~");
-        if let Ok(home) = filesystem.expand_path(&tilde_only) {
-            return home.join(rest);
-        }
-    }
-
-    // Try canonicalizing just the parent (works if parent dir exists)
-    if let (Some(parent), Some(filename)) = (raw.parent(), raw.file_name())
-        && let Ok(canonical_parent) = filesystem.expand_path(parent)
-    {
-        return canonical_parent.join(filename);
-    }
-
-    raw
-}
-
-/// Expand a secret-bearing entry's target without resolving its final component.
+/// Expands a leading `~` and resolves `.`/`..` textually, and deliberately does
+/// **not** canonicalize. Both writers this feeds --
+/// [`FileSystem::write_file_no_follow`] for repository files and
+/// [`FileSystem::write_file_private`] for credentials -- refuse or replace a
+/// symlink at the path **as given**, so handing either an already-resolved path
+/// forfeits the protection completely: `canonicalize` returns the link's
+/// destination, and the writer is then looking at an ordinary file.
 ///
-/// Deliberately not [`expand_user_path`]: that canonicalizes, and
-/// [`FileSystem::write_file_private`]'s promise to replace a symlinked target
-/// rather than write through it applies to the path **as given**. Handing it an
-/// already-resolved path forfeits exactly the protection ADR-0003 relies on for
-/// credential targets, so this expands `~` and normalizes `.`/`..` textually and
-/// leaves the last component alone.
+/// This is security-load-bearing, not tidiness, and it is measured rather than
+/// argued (selfie-4m9): reintroducing the canonicalization here fails the
+/// credential path's own symlink guard, both expansion tests, and every
+/// repository-file refusal test **whose link resolves**. Do not "simplify" it back
+/// to `expand_path` or `canonicalize`.
+///
+/// A *dangling* link survives that mutation, which is worth understanding rather
+/// than treating as a gap in coverage: `canonicalize` fails on one, so the path
+/// falls through unresolved and the refusal still fires. It is the same asymmetry
+/// `.claude/rules/secrets.md` states -- canonicalization forfeits the guarantee
+/// exactly when it *succeeds*.
+///
+/// No count of failing tests is given, deliberately. Two successive versions of
+/// this comment carried one and both went stale as soon as a test was added -- the
+/// second time inside the very change that corrected the first. A tally is a
+/// measurement with an expiry date and every edit to the suite expires it, so this
+/// says which tests fail and why instead.
+///
+/// Note the two halves of that fix are **not** symmetric, and an earlier version of
+/// this comment claimed they were. Refusing at the write site alone would leave the
+/// hole wide open, because a canonicalized path never reaches the writer as a link
+/// at all. Expanding correctly alone leaves apply's own check
+/// (`handle_apply`, before the deploy decision) catching every non-racing case --
+/// which is why reverting the writer to `write_file` fails no test but the one
+/// written for it. The writer is the TOCTOU defense; this expansion is what any of
+/// it depends on.
 ///
 /// A symlinked *parent* directory is still followed. That limitation is inherent
-/// to `write_file_private` and is documented rather than papered over.
+/// to both writers and is documented rather than papered over.
 ///
-/// Repository-file entries keep using `expand_user_path`; this is a narrower rule
-/// for the one path where the difference is load-bearing.
-fn expand_secret_target<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
+/// The converse also follows from resolving `..` textually: `a/link/../b` becomes
+/// `a/b` here, where canonicalizing would have followed `link` first and landed
+/// somewhere else. Both are consequences of not touching the filesystem, and the
+/// textual answer is the one that matches what the user wrote.
+///
+/// Serves repository-file and secret-bearing entries alike, so it is on the
+/// credential path. See `.claude/rules/secrets.md`; selfie-zv4b tracks making the
+/// distinction a compile error rather than a comment.
+pub fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
     let raw = if target.starts_with('~') {
         // Expand only the leading `~` component; everything after it is joined
         // unresolved, which is the whole point. A home directory always exists,
@@ -629,7 +628,7 @@ where
     /// A relative target would write relative to the current directory, which is
     /// both surprising and dangerous for a credential.
     async fn usable_target<'e>(&self, entry: &'e DotfileEntry) -> Phase<SecretTarget<'e>> {
-        let path = expand_secret_target(self.filesystem, entry.target());
+        let path = expand_target_path(self.filesystem, entry.target());
 
         if !path.is_absolute() {
             self.sender
@@ -917,6 +916,15 @@ where
     }
 }
 
+/// How a refused deploy is reported, worded once.
+///
+/// Two sites produce it — the check in `handle_apply` and the write itself, which
+/// still refuses if a link appears in between — and only the first is reachable in
+/// a test, so the second would be free to drift if each formatted its own.
+fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
+    format!("Skipping '{source}': {refusal}")
+}
+
 /// Describes a single config file deployment operation
 struct DeployUnit<'a> {
     source_path: &'a Path,
@@ -949,13 +957,34 @@ async fn perform_deploy<F: FileSystem>(
         .send_dotfile_deploying(unit.source_path.display(), unit.target_path.display())
         .await;
 
-    if let Err(e) = filesystem.write_file(unit.target_path, unit.source_content.as_bytes()) {
-        sender
-            .send_warning(format!(
-                "Failed to write '{}': {e}",
-                unit.target_path.display()
-            ))
-            .await;
+    // Refuses a symlinked target rather than writing through it: the content would
+    // otherwise land wherever the link points, which may be a path chosen by
+    // whoever planted it. The target reaches here unresolved -- see
+    // `expand_target_path` -- which is what lets the writer see the link at all.
+    if let Err(e) =
+        filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
+    {
+        // A refusal is not a failure. "Failed to write" would read as something
+        // going wrong rather than as selfie declining, and the error already names
+        // both the target and where the link points.
+        //
+        // Reaching the refusal arm here means the link appeared between the check
+        // in `handle_apply` and this write, so no test exercises it — which is why
+        // it shares `refusal_warning` with the checked path rather than repeating
+        // the wording, where the two could drift apart unnoticed.
+        let message = match &e {
+            FileSystemError::SymlinkedTarget { .. } => refusal_warning(unit.source_key, &e),
+            _ => format!("Failed to write '{}': {e}", unit.target_path.display()),
+        };
+        sender.send_warning(message).await;
+        // `Err` has the caller count this as skipped and leaves the deploy state
+        // untouched, so nothing is recorded as deployed that was not. An entry
+        // already in the state keeps its previous checksums and is stale rather than
+        // untracked, which is the honest record: for a refusal nothing was written,
+        // and for an IO failure the target may have been truncated or partly written
+        // first, since this writer truncates in place unlike `write_file_private`.
+        // Recording either as a fresh deployment is what would make a later drift
+        // check call the damage clean.
         return Err(());
     }
     deploy_state.record_deployment(
@@ -1086,7 +1115,7 @@ where
                 continue;
             }
 
-            let target_path = expand_user_path(filesystem, entry.target());
+            let target_path = expand_target_path(filesystem, entry.target());
 
             // Enforce documented rule: target must be absolute after expansion.
             // A relative target would write relative to CWD, which is surprising
@@ -1143,6 +1172,39 @@ where
                 source_checksum: &source_checksum,
                 source_key: source,
             };
+
+            // Refuse a symlinked target before anything acts on the decision, so a
+            // dry run reports what a real apply would do and an interactive resolver
+            // is never asked to settle a conflict whose answer cannot be honored.
+            // This also lands ahead of the conflict branch's diff, so the link
+            // destination's content is never rendered for display.
+            //
+            // `Skip` is excluded because an in-sync target is not written to. Note
+            // that branch is not inert: an untracked one is recorded as deployed
+            // below, the same as any other already-matching target. That record is
+            // about content, not about who wrote it — selfie did not write any
+            // already-in-sync target — and it costs nothing here, because the next
+            // repository edit makes the entry differ and the refusal fires then.
+            //
+            // What this check uniquely provides is the *preview* and the *un-asked
+            // prompt*: deleting it fails those two tests and no others. Not the
+            // warning -- `perform_deploy` emits the same text through
+            // `refusal_warning`, so on the plain deploy path the user is told either
+            // way. This check only gets there first.
+            //
+            // The writer's own `O_NOFOLLOW` refusal sits behind it as the TOCTOU
+            // defense, reachable only when a link is planted in between, so removing
+            // *that* changes nothing an ordinary test can observe while deleting the
+            // only protection against a link planted mid-apply.
+            // `the_writer_refuses_even_when_the_check_is_blinded` is the tripwire for
+            // that half; neither layer is redundant.
+            if !matches!(decision, DeployDecision::Skip(_))
+                && let Some(refusal) = filesystem.symlink_refusal(&target_path)
+            {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                skipped_count += 1;
+                continue;
+            }
 
             match decision {
                 DeployDecision::Deploy => {
@@ -1317,7 +1379,7 @@ where
                     sender
                         .send_dotfile_skipped(
                             secret_origin(entry),
-                            expand_secret_target(filesystem, entry.target()).display(),
+                            expand_target_path(filesystem, entry.target()).display(),
                             "provider-sourced (not verifiable without resolving)",
                         )
                         .await;
@@ -1336,7 +1398,7 @@ where
             };
 
             let source_path = resolve_source_path(&base_dir, source);
-            let target_path = expand_user_path(filesystem, entry.target());
+            let target_path = expand_target_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
             if !target_path.is_absolute() {
@@ -1433,7 +1495,7 @@ where
     let dotfiles_dir = config.dotfiles_directory();
 
     // Expand and validate the target path
-    let expanded_target = expand_user_path(filesystem, target_path);
+    let expanded_target = expand_target_path(filesystem, target_path);
     if !filesystem.path_exists(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
@@ -1545,12 +1607,12 @@ where
     };
 
     // Check if this target is already tracked in the package
-    let expanded_target = expand_user_path(filesystem, target_path);
+    let expanded_target = expand_target_path(filesystem, target_path);
     if package_blob
         .package()
         .dotfiles()
         .iter()
-        .any(|entry| expand_user_path(filesystem, entry.target()) == expanded_target)
+        .any(|entry| expand_target_path(filesystem, entry.target()) == expanded_target)
     {
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: package_name.to_string(),
@@ -1648,18 +1710,18 @@ mod tests {
     use crate::fs::RealFileSystem;
 
     #[test]
-    fn test_expand_user_path_absolute() {
+    fn test_expand_target_path_absolute() {
         let fs = RealFileSystem;
-        let result = expand_user_path(&fs, "/tmp/some/file");
+        let result = expand_target_path(&fs, "/tmp/some/file");
         // Should be an absolute path starting with /tmp
         assert!(result.is_absolute());
         assert!(result.starts_with("/tmp"));
     }
 
     #[test]
-    fn test_expand_user_path_tilde() {
+    fn test_expand_target_path_tilde() {
         let fs = RealFileSystem;
-        let result = expand_user_path(&fs, "~/test-file");
+        let result = expand_target_path(&fs, "~/test-file");
         // Should start with the actual home directory, not literal "~"
         assert!(result.is_absolute());
         assert!(

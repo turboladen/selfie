@@ -3,6 +3,7 @@ paths:
   - "crates/selfie/src/dotfile_service/**/*.rs"
   - "crates/selfie/src/package/event.rs"
   - "crates/selfie/src/fs/**/*.rs"
+  - "crates/cli/src/commands/track.rs"
   - "crates/cli/src/display_manager.rs"
   - "crates/cli/src/event_processor.rs"
   - "crates/mcp-server/src/**/*.rs"
@@ -49,13 +50,26 @@ Test egress at the **boundary**, not by listing known paths:
 
 ## Paths and permissions
 
-- **Never canonicalize a secret target path.** `write_file_private`'s symlink guarantee applies to
-  the path _as given_, and canonicalization forfeits it precisely when a symlink is planted, because
-  `canonicalize` only succeeds for a path that already exists. The secret path uses its own
-  non-canonicalizing `expand_secret_target` for this reason; do not "unify" it with
-  `expand_user_path` (selfie-4m9).
-- **Secret targets are written with `write_file_private`, never `write_file`** — temp file in the
-  target's own directory at mode `0600`, then rename.
+- **Never canonicalize a target path.** `write_file_private`'s symlink guarantee applies to the path
+  _as given_. Canonicalization forfeits it exactly when it **succeeds**: `canonicalize` resolves the
+  link and hands the writer the destination, so the writer sees an ordinary file and the guarantee
+  is gone. A path that fails to canonicalize — a dangling link — is the _safe_ input, because it
+  reaches the writer unresolved. Do not read this backwards; it has been stated backwards before.
+- **`expand_target_path` is on the credential path.** Both repository-file and secret-bearing
+  entries go through it (selfie-4m9 unified them by bringing the repository path up to the secret
+  path's behavior, never the reverse). It must never resolve the **final component**, and never
+  canonicalize the path as a whole — for any caller, for any reason. Duplicate detection comparing
+  unresolved paths is a known cost and is not a reason to. It does call `expand_path` on a leading
+  `~` by itself, which is deliberate: for any target with a component after the `~`, that cannot
+  reach the last one. (A bare `~` or `~/` is the whole path, so it does — those are directories and
+  fail the write anyway.) Read that call as the boundary, not as license to widen it. Only prose
+  separates the two paths now; selfie-zv4b tracks making it a `TargetPath` newtype so the compiler
+  does instead.
+- **Secret targets are written with `write_file_private`, never `write_file`,
+  `write_file_no_follow`, or any other writer** — temp file in the target's own directory at mode
+  `0600`, then rename. Symlink-safe is **not** the same as owner-only: `write_file_no_follow` also
+  refuses to follow a link, and creates at `0666 & ~umask`. Refusing to follow a link is the weaker
+  of the two properties a credential needs.
 - **Owner-only means `& 0o077 == 0`, not `& 0o007`.** Group-readable leaks a credential to exactly
   the people you are hiding it from on a shared machine.
 - **All package-relative source paths go through `crate::paths` containment.** This guard has been
