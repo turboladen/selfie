@@ -57,13 +57,19 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Installed up here rather than beside the step that uses it: a step with no
+      # `if:` is skipped once an earlier one fails, which would leave the guarded
+      # step below running without the tool.
+      - uses: taiki-e/install-action@cargo-hack
       - name: Build
         run: cargo build
       - name: Run tests
         run: cargo test
-      # Workspace `cargo test` unifies `with_mocks` in, so only the crate alone
-      # catches the library losing access to it. Runs last, and runs even when
-      # the workspace suite failed, so neither result can hide the other.
-      - name: Test the library crate alone
+      # `selfie` is the only crate with optional features, and the run above always
+      # builds it with `with_mocks` on because `test-common` requests it. Covering
+      # every combination catches a feature that has stopped compiling on its own,
+      # which that single combination cannot. Runs last, and runs even when the
+      # workspace suite failed, so neither result can hide the other.
+      - name: Test each feature combination
         if: ${{ !cancelled() }}
-        run: cargo test -p selfie
+        run: cargo hack --each-feature test -p selfie
