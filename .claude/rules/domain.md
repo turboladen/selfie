@@ -17,8 +17,8 @@ per-environment install and check commands. Packages may also declare `dotfiles`
 deployed via `selfie apply`), `post_install_note` (first-install guidance), and per-environment
 `recommends` (soft dependencies that warn on failure instead of failing the parent). Example:
 `bash-language-server` might use Homebrew on macOS and `npm` on Ubuntu -- the user decides per
-environment, then just runs `selfie install bash-language-server` regardless of which machine
-they're on.
+environment, then just runs `selfie package install bash-language-server` regardless of which
+machine they're on.
 
 Package operations:
 

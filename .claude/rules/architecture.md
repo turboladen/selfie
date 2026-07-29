@@ -23,11 +23,12 @@ decide how to display information about that event to the user in the current UI
 
 - **Ports (traits):** `PackageService`, `DotfileService`, `PackageRepository`, `CommandRunner`,
   `FileSystem`
-- **Adapters:** `PackageServiceImpl<R, CR>`, `YamlPackageRepository<F>`, `ShellCommandRunner`,
+- **Adapters:** `PackageServiceImpl<R, CR, G>`, `YamlPackageRepository<F>`, `ShellCommandRunner`,
   `RealFileSystem`
 - **Event system:** Operations return `EventStream` (pinned Stream of `PackageEvent`). The library
   emits events via `EventSender`; the CLI consumes them via `EventProcessor` with custom handlers;
-  the MCP server consumes them via `McpEventCollector` which converts events to structured JSON.
+  the MCP server consumes them via `event_collector::collect_events`, which converts a stream into
+  an `EventCollectorResult` for structured JSON.
 - **Progress:** `ProgressTracker` provides step-based progress (e.g., "Installing package (2/5)").
 - **Service orchestration:** `PackageServiceImpl::execute_operation_with_deps()` is the standard
   pattern — creates channel, spawns async task, returns stream.
@@ -58,10 +59,13 @@ from the CLI:
 - Uses `ShellCommandRunner::login_shell()` (not `default_shell()`) to source the user's login
   profile, since GUI-launched processes don't inherit terminal PATH.
 - Recovers `HOME` env var via `getpwuid` if not set (macOS GUI apps may not set it).
-- Uses `McpEventCollector` (in `event_collector.rs`) to convert `EventStream` into structured JSON.
+- Uses `event_collector::collect_events` to convert an `EventStream` into an `EventCollectorResult`
+  for structured JSON.
 - Status labels are AI-friendly (`"installed"`, `"not installed"`, `"error"`) rather than CLI log
   phrases (`"successfully"`, `"with failures"`).
-- Bulk tools (`get_all_specs`, `validate_all`) bypass the service layer for fast file reads.
+- Tools call `SpecService`/`PackageService` as the CLI does — `selfie_spec_validate_all` goes
+  through `SpecService::validate_all`. `selfie_dotfiles_list` reads the repository directly; that is
+  a known deviation from the boundary rule above, not a pattern to copy.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
   to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 
