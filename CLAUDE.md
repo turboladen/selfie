@@ -9,6 +9,8 @@ and operating systems.
 ## Commands
 
 ```bash
+just check                                     # Run the pre-commit gates (see below)
+just test-lib                                  # Test library only, the canonical form
 cargo build                                    # Build all crates
 cargo test                                     # Run all tests
 cargo test -p selfie                           # Test library only (see below)
@@ -23,21 +25,26 @@ dprint check                                   # Verify Markdown/YAML formatting
 Two of those gate commands come with a catch:
 
 - `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
-  rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form locally.
+  rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form when
+  running clippy directly; `just check` already does.
 - `cargo test -p selfie` takes no feature flag — `Justfile:31` (`just test-lib`) is the canonical
   form. It compiles only because `crates/test-common/Cargo.toml:7` requests
   `features = ["with_mocks"]`. **Do not drop that line**, or the build fails inside `test-common`
   with an error naming a crate you did not touch. `.claude/rules/architecture.md` explains the
-  mechanism. The command genuinely did not compile before PR #67; selfie-4b7 tracks that.
+  mechanism. The command compiles today. It did not before PR #67, which is why older instructions
+  prescribe a `--features with_mocks` flag that is now unnecessary.
 
 ### Pre-commit checklist
 
-Before every commit (unless instructed otherwise), run all four and fix any issues:
+Before every commit (unless instructed otherwise), run `just check` and fix any issues. It runs
+`cargo fmt`, `dprint fmt`, clippy with `-D warnings`, and the test suite, in that order, stopping at
+the first failure. `Justfile` is the source of truth for these gates — do not retype the commands.
 
-1. `cargo fmt` — auto-fix formatting
-2. `dprint fmt` — auto-fix Markdown/YAML formatting
-3. `cargo clippy --all-targets -- -D warnings` — zero warnings policy; the bare form under-reports
-4. `cargo test` — all tests must pass
+Passing it means the checklist passed, not that CI will be green — CI also runs `typos`,
+`cargo build`, and every feature combination of `selfie` via `cargo hack`.
+
+`dprint fmt` reformats every Markdown and YAML file in the repo, not just the ones you edited.
+Commit that: unformatted files anywhere are a miss, and the fix belongs in whatever PR finds it.
 
 ### Documentation rule
 
