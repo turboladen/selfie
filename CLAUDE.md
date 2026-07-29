@@ -45,6 +45,9 @@ When adding user-facing features, update `docs/` before considering the feature 
 - `docs/configuration.md` — New config settings
 - `README.md` — Status section and examples
 
+Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` in CI does not
+catch British forms, because they are real words.
+
 When testing the CLI crate, enable mocks: the `selfie` dev-dependency already uses
 `features = ["with_mocks"]`.
 
