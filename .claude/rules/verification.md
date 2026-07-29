@@ -7,9 +7,9 @@ These are cheap, they apply everywhere, and each one is here because skipping it
 - **Never reference a function, method, field or module without confirming it exists.** Grep for it.
   A plan in this repository called `CommandRunner::execute_in_dir` and cited "see its use in the
   install path"; neither existed.
-- **Check a dependency's behaviour against its source**, not its reputation or its README —
+- **Check a dependency's behavior against its source**, not its reputation or its README —
   `~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/`. Three claims about `tempfile`'s
-  platform behaviour were wrong, one of them in the unsafe direction.
+  platform behavior were wrong, one of them in the unsafe direction.
 - **An invariant you can state is not an invariant the code enforces.** A doc comment saying every
   consumer must refuse a value explicitly did not stop the next consumer from guessing. If it
   matters, make it a type, a guard in a shared module, or a compile error.
@@ -42,7 +42,7 @@ is a write.
 
 **Stage explicit paths. Never `git add -A` or `git add .`.** Check `git diff --cached --name-only`
 before committing. A tree can change between reading a diff and committing it, and `-A` is what lets
-a stale read authorise a commit — that is how unreviewed code got committed here under someone
+a stale read authorize a commit — that is how unreviewed code got committed here under someone
 else's name.
 
 Better still, `git commit -- <paths>`. It commits exactly what you name and leaves another writer's

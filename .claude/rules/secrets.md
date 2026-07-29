@@ -38,7 +38,7 @@ Test egress at the **boundary**, not by listing known paths:
 - **`CommandError::NonZeroExit` carries stdout.** Its `Display` omits the field; its `Debug` does
   not. Worse, `From<CommandError> for OperationFailure` moves that stdout into
   `CommandFailure::ExecutionFailed`, which reaches `PackageEvent::Completed`, is printed verbatim
-  line-by-line by the CLI (`display_manager.rs`), and is serialised by MCP. A provider's stdout _is_
+  line-by-line by the CLI (`display_manager.rs`), and is serialized by MCP. A provider's stdout _is_
   the secret. Use `to_string()`, never `{:?}`, and never route a resolve failure through
   `OperationFailure::from(CommandError)` or `command_failed`.
 - **Forward command stderr on failure only**, truncated. It is content selfie does not control; a
