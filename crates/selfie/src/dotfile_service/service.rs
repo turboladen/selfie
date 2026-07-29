@@ -805,7 +805,7 @@ where
     ///
     /// `auto_accept` is deliberately NOT consulted, unlike the repository-file
     /// path. It is a caller-settable parameter — the MCP server exposes it to an
-    /// assistant — and honouring it would let a non-interactive caller silently
+    /// assistant — and honoring it would let a non-interactive caller silently
     /// overwrite a hand-edited credentials file with provider output, with no
     /// human ever seeing the conflict. A credential is not recoverable
     /// afterwards, because nothing about it was recorded.
@@ -995,7 +995,7 @@ where
     //
     // Note this flag currently governs secret-resolution failures only. The
     // repository-file failure paths in this loop have always continued past an
-    // error, and changing that is a behaviour change beyond this feature.
+    // error, and changing that is a behavior change beyond this feature.
     let mut stopped: Option<String> = None;
 
     'packages: for package in packages {

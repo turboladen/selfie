@@ -26,7 +26,7 @@ use crate::paths::is_within;
 /// This bounds what selfie compares and writes, not what the command produces:
 /// the command runner buffers a command's whole output before this check can run,
 /// as it already does for every install and check command. A genuinely unbounded
-/// provider is therefore still bounded only by the runner's own behaviour.
+/// provider is therefore still bounded only by the runner's own behavior.
 const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum length of forwarded command stderr.

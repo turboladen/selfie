@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_in_dir_honours_its_timeout() {
+    async fn execute_in_dir_honors_its_timeout() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let dir = tempfile::tempdir().unwrap();

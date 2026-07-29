@@ -22,8 +22,8 @@ checksum would be a hash of a secret, written to a plain file on disk.
 
 Hashing does not make this safe. An unsalted hash of a credential is a confirmation oracle: anyone
 who can read the state file can test candidate values offline and confirm a match. Whether that
-matters depends on the entropy of the particular secret, which is not a judgement the deploy path
-can make on the user's behalf.
+matters depends on the entropy of the particular secret, which is not a judgment the deploy path can
+make on the user's behalf.
 
 Deriving change detection from filesystem metadata instead was considered. Comparing a target's
 modification time against the recorded deployment time requires no secret material, but it fails in

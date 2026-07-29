@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reveal_diff_is_labelled_with_the_target_and_the_resolved_output() {
+    fn a_reveal_diff_is_labeled_with_the_target_and_the_resolved_output() {
         let current = multi_field("old-token");
         let incoming = multi_field(SECRET);
 

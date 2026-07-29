@@ -2098,7 +2098,7 @@ mod secret_bearing {
     #[tokio::test]
     async fn auto_accept_does_not_overwrite_a_secret_target() {
         // `auto_accept` is caller-settable — the MCP server exposes it to an
-        // assistant — so honouring it would let a non-interactive caller silently
+        // assistant — so honoring it would let a non-interactive caller silently
         // overwrite a hand-edited credentials file. The spec requires provider
         // conflicts to be reported and skipped without an interactive resolver,
         // whatever auto_accept says.

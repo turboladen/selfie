@@ -51,9 +51,9 @@ impl FileSystem for RealFileSystem {
         // be on another filesystem, making the rename non-atomic, or world-readable.
         //
         // `parent()` yields Some("") for a bare relative name. Filtering that to "."
-        // is defensive normalisation rather than load-bearing: `create_dir_all("")` is
+        // is defensive normalization rather than load-bearing: `create_dir_all("")` is
         // a no-op returning `Ok` and `tempfile_in("")` already resolves to the current
-        // directory, so removing the filter would not change behaviour today. It is
+        // directory, so removing the filter would not change behavior today. It is
         // here so the parent is always a real directory rather than relying on those
         // two coincidences holding.
         let parent = path

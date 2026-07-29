@@ -602,13 +602,13 @@ Consequences worth knowing before you adopt this:
   checking them. Checking would mean resolving, which would run your commands from a read-only
   command.
 
-#### Deploy behaviour and permissions
+#### Deploy behavior and permissions
 
 Targets are created readable only by their owner (mode `0600` on Unix) and put in place atomically,
 so there is no window in which the content is world-readable and no interrupted write can leave a
 truncated credential.
 
-A symlink **at the target** is replaced rather than written through. This is a deliberate behaviour
+A symlink **at the target** is replaced rather than written through. This is a deliberate behavior
 change: writing through the link would send the credential wherever the link points. A symlinked
 **parent directory** is still followed.
 
