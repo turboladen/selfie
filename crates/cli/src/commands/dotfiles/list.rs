@@ -54,7 +54,10 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
             table.add_row(vec![
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
-                entry.source().to_string(),
+                // Renders var names and command strings, never a resolved value:
+                // listing runs nothing, so it cannot leak a secret or raise an
+                // authentication prompt.
+                entry.content_source().to_string(),
                 shorten_path(entry.target()),
             ]);
             total += 1;

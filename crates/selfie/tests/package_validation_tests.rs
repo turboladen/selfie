@@ -158,7 +158,7 @@ post_install_note: |
 "#;
     let package: selfie::package::Package = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(package.dotfiles().len(), 2);
-    assert_eq!(package.dotfiles()[0].source(), "fnm/fish-conf.fish");
+    assert_eq!(package.dotfiles()[0].source(), Some("fnm/fish-conf.fish"));
     assert_eq!(
         package.dotfiles()[0].target(),
         "~/.config/fish/conf.d/fnm.fish"

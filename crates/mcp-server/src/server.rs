@@ -34,7 +34,7 @@ type ConcreteService = PackageServiceImpl<
 >;
 
 type ConcreteDotfileService =
-    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem>;
+    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner>;
 
 type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
 
@@ -173,6 +173,12 @@ pub struct ApplyParam {
     /// and differs from the repo source). Defaults to `false`: conflicts are
     /// skipped and reported with a diff rather than silently overwritten, since
     /// the MCP path has no interactive prompt. Set `true` to force overwrite.
+    ///
+    /// Does NOT apply to secret-bearing dotfiles — those whose content comes from
+    /// a `command` or from a `source` with `vars`. Their conflicts are always
+    /// reported and skipped here, whatever this is set to, because their content
+    /// is a credential that was never recorded and so could not be recovered
+    /// after being overwritten.
     #[serde(default)]
     pub auto_accept: bool,
 }
@@ -217,7 +223,11 @@ impl SelfieServer {
     pub fn new(service: ConcreteService, config: SelfieConfig) -> Self {
         let repo =
             YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
-        let mut dotfile_service = DotfileServiceImpl::new(repo, RealFileSystem, config.clone());
+        // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
+        // and provider commands (`op`, `teller`) live on the user's PATH.
+        let runner = ShellCommandRunner::login_shell(config.command_timeout());
+        let mut dotfile_service =
+            DotfileServiceImpl::new(repo, RealFileSystem, runner, config.clone());
 
         // Add standalone dotfiles repository if the directory exists
         let dotfiles_dir = config.dotfiles_directory();
@@ -449,7 +459,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single spec file for correctness. Returns validation issues (errors and warnings)."
+        description = "Validate a single spec file for correctness. Returns validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles."
     )]
     async fn spec_validate(
         &self,
@@ -472,7 +482,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness. Returns per-spec validation issues (errors and warnings). Fast — no commands executed."
+        description = "Validate all spec files for correctness. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -581,7 +591,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Use dry_run=true to preview first."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -606,7 +616,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), source, and target for each entry. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::package::port::PackageRepository;
@@ -623,13 +633,7 @@ impl SelfieServer {
                 .filter(|p| !p.dotfiles_with_scope().is_empty())
             {
                 for (scope, entry) in pkg.dotfiles_with_scope() {
-                    entries.push(serde_json::json!({
-                        "package": pkg.name(),
-                        "environment": scope,
-                        "source": entry.source(),
-                        "target": entry.target(),
-                        "origin": "packages",
-                    }));
+                    entries.push(dotfile_entry_json(pkg.name(), scope, entry, "packages"));
                 }
             }
         }
@@ -643,13 +647,7 @@ impl SelfieServer {
                     .filter(|p| !p.dotfiles_with_scope().is_empty())
                 {
                     for (scope, entry) in pkg.dotfiles_with_scope() {
-                        entries.push(serde_json::json!({
-                            "package": pkg.name(),
-                            "environment": scope,
-                            "source": entry.source(),
-                            "target": entry.target(),
-                            "origin": "dotfiles",
-                        }));
+                        entries.push(dotfile_entry_json(pkg.name(), scope, entry, "dotfiles"));
                     }
                 }
             }
@@ -837,6 +835,57 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
     } else {
         CallToolResult::error(vec![Content::text(json)])
     }
+}
+
+/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+///
+/// Reports where content comes from without producing any of it: var names and
+/// the command string come from the package file and are references, not values.
+/// Nothing here runs a command or renders a template, so enumeration cannot leak
+/// a secret or trigger an authentication prompt.
+fn dotfile_entry_json(
+    package: &str,
+    scope: Option<&str>,
+    entry: &selfie::package::DotfileEntry,
+    origin: &str,
+) -> serde_json::Value {
+    use selfie::package::ContentSource;
+
+    let mut value = serde_json::json!({
+        "package": package,
+        "environment": scope,
+        "target": entry.target(),
+        "origin": origin,
+    });
+    let map = value.as_object_mut().expect("constructed as an object");
+
+    match entry.content_source() {
+        ContentSource::RepoFile(source) => {
+            map.insert("kind".into(), "file".into());
+            map.insert("source".into(), source.into());
+        }
+        ContentSource::Template { source, vars } => {
+            map.insert("kind".into(), "template".into());
+            map.insert("source".into(), source.into());
+            map.insert(
+                "vars".into(),
+                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
+            );
+        }
+        ContentSource::Provider(command) => {
+            map.insert("kind".into(), "command".into());
+            map.insert("command".into(), command.into());
+        }
+        ContentSource::Invalid => {
+            map.insert("kind".into(), "invalid".into());
+            map.insert(
+                "error".into(),
+                selfie::package::INVALID_CONTENT_SOURCE.into(),
+            );
+        }
+    }
+
+    value
 }
 
 #[cfg(test)]

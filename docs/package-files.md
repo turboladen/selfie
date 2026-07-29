@@ -84,24 +84,46 @@ A list of dotfile mappings that define files to deploy from your dotfiles reposi
 locations. Unlike environment-specific fields, `dotfiles` is a top-level field that applies across
 all environments.
 
-Each entry has two fields:
-
-- `source` — Relative path from the YAML file's parent directory (source files are colocated
-  alongside their package or dotfile definition)
-- `target` — Absolute destination path (supports `~` for home directory)
+Every entry has a `target` — the absolute destination path, supporting `~` for the home directory —
+plus one of three ways of saying where the content comes from.
 
 ```yaml
 dotfiles:
+  # 1. A repository file, copied as-is.
   - source: fnm/fish-conf.fish
     target: ~/.config/fish/conf.d/fnm.fish
-  - source: fnm/zsh-conf.zsh
-    target: ~/.config/zsh/conf.d/fnm.zsh
+
+  # 2. A repository file rendered as a template, with named values from commands.
+  - source: rubygems/credentials.tpl
+    target: ~/.gem/credentials
+    vars:
+      api_key: op read op://Private/rubygems/token
+      corp_token: teller get GEMSERVER_TOKEN
+
+  # 3. A command whose entire standard output is the file.
+  - command: op read op://Private/ssh-key/private
+    target: ~/.ssh/id_ed25519
 ```
+
+- `source` — Relative path from the YAML file's parent directory (source files are colocated
+  alongside their package or dotfile definition)
+- `command` — A command whose stdout becomes the whole file
+- `vars` — A map of names to commands, rendering `source` as a template
+
+Set **exactly one** of `source` or `command`. `vars` goes only with `source`: with `command` there
+is no template to render, and that combination is rejected rather than ignored.
+
+Any other key inside a dotfile entry is a parse error. Only `target` is required, so a misspelling
+would otherwise be dropped silently — writing `var:` for `vars:` would leave a valid-looking
+repository-file entry and deploy the template _unrendered_, placeholders and all, over the file it
+was meant to fill in.
 
 Dotfiles are deployed with `selfie apply`, not during `selfie package install`. This separation
 keeps installation fast and gives you explicit control over when dotfiles are written to disk.
 
-See [Dotfile Deployment](#dotfile-deployment) below for the full workflow.
+See [Dotfile Deployment](#dotfile-deployment) below for the full workflow, and
+[Provider-sourced and templated dotfiles](#provider-sourced-and-templated-dotfiles) for entries
+whose content comes from a command.
 
 #### Environment-specific dotfiles
 
@@ -469,6 +491,198 @@ file changes, selfie detects this as a conflict:
 ```
 
 Without `--yes`, conflicts are reported but the target file is left untouched.
+
+### Provider-sourced and templated dotfiles
+
+Where a config file holds a credential, the value can come from a command run at deploy time instead
+of being stored in the repository. selfie implements no secret storage of its own — it runs whatever
+command you configure, the same way it delegates install and check.
+
+#### A worked template
+
+`packages/rubygems/credentials.tpl`, committed to the repository, contains names and never values:
+
+```
+---
+:rubygems_api_key: {{ api_key }}
+https://gems.internal.corp: Bearer {{ corp_token }}
+```
+
+`packages/rubygems.yml`:
+
+```yaml
+name: rubygems
+environments:
+  macos-home:
+    install: brew install ruby
+dotfiles:
+  - source: rubygems/credentials.tpl
+    target: ~/.gem/credentials
+    vars:
+      api_key: op read op://Private/rubygems/token
+      corp_token: teller get GEMSERVER_TOKEN
+```
+
+The template names values, not stores. Two different tools contribute to one file here, which a
+single vendor's own inject command cannot express. Switching to `pass`, `vault`, or `sops` means
+changing the right-hand sides; the template is untouched. Because `vars` can appear in an
+`environments.<name>.dotfiles` block, the same template can be fed by 1Password on one machine and
+something else on another.
+
+#### Substitution rules
+
+- `{{ name }}` is replaced only when `name` is declared in `vars`. Whitespace inside the braces is
+  optional.
+- Names match `[A-Za-z_][A-Za-z0-9_]*`.
+- Any other placeholder-like text is left exactly as written, so a file that legitimately contains
+  brace syntax passes through unchanged and no escape mechanism is needed.
+- Every declared name must appear at least once in the template; an unused name is a validation
+  error. This is what catches misspellings — a typo in the template leaves that placeholder literal,
+  and the correctly-spelled declared name is then unused.
+- Substitution is **single-pass**. A value containing `{{ … }}` is not rescanned.
+- There are no conditionals, loops, includes, or expressions. This is substitution, not a templating
+  language.
+
+#### Values are substituted verbatim
+
+selfie does not escape a value for the target file's format. A value containing characters
+significant to that format can produce a malformed file, and selfie will not detect it.
+
+A value containing a line break is more than a correctness problem: because it is spliced in raw, it
+can add structure rather than merely corrupt it — in a credentials file, an extra entry naming a
+host you did not configure. Such a value produces a warning naming the binding and is then
+substituted as given, since refusing outright would break legitimate multi-line values like private
+keys.
+
+#### Working directory and output handling
+
+Both `vars` commands and a whole-file `command` run with their working directory set to the package
+file's parent directory — the same base that `source` paths resolve against. They run through a
+shell, so pipes, redirection, and `$(…)` are available.
+
+Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
+your existing target lacks it you will get a conflict on first apply. Strip it in your own command
+if you do not want it.
+
+Zero-length output is an error, for both a whole-file command and an individual binding, regardless
+of exit code. Writing an empty file over a credentials target is destructive, and empty output
+almost always means a failure that did not set a non-zero status. Whitespace-only output is content,
+not empty.
+
+`command_timeout` (default 60s, enough for a biometric prompt) applies **per command**, so an entry
+with several bindings can take longer in total.
+
+Resolved content larger than 8 MiB is rejected with an error. Note what that does and does not do:
+it bounds what selfie compares and writes, **not** what the command produces. The command's whole
+output is buffered before the check can run — as it already is for every install and check command —
+so this is not a memory bound against a genuinely unbounded provider.
+
+A failing command respects `stop_on_error`, which defaults to true, so by default a failure aborts
+the apply. When a binding fails, the error names that binding and the remaining bindings for that
+entry are not run.
+
+#### No deploy state, and what follows from it
+
+Ordinary dotfiles record a checksum of what was deployed, which is how selfie later distinguishes a
+changed repository file from a target you edited. Secret-bearing entries record **nothing**: a
+stored checksum of a credential is a confirmation oracle — anyone able to read the state file could
+test guesses against it offline.
+
+Instead the content is resolved into memory at apply time and compared with the target directly.
+Identical content is skipped, an absent target is written, and any difference is a conflict.
+
+Consequences worth knowing before you adopt this:
+
+- A rotated secret produces a conflict rather than refreshing silently.
+- Editing a template also produces a conflict, for the same reason.
+- selfie cannot tell those two apart from a target you hand-edited, and deliberately does not guess.
+- Every apply runs the commands, which may prompt for authentication. Results are never cached: a
+  cache would be a secret at rest.
+- `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
+  checking them. Checking would mean resolving, which would run your commands from a read-only
+  command.
+
+#### Deploy behavior and permissions
+
+Targets are created readable only by their owner (mode `0600` on Unix) and put in place atomically,
+so there is no window in which the content is world-readable and no interrupted write can leave a
+truncated credential.
+
+A symlink **at the target** is replaced rather than written through. This is a deliberate behavior
+change: writing through the link would send the credential wherever the link points. A symlinked
+**parent directory** is still followed.
+
+There is one case where whether the link is replaced depends on something other than the deploy
+itself. When the content already matches, selfie only rewrites the target if its permissions need
+tightening, and the permission check follows the link — so it reports on the file the link points
+at. A symlinked target whose destination is already owner-only is left completely alone and the link
+survives; one whose destination is group- or world-readable is tightened, which replaces the link
+with a regular file. Both outcomes are consistent with the rule above, but which one you get depends
+on the destination's mode rather than on anything about the link.
+
+#### What is shown, and what is not
+
+Resolved content never appears in selfie's output — not in a progress message, a log line, an error,
+or the MCP server's JSON. A conflict is reported with the target path, the command or template that
+produced the content, and a line count for each side:
+
+```
+CONFLICT  ~/.gem/credentials
+  rubygems/credentials.tpl (vars: api_key, corp_token)
+  target exists and differs from resolved output
+
+  resolved output : 3 lines
+  current target  : 12 lines
+  (content hidden)
+```
+
+Line counts are enough to tell a rotated token (1 line vs 1 line) from a hand-edited file (1 line vs
+12 lines). Command strings and var names **are** shown: they come from the package file and are
+references, not credentials.
+
+At an interactive prompt `selfie apply` offers to reveal the two values, behind its own warning and
+its own keypress. It is never the default and is never reachable by accepting one. The MCP server
+provides no interactive resolver at all, so it cannot reach that path.
+
+`--yes` / `auto_accept` does **not** apply to these entries. For an ordinary dotfile it forces the
+overwrite; for a secret-bearing one the conflict is always reported and skipped, and only an
+interactive answer can overwrite. The reason is asymmetric risk: an ordinary target that gets
+overwritten wrongly can be recovered from the repository, whereas a credential can not, because
+selfie recorded nothing about it. This matters most for non-interactive callers such as the MCP
+server, which can set the flag but has no human behind it.
+
+`--dry-run` does not run any provider or `vars` command. That means it cannot tell you whether a
+secret-bearing entry would change — knowing that needs the content, and the content needs the
+commands. It reports the entry and how many commands it is declining to run. The alternative, a
+preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
+executing operation.
+
+A dry run does still apply every check that can be made without running anything — a target that is
+not absolute, a template escaping the package directory — and reports the same refusal a real apply
+would. Because those refusals are failures, `stop_on_error` (default `true`) ends the preview at the
+first one rather than listing every remaining problem entry. That is deliberate: a preview that
+continued past an error a real apply would stop on would be describing a different run from the one
+you are about to perform. Set `stop_on_error: false` to see them all.
+
+#### Diagnostics do not carry line numbers
+
+Most package validation errors report the YAML line and column they came from. Dotfile entries do
+not: their fields are plain strings rather than the span-carrying type the rest of the schema uses,
+so a dotfile diagnostic names a field path such as `dotfiles[0].vars` instead of a location. This is
+a known gap rather than an intentional design.
+
+#### Limitations
+
+- **A command's stderr is forwarded when it fails.** A provider run with a verbose or debug flag can
+  echo secret material to stderr, and that text will appear in the failure message. It is not
+  forwarded when the command succeeds.
+- **Do not put a literal secret in a var command.** `echo hunter2` stores the secret in the package
+  file and exposes it in process listings. A binding should retrieve a value, never contain one.
+- **Resolved values are not reliably erasable from process memory.** String and buffer reallocation
+  can leave copies behind; selfie makes no scrubbing guarantee.
+- **`selfie apply` executes commands from package files.** Before this feature it only copied files.
+  `selfie validate` reports how many commands a package will run, but treat a package directory you
+  did not write as code, not as data.
 
 ### Drift Detection
 

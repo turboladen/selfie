@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use futures::StreamExt;
 use tempfile::TempDir;
 
+use test_common::FakeCommandRunner;
+
 use selfie::{
     config::SelfieConfigBuilder,
     dotfile_service::{
@@ -100,7 +102,19 @@ impl TestDirs {
     }
 
     /// Create a service backed only by the packages directory.
-    fn service(&self) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+    fn service(
+        &self,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
+    {
+        self.service_with_runner(FakeCommandRunner::new())
+    }
+
+    /// A packages-only service whose provider commands answer from `runner`.
+    fn service_with_runner(
+        &self,
+        runner: FakeCommandRunner,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
+    {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -109,13 +123,14 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        DotfileServiceImpl::new(repo, fs, config)
+        DotfileServiceImpl::new(repo, fs, runner, config)
     }
 
     /// Create a service backed by both `packages/` and `dotfiles/` directories.
     fn service_with_dotfiles(
         &self,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
+    {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -125,7 +140,8 @@ impl TestDirs {
             .build();
         let package_repo = YamlPackageRepository::new(fs, config.package_directory().clone());
         let dotfiles_repo = YamlPackageRepository::new(fs, self.dotfiles_dir.clone());
-        DotfileServiceImpl::new(package_repo, fs, config).with_dotfiles_repository(dotfiles_repo)
+        DotfileServiceImpl::new(package_repo, fs, FakeCommandRunner::new(), config)
+            .with_dotfiles_repository(dotfiles_repo)
     }
 }
 
@@ -410,13 +426,13 @@ async fn test_apply_conflict_auto_accept() {
 
 #[tokio::test]
 async fn test_apply_conflict_resolver_accept() {
-    use selfie::dotfile_service::port::{ConflictResolution, ConflictResolver};
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
     use std::sync::Arc;
 
     /// A test resolver that always accepts conflicts.
     struct AlwaysAccept;
     impl ConflictResolver for AlwaysAccept {
-        fn resolve(&self, _source: &str, _target: &str, _diff: &str) -> ConflictResolution {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
             ConflictResolution::Accept
         }
     }
@@ -472,13 +488,13 @@ async fn test_apply_conflict_resolver_accept() {
 
 #[tokio::test]
 async fn test_apply_conflict_resolver_skip() {
-    use selfie::dotfile_service::port::{ConflictResolution, ConflictResolver};
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
     use std::sync::Arc;
 
     /// A test resolver that always skips conflicts.
     struct AlwaysSkip;
     impl ConflictResolver for AlwaysSkip {
-        fn resolve(&self, _source: &str, _target: &str, _diff: &str) -> ConflictResolution {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
             ConflictResolution::Skip
         }
     }
@@ -1349,4 +1365,1240 @@ async fn test_track_for_package_fails_when_package_not_found() {
         matches!(result, OperationResult::Failure(_)),
         "Should fail when package doesn't exist"
     );
+}
+
+// ─── Secret-bearing dotfiles ────────────────────────────────────────────────
+//
+// Content that comes from a command, or from a template with `vars`, is resolved
+// at apply time, compared in memory, and never recorded. See ADR-0003.
+
+mod secret_bearing {
+    use super::*;
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::{Arc, Mutex};
+
+    /// A value distinctive enough that finding it anywhere is unambiguous.
+    const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+
+    /// Write a package whose single dotfile is a whole-file provider entry.
+    fn provider_package(package_dir: &std::path::Path, target: &str, command: &str) {
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"{command}\"\n    target: \"{target}\"\n"
+        );
+        std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    /// Write a package whose single dotfile is a template, plus the template.
+    fn template_package(
+        package_dir: &std::path::Path,
+        target: &str,
+        template_body: &str,
+        vars: &[(&str, &str)],
+    ) {
+        std::fs::create_dir_all(package_dir.join("creds")).unwrap();
+        std::fs::write(package_dir.join("creds/credentials.tpl"), template_body).unwrap();
+
+        let mut yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds/credentials.tpl\"\n    target: \"{target}\"\n    vars:\n"
+        );
+        for (name, command) in vars {
+            yaml.push_str(&format!("      {name}: \"{command}\"\n"));
+        }
+        std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    /// Assert that no event mentions `needle` anywhere in its debug rendering.
+    ///
+    /// Scans every event and every field rather than one variant's diff: a leak
+    /// added to a warning, or to a newly introduced field, has to fail this too.
+    fn assert_no_event_mentions(events: &[PackageEvent], needle: &str) {
+        for event in events {
+            let rendered = format!("{event:?}");
+            assert!(
+                !rendered.contains(needle),
+                "secret leaked into an event: {rendered}"
+            );
+        }
+    }
+
+    /// A resolver that accepts every conflict.
+    ///
+    /// Secret-bearing entries ignore `auto_accept`, so a test needing the
+    /// overwrite path has to go through a resolver — the same route a human at a
+    /// terminal takes.
+    struct AlwaysAcceptSecret;
+
+    impl ConflictResolver for AlwaysAcceptSecret {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            ConflictResolution::Accept
+        }
+    }
+
+    fn accepting() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(Arc::new(AlwaysAcceptSecret)),
+            ..Default::default()
+        }
+    }
+
+    fn state_file(dirs: &TestDirs) -> PathBuf {
+        dirs.state_dir.join("deploy-state.yml")
+    }
+
+    #[tokio::test]
+    async fn provider_content_is_deployed_to_an_absent_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_commands_run_in_the_package_directory() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"v");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            runner.calls(),
+            vec![("op read x".to_string(), dirs.package_dir.clone())],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_sync_target_is_skipped() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        // `starts_with`, not equality: a target seeded by `std::fs::write` is
+        // 0644, so this also takes the permissions-tightening branch, whose
+        // reason extends the same prefix. Both are in-sync skips, which is what
+        // this test is about; the two modes are covered separately below.
+        let skipped = events.iter().any(|e| {
+            matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. }
+                    if reason.starts_with("already in sync")
+            )
+        });
+        assert!(skipped, "expected an in-sync skip, got: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_differing_target_is_a_conflict_and_is_not_overwritten() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "hand-edited").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hand-edited",
+            "a conflict must leave the target alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_entry_records_no_deploy_state() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        // A stored checksum of a credential is a confirmation oracle: ADR-0003.
+        let state = std::fs::read_to_string(state_file(&dirs)).unwrap_or_default();
+        assert!(
+            !state.contains("credentials"),
+            "secret-bearing entries must record no deploy state, got: {state}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_repo_file_entry_still_records_deploy_state() {
+        // Proves the existing checksum path is untouched by the secret path.
+        let dirs = TestDirs::new();
+        let source_dir = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let service = dirs.service();
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let state = std::fs::read_to_string(state_file(&dirs)).unwrap();
+        assert!(state.contains("myapp/config.toml"), "got: {state}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_secret_target_is_written_owner_only_even_over_a_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "credential targets must be owner-only");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_sync_target_with_lax_permissions_is_tightened() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // The adoption path ADR-0003 names as the reason this design is safe: a
+        // machine with pre-existing config whose content already matches. Being
+        // told "already in sync" while the file stays world-readable would leave
+        // the user believing it is managed to the standard the docs promise
+        // unconditionally.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an in-sync target must still end up owner-only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            SECRET,
+            "content must be unchanged"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("permissions")
+            )),
+            "the tightening must be reported rather than done silently: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_sync_target_readable_only_by_its_group_is_still_tightened() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // 0640 leaks to the group but not to others, so a check that only looks
+        // at the "other" bits would pass it. On a shared machine the group is
+        // exactly who you are hiding a credential from.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "group-readable is not owner-only");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_sync_target_already_owner_only_is_left_completely_alone() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // The counterpart: tightening must be conditional. Rewriting a correct
+        // file on every apply would churn the inode and make "already in sync" a
+        // lie.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = std::fs::metadata(&target).unwrap().ino();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().ino(),
+            before,
+            "an already-correct target must not be rewritten"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. }
+                    if reason == "already in sync"
+            )),
+            "expected a plain in-sync skip, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_secret_target_is_replaced_not_written_through() {
+        let dirs = TestDirs::new();
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&elsewhere).unwrap(),
+            "untouched",
+            "the credential must not be written through the link"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must be replaced"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    #[tokio::test]
+    async fn non_utf8_provider_output_survives_byte_exact() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("id_ed25519");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read key");
+
+        let bytes = [0x00u8, 0xff, 0xfe, 0x0a];
+        let runner = FakeCommandRunner::new().succeeding("op read key", &bytes);
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn a_template_renders_its_bindings() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\ncorp: {{ corp }}\n",
+            &[("api_key", "op read a"), ("corp", "teller get B")],
+        );
+
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read a", SECRET.as_bytes())
+            .succeeding("teller get B", b"corp-token");
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            format!("key: {SECRET}\ncorp: corp-token\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn two_secret_entries_do_not_share_values() {
+        // Each entry's bindings must be built fresh. A binding map reused across
+        // entries would splice one entry's secret into the other's file.
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        std::fs::write(dirs.package_dir.join("creds/a.tpl"), "value: {{ va }}\n").unwrap();
+        // b.tpl references a name it does not declare — `va` belongs to the first
+        // entry. Per-entry bindings leave it verbatim; a binding map reused across
+        // entries would resolve it and splice the first entry's secret in here.
+        // The two entries must use *different* names for this to be observable at
+        // all: with a shared name the second binding simply overwrites the first.
+        std::fs::write(
+            dirs.package_dir.join("creds/b.tpl"),
+            "value: {{ vb }}\nborrowed: {{ va }}\n",
+        )
+        .unwrap();
+
+        let target_a = dirs.target_dir.join("a.conf");
+        let target_b = dirs.target_dir.join("b.conf");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds/a.tpl\"\n    target: \"{}\"\n    vars:\n      va: \"read-a\"\n  \
+             - source: \"creds/b.tpl\"\n    target: \"{}\"\n    vars:\n      vb: \"read-b\"\n",
+            target_a.display(),
+            target_b.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new()
+            .succeeding("read-a", b"AAAAAAAA")
+            .succeeding("read-b", b"BBBBBBBB");
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let a = std::fs::read_to_string(&target_a).unwrap();
+        let b = std::fs::read_to_string(&target_b).unwrap();
+        assert_eq!(a, "value: AAAAAAAA\n");
+        assert_eq!(
+            b, "value: BBBBBBBB\nborrowed: {{ va }}\n",
+            "the first entry's binding must not be visible to the second"
+        );
+        assert!(!b.contains("AAAAAAAA"), "a's value bled into b: {b}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_provider_stops_the_apply_when_stop_on_error_is_set() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"not logged in");
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "stop_on_error defaults to true, so a failed resolve aborts"
+        );
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn a_failing_provider_reports_stderr() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"not logged in");
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            format!("{events:?}").contains("not logged in"),
+            "a failure must stay diagnosable"
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_from_a_succeeding_provider_never_surfaces() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        // A provider run with a verbose flag can echo secret material to stderr.
+        let runner = FakeCommandRunner::new().succeeding_noisy(
+            "op read x",
+            b"content",
+            format!("debug: token={SECRET}").as_bytes(),
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn empty_provider_output_is_an_error_and_does_not_truncate_the_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "existing credential").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"");
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(format!("{events:?}").contains("produced no output"));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "existing credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_executes_no_command_at_all() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        // Resolving is what runs the user's commands, and a preview must not do
+        // that — it reaches a secret store and can raise a biometric prompt.
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "--dry-run must not execute a provider command: {:?}",
+            runner.calls()
+        );
+        assert!(!target.exists(), "dry run must not write");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("dry run")
+            )),
+            "the dry run should still report the entry, got: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_entry_is_refused_rather_than_guessed_at() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.tpl\"\n    command: \"op read x\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new();
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            format!("{events:?}").contains("exactly one of"),
+            "got: {events:?}"
+        );
+        assert_eq!(runner.call_count(), 0, "an invalid entry must run nothing");
+        assert!(!target.exists());
+    }
+
+    // ─── Enumeration must not resolve ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_drift_check_executes_no_binding() {
+        let dirs = TestDirs::new();
+        let provider_target = dirs.target_dir.join("provider.conf");
+        let template_target = dirs.target_dir.join("template.conf");
+
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        std::fs::write(dirs.package_dir.join("creds/t.tpl"), "key: {{ v }}\n").unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n  \
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+            provider_target.display(),
+            template_target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        // Scripted so that a resolve attempt would succeed rather than error —
+        // the assertion is that it never happens, not that it fails.
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read x", SECRET.as_bytes())
+            .succeeding("op read y", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.check_drift().await).await;
+
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "a read-only operation must not run a provider command: {:?}",
+            runner.calls()
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_drift_check_reports_secret_entries_without_counting_them_as_drift() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.check_drift().await).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+            )),
+            "secret entries should be identified, got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. })),
+            "counting them as drift would make sync status permanently dirty"
+        );
+
+        // The summary must agree: zero drift, not "one unverifiable therefore one
+        // drifted".
+        match get_operation_result(&events) {
+            Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count,
+                ..
+            })) => assert_eq!(*drift_count, 0),
+            other => panic!("expected a drift summary, got: {other:?}"),
+        }
+    }
+
+    // ─── Leak regression ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn no_event_carries_the_secret_across_a_full_apply() {
+        // Covers deploy, in-sync skip, and conflict in one run, for both a
+        // whole-file provider and a templated entry.
+        for existing in [None, Some(SECRET), Some("hand-edited")] {
+            let dirs = TestDirs::new();
+            let provider_target = dirs.target_dir.join("provider.conf");
+            let template_target = dirs.target_dir.join("template.conf");
+
+            std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+            std::fs::write(dirs.package_dir.join("creds/t.tpl"), "key: {{ v }}\n").unwrap();
+            let yaml = format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - command: \"op read x\"\n    target: \"{}\"\n  \
+                 - source: \"creds/t.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+                provider_target.display(),
+                template_target.display()
+            );
+            std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+            if let Some(content) = existing {
+                std::fs::write(&provider_target, content).unwrap();
+                std::fs::write(&template_target, content).unwrap();
+            }
+
+            let runner = FakeCommandRunner::new()
+                .succeeding("op read x", SECRET.as_bytes())
+                .succeeding("op read y", SECRET.as_bytes());
+            let service = dirs.service_with_runner(runner);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_no_event_mentions(&events, SECRET);
+
+            // Positive control: the run really did handle the secret, so this
+            // cannot be passing because nothing happened.
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    PackageEvent::DotfileDeployed { .. }
+                        | PackageEvent::DotfileSkipped { .. }
+                        | PackageEvent::DotfileConflict { .. }
+                )),
+                "no dotfile outcome was produced for existing={existing:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_secret_conflict_event_reports_structure_only() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "line one\nline two\nline three\n").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let conflict = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                _ => None,
+            })
+            .expect("expected a conflict event");
+
+        assert!(conflict.contains("lines"), "got: {conflict}");
+        assert!(conflict.contains("content hidden"), "got: {conflict}");
+        assert!(!conflict.contains(SECRET));
+        assert!(
+            conflict.contains("op read x"),
+            "the command is a reference, not a credential, and should be shown: {conflict}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_accept_does_not_overwrite_a_secret_target() {
+        // `auto_accept` is caller-settable — the MCP server exposes it to an
+        // assistant — so honoring it would let a non-interactive caller silently
+        // overwrite a hand-edited credentials file. The spec requires provider
+        // conflicts to be reported and skipped without an interactive resolver,
+        // whatever auto_accept says.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "hand-edited credential").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hand-edited credential",
+            "auto_accept must not force-overwrite a secret-bearing target"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+            "the conflict must still be reported, got: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn auto_accept_still_overwrites_an_ordinary_repo_file() {
+        // The guard above is specific to secret-bearing entries; `--yes` keeps
+        // working for ordinary dotfiles, which have a diff and a recorded state.
+        let dirs = TestDirs::new();
+        let source_dir = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"from-repo\"").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "key = \"hand-edited\"").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let service = dirs.service();
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let _ = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "key = \"from-repo\""
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_existing_but_unreadable_target_is_not_silently_overwritten() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // An unreadable file is still a file, and it may be the very credential an
+        // overwrite would destroy. Treating "cannot read" as "not there" would
+        // deploy over it with no prompt.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "existing credential").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+            "an unreadable target must be a conflict, got: {events:?}"
+        );
+
+        // Restore permissions so the content can be checked.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "existing credential",
+            "the unreadable target must not have been overwritten"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_target_conflict_says_so_rather_than_reporting_zero_lines() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "existing credential").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let summary = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                _ => None,
+            })
+            .expect("expected a conflict event");
+
+        assert!(
+            summary.contains("could not be read"),
+            "an empty-looking '0 lines' would understate what an overwrite \
+             destroys, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_source_escaping_the_package_directory_is_refused() {
+        // Apply never runs validation, so the static `..` check on `source` is not
+        // a gate. Without a runtime containment check, a crafted template source
+        // splices the contents of a file outside the package directory into a
+        // deployed dotfile.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.tpl");
+        std::fs::write(&outside, "STOLEN-FROM-OUTSIDE: {{ v }}\n").unwrap();
+
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!target.exists(), "the escaping template must not deploy");
+        assert!(
+            format!("{events:?}").contains("escapes the package directory"),
+            "expected a containment refusal, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("STOLEN-FROM-OUTSIDE"),
+            "the outside file's contents must not surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repo_file_source_escaping_the_package_directory_is_still_refused() {
+        // The pre-existing guard on the ordinary path, asserted here so moving it
+        // into a shared module cannot quietly drop it.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.conf");
+        std::fs::write(&outside, "outside content").unwrap();
+
+        let target = dirs.target_dir.join("escaped.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("../outside.conf", target.to_str().unwrap())],
+        );
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!target.exists(), "the escaping source must not deploy");
+        assert!(
+            format!("{events:?}").contains("escapes YAML base directory"),
+            "got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_relative_target_the_same_way_a_real_apply_does() {
+        // The dry-run short-circuit must sit after the checks that would refuse
+        // the entry outright, or a preview claims it "would run N commands" for
+        // something a real apply would never touch.
+        let dirs = TestDirs::new();
+        let yaml = "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                    - command: \"op read x\"\n    target: \"relative/credentials\"\n";
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(runner.call_count(), 0);
+        assert!(
+            format!("{events:?}").contains("is not absolute"),
+            "a dry run should report the same refusal a real apply would, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("would run"),
+            "must not claim it would run commands for an entry that can never deploy"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_refuses_an_escaping_template_the_same_way_a_real_apply_does() {
+        // Containment is decidable from the path alone, so the preview can and must
+        // apply it. Same rule as the relative-target case above: a dry run that says
+        // it "would run 1 command(s)" for an entry a real apply refuses outright is
+        // describing something that will never happen.
+        let dirs = TestDirs::new();
+        let outside = dirs._temp.path().join("outside.tpl");
+        std::fs::write(&outside, "STOLEN: {{ v }}\n").unwrap();
+
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner.clone());
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(runner.call_count(), 0);
+        assert!(
+            format!("{events:?}").contains("escapes the package directory"),
+            "a dry run should report the same refusal a real apply would, got: {events:?}"
+        );
+        assert!(
+            !format!("{events:?}").contains("would run"),
+            "must not claim it would run commands for an entry that can never deploy"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_on_error_still_records_what_was_already_deployed() {
+        // An abort must not discard the deploy state for files already written in
+        // the same run: the files are on disk, so dropping their record would make
+        // the next drift check report correctly-deployed files as untracked.
+        let dirs = TestDirs::new();
+
+        // Relies on packages being enumerated in sorted path order, so "aaa"
+        // is processed before "zzz" and the ordinary dotfile deploys before the
+        // provider fails. That ordering is a guarantee of the repository, pinned
+        // by `list_yaml_files_returns_them_in_sorted_order` — it is not an
+        // assumption about the filesystem. It was exactly that before, and CI on
+        // ext4 (hash order, unlike APFS) deployed "zzz" first and failed here.
+        let source_dir = dirs.package_dir.join("aaa");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+        let ok_target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "aaa",
+            &[("aaa/config.toml", ok_target.to_str().unwrap())],
+        );
+
+        let bad_target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            bad_target.display()
+        );
+        std::fs::write(dirs.package_dir.join("zzz.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"not logged in");
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "the run should still report failure"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ok_target).unwrap(),
+            "key = \"value\"",
+            "the earlier dotfile really was deployed"
+        );
+
+        let state = std::fs::read_to_string(state_file(&dirs)).unwrap_or_default();
+        assert!(
+            state.contains("aaa/config.toml"),
+            "the successful deployment must still be recorded, got: {state}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_package_is_named_rather_than_silently_dropped() {
+        // `deny_unknown_fields` makes a misspelled key a parse error, and
+        // `valid_packages()` drops parse failures. Without a warning, a package
+        // directory holding exactly one typo'd package produces a successful
+        // apply that deployed nothing — and the user's credentials dotfile
+        // quietly stops deploying, surfacing later as an auth failure nobody
+        // traces back to a typo.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    var:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let rendered = format!("{events:?}");
+        assert!(
+            rendered.contains("creds.yml"),
+            "the warning must name the file, got: {events:?}"
+        );
+        assert!(
+            rendered.contains("unparsable"),
+            "the warning must say why it was skipped, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_package_still_applies_alongside_an_unparsable_one() {
+        // The warning must not become an abort: one bad file should not stop the
+        // rest of the directory deploying.
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("broken.yml"),
+            "name: broken\ndotfiles:\n  - nope: 1\n",
+        )
+        .unwrap();
+
+        let good_target = dirs.target_dir.join("credentials");
+        provider_package(
+            &dirs.package_dir,
+            good_target.to_str().unwrap(),
+            "op read x",
+        );
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(std::fs::read_to_string(&good_target).unwrap(), SECRET);
+        assert!(
+            format!("{events:?}").contains("broken.yml"),
+            "the unparsable file must still be named: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    // ─── Leak regression: the failure path ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_failing_provider_does_not_leak_its_stdout() {
+        // The likeliest leak of all: `CommandFailure::ExecutionFailed` carries
+        // `stdout`, `PackageEvent::Completed` carries that, and the CLI prints it
+        // verbatim line by line. A provider's stdout IS the secret, so the resolve
+        // path must never route a failure through `OperationFailure::from`.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "op read x",
+            SECRET.as_bytes(),
+            b"error: vault sealed",
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+
+        // Positive control: the failure really was reported, so this is not
+        // passing because nothing happened.
+        assert!(
+            format!("{events:?}").contains("vault sealed"),
+            "the failure must stay diagnosable: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_length_output_failure_does_not_leak_stderr() {
+        // Empty stdout is an error, and on that path stderr was never a failure
+        // signal — the command exited zero — so it must not be forwarded either.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding_noisy(
+            "op read x",
+            b"",
+            format!("debug: retrieved token={SECRET}").as_bytes(),
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert!(
+            format!("{events:?}").contains("produced no output"),
+            "the empty-output error must still be reported: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_binding_does_not_leak_its_stdout() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read a")],
+        );
+
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "op read a",
+            SECRET.as_bytes(),
+            b"error: not logged in",
+        );
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert!(format!("{events:?}").contains("not logged in"));
+    }
+
+    /// A resolver that records what it was handed and always accepts.
+    #[derive(Default)]
+    struct RecordingResolver {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ConflictResolver for RecordingResolver {
+        fn resolve(&self, _target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
+            // Stands in for an interactive adapter that offers `[r]eveal`.
+            if let ConflictDetail::Secret {
+                incoming, current, ..
+            } = detail
+            {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push(String::from_utf8_lossy(incoming).into_owned());
+                seen.push(String::from_utf8_lossy(current).into_owned());
+            }
+            ConflictResolution::Accept
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resolver_receives_the_values_but_events_still_do_not() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "previous-credential").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let resolver = Arc::new(RecordingResolver::default());
+        let options = ApplyOptions {
+            conflict_resolver: Some(resolver.clone()),
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        let seen = resolver.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|v| v.contains(SECRET)),
+            "the resolver is the one place the values may go, but it saw: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|v| v.contains("previous-credential")),
+            "the resolver should see both sides, saw: {seen:?}"
+        );
+
+        assert_no_event_mentions(&events, SECRET);
+    }
 }

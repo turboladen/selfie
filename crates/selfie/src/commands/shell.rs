@@ -92,7 +92,10 @@ impl ShellCommandRunner {
     }
 
     /// Build a `Command` with the configured shell, login flag, and command string.
-    fn build_command(&self, command: &str) -> Command {
+    ///
+    /// When `working_dir` is `Some`, the child runs there; otherwise it inherits
+    /// selfie's own current directory.
+    fn build_command(&self, command: &str, working_dir: Option<&Path>) -> Command {
         let mut cmd = Command::new(&self.shell);
         if self.login {
             cmd.arg("-l");
@@ -102,7 +105,97 @@ impl ShellCommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
         cmd
+    }
+
+    /// Run a command to completion, buffering stdout and stderr.
+    ///
+    /// Shared by [`execute_with_timeout`](CommandRunner::execute_with_timeout) and
+    /// [`execute_in_dir`](CommandRunner::execute_in_dir); the only difference
+    /// between them is whether a working directory is supplied.
+    async fn run_buffered(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<CommandOutput, CommandError> {
+        let start_time = Instant::now();
+        // Report the directory the command actually ran in, not selfie's own, so a
+        // failure names the place the user configured.
+        let working_directory = working_dir.map_or_else(
+            || std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
+            Path::to_path_buf,
+        );
+
+        // Check for pre-cancellation before spawning
+        if token.is_cancelled() {
+            return Err(CommandError::Cancelled {
+                command: command.to_string(),
+                working_directory,
+            });
+        }
+
+        let mut cmd = self.build_command(command, working_dir);
+
+        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
+            command: command.to_string(),
+            working_directory: working_directory.clone(),
+            source: Arc::new(e),
+        })?;
+
+        // Take pipes and read them concurrently with wait() to avoid
+        // deadlock when the child produces more than the OS pipe buffer (~64KB).
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+        let stdout_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = child_stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child_stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
+
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.map_err(|e| CommandError::IoError {
+                    command: command.to_string(),
+                    working_directory: working_directory.clone(),
+                    source: Arc::new(e),
+                })?;
+                let stdout = stdout_handle.await.unwrap_or_default();
+                let stderr = stderr_handle.await.unwrap_or_default();
+                Ok(CommandOutput {
+                    output: Output { status, stdout, stderr },
+                    duration: start_time.elapsed(),
+                })
+            }
+            () = tokio::time::sleep(timeout) => {
+                let _ = child.kill().await;
+                Err(CommandError::Timeout {
+                    command: command.to_string(),
+                    timeout,
+                    working_directory,
+                })
+            }
+            () = token.cancelled() => {
+                let _ = child.kill().await;
+                Err(CommandError::Cancelled {
+                    command: command.to_string(),
+                    working_directory,
+                })
+            }
+        }
     }
 
     /// Return the platform-appropriate default shell path.
@@ -191,75 +284,27 @@ impl CommandRunner for ShellCommandRunner {
         timeout: Duration,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        let start_time = Instant::now();
-        let working_directory =
-            std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        self.run_buffered(command, None, timeout, token).await
+    }
 
-        // Check for pre-cancellation before spawning
-        if token.is_cancelled() {
-            return Err(CommandError::Cancelled {
-                command: command.to_string(),
-                working_directory,
-            });
-        }
-
-        let mut cmd = self.build_command(command);
-
-        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
-            command: command.to_string(),
-            working_directory: working_directory.clone(),
-            source: Arc::new(e),
-        })?;
-
-        // Take pipes and read them concurrently with wait() to avoid
-        // deadlock when the child produces more than the OS pipe buffer (~64KB).
-        let child_stdout = child.stdout.take();
-        let child_stderr = child.stderr.take();
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut out) = child_stdout {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
-            }
-            buf
-        });
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut err) = child_stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
-            }
-            buf
-        });
-
-        tokio::select! {
-            status = child.wait() => {
-                let status = status.map_err(|e| CommandError::IoError {
-                    command: command.to_string(),
-                    working_directory: working_directory.clone(),
-                    source: Arc::new(e),
-                })?;
-                let stdout = stdout_handle.await.unwrap_or_default();
-                let stderr = stderr_handle.await.unwrap_or_default();
-                Ok(CommandOutput {
-                    output: Output { status, stdout, stderr },
-                    duration: start_time.elapsed(),
-                })
-            }
-            () = tokio::time::sleep(timeout) => {
-                let _ = child.kill().await;
-                Err(CommandError::Timeout {
-                    command: command.to_string(),
-                    timeout,
-                    working_directory,
-                })
-            }
-            () = token.cancelled() => {
-                let _ = child.kill().await;
-                Err(CommandError::Cancelled {
-                    command: command.to_string(),
-                    working_directory,
-                })
-            }
-        }
+    /// Execute a command in a specific working directory
+    ///
+    /// Identical to [`execute_with_timeout`](CommandRunner::execute_with_timeout)
+    /// except that the child's current directory is `working_dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] if the command cannot be started (including when
+    /// `working_dir` does not exist), times out, or is cancelled.
+    async fn execute_in_dir(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<CommandOutput, CommandError> {
+        self.run_buffered(command, Some(working_dir), timeout, token)
+            .await
     }
 
     /// Execute a command with streaming output processing
@@ -301,7 +346,7 @@ impl CommandRunner for ShellCommandRunner {
             });
         }
 
-        let mut cmd = self.build_command(command);
+        let mut cmd = self.build_command(command, None);
 
         let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
             command: command.to_string(),
@@ -678,6 +723,111 @@ mod tests {
         let output = result.unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code(), 42);
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_runs_the_command_there() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize: on macOS the temp dir is under a symlinked /var, and `pwd`
+        // in a shell reports the resolved path.
+        let expected = dir.path().canonicalize().unwrap();
+
+        let output = runner
+            .execute_in_dir("pwd", dir.path(), Duration::from_secs(5), &token())
+            .await
+            .unwrap();
+
+        assert!(output.is_success());
+        assert_eq!(
+            output.stdout_str().trim(),
+            expected.to_string_lossy(),
+            "command should run in the directory it was given"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_resolves_relative_paths_against_that_directory() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("marker.txt"), "found-me").unwrap();
+
+        let output = runner
+            .execute_in_dir(
+                "cat marker.txt",
+                dir.path(),
+                Duration::from_secs(5),
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_success());
+        assert_eq!(output.stdout_str(), "found-me");
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_reports_that_directory_on_failure() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+
+        let error = runner
+            .execute_in_dir("echo hi", &missing, Duration::from_secs(5), &token())
+            .await
+            .unwrap_err();
+
+        match error {
+            CommandError::IoError {
+                working_directory, ..
+            } => assert_eq!(working_directory, missing),
+            other => panic!("Expected IoError for a missing working directory, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_reports_non_zero_exit_as_output_not_error() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+
+        let output = runner
+            .execute_in_dir("exit 3", dir.path(), Duration::from_secs(5), &token())
+            .await
+            .unwrap();
+
+        assert!(!output.is_success());
+        assert_eq!(output.exit_code(), 3);
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_honors_its_timeout() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = runner
+            .execute_in_dir("sleep 1", dir.path(), Duration::from_millis(10), &token())
+            .await;
+
+        assert!(matches!(result, Err(CommandError::Timeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn execute_with_timeout_still_inherits_the_current_directory() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let expected = std::env::current_dir().unwrap().canonicalize().unwrap();
+
+        let output = runner
+            .execute_with_timeout("pwd", Duration::from_secs(5), &token())
+            .await
+            .unwrap();
+
+        assert_eq!(output.stdout_str().trim(), expected.to_string_lossy());
     }
 
     #[tokio::test]

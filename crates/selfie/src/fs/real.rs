@@ -19,6 +19,10 @@ impl FileSystem for RealFileSystem {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
+    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
+        fs::read(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
     fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {
@@ -47,9 +51,9 @@ impl FileSystem for RealFileSystem {
         // be on another filesystem, making the rename non-atomic, or world-readable.
         //
         // `parent()` yields Some("") for a bare relative name. Filtering that to "."
-        // is defensive normalisation rather than load-bearing: `create_dir_all("")` is
+        // is defensive normalization rather than load-bearing: `create_dir_all("")` is
         // a no-op returning `Ok` and `tempfile_in("")` already resolves to the current
-        // directory, so removing the filter would not change behaviour today. It is
+        // directory, so removing the filter would not change behavior today. It is
         // here so the parent is always a real directory rather than relying on those
         // two coincidences holding.
         let parent = path
@@ -90,6 +94,22 @@ impl FileSystem for RealFileSystem {
         // it is a durability gap, not a correctness one.
         tmp.persist(path).map_err(|e| target_err(e.error))?;
         Ok(())
+    }
+
+    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Any group or other bit set means someone else can reach it.
+            Ok(metadata.permissions().mode() & 0o077 == 0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Ok(true)
+        }
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {

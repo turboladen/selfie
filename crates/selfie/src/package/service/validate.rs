@@ -5,14 +5,77 @@
 use crate::{
     config::SelfieConfig,
     package::{
+        Package,
         event::{
             EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
             ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
+        validate::{unreadable_template_issue, validate_template_vars},
     },
+    validation::{ValidationIssue, ValidationIssues},
 };
+
+/// Check every templated dotfile's placeholders against its declared bindings.
+///
+/// Reads each template through the repository, since `Package::validate` is a
+/// pure, offline check with no file system of its own. Never executes a binding:
+/// validation must work offline and must not trigger an authentication prompt.
+pub(super) fn validate_package_templates<PR>(package: &Package, repo: &PR) -> Vec<ValidationIssue>
+where
+    PR: PackageRepository,
+{
+    package
+        .template_dotfiles()
+        .iter()
+        .flat_map(
+            |reference| match repo.read_referenced_file(package.path(), reference.source) {
+                Ok(template) => validate_template_vars(&template, reference),
+                Err(e) => vec![unreadable_template_issue(reference, &e)],
+            },
+        )
+        .collect()
+}
+
+/// Every issue a package has: the offline checks plus the template checks that
+/// need the repository to read a file.
+pub(super) fn all_issues<PR>(package: &Package, repo: &PR, environment: &str) -> ValidationIssues
+where
+    PR: PackageRepository,
+{
+    let mut issues = package.validate(environment).issues().all_issues().to_vec();
+    issues.extend(validate_package_templates(package, repo));
+    issues.into()
+}
+
+/// Convert issues into the event payload, errors first, then warnings, then
+/// informational notices.
+///
+/// Shared with `validate_all`: one conversion, so a newly added level cannot be
+/// wired into one command and forgotten in the other.
+pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueData> {
+    let level_of = |issue: &ValidationIssue| match issue.level() {
+        crate::validation::ValidationLevel::Error => ValidationLevel::Error,
+        crate::validation::ValidationLevel::Warning => ValidationLevel::Warning,
+        crate::validation::ValidationLevel::Info => ValidationLevel::Info,
+    };
+
+    issues
+        .errors()
+        .into_iter()
+        .chain(issues.warnings())
+        .chain(issues.infos())
+        .map(|issue| ValidationIssueData {
+            category: format!("{:?}", issue.category()),
+            field: issue.field().to_string(),
+            message: issue.message().to_string(),
+            level: level_of(issue),
+            suggestion: issue.suggestion().map(std::string::ToString::to_string),
+            location: issue.location().map(str::to_string),
+        })
+        .collect()
+}
 
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
@@ -42,36 +105,13 @@ where
     // Step 2: Validate the package for the current environment
     progress.next(sender, "Validating package definition").await;
 
-    let validation_result = package_blob.package.validate(config.environment());
-    let issues = validation_result.issues();
+    let issues = &all_issues(&package_blob.package, repo, config.environment());
 
     // Step 3: Process validation results
     progress.next(sender, "Processing validation results").await;
 
     // Convert validation issues to structured data
-    let mut validation_issues = Vec::new();
-
-    for error in issues.errors() {
-        validation_issues.push(ValidationIssueData {
-            category: format!("{:?}", error.category()),
-            field: error.field().to_string(),
-            message: error.message().to_string(),
-            level: ValidationLevel::Error,
-            suggestion: error.suggestion().map(std::string::ToString::to_string),
-            location: error.location().map(str::to_string),
-        });
-    }
-
-    for warning in issues.warnings() {
-        validation_issues.push(ValidationIssueData {
-            category: format!("{:?}", warning.category()),
-            field: warning.field().to_string(),
-            message: warning.message().to_string(),
-            level: ValidationLevel::Warning,
-            suggestion: warning.suggestion().map(std::string::ToString::to_string),
-            location: warning.location().map(str::to_string),
-        });
-    }
+    let validation_issues = issue_payload(issues);
 
     // Determine overall validation status
     let status = if issues.has_errors() {

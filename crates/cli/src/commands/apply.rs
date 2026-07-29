@@ -7,8 +7,12 @@
 use std::sync::Arc;
 
 use selfie::{
+    commands::ShellCommandRunner,
+    dotfile_service::diff::unified_diff,
     dotfile_service::{
-        port::{ApplyOptions, ConflictResolution, ConflictResolver, DotfileService},
+        port::{
+            ApplyOptions, ConflictDetail, ConflictResolution, ConflictResolver, DotfileService,
+        },
         service::DotfileServiceImpl,
     },
     fs::real::RealFileSystem,
@@ -24,40 +28,169 @@ use crate::{
     event_processor::EventProcessor,
 };
 
+/// What [`InteractiveConflictResolver::reveal`] displays.
+enum RevealBody {
+    /// A unified diff between the current target and the resolved output.
+    Diff(String),
+    /// Neither value can be rendered as text; their sizes, and nothing else.
+    Binary { incoming: usize, current: usize },
+}
+
+/// Build what `reveal` shows for a secret-bearing conflict.
+///
+/// A unified diff rather than both values in full. At context radius 3 only the
+/// changed hunks are printed, so a credentials file with one rotated token among
+/// several fields puts one line into scrollback instead of the whole file twice.
+/// The reveal warning names scrollback and session capture as the residual risk
+/// of revealing at all, so showing less of the secret is a direct reduction of
+/// the risk this feature already documents — and a diff answers the question the
+/// prompt actually poses, "rotated or hand-edited?", which the line-count summary
+/// could only approximate.
+///
+/// Note this is a property of the *reveal* path, not of the event path. Events
+/// genuinely have no diff to carry, which is why the non-revealing summary
+/// exists; here both values are already in hand, so a diff is both possible and
+/// safer than a dump.
+///
+/// **Non-UTF-8 content takes neither path.** Diffing the `from_utf8_lossy` form
+/// of a binary secret produces garbage, and writing raw bytes to a terminal can
+/// emit control sequences and mangle the session. Byte counts are honest,
+/// terminal-safe, and still answer "did it change".
+///
+/// This makes revealing smaller, not safe. A single-value secret — an SSH key
+/// blob, a bare token — is one line, so its diff shows both values in full:
+/// no saving there, and no harm either.
+fn reveal_body(incoming: &[u8], current: &[u8], target: &str) -> RevealBody {
+    // Old is the target and new is the resolved output, matching the direction
+    // the repository-file conflict path already uses.
+    match (std::str::from_utf8(current), std::str::from_utf8(incoming)) {
+        (Ok(current_text), Ok(incoming_text)) => RevealBody::Diff(unified_diff(
+            current_text,
+            incoming_text,
+            target,
+            "resolved output",
+        )),
+        _ => RevealBody::Binary {
+            incoming: incoming.len(),
+            current: current.len(),
+        },
+    }
+}
+
 /// Interactive conflict resolver that prompts the user via the terminal.
 ///
-/// Shows the diff and asks whether to overwrite the target with the repo
-/// version or keep the target as-is.
+/// For an ordinary file this shows the diff and asks whether to overwrite the
+/// target. For a secret-bearing file there is no diff to show — only a summary of
+/// each side's shape — so it additionally offers to reveal the two values.
 struct InteractiveConflictResolver {
     display: DisplayManager,
 }
 
+impl InteractiveConflictResolver {
+    /// Ask how to resolve, offering reveal only when `reveal` is set.
+    ///
+    /// Accept is never the default for a secret-bearing conflict, and reveal is
+    /// never reachable by accepting a default: both require a deliberate
+    /// selection.
+    fn prompt(&self, reveal: bool) -> Option<usize> {
+        let mut items = vec![
+            "Skip (keep target as-is)",
+            "Accept (overwrite target with the new content)",
+        ];
+        if reveal {
+            items.push("Reveal the two values, then choose");
+        }
+
+        dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt("How should this conflict be resolved?")
+            .items(&items)
+            .default(0)
+            .interact()
+            .ok()
+    }
+
+    /// Show the difference between the two values, after an explicit confirmation.
+    ///
+    /// The warning names scrollback and session capture specifically: those
+    /// persist beyond selfie's control and are the actual residual risk of
+    /// showing a credential at all.
+    ///
+    /// Output goes through `DisplayManager`, which writes straight to the
+    /// terminal. It must not be routed through `tracing`, which would put the
+    /// values in the log file.
+    fn reveal(&self, incoming: &[u8], current: &[u8], target: &str) {
+        self.display.print_warning(
+            "This prints secret values to your terminal. They will remain in scrollback and \
+             in any session recording or shared screen.",
+        );
+
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt("Show values?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if !confirmed {
+            return;
+        }
+
+        match reveal_body(incoming, current, target) {
+            RevealBody::Diff(diff) => self.display.print_diff(&diff),
+            RevealBody::Binary { incoming, current } => self.display.println(format!(
+                "Content is not valid UTF-8, so it cannot be shown as a diff or printed \
+                 safely.\n  resolved output : {incoming} bytes\n  current target  : {current} bytes"
+            )),
+        }
+    }
+}
+
 impl ConflictResolver for InteractiveConflictResolver {
-    fn resolve(&self, source: &str, target: &str, diff: &str) -> ConflictResolution {
-        let short_source = shorten_path(source);
+    fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
         let short_target = shorten_path(target);
 
         // Blank line for breathing room before the conflict block
         self.display.println("");
         self.display
             .print_warning(format!("  Conflict: {short_target}"));
-        self.display
-            .print_progress(format!("{short_source} → {short_target}"));
-        self.display.print_diff(diff);
 
-        let items = &[
-            "Accept (overwrite target with repo version)",
-            "Skip (keep target as-is)",
-        ];
-        let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("How should this conflict be resolved?")
-            .items(items)
-            .default(0)
-            .interact();
+        match detail {
+            ConflictDetail::Diff { source, diff } => {
+                self.display
+                    .print_progress(format!("{} → {short_target}", shorten_path(source)));
+                self.display.print_diff(diff);
 
-        match selection {
-            Ok(0) => ConflictResolution::Accept,
-            _ => ConflictResolution::Skip,
+                match self.prompt(false) {
+                    Some(1) => ConflictResolution::Accept,
+                    _ => ConflictResolution::Skip,
+                }
+            }
+
+            ConflictDetail::Secret {
+                summary,
+                incoming,
+                current,
+            } => {
+                self.display.println(summary);
+
+                // Reveal is offered only on a terminal. Without one there is
+                // nobody to read it and no way to confirm the second prompt.
+                // Uses the display's own check, which covers stdout and stderr,
+                // rather than a fresh stdout-only probe.
+                let can_reveal = self.display.is_tty();
+
+                match self.prompt(can_reveal) {
+                    Some(1) => ConflictResolution::Accept,
+                    Some(2) => {
+                        self.reveal(incoming, current, target);
+                        // Ask again, without offering reveal a second time.
+                        match self.prompt(false) {
+                            Some(1) => ConflictResolution::Accept,
+                            _ => ConflictResolution::Skip,
+                        }
+                    }
+                    _ => ConflictResolution::Skip,
+                }
+            }
         }
     }
 }
@@ -84,7 +217,11 @@ pub(crate) async fn handle_apply(
 
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+    let runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.selfie_config().command_timeout(),
+    );
+    let mut service = DotfileServiceImpl::new(repo, fs, runner, config.selfie_config().clone());
 
     // Add standalone dotfiles repository if the directory exists
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
@@ -125,4 +262,117 @@ pub(crate) async fn handle_apply(
         .await;
 
     result.exit_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "s3cr3t-rotated-token";
+
+    /// A credentials file with one changed field among many — the driving case.
+    fn multi_field(token: &str) -> String {
+        format!(
+            "---\n\
+             :rubygems_api_key: {token}\n\
+             filler_two: unchanged-two\n\
+             filler_three: unchanged-three\n\
+             filler_four: unchanged-four\n\
+             filler_five: unchanged-five\n\
+             far_away_marker: UNCHANGED-AND-DISTANT\n"
+        )
+    }
+
+    #[test]
+    fn revealing_a_rotated_field_shows_a_diff_not_both_files() {
+        let current = multi_field("old-token");
+        let incoming = multi_field(SECRET);
+
+        let RevealBody::Diff(diff) = reveal_body(
+            incoming.as_bytes(),
+            current.as_bytes(),
+            "~/.gem/credentials",
+        ) else {
+            panic!("expected a diff for UTF-8 content");
+        };
+
+        // The change itself is shown — that is the point of revealing.
+        assert!(diff.contains(SECRET), "got: {diff}");
+        assert!(diff.contains("old-token"), "got: {diff}");
+
+        // But the untouched remainder is not. This is the whole saving: with two
+        // full dumps, every line below would appear twice in scrollback.
+        assert!(
+            !diff.contains("UNCHANGED-AND-DISTANT"),
+            "a line far from the change must not reach scrollback: {diff}"
+        );
+    }
+
+    #[test]
+    fn a_reveal_diff_is_labeled_with_the_target_and_the_resolved_output() {
+        let current = multi_field("old-token");
+        let incoming = multi_field(SECRET);
+
+        let RevealBody::Diff(diff) = reveal_body(
+            incoming.as_bytes(),
+            current.as_bytes(),
+            "~/.gem/credentials",
+        ) else {
+            panic!("expected a diff");
+        };
+
+        assert!(diff.contains("--- ~/.gem/credentials"), "got: {diff}");
+        assert!(diff.contains("+++ resolved output"), "got: {diff}");
+    }
+
+    #[test]
+    fn non_utf8_content_is_reported_by_size_rather_than_diffed_or_dumped() {
+        // An SSH key blob or similar. Diffing the lossy form produces garbage and
+        // dumping the bytes can emit terminal control sequences.
+        let incoming = [0x00u8, 0xff, 0xfe, 0x1b, b'[', b'2', b'J'];
+        let current = [0x00u8, 0xff];
+
+        let body = reveal_body(&incoming, &current, "~/.ssh/id_ed25519");
+
+        match body {
+            RevealBody::Binary {
+                incoming: i,
+                current: c,
+            } => {
+                assert_eq!(i, 7);
+                assert_eq!(c, 2);
+            }
+            RevealBody::Diff(diff) => {
+                panic!("binary content must not be diffed, got: {diff}")
+            }
+        }
+    }
+
+    #[test]
+    fn one_non_utf8_side_is_enough_to_refuse_the_diff() {
+        // Rotating a text credential to a binary one, or the reverse.
+        let incoming = [0xffu8, 0xfe];
+        let current = "readable\n";
+
+        assert!(matches!(
+            reveal_body(&incoming, current.as_bytes(), "~/.x"),
+            RevealBody::Binary { .. }
+        ));
+        assert!(matches!(
+            reveal_body(current.as_bytes(), &incoming, "~/.x"),
+            RevealBody::Binary { .. }
+        ));
+    }
+
+    #[test]
+    fn a_single_value_secret_still_reveals_both_values() {
+        // Documented as no saving and no harm: a one-line secret's diff shows
+        // both values in full. Asserted so the limitation stays visible.
+        let RevealBody::Diff(diff) = reveal_body(b"new-token\n", b"old-token\n", "~/.token") else {
+            panic!("expected a diff");
+        };
+
+        assert!(diff.contains("new-token"), "got: {diff}");
+        assert!(diff.contains("old-token"), "got: {diff}");
+    }
 }

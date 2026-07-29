@@ -903,6 +903,17 @@ mod tests {
                 self.execute(command, token).await
             }
 
+            async fn execute_in_dir(
+                &self,
+                command: &str,
+                _working_dir: &std::path::Path,
+                _timeout: std::time::Duration,
+                token: &CancellationToken,
+            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            {
+                self.execute(command, token).await
+            }
+
             async fn execute_streaming(
                 &self,
                 _command: &str,

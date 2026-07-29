@@ -50,10 +50,14 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
 /// This is the standard setup for any command that needs `DotfileService`.
 pub(crate) fn create_dotfile_service(
     config: &CliConfig,
-) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem> {
+) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner> {
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let mut service = DotfileServiceImpl::new(repo, fs, config.selfie_config().clone());
+    let runner = ShellCommandRunner::new(
+        ShellCommandRunner::default_shell(),
+        config.selfie_config().command_timeout(),
+    );
+    let mut service = DotfileServiceImpl::new(repo, fs, runner, config.selfie_config().clone());
 
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if dotfiles_dir.is_dir() {

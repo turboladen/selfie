@@ -579,6 +579,11 @@ enum FileChangeKind {
 ///
 /// Only non-deleted YAML files are validated — deleted files are obviously not
 /// parseable, and non-YAML files (dotfile sources) don't have a schema to validate.
+///
+/// Informational notices are excluded. This is a gate on pushing, and an `Info`
+/// issue is by definition not a defect — a package with a provider-sourced
+/// dotfile always carries one, so counting it here would block `sync push` for
+/// every correct package that uses the feature.
 fn validate_changed_packages(
     repo_root: &Path,
     changes: &[(PathBuf, FileChangeKind)],
@@ -646,10 +651,27 @@ fn validate_changed_packages(
             .issues()
             .all_issues()
             .iter()
+            // Positive, not negative: naming the levels that block a push means a
+            // level added later is absent here and absent from the match below,
+            // which fails the build at the one place that has to decide about it.
+            // A `!= Info` filter plus a wildcard would silently classify it as a
+            // warning and silently block every push.
+            .filter(|i| {
+                matches!(
+                    i.level(),
+                    crate::validation::ValidationLevel::Error
+                        | crate::validation::ValidationLevel::Warning
+                )
+            })
             .map(|i| PackageValidationIssue {
                 level: match i.level() {
                     crate::validation::ValidationLevel::Error => "ERROR".to_string(),
                     crate::validation::ValidationLevel::Warning => "WARN".to_string(),
+                    // Filtered out above; kept exhaustive so a new level is a
+                    // compile error rather than a silent reclassification.
+                    crate::validation::ValidationLevel::Info => {
+                        unreachable!("Info is filtered out before this map")
+                    }
                 },
                 category: format!("{:?}", i.category()),
                 field: i.field().to_string(),
@@ -1472,5 +1494,59 @@ mod tests {
         assert_eq!(drifted, vec!["/home/user/.bashrc"]);
         assert_eq!(total, 3);
         assert!(error.is_none());
+    }
+}
+
+#[cfg(test)]
+mod push_validation_tests {
+    use super::*;
+
+    fn write_package(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(format!("{name}.yml"));
+        std::fs::write(&path, body).unwrap();
+        PathBuf::from(format!("{name}.yml"))
+    }
+
+    #[test]
+    fn an_informational_notice_does_not_block_a_push() {
+        // `validate_changed_packages` fails the push on ANY issue it collects, so
+        // an informational notice reaching that list would block `sync push` for
+        // every package using a provider-sourced dotfile — which is every correct
+        // use of the feature.
+        let temp = tempfile::TempDir::new().unwrap();
+        let relative = write_package(
+            temp.path(),
+            "creds",
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - command: op read op://Private/token\n    target: ~/.creds\n",
+        );
+
+        let result =
+            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+
+        assert!(
+            result.is_ok(),
+            "an Info-only package must be pushable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_validation_error_still_blocks_a_push() {
+        // The counterpart: filtering notices must not have disarmed the gate.
+        let temp = tempfile::TempDir::new().unwrap();
+        let relative = write_package(
+            temp.path(),
+            "broken",
+            "name: broken\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: a.tpl\n    command: op read x\n    target: ~/.creds\n",
+        );
+
+        let result =
+            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+
+        assert!(
+            matches!(result, Err(SyncError::ValidationFailed { .. })),
+            "a package with a real error must still fail, got: {result:?}"
+        );
     }
 }

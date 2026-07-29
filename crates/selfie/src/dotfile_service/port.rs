@@ -18,17 +18,43 @@ pub enum ConflictResolution {
     Skip,
 }
 
+/// What a conflict resolver is given to decide with.
+///
+/// Ordinary files carry a rendered diff. Secret-bearing files carry the two
+/// values plus a summary that describes their shape without revealing either.
+///
+/// The values reach the resolver and nothing else. The resolver is an optional
+/// dependency the calling adapter injects, so an adapter that supplies none —
+/// the MCP server, for instance — cannot receive secret content at all. That is
+/// what makes an opt-in reveal safe to offer without it becoming a leak into
+/// structured output. See ADR-0003.
+pub enum ConflictDetail<'a> {
+    /// A rendered unified diff, and the repository path it came from.
+    ///
+    /// May be empty if the files are binary or unreadable.
+    Diff { source: &'a str, diff: &'a str },
+    /// The two candidate contents, plus a non-revealing structural summary.
+    ///
+    /// Borrowed rather than owned. This does not stop a resolver copying the
+    /// values — the CLI's reveal path necessarily does, to show them to a human.
+    /// What it buys is that the values are never moved wholesale across the
+    /// `'static` boundary the blocking resolver call requires, so the only copy
+    /// that exists is one an adapter took deliberately.
+    Secret {
+        summary: &'a str,
+        incoming: &'a [u8],
+        current: &'a [u8],
+    },
+}
+
 /// Port for resolving dotfile conflicts interactively.
 ///
 /// The library calls [`resolve`](ConflictResolver::resolve) when a conflict is
-/// detected. The CLI adapter can prompt the user with `dialoguer`; tests can
-/// return a fixed answer; the MCP server can return `Skip`.
+/// detected. The CLI adapter prompts the user with `dialoguer`; tests can return
+/// a fixed answer; the MCP server supplies no resolver at all.
 pub trait ConflictResolver: Send + Sync {
-    /// Decide what to do about a conflict between `source` and `target`.
-    ///
-    /// `diff` contains the unified diff string (may be empty if files are
-    /// binary or unreadable).
-    fn resolve(&self, source: &str, target: &str, diff: &str) -> ConflictResolution;
+    /// Decide what to do about the conflict at `target`.
+    fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution;
 }
 
 /// Options for dotfile apply operations
@@ -39,8 +65,13 @@ pub struct ApplyOptions {
     /// Auto-accept overwrite for conflicts (--yes flag)
     pub auto_accept: bool,
     /// Interactive conflict resolver. When set, conflicts call this instead of
-    /// emitting a `DotfileConflict` event and skipping. Ignored when
-    /// `auto_accept` is true.
+    /// emitting a `DotfileConflict` event and skipping.
+    ///
+    /// For an ordinary repository-file conflict this is ignored when
+    /// `auto_accept` is true. For a secret-bearing entry it is the **only** way
+    /// to accept an overwrite: `auto_accept` is not consulted there at all, so a
+    /// caller that supplies no resolver always gets the conflict reported and
+    /// skipped. See ADR-0003.
     pub conflict_resolver: Option<Arc<dyn ConflictResolver>>,
 }
 

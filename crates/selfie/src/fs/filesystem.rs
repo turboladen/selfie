@@ -38,6 +38,26 @@ pub trait FileSystem: Send + Sync {
     /// - Any other IO error occurs during reading
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
+    /// Read a file and return its raw bytes
+    ///
+    /// Unlike [`read_file`](FileSystem::read_file), imposes no encoding
+    /// requirement. Use this wherever the content is compared or written rather
+    /// than displayed — secret-bearing dotfile content is not guaranteed to be
+    /// UTF-8, and decoding it lossily before a comparison would report two
+    /// different files as identical.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to read
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if:
+    /// - The file does not exist
+    /// - Permission is denied to read the file
+    /// - Any other IO error occurs during reading
+    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
+
     /// Write data to a file
     ///
     /// Writes the provided data to the specified file path, creating the file
@@ -126,6 +146,30 @@ pub trait FileSystem: Send + Sync {
     /// succeed on an existing file inside a read-only directory; an atomic replace
     /// cannot, because it must create a sibling first.
     fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+
+    /// Whether a file is readable only by its owner
+    ///
+    /// Companion to [`write_file_private`](FileSystem::write_file_private), for
+    /// deciding whether an existing file already meets the standard that method
+    /// establishes. Secret-bearing content that is already correct still has to
+    /// be checked: content and permissions are independent, and a target whose
+    /// bytes happen to match may still be world-readable.
+    ///
+    /// # Platform notes
+    ///
+    /// On Unix this is exact: true when no group or other permission bit is set.
+    /// Symlinks are followed, so this reports on the file the path resolves to.
+    ///
+    /// On every other platform this returns `true`, because there are no Unix
+    /// permission bits to inspect and nothing this method could meaningfully
+    /// report or a caller meaningfully fix. Callers use it to decide whether to
+    /// tighten, so `true` — "nothing to do" — is the correct answer there, not a
+    /// claim that the file is private.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] if the file's metadata cannot be read.
+    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError>;
 
     /// Remove a file from the file system
     ///

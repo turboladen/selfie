@@ -280,6 +280,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-dotfile`, `selfie track`
 - ✅ Dotfile drift detection: `selfie dotfiles drift`
 - ✅ Dotfile listing: `selfie dotfiles list`
+- ✅ Provider-sourced and templated dotfiles: content from a command, or from a template with named
+  values, resolved at deploy time and never stored
 - ✅ Git sync: `selfie sync status/push/pull` with per-package conventional commits
 - 📋 Package groups and bulk operations (planned)
 

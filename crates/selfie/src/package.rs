@@ -22,7 +22,10 @@ pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
 pub use self::service::{InstallOptions, PackageService, SpecService};
 
 // Core package entity and related types
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_saphyr::{Location, Spanned};
@@ -111,30 +114,164 @@ impl GetPackage {
     }
 }
 
-/// A dotfile mapping from repo source to deployment target.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Where a dotfile's content comes from.
+///
+/// `Template` and `Provider` are secret-bearing: their content is produced by
+/// running user-supplied commands at apply time, is held only in memory, and is
+/// never recorded. See ADR-0003.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentSource<'a> {
+    /// A file in the package repository, copied as-is.
+    RepoFile(&'a str),
+    /// A repository file rendered by substituting named values.
+    Template {
+        source: &'a str,
+        vars: &'a BTreeMap<String, String>,
+    },
+    /// A command whose standard output is the entire content.
+    Provider(&'a str),
+    /// A shape that is not one of the three valid ones: neither `source` nor
+    /// `command` is set, both are, or `command` is combined with `vars`.
+    ///
+    /// This variant exists because **apply does not run validation**. Package
+    /// loading splits on parse failures alone (`ListPackagesOutput::valid_packages`
+    /// is `filter_map(Result::ok)`), and `selfie validate` is a separate, advisory
+    /// command. A malformed entry therefore reaches the deploy path, and every
+    /// consumer has to refuse it explicitly rather than guess at what was meant.
+    Invalid,
+}
+
+/// The single wording for "where this content comes from", shared by every
+/// consumer that has to say it: apply's events, `selfie dotfiles list`, and the
+/// MCP server's human-readable fallback.
+///
+/// Renders references only — a repository path, a command string, var *names* —
+/// never a resolved value. Nothing here runs a command or reads a template, so
+/// describing an entry can neither leak a secret nor trigger an authentication
+/// prompt. See ADR-0003.
+impl std::fmt::Display for ContentSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RepoFile(source) => f.write_str(source),
+            Self::Template { source, vars } => {
+                let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+                write!(f, "{source} (vars: {})", names.join(", "))
+            }
+            Self::Provider(command) => write!(f, "command: {command}"),
+            Self::Invalid => f.write_str(INVALID_CONTENT_SOURCE),
+        }
+    }
+}
+
+/// What to tell the user about an entry that is neither a file, a template, nor
+/// a provider. Stated once so apply, listing, and validation agree.
+pub const INVALID_CONTENT_SOURCE: &str =
+    "set exactly one of 'source' or 'command', and 'vars' only alongside 'source'";
+
+/// A dotfile mapping from a content source to a deployment target.
+///
+/// Exactly one of `source` or `command` is valid; `vars` accompanies only
+/// `source`. The fields stay as `Option`s rather than collapsing into an enum
+/// because `Package` is deserialized straight from YAML, and validation has to be
+/// able to observe "both set" and "neither set" in order to report them.
+/// [`content_source`](Self::content_source) is the abstraction over them.
+///
+/// Unknown keys are rejected. Every field here is now optional bar `target`, so
+/// without this a misspelling is silently dropped rather than caught: `var:` for
+/// `vars:` would leave a template entry looking like a plain repository file and
+/// deploy the template *unrendered* — literal `{{ api_key }}` — over a
+/// credentials target, with the content recorded in deploy state and shown in
+/// diffs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotfileEntry {
-    source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    vars: BTreeMap<String, String>,
     target: String,
 }
 
 impl DotfileEntry {
-    /// Create a new dotfile entry with source and target paths.
+    /// Create a plain repository-file entry.
     pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
-            source: source.into(),
+            source: Some(source.into()),
+            command: None,
+            vars: BTreeMap::new(),
             target: target.into(),
         }
     }
 
-    /// Get the source path (relative path within the dotfiles repository).
-    pub fn source(&self) -> &str {
-        &self.source
+    /// Get the repository source path, if this entry has one.
+    ///
+    /// `None` for a provider entry, whose content comes from a command rather
+    /// than from a file in the repository.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Get the whole-file provider command, if this entry has one.
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+
+    /// Get the variable bindings (name to command). Empty unless this entry is a
+    /// template.
+    pub fn vars(&self) -> &BTreeMap<String, String> {
+        &self.vars
     }
 
     /// Get the target path (deployment destination, may use `~` for home directory).
     pub fn target(&self) -> &str {
         &self.target
+    }
+
+    /// Where this entry's content comes from.
+    ///
+    /// Returns [`ContentSource::Invalid`] for a malformed entry rather than
+    /// guessing. See that variant's documentation for why an invalid entry can
+    /// reach a consumer at all.
+    pub fn content_source(&self) -> ContentSource<'_> {
+        match (self.source.as_deref(), self.command.as_deref()) {
+            (Some(source), None) if !self.vars.is_empty() => ContentSource::Template {
+                source,
+                vars: &self.vars,
+            },
+            (Some(source), None) => ContentSource::RepoFile(source),
+            // `vars` with `command` is rejected rather than ignored: silently
+            // discarding bindings the user wrote would deploy a file they did not
+            // ask for.
+            (None, Some(command)) if self.vars.is_empty() => ContentSource::Provider(command),
+            _ => ContentSource::Invalid,
+        }
+    }
+
+    /// How many commands `selfie apply` runs to produce this entry's content.
+    ///
+    /// Zero for a repository file. One for a provider. One per binding for a
+    /// template. Used to report apply-time execution and to say what a dry run is
+    /// declining to do.
+    pub fn command_count(&self) -> usize {
+        match self.content_source() {
+            ContentSource::Provider(_) => 1,
+            ContentSource::Template { vars, .. } => vars.len(),
+            ContentSource::RepoFile(_) | ContentSource::Invalid => 0,
+        }
+    }
+
+    /// Whether this entry's content is produced by running commands.
+    ///
+    /// Secret-bearing entries hold no deploy state and their content never enters
+    /// an event. See ADR-0003. An [`Invalid`](ContentSource::Invalid) entry is not
+    /// secret-bearing — it is not deployable at all.
+    pub fn is_secret_bearing(&self) -> bool {
+        matches!(
+            self.content_source(),
+            ContentSource::Template { .. } | ContentSource::Provider(_)
+        )
     }
 }
 
@@ -495,6 +632,148 @@ mod package_tests {
 
     use super::*;
 
+    fn entry_from_yaml(yaml: &str) -> DotfileEntry {
+        serde_saphyr::from_str(yaml).expect("dotfile entry should parse")
+    }
+
+    #[test]
+    fn plain_source_entry_is_a_repo_file() {
+        let entry = DotfileEntry::new("fnm/init.fish", "~/.config/fish/conf.d/fnm.fish");
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::RepoFile("fnm/init.fish")
+        );
+        assert!(!entry.is_secret_bearing());
+    }
+
+    #[test]
+    fn source_with_vars_is_a_template() {
+        let entry = entry_from_yaml(
+            r#"
+source: rubygems/credentials.tpl
+target: ~/.gem/credentials
+vars:
+  api_key: op read op://Private/rubygems/token
+"#,
+        );
+
+        match entry.content_source() {
+            ContentSource::Template { source, vars } => {
+                assert_eq!(source, "rubygems/credentials.tpl");
+                assert_eq!(vars["api_key"], "op read op://Private/rubygems/token");
+            }
+            other => panic!("expected Template, got {other:?}"),
+        }
+        assert!(entry.is_secret_bearing());
+    }
+
+    #[test]
+    fn command_only_entry_is_a_provider() {
+        let entry = entry_from_yaml(
+            r#"
+command: op read op://Private/ssh-key/private
+target: ~/.ssh/id_ed25519
+"#,
+        );
+
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::Provider("op read op://Private/ssh-key/private")
+        );
+        assert!(entry.is_secret_bearing());
+    }
+
+    #[test]
+    fn entry_with_both_source_and_command_is_invalid() {
+        let entry = entry_from_yaml(
+            r#"
+source: a.tpl
+command: op read x
+target: ~/.x
+"#,
+        );
+
+        assert_eq!(entry.content_source(), ContentSource::Invalid);
+        assert!(
+            !entry.is_secret_bearing(),
+            "an undeployable entry is not secret-bearing"
+        );
+    }
+
+    #[test]
+    fn entry_with_neither_source_nor_command_is_invalid() {
+        let entry = entry_from_yaml("target: ~/.x");
+        assert_eq!(entry.content_source(), ContentSource::Invalid);
+    }
+
+    #[test]
+    fn command_combined_with_vars_is_invalid_rather_than_dropping_the_vars() {
+        let entry = entry_from_yaml(
+            r#"
+command: op read x
+target: ~/.x
+vars:
+  api_key: op read y
+"#,
+        );
+
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::Invalid,
+            "bindings must not be silently discarded"
+        );
+    }
+
+    #[test]
+    fn empty_vars_map_leaves_an_entry_a_plain_repo_file() {
+        let entry = entry_from_yaml(
+            r#"
+source: bat/config
+target: ~/.config/bat/config
+vars: {}
+"#,
+        );
+
+        assert_eq!(
+            entry.content_source(),
+            ContentSource::RepoFile("bat/config")
+        );
+        assert!(!entry.is_secret_bearing());
+    }
+
+    #[test]
+    fn a_misspelled_dotfile_key_is_rejected_rather_than_silently_dropped() {
+        // Every field but `target` is optional, so a dropped key leaves a valid-
+        // looking entry: `var:` for `vars:` turns a template into a plain
+        // repository file and deploys it *unrendered* — literal `{{ api_key }}` —
+        // over a credentials target.
+        let err = serde_saphyr::from_str::<DotfileEntry>(
+            "source: creds.tpl\ntarget: ~/.gem/credentials\nvar:\n  api_key: op read x\n",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("var"), "got: {err}");
+    }
+
+    #[test]
+    fn a_plain_entry_round_trips_without_gaining_empty_fields() {
+        let entry = DotfileEntry::new("bat/config", "~/.config/bat/config");
+        let yaml = serde_saphyr::to_string(&entry).unwrap();
+
+        assert!(!yaml.contains("command"), "got: {yaml}");
+        assert!(!yaml.contains("vars"), "got: {yaml}");
+        assert_eq!(entry, serde_saphyr::from_str(&yaml).unwrap());
+    }
+
+    #[test]
+    fn a_provider_entry_round_trips() {
+        let entry = entry_from_yaml("command: op read x\ntarget: ~/.x");
+        let yaml = serde_saphyr::to_string(&entry).unwrap();
+
+        assert!(!yaml.contains("source"), "got: {yaml}");
+        assert_eq!(entry, serde_saphyr::from_str(&yaml).unwrap());
+    }
+
     #[test]
     fn dotfiles_for_environment_overrides_shared_and_adds_env_specific() {
         let package = PackageBuilder::default()
@@ -526,14 +805,14 @@ mod package_tests {
             .expect("bat entry present");
         assert_eq!(
             bat.source(),
-            "bat/work.config",
+            Some("bat/work.config"),
             "environment-specific source overrides the shared one"
         );
         assert!(
             effective
                 .iter()
                 .any(|e| e.target() == "~/.config/zscaler/config"
-                    && e.source() == "zscaler/work.conf"),
+                    && e.source() == Some("zscaler/work.conf")),
             "environment-only dotfile is added"
         );
     }
@@ -563,19 +842,19 @@ mod package_tests {
         assert!(
             scoped
                 .iter()
-                .any(|(scope, e)| scope.is_none() && e.source() == "bat/config"),
+                .any(|(scope, e)| scope.is_none() && e.source() == Some("bat/config")),
             "shared entry labeled as shared (None)"
         );
         assert!(
             scoped
                 .iter()
-                .any(|(scope, e)| *scope == Some("work") && e.source() == "bat/work.config"),
+                .any(|(scope, e)| *scope == Some("work") && e.source() == Some("bat/work.config")),
             "environment override labeled with its environment"
         );
         assert!(
             scoped
                 .iter()
-                .any(|(scope, e)| *scope == Some("work") && e.source() == "zscaler/w.conf"),
+                .any(|(scope, e)| *scope == Some("work") && e.source() == Some("zscaler/w.conf")),
             "environment-only entry labeled with its environment"
         );
     }
@@ -594,7 +873,7 @@ mod package_tests {
         let effective = package.dotfiles_for_environment("nonexistent");
 
         assert_eq!(effective.len(), 1);
-        assert_eq!(effective[0].source(), "bat/config");
+        assert_eq!(effective[0].source(), Some("bat/config"));
     }
 
     #[test]

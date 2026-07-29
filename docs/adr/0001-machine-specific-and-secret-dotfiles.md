@@ -1,10 +1,14 @@
-# 1. Per-environment and externally-sourced dotfiles
+# 0001. Per-environment and externally-sourced dotfiles
 
 Date: 2026-07-23
 
 ## Status
 
 Accepted
+
+Refined by [ADR-0003](0003-no-deploy-state-for-provider-sourced-dotfiles.md), which specifies the
+deploy-state handling deferred below, and [ADR-0004](0004-named-value-substitution-for-dotfiles.md),
+which revisits the rejection of templating for the case of a secret held within a structured file.
 
 ## Context
 

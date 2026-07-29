@@ -108,7 +108,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             let issues: Vec<Value> = validation_result
                 .issues
                 .iter()
-                .map(|i| serde_json::json!({ "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion, "location": &i.location }))
+                .map(|i| serde_json::json!({ "level": validation_level_label(&i.level), "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion, "location": &i.location }))
                 .collect();
             Some(
                 serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),
@@ -278,6 +278,21 @@ fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Val
         Some(GitFileStatus::Untracked) => Value::String("untracked".to_string()),
         Some(GitFileStatus::NotInRepo) => Value::String("not_in_repo".to_string()),
         None => Value::Null,
+    }
+}
+
+/// Label a validation issue's severity for an assistant reading the JSON.
+///
+/// Without this the three levels are indistinguishable, and an informational
+/// notice — which never makes a package invalid — reads as a defect alongside a
+/// `status` that says the package validated successfully.
+fn validation_level_label(level: &selfie::package::event::ValidationLevel) -> &'static str {
+    use selfie::package::event::ValidationLevel;
+
+    match level {
+        ValidationLevel::Error => "error",
+        ValidationLevel::Warning => "warning",
+        ValidationLevel::Info => "info",
     }
 }
 

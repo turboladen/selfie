@@ -5,7 +5,13 @@
 //! to allow different command execution strategies while maintaining a consistent interface.
 
 use std::{
-    borrow::Cow, fmt, future::Future, path::PathBuf, process::Output, sync::Arc, time::Duration,
+    borrow::Cow,
+    fmt,
+    future::Future,
+    path::{Path, PathBuf},
+    process::Output,
+    sync::Arc,
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -101,6 +107,39 @@ pub trait CommandRunner: Send + Sync {
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
+    /// Execute a command with a specific working directory and timeout
+    ///
+    /// Like [`execute_with_timeout`](CommandRunner::execute_with_timeout), but the
+    /// command runs with `working_dir` as its current directory rather than
+    /// inheriting selfie's own. Used where a command's meaning depends on where it
+    /// runs — dotfile content providers resolve against the package file's parent
+    /// directory, the same base repository sources resolve against.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The shell command to execute
+    /// * `working_dir` - Directory to run the command in
+    /// * `timeout` - Maximum duration to wait for command completion
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] if:
+    /// - `working_dir` does not exist or is not a directory (reported as
+    ///   [`CommandError::IoError`], since the shell cannot be spawned there)
+    /// - The command cannot be started (IO error)
+    /// - The command times out before completion
+    /// - The command is cancelled via `token`
+    ///
+    /// A non-zero exit is **not** an error: it is reported through
+    /// [`CommandOutput::is_success`], as with the other execution methods.
+    fn execute_in_dir(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
+
     /// Execute a command with streaming output
     ///
     /// Runs the command and streams stdout/stderr output through the provided
@@ -143,6 +182,29 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+    /// Build a `CommandOutput` from its parts.
+    ///
+    /// For test doubles that stand in for a real runner. Gated behind
+    /// `with_mocks` so that production code cannot fabricate the result of a
+    /// command that never ran.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_parts(
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
+            duration,
+        }
+    }
+
     /// Get the command's exit code
     ///
     /// Returns the exit status code of the command, or -1 if the exit code

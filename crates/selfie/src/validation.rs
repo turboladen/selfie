@@ -21,10 +21,26 @@ impl ValidationIssues {
         !self.has_errors()
     }
 
-    /// Returns true if there are any issues (errors or warnings)
+    /// Get all informational notices (neither errors nor warnings)
+    #[must_use]
+    pub fn infos(&self) -> Vec<&ValidationIssue> {
+        self.0
+            .iter()
+            .filter(|issue| issue.level == ValidationLevel::Info)
+            .collect()
+    }
+
+    /// Returns true if there is anything wrong: an error or a warning
+    ///
+    /// Informational notices are excluded. The name reads as "is anything
+    /// wrong", and a package carrying only a notice — which every package using
+    /// a provider-sourced dotfile does — is not. Counting those here would make
+    /// the first caller to trust the name treat correct packages as defective.
+    /// Use [`all_issues`](Self::all_issues) to ask whether there is anything at
+    /// all to display, and [`infos`](Self::infos) for the notices alone.
     #[must_use]
     pub fn has_issues(&self) -> bool {
-        !self.0.is_empty()
+        self.has_errors() || self.has_warnings()
     }
 
     /// Returns true if the validation has errors
@@ -138,6 +154,28 @@ impl ValidationIssue {
         }
     }
 
+    /// Create an informational notice.
+    ///
+    /// Reported alongside errors and warnings but never affects validity. Used
+    /// where the user needs to know something about a package that is not a
+    /// defect — a warning here would fire on every correct package and train
+    /// people to ignore warnings.
+    pub(super) fn info(
+        category: ValidationErrorCategory,
+        field: &str,
+        message: &str,
+        suggestion: Option<&str>,
+    ) -> Self {
+        Self {
+            category,
+            field: field.to_string(),
+            message: message.to_string(),
+            level: ValidationLevel::Info,
+            suggestion: suggestion.map(std::string::ToString::to_string),
+            location: None,
+        }
+    }
+
     /// Create a new validation error with source location
     pub(super) fn error_at(
         category: ValidationErrorCategory,
@@ -226,6 +264,9 @@ impl ValidationIssue {
 pub enum ValidationLevel {
     Error,
     Warning,
+    /// Neither a defect nor a risk: something about the package the user should
+    /// know. Does not affect whether validation passes.
+    Info,
 }
 
 /// Categories of package validation errors
@@ -255,4 +296,12 @@ pub enum ValidationErrorCategory {
     /// Path format errors
     ///
     PathFormat,
+
+    /// Something the user should know that is not a defect
+    ///
+    /// Pairs with [`ValidationLevel::Info`]. The other categories all name a
+    /// kind of mistake, and filing a notice under one of them (`InvalidValue`,
+    /// say) mislabels it in every table and JSON payload that shows the
+    /// category.
+    Advisory,
 }
