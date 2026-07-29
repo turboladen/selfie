@@ -135,8 +135,8 @@ pub enum ContentSource<'a> {
     ///
     /// This variant exists because **apply does not run validation**. Package
     /// loading splits on parse failures alone (`ListPackagesOutput::valid_packages`
-    /// is `filter_map(Result::ok)`), and `selfie validate` is a separate, advisory
-    /// command. A malformed entry therefore reaches the deploy path, and every
+    /// is `filter_map(Result::ok)`), and `selfie spec validate` is a separate,
+    /// advisory command. A malformed entry therefore reaches the deploy path, and every
     /// consumer has to refuse it explicitly rather than guess at what was meant.
     Invalid,
 }

@@ -680,9 +680,9 @@ a known gap rather than an intentional design.
   file and exposes it in process listings. A binding should retrieve a value, never contain one.
 - **Resolved values are not reliably erasable from process memory.** String and buffer reallocation
   can leave copies behind; selfie makes no scrubbing guarantee.
-- **`selfie apply` executes commands from package files.** Before this feature it only copied files.
-  `selfie validate` reports how many commands a package will run, but treat a package directory you
-  did not write as code, not as data.
+- **`selfie apply` executes commands from package files**, rather than only copying data out of
+  them. `selfie spec validate` reports how many commands a package will run, but treat a package
+  directory you did not write as code, not as data.
 
 ### Drift Detection
 

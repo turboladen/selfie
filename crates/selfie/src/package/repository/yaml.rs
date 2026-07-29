@@ -25,8 +25,6 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         Self { fs, package_dir }
     }
 
-    /// List all YAML files in a directory.
-    ///
     /// List all YAML files in a directory, in sorted path order.
     ///
     /// The sort is load-bearing, not cosmetic. `read_dir` yields entries in
