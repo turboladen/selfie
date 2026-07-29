@@ -5,7 +5,7 @@ use serde_saphyr::Location;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::{ContentSource, DotfileEntry, Package, describe_unknown_key, shadows_dotfile_field};
+use super::{DotfileEntry, Package, describe_unknown_key, shadows_dotfile_field};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -618,15 +618,24 @@ impl Package {
     /// for a single provider entry overridden on two machines, which overstates
     /// what any one `selfie apply` runs.
     ///
-    /// A refused entry contributes zero, so a package whose only dotfile has a
-    /// bad var name loses this notice entirely. That is right rather than a gap:
-    /// apply refuses the entry before resolving it, so no command runs and there
-    /// is nothing to review before applying. The var-name error is reported on
-    /// its own account by [`validate_dotfile_entry`](Self::validate_dotfile_entry).
+    /// Counts what each entry **declares**, read from its fields. **Not
+    /// [`DotfileEntry::command_count`]**, which answers apply's question and
+    /// returns zero for an entry apply would refuse: an undeployable entry still
+    /// *contains* a command to review, and correcting the defect — which
+    /// validation reports in the same breath — is enough to make it run. A notice
+    /// that appears only once a package is already deployable is no use to someone
+    /// deciding whether to trust it.
+    ///
+    /// The two counts agree for every valid entry, and
+    /// `declared_and_deployable_command_counts_agree` holds them to it.
     fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
-        let count_of = |entries: &[DotfileEntry]| -> usize {
-            entries.iter().map(DotfileEntry::command_count).sum()
-        };
+        // What the entry declares: a whole-file `command`, plus one per binding.
+        // A malformed entry carrying both is counted honestly as both.
+        fn declared(entry: &DotfileEntry) -> usize {
+            usize::from(entry.command().is_some()) + entry.vars().len()
+        }
+
+        let count_of = |entries: &[DotfileEntry]| -> usize { entries.iter().map(declared).sum() };
 
         // The shared set is the effective set for an environment that declares no
         // dotfiles of its own, so it is a candidate in its own right.
@@ -661,36 +670,47 @@ impl Package {
     /// can fetch each file through the repository and hand the contents to
     /// [`validate_template_vars`].
     ///
-    /// An entry that is not a template *at all* is omitted, which now includes
-    /// one refused by [`DotfileEntry::content_source`]. So a single bad var name
-    /// suppresses that entry's placeholder cross-check: `validate_template_vars`
-    /// never runs for it, and "declared but never used" is not reported. Nothing
-    /// important is lost — [`validate_dotfile_entry`](Self::validate_dotfile_entry)
-    /// reads `vars()` directly and still names the bad name — and the entry
-    /// cannot deploy in that state anyway, so one precise error beats two.
+    /// Selects on what the entry *looks like* — a `source` to read, plus at least
+    /// one name to check — reading those fields directly. **Do not route this
+    /// through [`DotfileEntry::content_source`].** That answers apply's question,
+    /// may this entry be deployed, and a defect which makes an entry undeployable
+    /// would then suppress this check for every other var in the same entry,
+    /// reporting one problem in a file that has two. Validation has to report
+    /// everything wrong at once: a validator that reveals defects a round at a
+    /// time invites the half-finished edit it exists to catch, in a tool that
+    /// writes to real environment configs.
+    /// [`validate_dotfile_entry`](Self::validate_dotfile_entry) reads the same
+    /// fields directly, for the same reason.
+    ///
+    /// So unknown keys and a redundant `command` are not disqualifying — neither
+    /// stops the cross-check being meaningful, and each is reported on its own
+    /// account. `command` with `vars` and no `source` is excluded, having no
+    /// template to read, as is a `source` whose only bindings arrived under a
+    /// colliding anchor, which leaves `vars` empty.
     #[must_use]
     pub fn template_dotfiles(&self) -> Vec<TemplateReference<'_>> {
+        // A `source` to read plus at least one name to check.
+        fn reference<'a>(entry: &'a DotfileEntry, field: String) -> Option<TemplateReference<'a>> {
+            let source = entry.source()?;
+            (!entry.vars().is_empty()).then(|| TemplateReference {
+                field,
+                source,
+                vars: entry.vars(),
+            })
+        }
+
         let mut refs = Vec::new();
 
         for (i, entry) in self.dotfiles.iter().enumerate() {
-            if let Ok(ContentSource::Template { source, vars }) = entry.content_source() {
-                refs.push(TemplateReference {
-                    field: format!("dotfiles[{i}]"),
-                    source,
-                    vars,
-                });
-            }
+            refs.extend(reference(entry, format!("dotfiles[{i}]")));
         }
 
         for (env_name, env) in self.environments() {
             for (i, entry) in env.dotfiles().iter().enumerate() {
-                if let Ok(ContentSource::Template { source, vars }) = entry.content_source() {
-                    refs.push(TemplateReference {
-                        field: format!("environments.{env_name}.dotfiles[{i}]"),
-                        source,
-                        vars,
-                    });
-                }
+                refs.extend(reference(
+                    entry,
+                    format!("environments.{env_name}.dotfiles[{i}]"),
+                ));
             }
         }
 
@@ -1165,6 +1185,155 @@ mod tests {
         };
 
         assert!(validate_template_vars("a: {{ x }}\nb: {{ y }}", &reference).is_empty());
+    }
+
+    #[test]
+    fn a_bad_var_name_does_not_suppress_the_unused_var_report() {
+        // Two defects in one entry, and validation must report both. If
+        // `template_dotfiles` selected on `content_source()`, this entry would not
+        // count as a template and the cross-check would never run for the *other*
+        // var — so fixing the name and re-running would be the only way to
+        // discover the second problem, which is the mistake this tool exists to
+        // catch rather than to stage.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds/t.tpl\n    target: ~/.creds\n    vars:\n      \
+             \"not-a-name\": op read a\n      forgotten: op read b\n",
+        );
+
+        // The entry is still enumerated for reading, despite being undeployable.
+        let refs = package.template_dotfiles();
+        assert_eq!(refs.len(), 1, "got: {refs:?}");
+        assert_eq!(refs[0].source, "creds/t.tpl");
+
+        // The bad name is reported on its own account.
+        let issues = package.validate("test");
+        assert!(
+            issues
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|i| i.message().contains("'not-a-name' is not valid")),
+            "got: {:?}",
+            issues.issues()
+        );
+
+        // And the cross-check still runs, so the forgotten var is reported too.
+        let unused = validate_template_vars("key: {{ api_key }}\n", &refs[0]);
+        let messages = messages(&unused);
+        assert!(
+            messages.contains("'forgotten' is declared but never used"),
+            "the other var's problem must not be hidden by the bad name, got: {messages}"
+        );
+    }
+
+    #[test]
+    fn a_valid_but_unused_var_is_still_reported() {
+        // The plain case, which already worked and must keep working: a var
+        // declared, correctly named, and never referenced — someone who meant to
+        // use it and did not finish.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds/t.tpl\n    target: ~/.creds\n    vars:\n      \
+             forgotten: op read b\n",
+        );
+
+        let refs = package.template_dotfiles();
+        assert_eq!(refs.len(), 1);
+        let messages = messages(&validate_template_vars("nothing here\n", &refs[0]));
+
+        assert!(
+            messages.contains("'forgotten' is declared but never used"),
+            "got: {messages}"
+        );
+    }
+
+    #[test]
+    fn an_entry_with_no_template_to_read_is_not_enumerated() {
+        // The boundary of "looks like a template". `command` with `vars` has no
+        // source to cross-check against, and `source` whose only bindings arrived
+        // under a colliding anchor has no names to check — `_vars` leaves `vars`
+        // empty. Both are reported elsewhere; neither belongs here.
+        for yaml in [
+            "name: c\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - command: op read a\n    target: ~/.c\n    vars:\n      a: op read a\n",
+            "name: c\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: c/t.tpl\n    target: ~/.c\n    _vars:\n      a: op read a\n",
+            "name: c\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: c/plain.conf\n    target: ~/.c\n",
+        ] {
+            assert!(
+                package_from_yaml(yaml).template_dotfiles().is_empty(),
+                "should not be enumerated: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_with_a_redundant_command_is_still_cross_checked() {
+        // `source` + `command` is a shape error, reported separately. There is
+        // still a template and still names to check, so suppressing the
+        // cross-check would hide a third defect behind the second.
+        let package = package_from_yaml(
+            "name: c\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: c/t.tpl\n    command: op read a\n    target: ~/.c\n    vars:\n      \
+             forgotten: op read b\n",
+        );
+
+        let refs = package.template_dotfiles();
+        assert_eq!(refs.len(), 1, "got: {refs:?}");
+        assert!(
+            messages(&validate_template_vars("nothing\n", &refs[0]))
+                .contains("'forgotten' is declared but never used")
+        );
+    }
+
+    #[test]
+    fn the_apply_time_command_notice_survives_a_bad_var_name() {
+        // The notice exists so someone deciding whether to trust a package they
+        // did not write can see that applying it runs code. Counting via the
+        // deploy-path classification gave this package no notice at all, even
+        // though it contains a command and would run it the moment the name is
+        // corrected.
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds/t.tpl\n    target: ~/.creds\n    vars:\n      \
+             \"not-a-name\": curl example.com | sh\n",
+        );
+
+        let infos = package.validate("test");
+        let infos = infos.issues();
+        assert!(
+            infos
+                .infos()
+                .iter()
+                .any(|i| i.message().contains("executes 1 command(s)")),
+            "got: {:?}",
+            infos.all_issues()
+        );
+    }
+
+    #[test]
+    fn declared_and_deployable_command_counts_agree() {
+        // `report_apply_time_commands` counts declared commands; `command_count`
+        // counts what apply would run. They are allowed to differ only for an
+        // entry apply refuses — for every valid shape they must agree, or the
+        // notice would misreport a package that is perfectly fine.
+        for (yaml, expected) in [
+            ("source: a.tpl\ntarget: ~/.a\n", 0),
+            ("command: op read a\ntarget: ~/.a\n", 1),
+            ("source: a.tpl\ntarget: ~/.a\nvars:\n  a: op read a\n", 1),
+            (
+                "source: a.tpl\ntarget: ~/.a\nvars:\n  a: op read a\n  b: op read b\n",
+                2,
+            ),
+        ] {
+            let entry = entry_from_yaml(yaml);
+            let declared = usize::from(entry.command().is_some()) + entry.vars().len();
+
+            assert_eq!(entry.command_count(), expected, "for {yaml}");
+            assert_eq!(declared, expected, "declared count disagrees for {yaml}");
+        }
     }
 
     #[test]

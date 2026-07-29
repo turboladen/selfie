@@ -2666,12 +2666,10 @@ mod secret_bearing {
 
     // ─── Entries refused before anything runs (selfie-n310/3c5a/kj5y) ────────
     //
-    // `DotfileEntry::content_source` returns a `Result`, so every consumer has to
-    // state what it does with a refusal. That is a compile-time nudge, not a
-    // proof: `let Ok(..) else { continue }` still builds. These tests are the
-    // guard for that residual gap — one per consumer path, each asserting the
-    // refused entry is *reported*, so a future consumer that silently drops it
-    // fails a test rather than compiling quietly.
+    // A consumer can drop a refused entry and still compile — `let Ok(..) else
+    // { continue }` builds — which would leave the user a dotfile that never
+    // deploys and no diagnostic. One test per consumer path asserts the refusal
+    // is reported, so a consumer that swallows it fails a test.
 
     /// A template whose var name cannot be substituted, plus its template file.
     ///
@@ -2697,10 +2695,10 @@ mod secret_bearing {
     #[tokio::test]
     async fn a_var_name_that_cannot_be_substituted_runs_no_command() {
         // selfie-3c5a. `template::render` cannot substitute `not-a-name`, so this
-        // entry provably cannot produce the file it describes — yet apply used to
-        // run `op read x` anyway, a REAL credential fetch that can raise a
-        // biometric or password prompt, discard the value, and deploy the
-        // placeholder verbatim over the credentials target.
+        // entry provably cannot produce the file it describes. Nothing may run for
+        // it: `op read x` is a REAL credential fetch that can raise a biometric or
+        // password prompt, and the value would be fetched, discarded, and the
+        // placeholder deployed verbatim over the credentials target.
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
         bad_var_name_package(&dirs.package_dir, target.to_str().unwrap(), "not-a-name");

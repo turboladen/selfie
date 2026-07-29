@@ -155,25 +155,18 @@ impl std::fmt::Display for ContentSource<'_> {
 
 /// Why an entry has no content source, and therefore cannot be deployed.
 ///
-/// This is an error rather than a fourth [`ContentSource`] variant because
-/// **apply does not run validation**. Package loading splits on parse failures
-/// alone (`ListPackagesOutput::valid_packages` is `filter_map(Result::ok)`), and
-/// `selfie spec validate` is a separate, advisory command, so a malformed entry
-/// reaches the deploy path intact.
+/// A malformed entry reaches the deploy path intact, because **apply does not run
+/// validation**: package loading splits on parse failures alone
+/// (`ListPackagesOutput::valid_packages` is `filter_map(Result::ok)`) and `selfie
+/// spec validate` is a separate, advisory command.
 ///
-/// As a variant it was an *affordance*: [`ContentSource`]'s `Display` had an
-/// `Invalid` arm, so a malformed entry could be printed as though it named a
-/// source, and a consumer could pattern-match past it without the compiler
-/// saying anything. Moving it into the `Err` of
-/// [`DotfileEntry::content_source`] does not make dropping it impossible — a
-/// caller can still write `let Ok(source) = … else { continue }` — but it does
-/// make every consumer *state* a decision at the point of use, and leaves the
-/// residual cases greppable rather than invisible.
+/// Refusing is the caller's decision and nothing here can force it — `let Ok(x) = …
+/// else { continue }` compiles — so **report the refusal**: dropping one leaves a
+/// dotfile that never deploys and no diagnostic. Each consumer has a test for that.
 ///
-/// Carries the reason, so a caller that refuses an entry can say which key or
-/// which name was at fault instead of reciting all three possibilities.
-/// Borrows from the entry: describing a refusal must not allocate on a path
-/// that may be hot, and the strings all outlive the call.
+/// Carries the reason, so a caller can name the key or var at fault. Borrows from
+/// the entry: describing a refusal must not allocate, and the strings outlive the
+/// call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidEntry<'a> {
     /// Neither `source` nor `command` is set, both are, or `command` is
@@ -231,12 +224,12 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 /// validate` cannot describe the same key differently.
 ///
 /// The collision message must hold for **both** readings of the key, because
-/// selfie cannot tell them apart — that ambiguity is the entire reason the key
-/// is refused. Saying "'target' is not set" was true of the misspelling and
-/// **false** of the genuine anchor, where `target: *t` is set and the user would
-/// have been told something untrue about their own file. So it names the
-/// ambiguity rather than asserting a consequence, and offers the remedy for
-/// each reading: rename it if it is an anchor, spell it correctly if it is not.
+/// selfie cannot tell them apart — that ambiguity is the entire reason the key is
+/// refused. In particular it must not say the colliding field is unset: that is
+/// true of a misspelling, and false of a genuine `_target: &t` anchor aliased by
+/// `target: *t`, whose author would be told something untrue about their own file.
+/// So it names the ambiguity and gives the remedy for each reading: rename it if
+/// it is an anchor, spell it correctly if it is not.
 pub(crate) fn describe_unknown_key(key: &str) -> String {
     if let Some(field) = key.strip_prefix('_').filter(|_| shadows_dotfile_field(key)) {
         format!(
