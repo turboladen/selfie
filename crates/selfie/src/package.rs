@@ -439,11 +439,15 @@ impl DotfileEntry {
 
     /// Where this entry's content comes from, or why it has nowhere.
     ///
-    /// The **only** accessor the deploy path uses — `source()`, `command()` and
-    /// `vars()` have no production callers outside this module — which is what
-    /// makes one fallible constructor enough to put every consumer in front of
-    /// the invalid case. See [`InvalidEntry`] for what that does and does not
-    /// guarantee.
+    /// The **only** accessor the deploy path uses, which is what makes one
+    /// fallible constructor enough to put every consumer in front of the invalid
+    /// case. See [`InvalidEntry`] for what that does and does not guarantee.
+    ///
+    /// `source()`, `command()` and `vars()` are not a way around it.
+    /// `Package::validate_dotfile_entry` is their only production caller and it
+    /// reads them deliberately: reporting "sets both" and "sets neither" needs to
+    /// observe the fields separately, which is why they stay `Option`s rather
+    /// than collapsing into an enum. Nothing that *deploys* an entry reads them.
     ///
     /// Every check here is offline: it reads the entry and nothing else. Asking
     /// where content comes from must never run a command or touch a file, or

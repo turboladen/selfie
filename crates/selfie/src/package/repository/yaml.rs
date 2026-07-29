@@ -240,10 +240,11 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
         // A save rewrites the file from the struct, dropping every key the struct
         // does not model. In a dotfile entry that key is what makes
-        // `content_source()` return `Invalid`, so writing the file would launder a
-        // refused entry into a deployable one: `var:` for `vars:` would vanish and
-        // the next apply would write the *unrendered* template — literal
-        // `{{ api_key }}` — over the target. Refuse the write instead.
+        // `content_source()` return `Err(InvalidEntry::UnknownKeys(_))`, so writing
+        // the file would launder a refused entry into a deployable one: `var:` for
+        // `vars:` — or an anchor named `_vars:` — would vanish and the next apply
+        // would write the *unrendered* template — literal `{{ api_key }}` — over
+        // the target. Refuse the write instead.
         //
         // The guard lives here rather than at the call sites because this is where
         // the key is destroyed, and a fourth caller cannot forget it. See selfie-6lz4.
@@ -1144,7 +1145,7 @@ environments:
     #[test]
     fn save_package_refuses_an_entry_carrying_an_unrecognized_key() {
         // Saving rewrites the file from the struct, which drops `var:` entirely.
-        // The entry would stop being `Invalid` and the next apply would write the
+        // The entry would stop being refused and the next apply would write the
         // unrendered template over the credentials target — so the write must not
         // happen at all. `times(0)` is the assertion that matters: refusing after
         // writing would already have destroyed the key.

@@ -19,7 +19,7 @@ use super::template;
 use crate::commands::CommandRunner;
 use crate::commands::runner::truncate_stderr;
 use crate::fs::filesystem::FileSystem;
-use crate::package::{ContentSource, DotfileEntry};
+use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
 use crate::paths::is_within;
 
 /// Upper bound on resolved content.
@@ -118,11 +118,17 @@ pub(crate) fn check_resolvable(entry: &DotfileEntry, base_dir: &Path) -> Result<
         // A provider has no path to contain, and a repository file is not
         // resolved here at all.
         Ok(ContentSource::Provider(_) | ContentSource::RepoFile(_)) => Ok(()),
-        // Spelled out rather than folded into a catch-all: an entry that cannot
-        // deploy is refused by `handle_apply` before this module is reached, so
-        // there is nothing left to decide — but the next reason a `content_source`
-        // can fail should have to be looked at here rather than swallowed by `_`.
-        Err(_) => Ok(()),
+        // An entry that cannot deploy is refused by `handle_apply` before this
+        // module is reached, so there is nothing left to decide here.
+        //
+        // The variants are named rather than matched with `Err(_)` so that claim
+        // has to be re-checked when a new one appears: a reason that is *not*
+        // refused upstream would need a decision here, and `_` would silently
+        // make it "resolvable". Naming them costs a line and turns that into a
+        // build failure.
+        Err(InvalidEntry::Shape | InvalidEntry::UnknownKeys(_) | InvalidEntry::VarName(_)) => {
+            Ok(())
+        }
     }
 }
 
