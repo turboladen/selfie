@@ -79,43 +79,6 @@ mod tests {
     }
 
     #[test]
-    fn test_non_zero_exit_error_contains_full_context() {
-        let error = CommandError::NonZeroExit {
-            command: "false".to_string(),
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "Command failed".to_string(),
-            working_directory: PathBuf::from("/home/user"),
-            execution_duration: Duration::from_millis(500),
-        };
-
-        // Test error message content
-        let error_message = error.to_string();
-        assert!(error_message.contains("false"));
-        assert!(error_message.contains("exit code 1"));
-
-        // Test that all context is accessible
-        match error {
-            CommandError::NonZeroExit {
-                command,
-                exit_code,
-                stdout,
-                stderr,
-                working_directory,
-                execution_duration,
-            } => {
-                assert_eq!(command, "false");
-                assert_eq!(exit_code, 1);
-                assert_eq!(stdout, "");
-                assert_eq!(stderr, "Command failed");
-                assert_eq!(working_directory, PathBuf::from("/home/user"));
-                assert_eq!(execution_duration, Duration::from_millis(500));
-            }
-            _ => panic!("Expected NonZeroExit error"),
-        }
-    }
-
-    #[test]
     fn test_command_error_debug_output_includes_context() {
         let error = CommandError::Timeout {
             command: "debug-test-command".to_string(),

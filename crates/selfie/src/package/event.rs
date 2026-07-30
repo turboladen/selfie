@@ -1270,16 +1270,6 @@ impl From<crate::package::port::PackageError> for OperationFailure {
 impl From<crate::commands::runner::CommandError> for OperationFailure {
     fn from(err: crate::commands::runner::CommandError) -> Self {
         match err {
-            crate::commands::runner::CommandError::NonZeroExit {
-                command,
-                exit_code,
-                stderr,
-                ..
-            } => OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-                command,
-                exit_code: Some(exit_code),
-                stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
-            }),
             crate::commands::runner::CommandError::IoError { command, .. } => {
                 OperationFailure::CommandError(CommandFailure::CommandNotFound { command })
             }

@@ -286,20 +286,6 @@ pub enum CommandError {
         source: Arc<std::io::Error>,
     },
 
-    /// Command executed but returned a non-zero exit code
-    ///
-    /// No runner constructs this today: a non-zero exit is reported through
-    /// [`CommandOutput::is_success`] instead.
-    #[error("Command failed with exit code {exit_code}: {command}")]
-    NonZeroExit {
-        command: String,
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-        working_directory: PathBuf,
-        execution_duration: Duration,
-    },
-
     /// Command was cancelled via a cancellation token
     #[error("Command cancelled: {command}")]
     Cancelled {
@@ -362,9 +348,9 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 ///
 /// # Why `Debug` is derived
 ///
-/// Deliberately, and unlike `ResolvedContent` or [`CommandError::NonZeroExit`]'s
-/// stdout. Those are never forwarded, so their `Debug` is a pure exit worth
-/// closing by hand. This value is text selfie forwards on purpose, and
+/// Deliberately, and unlike `ResolvedContent`. That is never forwarded, so its
+/// `Debug` is a pure exit worth closing by hand. This value is text selfie
+/// forwards on purpose, and
 /// `.claude/rules/secrets.md` prescribes scanning an event's `Debug` output for
 /// a secret literal. A hand-written `Debug` printing `<N bytes>` would hide
 /// forwarded stderr from that scan, so a secret that reaches stderr later would
