@@ -3,7 +3,9 @@
 pub mod runner;
 pub mod shell;
 
-pub use runner::{BoundedText, CommandError, CommandOutput, CommandRunner, OutputChunk};
+pub use runner::{
+    BoundedText, CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream,
+};
 pub use shell::ShellCommandRunner;
 
 #[cfg(feature = "with_mocks")]

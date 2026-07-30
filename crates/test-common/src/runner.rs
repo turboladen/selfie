@@ -10,15 +10,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use selfie::commands::{CommandError, CommandOutput, CommandRunner, OutputChunk};
+use selfie::commands::{CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream};
 use tokio_util::sync::CancellationToken;
 
 /// What a scripted command does when run.
 #[derive(Debug, Clone)]
-struct Response {
-    exit_code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+enum Response {
+    /// The command ran and produced this.
+    Output {
+        exit_code: i32,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    /// The command did not produce usable output, and the runner says why.
+    Error(CommandError),
 }
 
 /// A `CommandRunner` that answers from a script and records every call.
@@ -42,13 +47,41 @@ impl FakeCommandRunner {
     pub fn succeeding(mut self, command: &str, stdout: &[u8]) -> Self {
         self.responses.insert(
             command.to_string(),
-            Response {
+            Response::Output {
                 exit_code: 0,
                 stdout: stdout.to_vec(),
                 stderr: Vec::new(),
             },
         );
         self
+    }
+
+    /// Script a command the runner refuses to report output for.
+    ///
+    /// For the failures that are not a non-zero exit: a pipe that could not be
+    /// read to the end, a timeout, a cancellation. These cannot be provoked from
+    /// a scripted exit code, and they are the cases where a caller must not treat
+    /// a buffer as the command's answer.
+    #[must_use]
+    pub fn erroring(mut self, command: &str, error: CommandError) -> Self {
+        self.responses
+            .insert(command.to_string(), Response::Error(error));
+        self
+    }
+
+    /// Script a command whose stdout pipe dies part-way through being read.
+    ///
+    /// The shape of `selfie-ql8m`: the command itself is fine, and what selfie
+    /// buffered is a prefix of its output rather than the whole of it.
+    #[must_use]
+    pub fn stdout_read_failing(self, command: &str) -> Self {
+        let error = CommandError::OutputReadFailed {
+            command: command.to_string(),
+            working_directory: PathBuf::from("."),
+            stream: OutputStream::Stdout,
+            source: Arc::new(std::io::Error::other("pipe died mid-read")),
+        };
+        self.erroring(command, error)
     }
 
     /// Script a command that succeeds while also writing to stderr.
@@ -58,7 +91,7 @@ impl FakeCommandRunner {
     pub fn succeeding_noisy(mut self, command: &str, stdout: &[u8], stderr: &[u8]) -> Self {
         self.responses.insert(
             command.to_string(),
-            Response {
+            Response::Output {
                 exit_code: 0,
                 stdout: stdout.to_vec(),
                 stderr: stderr.to_vec(),
@@ -75,7 +108,7 @@ impl FakeCommandRunner {
     pub fn failing_with_stdout(mut self, command: &str, stdout: &[u8], stderr: &[u8]) -> Self {
         self.responses.insert(
             command.to_string(),
-            Response {
+            Response::Output {
                 exit_code: 1,
                 stdout: stdout.to_vec(),
                 stderr: stderr.to_vec(),
@@ -89,7 +122,7 @@ impl FakeCommandRunner {
     pub fn failing(mut self, command: &str, stderr: &[u8]) -> Self {
         self.responses.insert(
             command.to_string(),
-            Response {
+            Response::Output {
                 exit_code: 1,
                 stdout: Vec::new(),
                 stderr: stderr.to_vec(),
@@ -117,11 +150,12 @@ impl FakeCommandRunner {
             .push((command.to_string(), working_dir.to_path_buf()));
 
         match self.responses.get(command) {
-            Some(response) => Ok(command_output(
-                response.exit_code,
-                response.stdout.clone(),
-                response.stderr.clone(),
-            )),
+            Some(Response::Output {
+                exit_code,
+                stdout,
+                stderr,
+            }) => Ok(command_output(*exit_code, stdout.clone(), stderr.clone())),
+            Some(Response::Error(error)) => Err(error.clone()),
             None => Err(CommandError::IoError {
                 command: command.to_string(),
                 working_directory: working_dir.to_path_buf(),

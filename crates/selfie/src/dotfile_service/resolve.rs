@@ -258,6 +258,18 @@ where
 /// and not enforced by the error type — unlike `CommandFailure::ExecutionFailed`,
 /// whose field *is* a `BoundedText`. A new failure exit added to this function
 /// has to call `bound` itself; nothing will stop it if it does not.
+///
+/// A command that ran fine but whose output could not be read to the end fails
+/// here too, as [`CommandError::OutputReadFailed`](crate::commands::CommandError).
+/// That matters more on this path than anywhere else in selfie, and it matters at
+/// **both** of this function's call sites:
+///
+/// - For a provider, a truncated read is a truncated credential, and the
+///   `MAX_CONTENT_BYTES` cap is a *maximum* — a short buffer sails under it.
+/// - For a var binding it is worse: a prefix of a credential is still non-empty,
+///   so the `is_empty` check passes, and truncation only makes the rendered file
+///   *smaller*, so the cap on the render passes too. Nothing downstream of here
+///   can tell a truncated binding from a short one.
 async fn run_capture<CR: CommandRunner>(
     command: &str,
     base_dir: &Path,
@@ -271,7 +283,11 @@ async fn run_capture<CR: CommandRunner>(
         .map_err(|e| BoundedText::bound(e.to_string().as_bytes()).into_string())?;
 
     if output.is_success() {
-        Ok(output.stdout().to_vec())
+        // Consumed rather than borrowed-and-copied: `stdout().to_vec()` left the
+        // provider's whole output alive twice at peak, and on this path that
+        // output is a credential. One buffer is also one thing to zeroize later
+        // rather than two.
+        Ok(output.into_stdout())
     } else {
         Err(BoundedText::bound(output.stderr()).into_string())
     }
@@ -301,6 +317,8 @@ mod tests {
     struct FakeRunner {
         /// command -> (exit code, stdout, stderr)
         responses: std::collections::HashMap<String, (i32, Vec<u8>, Vec<u8>)>,
+        /// Commands whose output cannot be read to the end.
+        read_failing: std::collections::HashSet<String>,
         calls: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>,
     }
 
@@ -322,6 +340,18 @@ mod tests {
         fn with(mut self, command: &str, stdout: &[u8]) -> Self {
             self.responses
                 .insert(command.to_string(), (0, stdout.to_vec(), Vec::new()));
+            self
+        }
+
+        /// The command runs, but its stdout pipe dies part-way through.
+        fn read_failing(command: &str) -> Self {
+            let mut this = Self::default();
+            this.read_failing.insert(command.to_string());
+            this
+        }
+
+        fn also_read_failing(mut self, command: &str) -> Self {
+            self.read_failing.insert(command.to_string());
             self
         }
 
@@ -365,6 +395,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((command.to_string(), working_dir.to_path_buf()));
+
+            if self.read_failing.contains(command) {
+                return Err(CommandError::OutputReadFailed {
+                    command: command.to_string(),
+                    working_directory: working_dir.to_path_buf(),
+                    stream: crate::commands::OutputStream::Stdout,
+                    source: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
+                });
+            }
 
             let (code, stdout, stderr) = self
                 .responses
@@ -691,6 +730,46 @@ mod tests {
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
 
         assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_provider_whose_output_could_not_be_read_is_an_error() {
+        // Mechanism only. The harm this prevents — a truncated credential
+        // reaching a file — is asserted at the apply level, in
+        // `tests/dotfile_service_tests.rs`, because that is where a write
+        // happens and where this test would not notice one.
+        let runner = FakeRunner::read_failing("op read x");
+        let entry = provider_entry("op read x", "~/.gem/credentials");
+
+        let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
+
+        assert!(matches!(err, ResolveError::CommandFailed { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_binding_whose_output_could_not_be_read_is_an_error() {
+        // The second call site of `run_capture`, and the less guarded one: a
+        // truncated binding is non-empty, so `EmptyBinding` does not catch it,
+        // and truncation shrinks the render, so the size cap does not either.
+        let runner = FakeRunner::succeeding("op read a", b"AAA").also_read_failing("teller get B");
+        let entry = template_entry(
+            "creds.tpl",
+            &[("api_key", "op read a"), ("corp", "teller get B")],
+            "~/.gem/credentials",
+        );
+
+        let err = resolve(
+            &entry,
+            &fs_with_template("key: {{ api_key }}\ncorp: {{ corp }}\n"),
+            &runner,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            ResolveError::BindingFailed { ref name, .. } => assert_eq!(name, "corp"),
+            other => panic!("expected BindingFailed, got: {other}"),
+        }
     }
 
     #[tokio::test]
