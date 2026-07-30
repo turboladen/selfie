@@ -310,15 +310,19 @@ impl CommandRunner for ShellCommandRunner {
     /// Execute a command with streaming output processing
     ///
     /// Runs the command and streams stdout/stderr output through the provided
-    /// callback as it becomes available. This allows real-time processing of
+    /// channel as it becomes available. This allows real-time processing of
     /// command output, which is useful for long-running commands or when
     /// providing user feedback.
+    ///
+    /// A chunk is dropped rather than blocking the read loop when the receiver
+    /// falls behind, so the channel is best-effort; the returned
+    /// [`CommandOutput`] always holds the whole output.
     ///
     /// # Arguments
     ///
     /// * `command` - The shell command to execute
     /// * `timeout` - Maximum duration to wait for completion
-    /// * `callback` - Function called with each chunk of output
+    /// * `output_sender` - Channel sender each chunk of output is sent to
     ///
     /// # Errors
     ///
@@ -326,7 +330,6 @@ impl CommandRunner for ShellCommandRunner {
     /// - The command cannot be started (IO error)
     /// - The command times out before completion
     /// - Output stream handling fails
-    /// - The callback function encounters an error
     async fn execute_streaming(
         &self,
         command: &str,
@@ -437,17 +440,18 @@ impl CommandRunner for ShellCommandRunner {
     }
 }
 
-/// Handle the result of reading a chunk with real-time streaming callback
+/// Handle the result of reading a chunk with real-time streaming
 ///
 /// Processes the result of an async read operation, updating the full output
-/// buffer and calling the callback immediately for real-time streaming.
+/// buffer and sending the chunk immediately for real-time streaming. The send
+/// is non-blocking: a chunk is dropped if the channel is full.
 ///
 /// # Arguments
 ///
 /// * `result` - Result of the read operation
 /// * `full_output` - Buffer to accumulate complete output
 /// * `buffer` - Read buffer containing the latest chunk
-/// * `output_sender` - Mutable sender channel for streaming chunks
+/// * `output_sender` - Sender channel for streaming chunks
 /// * `output_type` - Function to wrap chunks as stdout or stderr
 ///
 /// # Returns
