@@ -23,6 +23,9 @@ These are cheap, they apply everywhere, and each one is here because skipping it
   exits immediately and reports no checks. Wait for the expected count first.
 - **Issue IDs must be looked up, never recalled.** Four of four bead IDs cited from memory in a PR
   description were wrong. `bd list` or `bd search`, then grep the output.
+- **Your context's copy of `CLAUDE.md` and `.claude/rules/*` is a snapshot from session start**, not
+  the tree, and subagents inherit it. Four agents reported a CLAUDE.md claim corrected hours earlier
+  by a merged PR. Before calling any doc or rule stale, read it: `git show <ref>:<path>`.
 
 Before reporting a negative result — "it isn't there", "the gate fails", "no test covers this" —
 confirm it a second way. Two of this session's accusations were withdrawn after doing so.
@@ -48,6 +51,13 @@ else's name.
 Better still, `git commit -- <paths>`. It commits exactly what you name and leaves another writer's
 index alone; plain staging does not, and a concurrently staged deletion will otherwise ride your
 commit.
+
+`git commit --amend -- <paths>` rebuilds the commit from the parent tree plus only those paths, so
+it **silently drops deletions** the original commit made. Use `git add -- <paths>` then a bare
+`--amend`.
+
+Never `|| true` a `git switch`/`checkout`. It turns a failed branch switch into silently operating
+on the wrong branch, and a following `reset --hard` then lands there.
 
 To commit to a different branch while someone else holds the working tree, use
 `git worktree add <scratch> <branch>` rather than switching branches under them.
