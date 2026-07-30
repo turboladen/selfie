@@ -535,9 +535,15 @@ fn join_read(
 /// Build the finished [`CommandOutput`], or the first read failure.
 ///
 /// Split out of `run_buffered` so the step that decides whether a command's
-/// output is trustworthy can be tested directly. Testing it only through the
-/// runner leaves this wiring uncovered: the mechanism tests below would still
-/// pass if a caller went back to ignoring what [`join_read`] returns.
+/// output is trustworthy can be tested directly, on inputs a real child process
+/// cannot be made to produce on demand.
+///
+/// **That makes this function's own logic testable; it does not cover the call
+/// site.** Going back to `unwrap_or_default()` where `run_buffered` calls this
+/// would still fail no test: reaching it needs a genuine pipe failure from a
+/// real child, and the tests that exercise the consumers substitute a fake
+/// runner and never construct a `ShellCommandRunner` at all. Read the tests
+/// below as covering the decision, not the wiring into it.
 ///
 /// stdout is checked first because it is the stream every consumer makes a
 /// decision from — an executable path, a credential, a check verdict, a source
@@ -664,7 +670,11 @@ mod tests {
             buf: &mut tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
             if !self.bytes.is_empty() {
-                let taken = std::mem::take(&mut self.bytes);
+                // Only what fits: `put_slice` panics past the remaining capacity,
+                // which today's 7-byte fixtures never reach but a realistic one
+                // would. The rest is handed over on the next poll.
+                let n = self.bytes.len().min(buf.remaining());
+                let taken: Vec<u8> = self.bytes.drain(..n).collect();
                 buf.put_slice(&taken);
                 return std::task::Poll::Ready(Ok(()));
             }
@@ -683,14 +693,28 @@ mod tests {
         Ok(Err(std::io::Error::other("pipe died")))
     }
 
+    /// Serializes the panic-hook swap below.
+    ///
+    /// The hook is process-global and the lib test binary runs tests in parallel,
+    /// so two callers can interleave their take/set/restore and leave the
+    /// silencing hook installed for the rest of the run. That cannot cause a
+    /// false pass, but it would swallow the panic output of some later genuine
+    /// failure, which is a trap for whoever hits it.
+    ///
+    /// `tokio`'s mutex rather than `std`'s because the guarded region spans the
+    /// `.await` on the spawned task, which is exactly what `std`'s must not do.
+    static PANIC_HOOK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A real `JoinError` from a task that panicked with `payload`.
     async fn joined_panic(payload: &'static str) -> JoinedRead {
         // The default hook would print the payload to the test log, which for the
         // leak test below is the very thing under examination.
+        let guard = PANIC_HOOK.lock().await;
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let joined = tokio::spawn(async move { panic!("{payload}") }).await;
         std::panic::set_hook(previous);
+        drop(guard);
         joined.map(|()| Ok(Vec::new()))
     }
 
