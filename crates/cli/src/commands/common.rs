@@ -44,20 +44,45 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     YamlPackageRepository::new(fs, config.package_directory().clone())
 }
 
+/// Build the command runner every CLI service uses.
+///
+/// The one place the CLI decides what shell runs a user's commands. It used to be
+/// decided per construction site: of this crate's three, the two that built a
+/// dotfile service picked `/bin/sh` and the one that built a package service
+/// picked a login shell — so the same package behaved one way under
+/// `selfie package install` and another under `selfie apply`. A login shell
+/// sources the user's profile, which is where `SSH_AUTH_SOCK`, `OP_*` and PATH
+/// additions are usually *set* rather than exported, and it is what makes a
+/// command written in fish or zsh syntax work at all.
+///
+/// `crates/cli/clippy.toml` makes the *shell choice* a build error: `new` and
+/// `default_shell` are disallowed crate-wide with no exemptions, so a non-login
+/// runner cannot be constructed here at all — including inside this function.
+/// It does not prevent a second site from calling `login_shell`; that would need
+/// an `#[expect]` here, which would also stop clippy noticing if *this* function
+/// went back to `/bin/sh`. See the comment in `clippy.toml` for the measurement.
+fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
+    ShellCommandRunner::login_shell(config.command_timeout())
+}
+
 /// Create a `DotfileServiceImpl` with the packages repo and, if the configured
 /// `dotfiles_directory` exists on disk, an additional dotfiles repo.
 ///
 /// This is the standard setup for any command that needs `DotfileService`.
 pub(crate) fn create_dotfile_service(
     config: &CliConfig,
+    cancellation_token: CancellationToken,
 ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner> {
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
-    let runner = ShellCommandRunner::new(
-        ShellCommandRunner::default_shell(),
-        config.selfie_config().command_timeout(),
+    let runner = create_command_runner(config);
+    let mut service = DotfileServiceImpl::new(
+        repo,
+        fs,
+        runner,
+        config.selfie_config().clone(),
+        cancellation_token,
     );
-    let mut service = DotfileServiceImpl::new(repo, fs, runner, config.selfie_config().clone());
 
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if dotfiles_dir.is_dir() {
@@ -71,9 +96,12 @@ pub(crate) fn create_dotfile_service(
 /// Create a `SyncServiceImpl` with `GixGitAdapter` and `DotfileService`.
 ///
 /// This is the standard setup for any command that needs `SyncService`.
-pub(crate) fn create_sync_service(config: &CliConfig) -> impl SyncService {
+pub(crate) fn create_sync_service(
+    config: &CliConfig,
+    cancellation_token: CancellationToken,
+) -> impl SyncService {
     let git = GixGitAdapter;
-    let dotfile_service = create_dotfile_service(config);
+    let dotfile_service = create_dotfile_service(config, cancellation_token);
     SyncServiceImpl::new(git, dotfile_service, config.selfie_config().clone())
 }
 
@@ -85,6 +113,7 @@ pub(crate) async fn handle_track_standalone(
     file: &str,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if !dotfiles_dir.is_dir() {
@@ -99,7 +128,7 @@ pub(crate) async fn handle_track_standalone(
         return 1;
     }
 
-    let service = create_dotfile_service(config);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.track_standalone(name, file).await;
 
     let processor = EventProcessor::new(display.clone());
@@ -120,8 +149,9 @@ pub(crate) async fn handle_track_for_package(
     file: &str,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_dotfile_service(config);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.track_for_package(package_name, file).await;
 
     let processor = EventProcessor::new(display.clone());
@@ -261,7 +291,7 @@ pub(crate) fn create_package_service(
     cancellation_token: CancellationToken,
 ) -> impl PackageService + SpecService {
     let repo = create_package_repository(config);
-    let command_runner = ShellCommandRunner::login_shell(config.command_timeout());
+    let command_runner = create_command_runner(config);
     PackageServiceImpl::new(
         repo,
         command_runner,

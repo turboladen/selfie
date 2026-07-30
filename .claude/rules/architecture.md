@@ -56,11 +56,24 @@ decide how to display information about that event to the user in the current UI
 
 ## MCP server (`selfie-mcp`)
 
-The MCP server (`crates/mcp-server/`) is a second driving adapter alongside the CLI. Key differences
-from the CLI:
+The MCP server (`crates/mcp-server/`) is a second driving adapter alongside the CLI.
 
-- Uses `ShellCommandRunner::login_shell()` (not `default_shell()`) to source the user's login
-  profile, since GUI-launched processes don't inherit terminal PATH.
+**Not a difference: the shell.** Both adapters use `ShellCommandRunner::login_shell()` to source the
+user's login profile — the MCP server because a GUI-launched process doesn't inherit terminal PATH,
+the CLI because provider commands and install commands need the same environment however they are
+invoked. This was listed here as an MCP-vs-CLI difference and never was one:
+`create_package_service` has always used a login shell. The CLI builds its runner in
+`commands::common::create_command_runner`, and `crates/cli/clippy.toml` disallows `new` and
+`default_shell` crate-wide with **no** exemptions — so a non-login runner is a build error anywhere
+in `selfie-cli`, including inside that function. `login_shell` is deliberately _not_ disallowed:
+listing it would force an `#[expect]` on `create_command_runner`, and a function-wide `#[expect]`
+would also suppress the lint on `new`/`default_shell` inside it, letting the deciding function
+silently revert to `/bin/sh`. The enforced invariant is the shell, not the number of call sites.
+`selfie`'s own tests and `test-common` still use `default_shell()` deliberately, wanting a
+deterministic `/bin/sh` rather than the developer's profile.
+
+Key differences from the CLI:
+
 - Recovers `HOME` env var via `getpwuid` if not set (macOS GUI apps may not set it).
 - Uses `event_collector::collect_events` to convert an `EventStream` into an `EventCollectorResult`
   for structured JSON.

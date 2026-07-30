@@ -3,6 +3,7 @@
 //! This module handles the `selfie package track-dotfile <pkg> <file>` CLI
 //! command, which adds a config file to an existing package's dotfiles list.
 
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{commands::common, config::CliConfig, display_manager::DisplayManager};
@@ -13,7 +14,8 @@ pub(crate) async fn handle_track_dotfile(
     file: &str,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     info!("Adding '{}' to package '{}' dotfiles", file, package_name);
-    common::handle_track_for_package(package_name, file, config, display).await
+    common::handle_track_for_package(package_name, file, config, display, cancellation_token).await
 }

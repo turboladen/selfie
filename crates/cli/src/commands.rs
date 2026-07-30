@@ -59,9 +59,10 @@ pub(crate) async fn dispatch_command(
     debug!("Dispatching command: {:?}", command);
 
     match command {
-        ClapCommands::Apply(args) => handle_apply(args, config, &display).await,
+        ClapCommands::Apply(args) => handle_apply(args, config, &display, cancellation_token).await,
         ClapCommands::Dotfiles(dotfiles_cmd) => {
-            dispatch_dotfiles_command(&dotfiles_cmd.command, config, &display).await
+            dispatch_dotfiles_command(&dotfiles_cmd.command, config, &display, cancellation_token)
+                .await
         }
         ClapCommands::Spec(spec_cmd) => {
             dispatch_spec_command(&spec_cmd.command, config, display, cancellation_token).await
@@ -71,9 +72,11 @@ pub(crate) async fn dispatch_command(
                 .await
         }
         ClapCommands::Sync(sync_cmd) => {
-            dispatch_sync_command(&sync_cmd.command, config, &display).await
+            dispatch_sync_command(&sync_cmd.command, config, &display, cancellation_token).await
         }
-        ClapCommands::Track { file } => track::handle_track(file, config, &display).await,
+        ClapCommands::Track { file } => {
+            track::handle_track(file, config, &display, cancellation_token).await
+        }
         ClapCommands::Config(config_cmd) => {
             dispatch_config_command(&config_cmd.command, config, display, fs)
         }
@@ -157,7 +160,7 @@ async fn dispatch_package_command(
 ) -> i32 {
     debug!("Handling package command: {:?}", command);
 
-    let service = create_package_service(config, cancellation_token);
+    let service = create_package_service(config, cancellation_token.clone());
 
     match command {
         PackageSubcommands::Install {
@@ -191,7 +194,14 @@ async fn dispatch_package_command(
             package::status::handle_status(&service, package_name, config, &display).await
         }
         PackageSubcommands::TrackDotfile { package_name, file } => {
-            package::track_dotfile::handle_track_dotfile(package_name, file, config, &display).await
+            package::track_dotfile::handle_track_dotfile(
+                package_name,
+                file,
+                config,
+                &display,
+                cancellation_token,
+            )
+            .await
         }
     }
 }
@@ -201,14 +211,17 @@ async fn dispatch_dotfiles_command(
     command: &DotfilesSubcommands,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Handling dotfiles command: {:?}", command);
 
     match command {
-        DotfilesSubcommands::Drift => dotfiles::drift::handle_drift(config, display).await,
+        DotfilesSubcommands::Drift => {
+            dotfiles::drift::handle_drift(config, display, cancellation_token).await
+        }
         DotfilesSubcommands::List => dotfiles::list::handle_list(config, display),
         DotfilesSubcommands::Track { name, file } => {
-            dotfiles::track::handle_track(name, file, config, display).await
+            dotfiles::track::handle_track(name, file, config, display, cancellation_token).await
         }
     }
 }
@@ -218,11 +231,14 @@ async fn dispatch_sync_command(
     command: &SyncSubcommands,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     debug!("Handling sync command: {:?}", command);
 
     match command {
-        SyncSubcommands::Status => sync::status::handle_status(config, display).await,
+        SyncSubcommands::Status => {
+            sync::status::handle_status(config, display, cancellation_token).await
+        }
         SyncSubcommands::Push {
             batch,
             message,
@@ -235,9 +251,9 @@ async fn dispatch_sync_command(
                 yes: *yes,
                 include_ungrouped: *include_ungrouped,
             };
-            sync::push::handle_push(&args, config, display).await
+            sync::push::handle_push(&args, config, display, cancellation_token).await
         }
-        SyncSubcommands::Pull => sync::pull::handle_pull(config, display).await,
+        SyncSubcommands::Pull => sync::pull::handle_pull(config, display, cancellation_token).await,
     }
 }
 

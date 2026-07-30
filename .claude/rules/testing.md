@@ -48,8 +48,13 @@ through and nobody learns.
 
 Run one mutation per invocation, in a `git archive` copy with its own `CARGO_TARGET_DIR`, assert the
 mutation's anchor before substituting, distinguish a rustc error from a test failure, and assert
-cargo actually printed `Compiling selfie v`. A mutation that does not compile must be reported as
-never having run, not counted as caught.
+cargo actually built the crate — `Compiling selfie v` **or** `Checking selfie v`. A mutation that
+does not compile must be reported as never having run, not counted as caught.
+
+Match **both** verbs, not just the first: `cargo test` prints `Compiling`, but `cargo clippy` and
+`cargo check` print `Checking`. A detector looking only for `Compiling` reports every
+clippy-verified mutation as never having run — which this file's own wording caused, on a run whose
+clippy output contained a real gate failure. Do not "simplify" it back to one verb.
 
 ## Ordering
 

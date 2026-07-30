@@ -1,6 +1,7 @@
 //! Handler for `selfie sync push`.
 
 use console::style;
+use tokio_util::sync::CancellationToken;
 
 use selfie::{
     package::event::{OperationResult, OperationSuccess, PackageEvent},
@@ -28,8 +29,9 @@ pub(crate) async fn handle_push(
     args: &PushArgs,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_sync_service(config);
+    let service = create_sync_service(config, cancellation_token);
     let use_colors = config.use_colors();
 
     let options = PushOptions {

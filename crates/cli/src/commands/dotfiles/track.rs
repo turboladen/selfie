@@ -7,6 +7,7 @@
 use selfie::{
     fs::real::RealFileSystem, namespace, package::repository::yaml::YamlPackageRepository,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
@@ -21,6 +22,7 @@ pub(crate) async fn handle_track(
     file: &str,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     info!("Tracking dotfile '{}' as '{}'", file, name);
 
@@ -37,5 +39,5 @@ pub(crate) async fn handle_track(
         return 1;
     }
 
-    common::handle_track_standalone(name, file, config, display).await
+    common::handle_track_standalone(name, file, config, display, cancellation_token).await
 }

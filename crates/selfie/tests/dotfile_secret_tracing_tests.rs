@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use tempfile::TempDir;
 use test_common::FakeCommandRunner;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::MakeWriter;
 
 use selfie::{
@@ -109,7 +110,13 @@ async fn no_tracing_record_contains_a_resolved_secret() {
     let runner = FakeCommandRunner::new()
         .succeeding("op read x", SECRET.as_bytes())
         .succeeding("op read y", SECRET.as_bytes());
-    let service = DotfileServiceImpl::new(repo, RealFileSystem, runner, config);
+    let service = DotfileServiceImpl::new(
+        repo,
+        RealFileSystem,
+        runner,
+        config,
+        CancellationToken::new(),
+    );
 
     let events: Vec<PackageEvent> = service
         .apply_all(ApplyOptions::default())
