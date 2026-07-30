@@ -1289,11 +1289,17 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             //
             // `OutputReadFailed` was checked against that requirement when it was
             // added: alongside the command it renders the stream that failed and
-            // an `io::Error`, which is either the OS's own message or, for a
-            // reader task that did not finish, a fixed `&'static str`. The
-            // `JoinError` itself is dropped rather than wrapped, because a panic
-            // payload is produced by the task holding the command's bytes and can
-            // be derived from them.
+            // an `io::Error`, which is the OS's own message for the failed read.
+            // It carries no output bytes — whatever had been buffered when the
+            // read failed is dropped rather than reported.
+            //
+            // It once also had to render a reader *task* that did not finish, and
+            // substituted a fixed `&'static str` for the `JoinError` because a
+            // panic payload is produced by the task holding the command's bytes
+            // and can be derived from them. Those tasks are gone: `collect` in
+            // `commands::shell` reads both pipes inline, so no `JoinError` is
+            // reachable from this variant. See that function on why a `spawn`
+            // must not be reintroduced there without restoring the guard.
             crate::commands::runner::CommandError::Cancelled { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
             | crate::commands::runner::CommandError::StdoutSpawn(_)
