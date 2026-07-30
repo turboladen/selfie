@@ -36,14 +36,15 @@ pub enum OutputChunk {
 /// (shell commands, mock execution, etc.) and to enable comprehensive testing.
 /// It provides both buffered and streaming execution modes with timeout support.
 ///
-/// A non-zero exit is **not** an error for any method here: it is reported
-/// through [`CommandOutput::is_success`]. The `# Errors` sections below list
-/// only the ways a command fails to run to completion.
+/// A non-zero exit is **not** an error for the `execute*` methods: it is
+/// reported through [`CommandOutput::is_success`], so their `# Errors` sections
+/// list only the ways a command fails to run to completion.
 ///
-/// Every method buffers a command's entire output in memory, and nothing bounds
-/// it — the streaming methods accumulate the output as well as relaying it. A
-/// size check applied by a caller, such as the dotfile content cap, therefore
-/// bounds what selfie compares and writes, not what it allocates.
+/// Those methods buffer a command's entire output in memory, and nothing bounds
+/// it — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
+/// output as well as relaying it. A size check applied by a caller, such as the
+/// dotfile content cap, therefore bounds what selfie compares and writes, not
+/// what it allocates.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait CommandRunner: Send + Sync {
     /// Check if a command executable exists on `PATH`
