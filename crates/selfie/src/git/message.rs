@@ -142,6 +142,10 @@ impl std::fmt::Display for GitMessage {
 /// the whole token would take the `@` in the *path* and render the host as
 /// `https://***b`, destroying the one part of the message worth reading.
 ///
+/// **Every authority in a token is redacted, not just the first** — one token
+/// can hold two URLs, as `url.<base>.insteadOf` values do. See
+/// [`redact_token`] for the two leaks that scoping to the first one caused.
+///
 /// # What is deliberately not covered
 ///
 /// Stated rather than implied, because a redaction that looks complete is worse
@@ -159,7 +163,10 @@ impl std::fmt::Display for GitMessage {
 ///   authority is cut at that `/`, the `@` falls outside it, and the token
 ///   passes through untouched. Also not reachable from a valid remote, but
 ///   [`GitMessage::new`] wraps gix errors too, so it is not purely theoretical.
-/// - **Over-redaction, accepted.** `git@github.com` becomes `***@github.com`
+/// - **Over-redaction, accepted.** In a token with no scheme the redaction can
+///   only start at the token itself, so everything before the `@` is treated as
+///   userinfo — `url.<token>@internal:…` loses its `url.` config-key prefix
+///   along with the credential. `git@github.com` becomes `***@github.com`
 ///   and the address in git's "please tell me who you are" is redacted too.
 ///   Keeping those would mean deciding some usernames are safe, which is the
 ///   same fails-open allowlist refused above; it has to be refused in both
@@ -191,39 +198,86 @@ fn redact_credentials(text: &str) -> String {
     out
 }
 
-/// Redact the userinfo of one whitespace-delimited token.
+/// Redact the userinfo of **every** authority in one whitespace-delimited token.
 ///
 /// Surrounding punctuation is left alone, so git's single-quoted URLs survive
 /// as `'http://***@host:8731':` rather than being mangled into unreadability.
+///
+/// # Why this loops
+///
+/// One token can hold more than one URL, and an earlier version stopped after
+/// the first authority — appending everything past it verbatim. That leaked
+/// two ways, and neither was in the uncovered list:
+///
+/// - `https://host/redirect?to=https://user:TOKEN@other/repo` — the first
+///   authority (`host`) has no `@`, so the whole token was returned untouched
+///   and the second URL's credential survived **in full**.
+/// - `https://proxy@host/https://user:TOKEN@real/r` — the first authority was
+///   redacted and the second was not.
+///
+/// A single embedded URL is not exotic: `url.<base>.insteadOf` is the standard
+/// way to inject a credential-bearing remote, and its value is one token
+/// containing two URLs. Scanning to the end of the token is what closes it.
 fn redact_token(token: &str) -> Cow<'_, str> {
-    // The authority starts after `://`, or at the token start for scp-style
-    // (`user@host:path`) and bare `user:pass@host`.
-    let authority_start = token.find("://").map_or(0, |i| i + 3);
+    let mut out: Option<String> = None;
+    // How much of `token` has already been copied into `out`.
+    let mut copied_to = 0;
+    // The token may *open* with an authority — scp-style `user@host:path`, or a
+    // bare `user:pass@host`. This candidate is unconditional: gating it on the
+    // token containing no `://` anywhere missed `user@host:https://elsewhere/`,
+    // where the search succeeded on the later scheme and the leading credential
+    // was never examined at all.
+    let mut authority_start = 0;
 
-    // …and ends at the first `/` after that, which begins the path.
-    let authority_end = token[authority_start..]
-        .find('/')
-        .map_or(token.len(), |i| authority_start + i);
+    loop {
+        // An authority ends at the first `/` after its start, which begins the
+        // path. For the opening candidate of a `scheme://…` token that lands
+        // inside the `://` itself, leaving `scheme:` — which holds no `@`, so
+        // the candidate simply finds nothing and the scheme pass below does the
+        // work.
+        let authority_end = token[authority_start..]
+            .find('/')
+            .map_or(token.len(), |i| authority_start + i);
 
-    // The last `@` at an index *below* `authority_end` — never `rfind` over the
-    // whole token. Last rather than first so that a password containing an `@`
-    // is redacted whole instead of leaving its tail behind.
-    let Some(offset) = token[authority_start..authority_end].rfind('@') else {
-        return Cow::Borrowed(token);
-    };
-    let at = authority_start + offset;
+        // The last `@` at an index *below* `authority_end` — never `rfind` over
+        // the whole token, which would take an `@` from the path and drag the
+        // host into the redaction. Last rather than first so a password
+        // containing an `@` goes whole instead of leaving its tail behind.
+        if let Some(offset) = token[authority_start..authority_end].rfind('@') {
+            let at = authority_start + offset;
 
-    // An empty userinfo (`https://@host`) has nothing to hide, and rewriting it
-    // to `***@host` would invent a credential that was never there.
-    if at == authority_start {
-        return Cow::Borrowed(token);
+            // An empty userinfo (`https://@host`) has nothing to hide, and
+            // rewriting it to `***@host` would invent a credential that was
+            // never there.
+            if at > authority_start {
+                let buffer = out.get_or_insert_with(|| String::with_capacity(token.len()));
+                buffer.push_str(&token[copied_to..authority_start]);
+                buffer.push_str(REDACTION);
+                copied_to = at;
+            }
+        }
+
+        // Advance from this authority's *start*, not from `authority_end`: for
+        // `https://…` the first `/` sits inside the `://` itself, so resuming
+        // after it would skip the very scheme being looked for.
+        //
+        // Each step moves forward by at least three bytes, so this terminates.
+        // The next start also always exceeds `copied_to`: a `://` carries a `/`,
+        // so `authority_end` of this pass is at most one past that `:`, and the
+        // next start is two beyond it.
+        authority_start = match token[authority_start..].find("://") {
+            Some(i) => authority_start + i + 3,
+            None => break,
+        };
     }
 
-    Cow::Owned(format!(
-        "{}{REDACTION}{}",
-        &token[..authority_start],
-        &token[at..]
-    ))
+    match out {
+        Some(mut buffer) => {
+            buffer.push_str(&token[copied_to..]);
+            Cow::Owned(buffer)
+        }
+        None => Cow::Borrowed(token),
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +363,76 @@ mod tests {
             redact_credentials("https://someone@host/a@b"),
             "https://***@host/a@b"
         );
+    }
+
+    /// Two URLs in one whitespace-delimited token, the first *without* a
+    /// credential. A scan that stopped at the first authority returned this
+    /// token untouched and leaked the second credential in full — it did, and
+    /// a reviewer caught it rather than a test.
+    #[test]
+    fn redacts_a_credential_url_embedded_after_a_path() {
+        let out = redact_credentials(&format!(
+            "https://host/redirect?to=https://user:{TOKEN}@other/repo"
+        ));
+
+        assert_secret_free(&out, TOKEN, "a redacted git message");
+        assert_eq!(out, "https://host/redirect?to=https://***@other/repo");
+    }
+
+    /// The same gap with a credential in *both* authorities: stopping after the
+    /// first redacted one and forwarded the other.
+    #[test]
+    fn redacts_every_authority_in_a_single_token() {
+        let out = redact_credentials(&format!(
+            "https://proxy@host/https://user:{TOKEN}@real/r.git"
+        ));
+
+        assert_secret_free(&out, TOKEN, "a redacted git message");
+        assert_eq!(out, "https://***@host/https://***@real/r.git");
+    }
+
+    /// `url.<base>.insteadOf` is the standard way to inject a credential-bearing
+    /// remote, and its value is one token holding two URLs. A gix config error
+    /// echoing it reaches [`GitMessage::new`].
+    #[test]
+    fn redacts_an_insteadof_style_configuration_value() {
+        let out = redact_credentials(&format!(
+            "url.https://x:{TOKEN}@host/.insteadOf=https://host/"
+        ));
+
+        assert_secret_free(&out, TOKEN, "a redacted git message");
+        assert_eq!(out, "url.https://***@host/.insteadOf=https://host/");
+    }
+
+    /// A credential in a *bare* authority that is followed, in the same token,
+    /// by an unrelated `scheme://`. Looking for the opening authority only when
+    /// the token held no `://` at all meant the search succeeded on the later
+    /// scheme and this credential was never examined — the token came back
+    /// byte-for-byte unchanged. Found by review, not by a test.
+    #[test]
+    fn redacts_a_bare_authority_followed_by_a_later_scheme() {
+        let out = redact_credentials(&format!("{TOKEN}@evil.example:https://good.example/"));
+
+        assert_secret_free(&out, TOKEN, "a redacted git message");
+        assert_eq!(out, "***@evil.example:https://good.example/");
+    }
+
+    /// The same gap in its realistic dress: an scp-style `insteadOf` base, whose
+    /// value is a plain URL.
+    ///
+    /// Note the `url.` config-key prefix goes with the userinfo. A bare
+    /// authority has no scheme to anchor on, so the redaction can only start at
+    /// the token, and everything before the `@` is treated as userinfo. That is
+    /// the documented over-redaction tradeoff, and the safe direction: telling a
+    /// config-key prefix apart from a username means deciding which text before
+    /// an `@` is harmless, which is the fails-open guess this module refuses to
+    /// make.
+    #[test]
+    fn redacts_an_scp_style_insteadof_base() {
+        let out = redact_credentials(&format!("url.{TOKEN}@internal:.insteadOf=https://host/"));
+
+        assert_secret_free(&out, TOKEN, "a redacted git message");
+        assert_eq!(out, "***@internal:.insteadOf=https://host/");
     }
 
     #[test]
