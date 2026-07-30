@@ -249,9 +249,9 @@ impl CommandRunner for ShellCommandRunner {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out (exceeds default timeout)
-    /// - Any other execution error occurs
+    /// - The command is cancelled via `token`
     async fn execute(
         &self,
         command: &str,
@@ -275,9 +275,9 @@ impl CommandRunner for ShellCommandRunner {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
-    /// - The shell returns an error executing the command
+    /// - The command is cancelled via `token`
     async fn execute_with_timeout(
         &self,
         command: &str,
@@ -295,7 +295,8 @@ impl CommandRunner for ShellCommandRunner {
     /// # Errors
     ///
     /// Returns [`CommandError`] if the command cannot be started (including when
-    /// `working_dir` does not exist), times out, or is cancelled.
+    /// `working_dir` does not exist), fails part-way through, times out, or is
+    /// cancelled.
     async fn execute_in_dir(
         &self,
         command: &str,
@@ -315,8 +316,9 @@ impl CommandRunner for ShellCommandRunner {
     /// providing user feedback.
     ///
     /// A chunk is dropped rather than blocking the read loop when the receiver
-    /// falls behind, so the channel is best-effort; the returned
-    /// [`CommandOutput`] always holds the whole output.
+    /// falls behind, and dropped outright once the receiver is gone, so the
+    /// channel is best-effort; the returned [`CommandOutput`] always holds the
+    /// whole output.
     ///
     /// # Arguments
     ///
@@ -327,8 +329,9 @@ impl CommandRunner for ShellCommandRunner {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
+    /// - The command is cancelled via `token`
     /// - Output stream handling fails
     async fn execute_streaming(
         &self,
@@ -444,7 +447,8 @@ impl CommandRunner for ShellCommandRunner {
 ///
 /// Processes the result of an async read operation, updating the full output
 /// buffer and sending the chunk immediately for real-time streaming. The send
-/// is non-blocking: a chunk is dropped if the channel is full.
+/// is non-blocking: a chunk is dropped if the channel is full or its receiver
+/// is gone.
 ///
 /// # Arguments
 ///

@@ -76,8 +76,9 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - Command execution times out (implementation-dependent default)
+    /// - The command is cancelled via `token`
     fn execute(
         &self,
         command: &str,
@@ -97,8 +98,9 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
+    /// - The command is cancelled via `token`
     fn execute_with_timeout(
         &self,
         command: &str,
@@ -125,7 +127,7 @@ pub trait CommandRunner: Send + Sync {
     /// Returns [`CommandError`] if:
     /// - `working_dir` does not exist or is not a directory (reported as
     ///   [`CommandError::IoError`], since the shell cannot be spawned there)
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
     /// - The command is cancelled via `token`
     fn execute_in_dir(
@@ -143,9 +145,10 @@ pub trait CommandRunner: Send + Sync {
     /// or when real-time feedback is needed.
     ///
     /// Chunks are delivered on a best-effort basis: an implementation may drop a
-    /// chunk rather than block when the receiver falls behind, so what arrives
-    /// on the channel is not guaranteed to be the whole output. The returned
-    /// [`CommandOutput`] holds all of it.
+    /// chunk rather than block when the receiver falls behind, and drops one
+    /// outright once the receiver is gone, so what arrives on the channel is not
+    /// guaranteed to be the whole output. The returned [`CommandOutput`] holds
+    /// all of it.
     ///
     /// # Arguments
     ///
@@ -156,8 +159,10 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
+    /// - The command is cancelled via `token`
+    /// - Stdout or stderr cannot be captured from the child
     fn execute_streaming(
         &self,
         command: &str,
