@@ -382,10 +382,7 @@ mod tests {
         let result = collect_events(Box::pin(stream::iter(events))).await;
         let json = serde_json::to_string(&result.data).unwrap();
 
-        assert!(
-            !json.contains(SECRET),
-            "a failed command's stderr reached the MCP payload:\n{json}"
-        );
+        test_common::assert_secret_free(&json, SECRET, "the MCP JSON payload");
         // Control: the failure was rendered at all, and stays diagnosable.
         assert!(!result.success);
         assert!(

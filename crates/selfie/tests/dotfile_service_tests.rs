@@ -1409,17 +1409,17 @@ mod secret_bearing {
         std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
     }
 
-    /// Assert that no event mentions `needle` anywhere in its debug rendering.
+    /// Assert that no event reproduces `secret`, in any rendering.
     ///
     /// Scans every event and every field rather than one variant's diff: a leak
     /// added to a warning, or to a newly introduced field, has to fail this too.
-    fn assert_no_event_mentions(events: &[PackageEvent], needle: &str) {
+    /// *Which* renderings count is `test_common::secrets`' decision, not this
+    /// call site's — see that module for what they are and what they miss.
+    #[track_caller]
+    fn assert_no_event_mentions(events: &[PackageEvent], secret: impl AsRef<[u8]>) {
+        let secret = secret.as_ref();
         for event in events {
-            let rendered = format!("{event:?}");
-            assert!(
-                !rendered.contains(needle),
-                "secret leaked into an event: {rendered}"
-            );
+            test_common::assert_secret_free(&format!("{event:?}"), secret, "an event");
         }
     }
 
@@ -2088,7 +2088,7 @@ mod secret_bearing {
 
         assert!(conflict.contains("lines"), "got: {conflict}");
         assert!(conflict.contains("content hidden"), "got: {conflict}");
-        assert!(!conflict.contains(SECRET));
+        test_common::assert_secret_free(conflict, SECRET, "the conflict diff");
         assert!(
             conflict.contains("op read x"),
             "the command is a reference, not a credential, and should be shown: {conflict}"

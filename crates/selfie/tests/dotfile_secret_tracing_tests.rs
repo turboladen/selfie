@@ -137,8 +137,5 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         !log.is_empty(),
         "the subscriber captured nothing, so this test proves nothing"
     );
-    assert!(
-        !log.contains(SECRET),
-        "secret leaked into a tracing record:\n{log}"
-    );
+    test_common::assert_secret_free(&log, SECRET, "a tracing record");
 }
