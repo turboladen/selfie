@@ -161,17 +161,29 @@ impl ShellCommandRunner {
 
         tokio::select! {
             status = child.wait() => {
-                let status = status.map_err(|e| CommandError::IoError {
-                    command: command.to_string(),
-                    working_directory: working_directory.clone(),
-                    source: Arc::new(e),
-                })?;
-                // Both readers are already running, so joining them concurrently
-                // rather than one after the other is neutral for progress. It is
-                // done this way so that a failure on one stream still reaps the
-                // other instead of leaving a detached task behind.
-                let (out, err) = tokio::join!(stdout_handle, stderr_handle);
-                finish(status, out, err, command, &working_directory, start_time.elapsed())
+                match status {
+                    Ok(status) => {
+                        // Both readers are already running, so joining them
+                        // concurrently rather than one after the other is neutral
+                        // for progress. It is done this way so that a failure on
+                        // one stream still reaps the other instead of leaving a
+                        // detached task behind.
+                        let (out, err) = tokio::join!(stdout_handle, stderr_handle);
+                        finish(status, out, err, command, &working_directory, start_time.elapsed())
+                    }
+                    // Aborted for the same reason as the timeout and cancellation
+                    // arms below: without a status there is no output to report,
+                    // and dropping the handles would only detach them.
+                    Err(e) => {
+                        stdout_handle.abort();
+                        stderr_handle.abort();
+                        Err(CommandError::IoError {
+                            command: command.to_string(),
+                            working_directory: working_directory.clone(),
+                            source: Arc::new(e),
+                        })
+                    }
+                }
             }
             () = tokio::time::sleep(timeout) => {
                 let _ = child.kill().await;
@@ -486,13 +498,13 @@ where
 /// the caller — selfie does not have the command's output — so they share one
 /// variant.
 ///
-/// The [`JoinError`](tokio::task::JoinError) is read for its two booleans and
-/// then **dropped**. It is never wrapped or rendered: a panic payload is
-/// produced by the very task that was holding this command's output, so it can
-/// be derived from a credential, and `OutputReadFailed`'s `Display` reaches
-/// `PackageEvent::Completed`, the CLI, and the MCP server's JSON. The
-/// replacement is a fixed `&'static str`, so no runtime data can reach it even
-/// by accident later.
+/// The [`JoinError`](tokio::task::JoinError) is inspected only for whether the
+/// task was cancelled, and is then **dropped**. It is never wrapped or rendered:
+/// a panic payload is produced by the very task that was holding this command's
+/// output, so it can be derived from a credential, and `OutputReadFailed`'s
+/// `Display` reaches `PackageEvent::Completed`, the CLI, and the MCP server's
+/// JSON. The replacement is a fixed `&'static str`, so no runtime data can reach
+/// it even by accident later.
 fn join_read(
     joined: JoinedRead,
     stream: OutputStream,

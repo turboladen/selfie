@@ -1284,15 +1284,16 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             // error with `Display`, and a variant whose `Display` carried
             // command output would leak it into `PackageEvent::Completed` and
             // on to both the CLI and the MCP server's JSON. Every variant below
-            // names only the command. Check that before extending this list.
+            // names the command, and beyond that only text selfie chose itself —
+            // never process output. Check that before extending this list.
             //
-            // `OutputReadFailed` was checked against that requirement when it
-            // was added: it renders the command, the stream that failed, and an
-            // `io::Error`. The `io::Error` is either the OS's own message or, for
-            // a reader task that panicked, a fixed `&'static str` — the
-            // `JoinError` is read for `is_panic()`/`is_cancelled()` and dropped,
-            // never wrapped, because a panic payload is produced by the task
-            // holding the command's bytes and can be derived from them.
+            // `OutputReadFailed` was checked against that requirement when it was
+            // added: alongside the command it renders the stream that failed and
+            // an `io::Error`, which is either the OS's own message or, for a
+            // reader task that did not finish, a fixed `&'static str`. The
+            // `JoinError` itself is dropped rather than wrapped, because a panic
+            // payload is produced by the task holding the command's bytes and can
+            // be derived from them.
             crate::commands::runner::CommandError::Cancelled { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
             | crate::commands::runner::CommandError::StdoutSpawn(_)
