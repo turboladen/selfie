@@ -504,18 +504,6 @@ impl DotfileEntry {
             Err(_) => 0,
         }
     }
-
-    /// Whether this entry's content is produced by running commands.
-    ///
-    /// Secret-bearing entries hold no deploy state and their content never enters
-    /// an event. See ADR-0003. An [`InvalidEntry`] is not secret-bearing — it is
-    /// not deployable at all.
-    pub fn is_secret_bearing(&self) -> bool {
-        matches!(
-            self.content_source(),
-            Ok(ContentSource::Template { .. } | ContentSource::Provider(_))
-        )
-    }
 }
 
 /// Default value for environments field when missing from YAML.
@@ -886,7 +874,6 @@ mod package_tests {
             entry.content_source(),
             Ok(ContentSource::RepoFile("fnm/init.fish"))
         );
-        assert!(!entry.is_secret_bearing());
     }
 
     #[test]
@@ -907,7 +894,6 @@ vars:
             }
             other => panic!("expected Template, got {other:?}"),
         }
-        assert!(entry.is_secret_bearing());
     }
 
     #[test]
@@ -925,7 +911,6 @@ target: ~/.ssh/id_ed25519
                 "op read op://Private/ssh-key/private"
             ))
         );
-        assert!(entry.is_secret_bearing());
     }
 
     #[test]
@@ -939,10 +924,6 @@ target: ~/.x
         );
 
         assert_eq!(entry.content_source(), Err(InvalidEntry::Shape));
-        assert!(
-            !entry.is_secret_bearing(),
-            "an undeployable entry is not secret-bearing"
-        );
     }
 
     #[test]
@@ -983,7 +964,6 @@ vars: {}
             entry.content_source(),
             Ok(ContentSource::RepoFile("bat/config"))
         );
-        assert!(!entry.is_secret_bearing());
     }
 
     #[test]
@@ -1141,10 +1121,6 @@ vars: {}
         assert_eq!(
             entry.content_source(),
             Err(InvalidEntry::VarName("not-a-name"))
-        );
-        assert!(
-            !entry.is_secret_bearing(),
-            "an entry that cannot deploy has no secret to bear"
         );
         assert_eq!(
             entry.command_count(),
