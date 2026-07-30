@@ -144,7 +144,7 @@ allowing AI assistants to provide meaningful messages without interactive prompt
 
 When a git operation fails, selfie forwards git's own stderr into the error it reports — to the
 terminal, and to an AI assistant through the sync MCP tools. Before that happens, the **userinfo
-component of any URL in the message is replaced with `***`**, and the message is truncated if it is
+component of the URLs it recognizes is replaced with `***`**, and the message is truncated if it is
 very long.
 
 This matters because a remote URL can carry a credential. `https://<token>@github.com/you/repo.git`
@@ -161,4 +161,12 @@ _username_. Redaction also applies to SSH-style remotes, so `git@github.com` rea
 
 **It covers URLs, not credentials in general.** A token echoed outside a URL — an `Authorization`
 header in a `GIT_TRACE` dump, or output from a credential helper — is not redacted, because there is
-no reliable way to recognize one. Treat selfie's error output as you would git's own.
+no reliable way to recognize one.
+
+**And it recognizes URLs by position, not by parsing.** A credential is found at the start of a
+whitespace-delimited word, after `://`, and after `=` or `,` — which covers ordinary remotes,
+SSH-style remotes, and the `url.<base>.insteadOf=<url>` form used to inject one. It is **not** found
+after a path separator, so a URL buried inside another URL's path is left alone; treating every `/`
+as a boundary would mangle the host out of ordinary messages, which costs more than it saves.
+
+Treat selfie's error output as you would git's own: safer than raw, not a guarantee.
