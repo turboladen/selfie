@@ -6,23 +6,16 @@
 
 use std::sync::Arc;
 
-use selfie::{
-    commands::ShellCommandRunner,
-    dotfile_service::diff::unified_diff,
-    dotfile_service::{
-        port::{
-            ApplyOptions, ConflictDetail, ConflictResolution, ConflictResolver, DotfileService,
-        },
-        service::DotfileServiceImpl,
-    },
-    fs::real::RealFileSystem,
-    package::repository::yaml::YamlPackageRepository,
+use selfie::dotfile_service::diff::unified_diff;
+use selfie::dotfile_service::port::{
+    ApplyOptions, ConflictDetail, ConflictResolution, ConflictResolver, DotfileService,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
     cli::ApplyArgs,
-    commands::common::create_package_repository,
+    commands::common::create_dotfile_service,
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
     event_processor::EventProcessor,
@@ -206,6 +199,7 @@ pub(crate) async fn handle_apply(
     args: &ApplyArgs,
     config: &CliConfig,
     display: &DisplayManager,
+    cancellation_token: CancellationToken,
 ) -> i32 {
     let options = ApplyOptions {
         dry_run: args.dry_run,
@@ -215,20 +209,10 @@ pub(crate) async fn handle_apply(
         })),
     };
 
-    let repo = create_package_repository(config);
-    let fs = RealFileSystem;
-    let runner = ShellCommandRunner::new(
-        ShellCommandRunner::default_shell(),
-        config.selfie_config().command_timeout(),
-    );
-    let mut service = DotfileServiceImpl::new(repo, fs, runner, config.selfie_config().clone());
-
-    // Add standalone dotfiles repository if the directory exists
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if dotfiles_dir.is_dir() {
-        let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
-        service = service.with_dotfiles_repository(dotfiles_repo);
-    }
+    // Built by the shared constructor rather than assembled here. This function
+    // used to duplicate it line for line, which is how apply ended up running
+    // provider commands under a different shell than install and check.
+    let service = create_dotfile_service(config, cancellation_token);
 
     let event_stream = if let Some(name) = &args.name {
         info!("Applying dotfiles for package: {}", name);

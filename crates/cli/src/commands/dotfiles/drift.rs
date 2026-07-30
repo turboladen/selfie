@@ -8,6 +8,7 @@ use selfie::{
     dotfile_service::port::DotfileService,
     package::event::{OperationResult, OperationSuccess, PackageEvent},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
@@ -20,10 +21,14 @@ use crate::{
 /// Creates a `DotfileServiceImpl` and calls `check_drift()`, which walks all
 /// dotfile entries across packages and the standalone dotfiles directory,
 /// comparing current file contents against stored deploy-state checksums.
-pub(crate) async fn handle_drift(config: &CliConfig, display: &DisplayManager) -> i32 {
+pub(crate) async fn handle_drift(
+    config: &CliConfig,
+    display: &DisplayManager,
+    cancellation_token: CancellationToken,
+) -> i32 {
     info!("Checking dotfile drift");
 
-    let service = create_dotfile_service(config);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.check_drift().await;
 
     let display_for_handler = display.clone();

@@ -649,6 +649,18 @@ Both `vars` commands and a whole-file `command` run with their working directory
 file's parent directory — the same base that `source` paths resolve against. They run through a
 shell, so pipes, redirection, and `$(…)` are available.
 
+That shell is your **login shell** — `$SHELL -l -c`, falling back to `/bin/sh` when `SHELL` is
+unset, and without `-l` on non-Unix. It is the same shell `selfie package install`, `check` and
+`audit` use, and the same one the MCP server uses, so a command written in fish or zsh syntax
+behaves identically however you invoke it. Because the login profile is sourced, anything your
+profile _sets_ rather than exports — `SSH_AUTH_SOCK`, `OP_*` variables, PATH additions — is
+available to a provider command.
+
+**A profile that writes to stdout will corrupt the file selfie deploys.** A provider command's
+entire stdout becomes the target's content, and `-l` splices your profile's own output into that
+same stream — so an `echo` in `.zprofile` or `.bash_profile` lands in your credentials file ahead of
+the credential. Keep login-shell output on stderr, or guard it on the shell being interactive.
+
 Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
 your existing target lacks it you will get a conflict on first apply. Strip it in your own command
 if you do not want it.
@@ -675,6 +687,11 @@ so this is not a memory bound against a genuinely unbounded provider.
 A failing command respects `stop_on_error`, which defaults to true, so by default a failure aborts
 the apply. When a binding fails, the error names that binding and the remaining bindings for that
 entry are not run.
+
+Ctrl+C during `selfie apply` cancels a provider command that is still running, as it does during
+`install` and `check` — so a command waiting on a biometric or password prompt can be escaped
+without waiting out `command_timeout`. The run stops there and reports itself as cancelled; whatever
+had already been deployed stays deployed and stays recorded.
 
 #### No deploy state, and what follows from it
 

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use futures::StreamExt;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 use test_common::FakeCommandRunner;
 
@@ -115,6 +116,23 @@ impl TestDirs {
         runner: FakeCommandRunner,
     ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
     {
+        self.service_with_runner_and_token(runner, CancellationToken::new())
+    }
+
+    /// As [`service_with_runner`](Self::service_with_runner), but the caller
+    /// supplies the cancellation token and may use any runner type.
+    ///
+    /// Generic over the runner because the cancellation tests need one that
+    /// observes the token it is handed, which `FakeCommandRunner` deliberately
+    /// ignores.
+    fn service_with_runner_and_token<CR>(
+        &self,
+        runner: CR,
+        token: CancellationToken,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, CR>
+    where
+        CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -123,7 +141,7 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        DotfileServiceImpl::new(repo, fs, runner, config)
+        DotfileServiceImpl::new(repo, fs, runner, config, token)
     }
 
     /// Create a service backed by both `packages/` and `dotfiles/` directories.
@@ -140,8 +158,14 @@ impl TestDirs {
             .build();
         let package_repo = YamlPackageRepository::new(fs, config.package_directory().clone());
         let dotfiles_repo = YamlPackageRepository::new(fs, self.dotfiles_dir.clone());
-        DotfileServiceImpl::new(package_repo, fs, FakeCommandRunner::new(), config)
-            .with_dotfiles_repository(dotfiles_repo)
+        DotfileServiceImpl::new(
+            package_repo,
+            fs,
+            FakeCommandRunner::new(),
+            config,
+            CancellationToken::new(),
+        )
+        .with_dotfiles_repository(dotfiles_repo)
     }
 }
 
@@ -2999,6 +3023,544 @@ mod secret_bearing {
             "an undeployable entry is not merely unverifiable, got: {events:?}"
         );
     }
+
+    /// Ctrl+C during `selfie apply`.
+    ///
+    /// Apply gained the ability to run commands after the cancellation token was
+    /// threaded through the rest of the service layer, and did not inherit it:
+    /// the resolve path built a fresh `CancellationToken` nobody held, so an `op
+    /// read` blocked on a biometric prompt could only be escaped by waiting out
+    /// `command_timeout`.
+    mod cancellation {
+        use super::*;
+        use selfie::commands::{CommandError, CommandOutput, CommandRunner, OutputChunk};
+        use std::path::Path;
+        use std::time::Duration;
+
+        /// What the runner should do on a given call.
+        #[derive(Clone, Copy, Debug, Default)]
+        struct CallEffect {
+            /// Cancel the token the *service* holds, as a signal handler would
+            /// while this command is in flight.
+            cancel: bool,
+            /// Report the command as killed, which is what `ShellCommandRunner`
+            /// does once the token fires.
+            fail_as_cancelled: bool,
+        }
+
+        /// A runner that records the token it is **handed** and cancels the token
+        /// the service was **built with**.
+        ///
+        /// Those being two different things is the entire mechanism, and it is not
+        /// self-evident. `resolve_content` takes one `&CancellationToken` and
+        /// reuses that same reference for every command of an entry — so a fake
+        /// that cancelled the token it was *handed* would cancel a placeholder
+        /// just as readily as the real one, and every assertion below would hold
+        /// with the bug still in place. Holding an independent clone of the real
+        /// token means `observed` differs between the two worlds: the second call
+        /// sees `true` only if what reached the runner *is* the service's token.
+        #[derive(Clone, Debug)]
+        struct TokenObservingRunner {
+            /// The token the service was constructed with.
+            real_token: CancellationToken,
+            /// `is_cancelled()` of the token handed to each call, in call order.
+            observed: Arc<Mutex<Vec<bool>>>,
+            /// Commands seen, in call order.
+            calls: Arc<Mutex<Vec<String>>>,
+            /// Indexed by call number.
+            effects: Vec<CallEffect>,
+            /// Refuse any call handed an already-cancelled token, as
+            /// `ShellCommandRunner::run_buffered` does in its pre-spawn check.
+            ///
+            /// Off by default so the other tests observe the token without the
+            /// runner acting on it. On, it makes this fake faithful to the
+            /// production runner on the one behavior that closes the
+            /// between-bindings window.
+            refuse_when_handed_cancelled: bool,
+            /// Returned as stdout by any call that is not failing.
+            stdout: Vec<u8>,
+        }
+
+        impl TokenObservingRunner {
+            fn new(real_token: &CancellationToken, effects: Vec<CallEffect>) -> Self {
+                Self {
+                    real_token: real_token.clone(),
+                    observed: Arc::new(Mutex::new(Vec::new())),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    effects,
+                    refuse_when_handed_cancelled: false,
+                    stdout: SECRET.as_bytes().to_vec(),
+                }
+            }
+
+            /// Behave like the real shell runner: refuse a pre-cancelled token.
+            fn refusing_a_cancelled_token(mut self) -> Self {
+                self.refuse_when_handed_cancelled = true;
+                self
+            }
+
+            /// Cancel while the *first* command is in flight, and report that
+            /// command as killed — a faithful Ctrl+C.
+            fn cancelling_and_failing(real_token: &CancellationToken) -> Self {
+                Self::new(
+                    real_token,
+                    vec![CallEffect {
+                        cancel: true,
+                        fail_as_cancelled: true,
+                    }],
+                )
+            }
+
+            fn observed(&self) -> Vec<bool> {
+                self.observed.lock().unwrap().clone()
+            }
+
+            fn calls(&self) -> Vec<String> {
+                self.calls.lock().unwrap().clone()
+            }
+
+            fn answer(
+                &self,
+                command: &str,
+                handed: &CancellationToken,
+            ) -> Result<CommandOutput, CommandError> {
+                let index = {
+                    let mut calls = self.calls.lock().unwrap();
+                    calls.push(command.to_string());
+                    calls.len() - 1
+                };
+                // Recorded before this call's own effect fires, so the value is
+                // what the caller handed over rather than what this runner just
+                // did.
+                self.observed.lock().unwrap().push(handed.is_cancelled());
+
+                // Before this call's own effect, and before any scripted answer:
+                // the real runner checks the token before it spawns anything.
+                if self.refuse_when_handed_cancelled && handed.is_cancelled() {
+                    return Err(CommandError::Cancelled {
+                        command: command.to_string(),
+                        working_directory: Path::new(".").to_path_buf(),
+                    });
+                }
+
+                let effect = self.effects.get(index).copied().unwrap_or_default();
+                if effect.cancel {
+                    self.real_token.cancel();
+                }
+                if effect.fail_as_cancelled {
+                    return Err(CommandError::Cancelled {
+                        command: command.to_string(),
+                        working_directory: Path::new(".").to_path_buf(),
+                    });
+                }
+                Ok(command_output(self.stdout.clone()))
+            }
+        }
+
+        impl CommandRunner for TokenObservingRunner {
+            async fn is_command_available(&self, _command: &str) -> bool {
+                true
+            }
+
+            async fn execute(
+                &self,
+                command: &str,
+                token: &CancellationToken,
+            ) -> Result<CommandOutput, CommandError> {
+                self.answer(command, token)
+            }
+
+            async fn execute_with_timeout(
+                &self,
+                command: &str,
+                _timeout: Duration,
+                token: &CancellationToken,
+            ) -> Result<CommandOutput, CommandError> {
+                self.answer(command, token)
+            }
+
+            async fn execute_in_dir(
+                &self,
+                command: &str,
+                _working_dir: &Path,
+                _timeout: Duration,
+                token: &CancellationToken,
+            ) -> Result<CommandOutput, CommandError> {
+                self.answer(command, token)
+            }
+
+            async fn execute_streaming(
+                &self,
+                command: &str,
+                _timeout: Duration,
+                _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
+                token: &CancellationToken,
+            ) -> Result<CommandOutput, CommandError> {
+                self.answer(command, token)
+            }
+        }
+
+        /// A successful `CommandOutput` carrying `stdout`.
+        fn command_output(stdout: Vec<u8>) -> CommandOutput {
+            use std::os::unix::process::ExitStatusExt as _;
+            CommandOutput::from_parts(
+                std::process::ExitStatus::from_raw(0),
+                stdout,
+                Vec::new(),
+                Duration::ZERO,
+            )
+        }
+
+        /// Assert the run ended in a failure whose message names cancellation.
+        #[track_caller]
+        fn assert_cancelled(events: &[PackageEvent]) {
+            let result = get_operation_result(events)
+                .expect("a cancelled run still has to emit its Completed event");
+            let OperationResult::Failure(failure) = result else {
+                panic!("expected a failure, got: {result:?}");
+            };
+            let rendered = failure.to_string();
+            assert!(
+                rendered.to_lowercase().contains("cancel"),
+                "the run must report cancellation, got: {rendered}"
+            );
+        }
+
+        // ── The token has to reach the runner ────────────────────────────────
+
+        /// The discriminating test: proves the *service's* token is what a
+        /// provider command is run with.
+        ///
+        /// Two `vars` rather than two entries on purpose. `resolve_content` loops
+        /// over an entry's bindings with no cancellation check between them, so
+        /// the second command is dispatched with whatever token was threaded and
+        /// nothing else can intercept it. Two *entries* would be caught by the
+        /// between-entries guard in `handle_apply` and would prove nothing about
+        /// what the runner received.
+        ///
+        /// This does lean on that absence of a guard inside the `vars` loop. If
+        /// one is ever added there, this test stops discriminating and starts
+        /// passing for the wrong reason — rewrite it rather than trusting it.
+        #[tokio::test]
+        async fn the_live_token_reaches_the_command_runner() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            template_package(
+                &dirs.package_dir,
+                target.to_str().unwrap(),
+                "one={{ alpha }}\ntwo={{ beta }}\n",
+                &[("alpha", "op read a"), ("beta", "op read b")],
+            );
+
+            let token = CancellationToken::new();
+            // Cancels during the first binding's command, succeeds for both.
+            let runner = TokenObservingRunner::new(
+                &token,
+                vec![CallEffect {
+                    cancel: true,
+                    fail_as_cancelled: false,
+                }],
+            );
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            // Control: both bindings really ran, so the observation below is of
+            // two real dispatches and not of an empty vector.
+            assert_eq!(
+                runner.calls(),
+                vec!["op read a".to_string(), "op read b".to_string()],
+                "both bindings must run for this test to observe anything"
+            );
+            assert_eq!(
+                runner.observed(),
+                vec![false, true],
+                "the second command must be handed the token the first one cancelled; \
+                 [false, false] means a fresh token was passed to the resolve path"
+            );
+        }
+
+        /// The third window: cancellation landing *between two bindings*.
+        ///
+        /// Neither guard in `handle_apply` covers this. The between-entries guard
+        /// has already run for this entry, and the `Failed`-arm guard has not
+        /// been reached — `resolve_content` is midway through the entry's `vars`,
+        /// and it iterates them with no cancellation check of its own (the same
+        /// absence `the_live_token_reaches_the_command_runner` relies on).
+        ///
+        /// What closes it is the runner: `ShellCommandRunner::run_buffered`
+        /// checks the token before spawning and returns `Cancelled`, which
+        /// becomes a resolve failure and lands in the `Failed` arm, where
+        /// cancellation is read before `stop_on_error`. So the window is covered,
+        /// but only because a live token reaches the runner — which is the very
+        /// thing this unit fixed. Before it, the fresh token was never cancelled,
+        /// so the pre-spawn check could never fire and the second binding would
+        /// have run happily after the user pressed Ctrl+C.
+        ///
+        /// The fake models that pre-spawn refusal explicitly rather than
+        /// inheriting it, because a test double that answers a cancelled token
+        /// with success would show this window as closed when it is not.
+        #[tokio::test]
+        async fn a_cancellation_between_two_bindings_is_reported_honestly() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            template_package(
+                &dirs.package_dir,
+                target.to_str().unwrap(),
+                "one={{ alpha }}\ntwo={{ beta }}\n",
+                &[("alpha", "op read a"), ("beta", "op read b")],
+            );
+
+            let token = CancellationToken::new();
+            // Cancels after the first binding succeeds; the second is then handed
+            // an already-cancelled token and is refused, as the real runner would.
+            let runner = TokenObservingRunner::new(
+                &token,
+                vec![CallEffect {
+                    cancel: true,
+                    fail_as_cancelled: false,
+                }],
+            )
+            .refusing_a_cancelled_token();
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            // Control: the run really did reach the second binding. Without this,
+            // the assertions below would also hold if it had stopped at the first.
+            assert_eq!(
+                runner.calls(),
+                vec!["op read a".to_string(), "op read b".to_string()],
+                "the cancellation has to land between the two bindings"
+            );
+
+            assert_cancelled(&events);
+
+            let rendered = format!("{events:?}");
+            assert!(
+                !rendered.contains("stop_on_error"),
+                "a mid-bindings cancellation must not be blamed on the spec: {rendered}"
+            );
+            assert!(
+                !target.exists(),
+                "a half-resolved template must never be written"
+            );
+        }
+
+        // ── Between entries ──────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn a_cancelled_token_stops_apply_before_running_a_provider_command() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+            let token = CancellationToken::new();
+            token.cancel();
+            let runner = TokenObservingRunner::new(&token, Vec::new());
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_eq!(
+                runner.calls(),
+                Vec::<String>::new(),
+                "a cancelled run must not start a provider command"
+            );
+            assert!(
+                !target.exists(),
+                "nothing may be written after cancellation"
+            );
+            assert_cancelled(&events);
+        }
+
+        /// The positive control for the test above.
+        ///
+        /// Without it, that test passes just as well if apply were failing for
+        /// some reason having nothing to do with the token.
+        #[tokio::test]
+        async fn an_uncancelled_token_runs_the_provider_command() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+            let token = CancellationToken::new();
+            let runner = TokenObservingRunner::new(&token, Vec::new());
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_eq!(runner.calls(), vec!["op read x".to_string()]);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+            assert!(
+                matches!(
+                    get_operation_result(&events),
+                    Some(OperationResult::Success(_))
+                ),
+                "got: {events:?}"
+            );
+        }
+
+        // ── Mid-command ──────────────────────────────────────────────────────
+
+        /// A command killed by Ctrl+C must not be blamed on the package file.
+        ///
+        /// `stop_on_error` defaults to **true**, and a cancelled command fails —
+        /// so the failure arm reaches `stop_on_error`'s explanation first and the
+        /// run reports "Stopped after failing to apply dotfile 'X' (stop_on_error
+        /// is enabled)". That names the user's own interrupt as a spec problem
+        /// and sends them looking for one. The between-entries guard cannot help
+        /// here: the break happens in the same iteration the command died in.
+        #[tokio::test]
+        async fn a_command_killed_by_cancellation_is_not_reported_as_a_spec_failure() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+            let token = CancellationToken::new();
+            let runner = TokenObservingRunner::cancelling_and_failing(&token);
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            // The command really was dispatched and really did die, so what
+            // follows is about attribution and not about an entry that never ran.
+            assert_eq!(runner.calls(), vec!["op read x".to_string()]);
+
+            // The terminal event exists and names cancellation — this is also the
+            // assertion that a cancelled run still completes its stream rather
+            // than dropping it.
+            assert_cancelled(&events);
+
+            let rendered = format!("{events:?}");
+            assert!(
+                !rendered.contains("stop_on_error"),
+                "cancellation must not be attributed to stop_on_error, got: {rendered}"
+            );
+        }
+
+        /// The fourth window: cancellation arriving once the *last* entry has
+        /// started, where the loop's guard can never run again.
+        ///
+        /// This is the case the three-entry test below sets up deliberately to
+        /// avoid — "with the provider last, the loop ends on its own and the
+        /// guard is never reached". That sentence describes a real hole, and this
+        /// is the follow-up it was owed.
+        ///
+        /// Distinct from the other three because nothing *fails* here: the
+        /// command succeeds despite the cancellation, so no failure arm is
+        /// reached and no guard is left to run. Without the post-loop check the
+        /// run reports `Success` for a run the user interrupted — and for a
+        /// provider entry that means a credential on disk with nothing in the
+        /// stream mentioning Ctrl+C at all.
+        ///
+        /// The target is asserted **present** on purpose. Cancelling does not
+        /// unwrite a file that was already written; the fix is to stop reporting
+        /// the run as clean, not to pretend the write did not happen.
+        #[tokio::test]
+        async fn a_cancellation_during_the_last_entry_is_still_reported() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+            let token = CancellationToken::new();
+            // Cancels while the command runs, but the command still succeeds —
+            // so the entry deploys and the loop then ends with nothing left to
+            // check.
+            let runner = TokenObservingRunner::new(
+                &token,
+                vec![CallEffect {
+                    cancel: true,
+                    fail_as_cancelled: false,
+                }],
+            );
+            let service = dirs.service_with_runner_and_token(runner.clone(), token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            // Control: the entry really did run and really did deploy, so this is
+            // the silent-success window and not an entry that never started.
+            assert_eq!(runner.calls(), vec!["op read x".to_string()]);
+            assert!(
+                target.exists(),
+                "the write happened before the cancellation was noticed"
+            );
+
+            assert_cancelled(&events);
+        }
+
+        // ── What a cancelled run leaves behind ───────────────────────────────
+
+        /// Cancelling must not discard the record of what was already deployed.
+        ///
+        /// The run breaks out of the loop rather than returning, so deploy state
+        /// still reaches disk. Returning early would leave the files in place
+        /// with no record of them, and the next drift check would report
+        /// correctly-deployed files as untracked.
+        ///
+        /// Three entries, because the invariant needs an entry *after* the
+        /// cancelling one: with the provider last, the loop ends on its own and
+        /// the guard is never reached. Not a dry run, because dry runs skip
+        /// saving state entirely — which would make the assertion pass for a
+        /// reason that has nothing to do with cancellation.
+        #[tokio::test]
+        async fn a_cancelled_apply_still_records_what_it_already_deployed() {
+            let dirs = TestDirs::new();
+            let first = dirs.target_dir.join("first.conf");
+            let secret_target = dirs.target_dir.join("credentials");
+            let third = dirs.target_dir.join("third.conf");
+
+            std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+            std::fs::write(dirs.package_dir.join("creds/first"), "first\n").unwrap();
+            std::fs::write(dirs.package_dir.join("creds/third"), "third\n").unwrap();
+            let yaml = format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"creds/first\"\n    target: \"{}\"\n  \
+                 - command: \"op read x\"\n    target: \"{}\"\n  \
+                 - source: \"creds/third\"\n    target: \"{}\"\n",
+                first.display(),
+                secret_target.display(),
+                third.display(),
+            );
+            std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+            let token = CancellationToken::new();
+            // Cancels during the provider command but lets it succeed, so the
+            // run reaches the third entry's guard rather than the failure arm.
+            let runner = TokenObservingRunner::new(
+                &token,
+                vec![CallEffect {
+                    cancel: true,
+                    fail_as_cancelled: false,
+                }],
+            );
+            let service = dirs.service_with_runner_and_token(runner, token);
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_cancelled(&events);
+            assert!(
+                first.exists(),
+                "the entry before the cancellation must have deployed"
+            );
+            assert!(
+                !third.exists(),
+                "the entry after the cancellation must not deploy"
+            );
+
+            let state = std::fs::read_to_string(state_file(&dirs))
+                .expect("deploy state must survive a cancelled run");
+            assert!(
+                state.contains("creds/first"),
+                "what was deployed before the cancellation has to stay recorded, \
+                 or the next drift check calls it untracked: {state}"
+            );
+            assert!(
+                !state.contains("creds/third"),
+                "nothing may be recorded for an entry that never deployed: {state}"
+            );
+        }
+    }
 }
 
 /// Deploying a repository file onto a symlinked target, and the permissions of the
@@ -3414,6 +3976,7 @@ mod symlinked_targets {
             BlindToSymlinks(RealFileSystem, Arc::clone(&writes)),
             FakeCommandRunner::new(),
             config,
+            CancellationToken::new(),
         );
 
         let options = ApplyOptions {

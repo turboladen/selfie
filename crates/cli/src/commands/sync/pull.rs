@@ -1,6 +1,7 @@
 //! Handler for `selfie sync pull`.
 
 use console::style;
+use tokio_util::sync::CancellationToken;
 
 use selfie::{
     package::event::{OperationResult, OperationSuccess, PackageEvent},
@@ -14,8 +15,12 @@ use crate::{
     event_processor::EventProcessor,
 };
 
-pub(crate) async fn handle_pull(config: &CliConfig, display: &DisplayManager) -> i32 {
-    let service = create_sync_service(config);
+pub(crate) async fn handle_pull(
+    config: &CliConfig,
+    display: &DisplayManager,
+    cancellation_token: CancellationToken,
+) -> i32 {
+    let service = create_sync_service(config, cancellation_token);
 
     let event_stream = service.pull().await;
 

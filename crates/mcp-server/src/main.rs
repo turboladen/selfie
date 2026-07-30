@@ -68,6 +68,10 @@ async fn async_main() -> Result<()> {
         runner,
         GixGitStatusProvider,
         config.clone(),
+        // A fresh token, deliberately: an MCP server has no signal handler and no
+        // interactive user to press Ctrl+C, so there is nothing to cancel with.
+        // `command_timeout` remains the bound on a command that blocks.
+        // `server.rs` says the same about the dotfile service.
         CancellationToken::new(),
     );
 

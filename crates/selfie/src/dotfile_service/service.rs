@@ -38,6 +38,13 @@ use super::port::{ApplyOptions, DotfileService};
 /// Default deploy state filename
 const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 
+/// How a cancelled apply is reported.
+///
+/// One constant so the two sites that stop a run — between entries, and after a
+/// provider command was killed mid-flight — cannot describe the same event two
+/// different ways.
+const APPLY_CANCELLED: &str = "Apply cancelled";
+
 /// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
@@ -54,6 +61,8 @@ pub struct DotfileServiceImpl<R, F, CR> {
     /// Runs the commands that produce secret-bearing dotfile content.
     runner: CR,
     config: SelfieConfig,
+    /// Token used to signal graceful cancellation of in-flight operations.
+    cancellation_token: CancellationToken,
 }
 
 impl<R, F, CR> DotfileServiceImpl<R, F, CR>
@@ -63,13 +72,27 @@ where
     CR: CommandRunner + Clone + Send + Sync + 'static,
 {
     /// Create a new dotfile service instance
-    pub fn new(package_repository: R, filesystem: F, runner: CR, config: SelfieConfig) -> Self {
+    ///
+    /// `cancellation_token` is required rather than defaulted, mirroring
+    /// [`PackageServiceImpl::new`](crate::package::service::PackageServiceImpl::new).
+    /// Apply runs the user's provider commands, so an adapter that cannot supply
+    /// a live token has to say so at its own boundary — where it is visible —
+    /// instead of a fresh token being conjured deep in the resolve path, which is
+    /// what made Ctrl+C a no-op here for as long as this path could run commands.
+    pub fn new(
+        package_repository: R,
+        filesystem: F,
+        runner: CR,
+        config: SelfieConfig,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             package_repository,
             dotfiles_repository: None,
             filesystem,
             runner,
             config,
+            cancellation_token,
         }
     }
 
@@ -354,6 +377,7 @@ where
         let fs = self.filesystem.clone();
         let runner = self.runner.clone();
         let config = self.config.clone();
+        let token = self.cancellation_token.clone();
 
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
@@ -371,7 +395,15 @@ where
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
-                    handle_apply(&packages, &fs, &runner, &config, &sender, &options, None).await
+                    let ctx = ApplyContext {
+                        filesystem: &fs,
+                        runner: &runner,
+                        config: &config,
+                        sender: &sender,
+                        options: &options,
+                        token: &token,
+                    };
+                    handle_apply(&packages, &ctx, None).await
                 }
                 Err(e) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
@@ -388,6 +420,7 @@ where
         let fs = self.filesystem.clone();
         let runner = self.runner.clone();
         let config = self.config.clone();
+        let token = self.cancellation_token.clone();
         let name = name.to_string();
 
         Self::create_event_stream(move |tx| async move {
@@ -406,16 +439,15 @@ where
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
-                    handle_apply(
-                        &packages,
-                        &fs,
-                        &runner,
-                        &config,
-                        &sender,
-                        &options,
-                        Some(&name),
-                    )
-                    .await
+                    let ctx = ApplyContext {
+                        filesystem: &fs,
+                        runner: &runner,
+                        config: &config,
+                        sender: &sender,
+                        options: &options,
+                        token: &token,
+                    };
+                    handle_apply(&packages, &ctx, Some(&name)).await
                 }
                 Err(e) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
@@ -605,6 +637,10 @@ struct SecretApply<'a, F, CR> {
     config: &'a SelfieConfig,
     sender: &'a EventSender,
     options: &'a ApplyOptions,
+    /// The caller's live cancellation token, so Ctrl+C reaches a provider command
+    /// that is blocked on a biometric or password prompt. Never a fresh token:
+    /// `command_timeout` would then be the only way out of an interactive prompt.
+    token: &'a CancellationToken,
 }
 
 impl<F, CR> SecretApply<'_, F, CR>
@@ -722,7 +758,7 @@ where
             self.filesystem,
             self.runner,
             self.config.command_timeout(),
-            &CancellationToken::new(),
+            self.token,
         )
         .await
         {
@@ -1020,20 +1056,42 @@ async fn perform_deploy<F: FileSystem>(
     Ok(())
 }
 
+/// Everything an apply needs that does not vary from package to package.
+///
+/// Grouped because they travel together: `handle_apply` needs all six, and
+/// builds a [`SecretApply`] from them once per package. Passing them
+/// individually put the argument count over clippy's limit once the cancellation
+/// token joined them.
+#[derive(Clone, Copy)]
+struct ApplyContext<'a, F, CR> {
+    filesystem: &'a F,
+    runner: &'a CR,
+    config: &'a SelfieConfig,
+    sender: &'a EventSender,
+    options: &'a ApplyOptions,
+    /// The caller's live token. See [`SecretApply::token`].
+    token: &'a CancellationToken,
+}
+
 /// Core logic for applying config files
 async fn handle_apply<F, CR>(
     packages: &[Package],
-    filesystem: &F,
-    runner: &CR,
-    config: &SelfieConfig,
-    sender: &EventSender,
-    options: &ApplyOptions,
+    ctx: &ApplyContext<'_, F, CR>,
     filter_name: Option<&str>,
 ) -> OperationResult
 where
     F: FileSystem,
     CR: CommandRunner,
 {
+    let ApplyContext {
+        filesystem,
+        runner,
+        config,
+        sender,
+        options,
+        token,
+    } = *ctx;
+
     let mut deploy_state = load_deploy_state(filesystem, config);
 
     let mut deployed_count: usize = 0;
@@ -1076,9 +1134,19 @@ where
             config,
             sender,
             options,
+            token,
         };
 
         for entry in &dotfiles {
+            // Between entries: refuse to start another entry's commands once the
+            // user has asked to stop. The *mid-command* case cannot be caught
+            // here — it surfaces as a resolve failure and is handled in the
+            // `Failed` arm below.
+            if token.is_cancelled() {
+                stopped = Some(APPLY_CANCELLED.to_string());
+                break 'packages;
+            }
+
             let source = match entry.content_source() {
                 Ok(ContentSource::RepoFile(source)) => source,
 
@@ -1091,6 +1159,20 @@ where
                         SecretOutcome::Conflicted => conflict_count += 1,
                         SecretOutcome::Failed => {
                             skipped_count += 1;
+                            // Cancellation is decided before `stop_on_error` gets
+                            // to explain the failure, and outside its branch,
+                            // because a cancelled run stops either way.
+                            //
+                            // Ctrl+C kills the provider command, which fails, and
+                            // `stop_on_error` defaults to true — so without this
+                            // the run blames the package file for the user's own
+                            // interrupt ("Stopped after failing to apply dotfile
+                            // 'X' (stop_on_error is enabled)"). That reads as a
+                            // spec bug and sends the user looking for one.
+                            if token.is_cancelled() {
+                                stopped = Some(APPLY_CANCELLED.to_string());
+                                break 'packages;
+                            }
                             if config.stop_on_error() {
                                 // Break rather than return: anything already
                                 // deployed in this run has been written to disk
@@ -1332,6 +1414,20 @@ where
                 }
             }
         }
+    }
+
+    // Cancellation arriving once the *last* entry has started is seen by nothing
+    // above: the loop's guard sits at the top of each entry, so when there is no
+    // next entry it never runs again, and a command that finishes despite the
+    // cancellation leaves `stopped` as `None`. The run would then report success
+    // for a run the user interrupted — and for a provider entry that means a
+    // credential written to disk after Ctrl+C, with nothing in the stream saying
+    // so. Deploy state is still saved below, because the writes really happened.
+    //
+    // Does not overwrite an existing reason: `stop_on_error` names the entry that
+    // failed, which is more specific than this.
+    if stopped.is_none() && token.is_cancelled() {
+        stopped = Some(APPLY_CANCELLED.to_string());
     }
 
     // Save deploy state (skip in dry-run mode)

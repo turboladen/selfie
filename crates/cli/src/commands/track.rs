@@ -11,6 +11,7 @@ use selfie::{
     namespace,
     package::{port::PackageRepository, repository::yaml::YamlPackageRepository},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
@@ -36,7 +37,12 @@ enum TrackChoice {
 }
 
 /// Handle the `selfie track` interactive command
-pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &DisplayManager) -> i32 {
+pub(crate) async fn handle_track(
+    file: &str,
+    config: &CliConfig,
+    display: &DisplayManager,
+    cancellation_token: CancellationToken,
+) -> i32 {
     info!("Interactive track for '{}'", file);
 
     let repo = create_package_repository(config);
@@ -63,7 +69,7 @@ pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &Displ
 
     match choice {
         TrackChoice::ExistingPackage(ref name) => {
-            common::handle_track_for_package(name, file, config, display).await
+            common::handle_track_for_package(name, file, config, display, cancellation_token).await
         }
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
@@ -77,7 +83,7 @@ pub(crate) async fn handle_track(file: &str, config: &CliConfig, display: &Displ
                 display.print_error(format!("Cannot use name '{name}': {e}"));
                 return 1;
             }
-            common::handle_track_standalone(name, file, config, display).await
+            common::handle_track_standalone(name, file, config, display, cancellation_token).await
         }
         TrackChoice::Cancelled => {
             display.print_info("Cancelled.");

@@ -24,6 +24,7 @@ use selfie::{
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::event_collector;
 
@@ -226,8 +227,19 @@ impl SelfieServer {
         // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
         // and provider commands (`op`, `teller`) live on the user's PATH.
         let runner = ShellCommandRunner::login_shell(config.command_timeout());
-        let mut dotfile_service =
-            DotfileServiceImpl::new(repo, RealFileSystem, runner, config.clone());
+        // A fresh token, deliberately: an MCP server has no signal handler and no
+        // interactive user to press Ctrl+C, so there is nothing to cancel with.
+        // Stated here rather than defaulted inside the service, so this stays a
+        // visible property of *this* adapter — `main.rs` says the same about
+        // `PackageServiceImpl`. `command_timeout` remains the bound on a provider
+        // command that blocks.
+        let mut dotfile_service = DotfileServiceImpl::new(
+            repo,
+            RealFileSystem,
+            runner,
+            config.clone(),
+            CancellationToken::new(),
+        );
 
         // Add standalone dotfiles repository if the directory exists
         let dotfiles_dir = config.dotfiles_directory();
