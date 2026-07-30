@@ -1289,7 +1289,17 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
                     reason: "Command timed out".to_string(),
                 })
             }
-            _ => OperationFailure::Generic(err.to_string()),
+            // Listed rather than matched with `_` so that adding a
+            // `CommandError` variant fails to build here. This arm renders the
+            // error with `Display`, and a variant whose `Display` carried
+            // command output would leak it into `PackageEvent::Completed` and
+            // on to both the CLI and the MCP server's JSON. Every variant below
+            // names only the command. Check that before extending this list.
+            crate::commands::runner::CommandError::Cancelled { .. }
+            | crate::commands::runner::CommandError::StdoutSpawn(_)
+            | crate::commands::runner::CommandError::StderrSpawn(_) => {
+                OperationFailure::Generic(err.to_string())
+            }
         }
     }
 }
