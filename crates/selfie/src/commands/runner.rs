@@ -6,7 +6,6 @@
 
 use std::{
     borrow::Cow,
-    fmt,
     future::Future,
     path::{Path, PathBuf},
     process::Output,
@@ -31,19 +30,21 @@ pub enum OutputChunk {
     Stderr(String),
 }
 
-impl fmt::Display for OutputChunk {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Stdout(s) | Self::Stderr(s) => f.write_str(s),
-        }
-    }
-}
-
 /// Port for command execution (Hexagonal Architecture)
 ///
 /// This trait abstracts command execution to allow different implementations
 /// (shell commands, mock execution, etc.) and to enable comprehensive testing.
 /// It provides both buffered and streaming execution modes with timeout support.
+///
+/// A non-zero exit is **not** an error for the `execute*` methods: it is
+/// reported through [`CommandOutput::is_success`], so their `# Errors` sections
+/// list only the ways a command fails to run to completion.
+///
+/// Those methods buffer a command's entire output in memory, and nothing bounds
+/// it — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
+/// output as well as relaying it. A size check applied by a caller, such as the
+/// dotfile content cap, therefore bounds what selfie compares and writes, not
+/// what it allocates.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait CommandRunner: Send + Sync {
     /// Check if a command executable exists on `PATH`
@@ -75,9 +76,9 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
-    /// - The command exits with a non-zero status code
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - Command execution times out (implementation-dependent default)
+    /// - The command is cancelled via `token`
     fn execute(
         &self,
         command: &str,
@@ -97,9 +98,9 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
-    /// - The command exits with a non-zero status code
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
+    /// - The command is cancelled via `token`
     fn execute_with_timeout(
         &self,
         command: &str,
@@ -126,12 +127,9 @@ pub trait CommandRunner: Send + Sync {
     /// Returns [`CommandError`] if:
     /// - `working_dir` does not exist or is not a directory (reported as
     ///   [`CommandError::IoError`], since the shell cannot be spawned there)
-    /// - The command cannot be started (IO error)
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
     /// - The command is cancelled via `token`
-    ///
-    /// A non-zero exit is **not** an error: it is reported through
-    /// [`CommandOutput::is_success`], as with the other execution methods.
     fn execute_in_dir(
         &self,
         command: &str,
@@ -146,6 +144,12 @@ pub trait CommandRunner: Send + Sync {
     /// channel as it becomes available. This is ideal for long-running commands
     /// or when real-time feedback is needed.
     ///
+    /// Chunks are delivered on a best-effort basis: an implementation may drop a
+    /// chunk rather than block when the receiver falls behind, and drops one
+    /// outright once the receiver is gone, so what arrives on the channel is not
+    /// guaranteed to be the whole output. The returned [`CommandOutput`] holds
+    /// all of it.
+    ///
     /// # Arguments
     ///
     /// * `command` - The shell command to execute
@@ -155,10 +159,10 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CommandError`] if:
-    /// - The command cannot be started (IO error)
-    /// - The command exits with a non-zero status code
+    /// - The command cannot be started, or fails part-way through (IO error)
     /// - The command times out before completion
-    /// - Channel communication fails
+    /// - The command is cancelled via `token`
+    /// - Stdout or stderr cannot be captured from the child
     fn execute_streaming(
         &self,
         command: &str,
@@ -282,17 +286,6 @@ pub enum CommandError {
         source: Arc<std::io::Error>,
     },
 
-    /// Command executed but returned a non-zero exit code
-    #[error("Command failed with exit code {exit_code}: {command}")]
-    NonZeroExit {
-        command: String,
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-        working_directory: PathBuf,
-        execution_duration: Duration,
-    },
-
     /// Command was cancelled via a cancellation token
     #[error("Command cancelled: {command}")]
     Cancelled {
@@ -307,10 +300,6 @@ pub enum CommandError {
     /// Failed to capture stderr during streaming execution
     #[error("Failed spawning stderr during command: {0}")]
     StderrSpawn(String),
-
-    /// Error occurred in the output callback during streaming execution
-    #[error("Error while processing command: {0}")]
-    Callback(OutputChunk),
 }
 
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
@@ -359,9 +348,9 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 ///
 /// # Why `Debug` is derived
 ///
-/// Deliberately, and unlike `ResolvedContent` or [`CommandError::NonZeroExit`]'s
-/// stdout. Those are never forwarded, so their `Debug` is a pure exit worth
-/// closing by hand. This value is text selfie forwards on purpose, and
+/// Deliberately, and unlike `ResolvedContent`. That is never forwarded, so its
+/// `Debug` is a pure exit worth closing by hand. This value is text selfie
+/// forwards on purpose, and
 /// `.claude/rules/secrets.md` prescribes scanning an event's `Debug` output for
 /// a secret literal. A hand-written `Debug` printing `<N bytes>` would hide
 /// forwarded stderr from that scan, so a secret that reaches stderr later would

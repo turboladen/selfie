@@ -248,9 +248,10 @@ where
 /// flag can echo secret material there, and on the success path it has no
 /// purpose.
 ///
-/// The error is rendered with `Display`, never `Debug`: `CommandError::NonZeroExit`
-/// carries the command's stdout in a field, which `Debug` would print and which is
-/// the secret itself.
+/// The error is rendered with `Display`, never `Debug`. No `CommandError`
+/// variant carries stdout today, so `Debug` would leak nothing — but `Display`
+/// is what each variant's `#[error(...)]` curates, and `Debug` prints whatever
+/// fields a future variant happens to add.
 ///
 /// Both exits go through [`BoundedText`] and then unwrap to a `String`, because
 /// [`ResolveError`]'s fields are `String`. The bound is therefore applied here

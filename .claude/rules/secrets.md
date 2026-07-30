@@ -61,14 +61,16 @@ Test egress at the **boundary**, not by listing known paths:
   bound for the terminal, and it would hide forwarded stderr from the event scan above — a secret
   arriving on stderr later would go unseen instead of caught. Apply this rule to types that hold a
   secret, not to types that carry something already on its way out.
-- **`CommandError::NonZeroExit` carries stdout.** Its `Display` omits the field; its `Debug` does
-  not, so a `{:?}` on any `Result` holding one prints the command's whole output. Use `to_string()`,
-  never `{:?}`. `CommandFailure::ExecutionFailed` deliberately has **no** `stdout` field so that the
-  conversion has nowhere to put it, and forwards stderr only, bounded — do not add one back. A
-  provider's stdout _is_ the secret, and the general failure path cannot know which commands produce
-  one. Still prefer the resolve path's own error type over `OperationFailure::from(CommandError)` or
-  `command_failed`: those say "a command failed", not which entry or which var, and the resolve
-  variants carry that.
+- **No command's stdout may reach a failure type.** A provider's stdout _is_ the secret, and the
+  general failure path cannot know which commands produce one. This is currently enforced by
+  construction at both ends: **no `CommandError` variant carries a `stdout` field**, so
+  `OperationFailure::from(CommandError)` has nothing to read, and `CommandFailure::ExecutionFailed`
+  has none either, so it would have nowhere to put it. Adding a `stdout` field to either — or a new
+  `CommandError` variant that has one — reopens the path and needs a leak test again. Render a
+  `CommandError` with `to_string()`, never `{:?}`: `Display` is what each variant's `#[error(...)]`
+  curates, while `Debug` prints whatever fields a future variant adds. Still prefer the resolve
+  path's own error type over `from(CommandError)` or `command_failed`: those say "a command failed",
+  not which entry or which var, and the resolve variants carry that.
 - **Forward command stderr on failure only**, bounded. It is content selfie does not control; a
   provider run with a verbose flag can echo secret material there, and a rendered `CommandError`
   embeds the package file's own unbounded `command:` string. `BoundedText` in `commands/runner.rs`
