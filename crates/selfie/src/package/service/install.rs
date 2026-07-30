@@ -280,15 +280,16 @@ where
                 .await;
             None
         }
-        Err(_) => {
-            let command_name = if cfg!(target_os = "windows") {
-                "where"
-            } else {
-                "which"
-            };
+        // No path rather than a guessed one. This covers the command failing to
+        // run *and* its output failing to read part-way through — the latter
+        // would otherwise hand back a truncated path that either fails to
+        // resolve or, worse, names a different binary than the command found.
+        // Rendered with `Display`: `Debug` would print whatever fields a future
+        // `CommandError` variant adds.
+        Err(err) => {
             sender
                 .send_debug(format!(
-                    "Could not run '{command_name}' command to locate executable"
+                    "Could not determine the path of '{package_name}': {err}"
                 ))
                 .await;
             None

@@ -658,6 +658,12 @@ of exit code. Writing an empty file over a credentials target is destructive, an
 almost always means a failure that did not set a non-zero status. Whitespace-only output is content,
 not empty.
 
+Output selfie could not read to the end is an error too, and nothing is written. A command can run
+correctly and still have the pipe carrying its output fail part-way through; what was read by then
+is a prefix of the credential, not the credential, and the size limit below cannot catch it because
+a truncated value is smaller, not larger. The same applies to an individual binding, where a
+truncated value is still non-empty and so clears the zero-length check above as well.
+
 `command_timeout` (default 60s, enough for a biometric prompt) applies **per command**, so an entry
 with several bindings can take longer in total.
 

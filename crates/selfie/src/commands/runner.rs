@@ -77,6 +77,10 @@ pub trait CommandRunner: Send + Sync {
     ///
     /// Returns [`CommandError`] if:
     /// - The command cannot be started, or fails part-way through (IO error)
+    /// - Either output stream cannot be read to the end
+    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
+    ///   whose correctness depends only on stdout. The runner reports what it
+    ///   could not read; it does not decide which stream a caller cared about.
     /// - Command execution times out (implementation-dependent default)
     /// - The command is cancelled via `token`
     fn execute(
@@ -99,6 +103,9 @@ pub trait CommandRunner: Send + Sync {
     ///
     /// Returns [`CommandError`] if:
     /// - The command cannot be started, or fails part-way through (IO error)
+    /// - Either output stream cannot be read to the end
+    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
+    ///   whose correctness depends only on stdout
     /// - The command times out before completion
     /// - The command is cancelled via `token`
     fn execute_with_timeout(
@@ -128,6 +135,9 @@ pub trait CommandRunner: Send + Sync {
     /// - `working_dir` does not exist or is not a directory (reported as
     ///   [`CommandError::IoError`], since the shell cannot be spawned there)
     /// - The command cannot be started, or fails part-way through (IO error)
+    /// - Either output stream cannot be read to the end
+    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
+    ///   whose correctness depends only on stdout
     /// - The command times out before completion
     /// - The command is cancelled via `token`
     fn execute_in_dir(
@@ -227,6 +237,20 @@ impl CommandOutput {
         &self.output.stdout
     }
 
+    /// Take ownership of the stdout bytes, consuming the output.
+    ///
+    /// For a caller that keeps stdout rather than reading it in place.
+    /// [`stdout`](Self::stdout) plus `to_vec` leaves both copies alive at once,
+    /// which on the dotfile provider path means the whole credential exists twice
+    /// at peak — and a second buffer is a second thing to reason about for
+    /// zeroization. Nothing bounds either copy: the runner buffers a command's
+    /// entire output before any caller's size cap can run, so the saving is
+    /// 2×N → N for arbitrary N, not a fixed amount.
+    #[must_use]
+    pub fn into_stdout(self) -> Vec<u8> {
+        self.output.stdout
+    }
+
     /// Get stdout as a UTF-8 string
     ///
     /// Converts stdout bytes to a string, replacing invalid UTF-8 sequences
@@ -263,6 +287,27 @@ impl CommandOutput {
     }
 }
 
+/// Which of a command's two output streams something happened to.
+///
+/// Carried by [`CommandError::OutputReadFailed`] so a failure names the pipe it
+/// happened on. Deliberately a tag and nothing more — it holds no bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    /// The command's standard output.
+    Stdout,
+    /// The command's standard error.
+    Stderr,
+}
+
+impl std::fmt::Display for OutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
 /// Errors that can occur during command execution
 ///
 /// Represents all possible failure modes when executing system commands,
@@ -282,6 +327,34 @@ pub enum CommandError {
     IoError {
         command: String,
         working_directory: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// One of the command's output pipes could not be read to the end.
+    ///
+    /// Whatever had been buffered when the read failed is **not** the command's
+    /// output, so it is dropped rather than returned. Nothing else distinguishes
+    /// "the command produced this" from "the pipe failed and this is what we
+    /// got", and callers act on that output: one uses it as an executable path,
+    /// one writes it to a credentials file, and two read a verdict out of it.
+    ///
+    /// Reported for stderr as well as stdout, including on commands whose
+    /// correctness depends only on stdout. Being lenient about stderr would mean
+    /// either a per-stream flag on [`CommandOutput`] — the ignorable-by-default
+    /// shape this variant exists to avoid — or splicing a selfie-authored marker
+    /// into bytes every consumer treats as the process's own, which would then be
+    /// forwarded to the CLI and the MCP server's JSON as if the command had
+    /// emitted it.
+    ///
+    /// Carries no output bytes, by construction: see the comment on
+    /// `OperationFailure::from(CommandError)`, which this variant's `Display` has
+    /// to satisfy.
+    #[error("Failed reading {stream} of command '{command}': {source}")]
+    OutputReadFailed {
+        command: String,
+        working_directory: PathBuf,
+        stream: OutputStream,
         #[source]
         source: Arc<std::io::Error>,
     },

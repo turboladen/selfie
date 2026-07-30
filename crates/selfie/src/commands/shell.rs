@@ -14,7 +14,7 @@ use std::{
 use tokio::{io::AsyncReadExt, process::Command};
 use tokio_util::sync::CancellationToken;
 
-use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk};
+use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream};
 
 /// Shell command runner implementation
 ///
@@ -147,41 +147,54 @@ impl ShellCommandRunner {
             source: Arc::new(e),
         })?;
 
-        // Take pipes and read them concurrently with wait() to avoid
-        // deadlock when the child produces more than the OS pipe buffer (~64KB).
+        // Take pipes and read them in spawned tasks, so both drain while wait()
+        // runs. This is what avoids the deadlock when the child produces more
+        // than the OS pipe buffer (~64KB): a read that only started after wait()
+        // returned would never get there, because the child cannot exit until
+        // something drains the pipe it is blocked writing to. The spawns must
+        // stay *before* the select for that to hold; nothing below depends on
+        // the order the handles are later joined in.
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut out) = child_stdout {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
-            }
-            buf
-        });
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut err) = child_stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
-            }
-            buf
-        });
+        let stdout_handle = tokio::spawn(read_stream(child_stdout));
+        let stderr_handle = tokio::spawn(read_stream(child_stderr));
 
         tokio::select! {
             status = child.wait() => {
-                let status = status.map_err(|e| CommandError::IoError {
-                    command: command.to_string(),
-                    working_directory: working_directory.clone(),
-                    source: Arc::new(e),
-                })?;
-                let stdout = stdout_handle.await.unwrap_or_default();
-                let stderr = stderr_handle.await.unwrap_or_default();
-                Ok(CommandOutput {
-                    output: Output { status, stdout, stderr },
-                    duration: start_time.elapsed(),
-                })
+                match status {
+                    Ok(status) => {
+                        // Both readers are already running, so joining them
+                        // concurrently rather than one after the other is neutral
+                        // for progress. It is done this way so that a failure on
+                        // one stream still reaps the other instead of leaving a
+                        // detached task behind.
+                        let (out, err) = tokio::join!(stdout_handle, stderr_handle);
+                        finish(status, out, err, command, &working_directory, start_time.elapsed())
+                    }
+                    // Aborted for the same reason as the timeout and cancellation
+                    // arms below: without a status there is no output to report,
+                    // and dropping the handles would only detach them.
+                    Err(e) => {
+                        stdout_handle.abort();
+                        stderr_handle.abort();
+                        Err(CommandError::IoError {
+                            command: command.to_string(),
+                            working_directory: working_directory.clone(),
+                            source: Arc::new(e),
+                        })
+                    }
+                }
             }
             () = tokio::time::sleep(timeout) => {
                 let _ = child.kill().await;
+                // The readers are abandoned deliberately. A read error here would
+                // be a consequence of the kill above rather than a cause, and the
+                // timeout is the more specific answer. Aborting rather than
+                // dropping the handles: dropping only detaches, which would leave
+                // a task buffering a killed command's output after the caller has
+                // given up on it.
+                stdout_handle.abort();
+                stderr_handle.abort();
                 Err(CommandError::Timeout {
                     command: command.to_string(),
                     timeout,
@@ -190,6 +203,9 @@ impl ShellCommandRunner {
             }
             () = token.cancelled() => {
                 let _ = child.kill().await;
+                // Abandoned for the same reason as the timeout arm above.
+                stdout_handle.abort();
+                stderr_handle.abort();
                 Err(CommandError::Cancelled {
                     command: command.to_string(),
                     working_directory,
@@ -250,6 +266,9 @@ impl CommandRunner for ShellCommandRunner {
     ///
     /// Returns [`CommandError`] if:
     /// - The command cannot be started, or fails part-way through (IO error)
+    /// - Either output stream cannot be read to the end
+    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
+    ///   whose correctness depends only on stdout
     /// - The command times out (exceeds default timeout)
     /// - The command is cancelled via `token`
     async fn execute(
@@ -276,6 +295,9 @@ impl CommandRunner for ShellCommandRunner {
     ///
     /// Returns [`CommandError`] if:
     /// - The command cannot be started, or fails part-way through (IO error)
+    /// - Either output stream cannot be read to the end
+    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
+    ///   whose correctness depends only on stdout
     /// - The command times out before completion
     /// - The command is cancelled via `token`
     async fn execute_with_timeout(
@@ -295,8 +317,10 @@ impl CommandRunner for ShellCommandRunner {
     /// # Errors
     ///
     /// Returns [`CommandError`] if the command cannot be started (including when
-    /// `working_dir` does not exist), fails part-way through, times out, or is
-    /// cancelled.
+    /// `working_dir` does not exist), fails part-way through, has either output
+    /// stream fail to read to the end ([`CommandError::OutputReadFailed`] —
+    /// **including stderr**, on a command whose correctness depends only on
+    /// stdout), times out, or is cancelled.
     async fn execute_in_dir(
         &self,
         command: &str,
@@ -443,6 +467,119 @@ impl CommandRunner for ShellCommandRunner {
     }
 }
 
+/// What a spawned reader task hands back once joined.
+///
+/// The outer `Result` is the join itself (the task panicked or was aborted); the
+/// inner one is whether the pipe read to the end.
+type JoinedRead = Result<std::io::Result<Vec<u8>>, tokio::task::JoinError>;
+
+/// Read one of a child's pipes to the end, or fail.
+///
+/// **A partial buffer is dropped, never returned.** This function existing at all
+/// is the fix for the shape it replaced, which discarded the error and returned
+/// whatever had accumulated as though the command had produced exactly that.
+///
+/// `None` is not a failure: a pipe that was never captured has no output, which
+/// is the same empty answer the previous shape gave.
+async fn read_stream<R>(reader: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
+    let mut buf = Vec::new();
+    if let Some(mut reader) = reader {
+        reader.read_to_end(&mut buf).await?;
+    }
+    Ok(buf)
+}
+
+/// Turn a joined reader task into its bytes, or into a [`CommandError`].
+///
+/// A failed read and a reader task that did not finish are the same answer to
+/// the caller — selfie does not have the command's output — so they share one
+/// variant.
+///
+/// The [`JoinError`](tokio::task::JoinError) is inspected only for whether the
+/// task was cancelled, and is then **dropped**. It is never wrapped or rendered:
+/// a panic payload is produced by the very task that was holding this command's
+/// output, so it can be derived from a credential, and `OutputReadFailed`'s
+/// `Display` reaches `PackageEvent::Completed`, the CLI, and the MCP server's
+/// JSON. The replacement is a fixed `&'static str`, so no runtime data can reach
+/// it even by accident later.
+fn join_read(
+    joined: JoinedRead,
+    stream: OutputStream,
+    command: &str,
+    working_directory: &Path,
+) -> Result<Vec<u8>, CommandError> {
+    let source = match joined {
+        Ok(Ok(bytes)) => return Ok(bytes),
+        Ok(Err(io_error)) => Arc::new(io_error),
+        Err(join_error) => {
+            let reason: &'static str = if join_error.is_cancelled() {
+                "output reader task was cancelled"
+            } else {
+                "output reader task panicked"
+            };
+            Arc::new(std::io::Error::other(reason))
+        }
+    };
+
+    Err(CommandError::OutputReadFailed {
+        command: command.to_string(),
+        working_directory: working_directory.to_path_buf(),
+        stream,
+        source,
+    })
+}
+
+/// Build the finished [`CommandOutput`], or the first read failure.
+///
+/// Split out of `run_buffered` so the step that decides whether a command's
+/// output is trustworthy can be tested directly, on inputs a real child process
+/// cannot be made to produce on demand.
+///
+/// **That makes this function's own logic testable; it does not cover the call
+/// site.** Going back to `unwrap_or_default()` where `run_buffered` calls this
+/// would still fail no test: reaching it needs a genuine pipe failure from a
+/// real child, and the tests that exercise the consumers substitute a fake
+/// runner and never construct a `ShellCommandRunner` at all. Read the tests
+/// below as covering the decision, not the wiring into it.
+///
+/// stdout is checked first because it is the stream every consumer makes a
+/// decision from — an executable path, a credential, a check verdict, a source
+/// list. An exit status is not enough to report on its own: a command can exit 0
+/// while the pipe carrying its answer failed.
+fn finish(
+    status: std::process::ExitStatus,
+    joined_stdout: JoinedRead,
+    joined_stderr: JoinedRead,
+    command: &str,
+    working_directory: &Path,
+    duration: Duration,
+) -> Result<CommandOutput, CommandError> {
+    let stdout = join_read(
+        joined_stdout,
+        OutputStream::Stdout,
+        command,
+        working_directory,
+    )?;
+    let stderr = join_read(
+        joined_stderr,
+        OutputStream::Stderr,
+        command,
+        working_directory,
+    )?;
+
+    Ok(CommandOutput {
+        output: Output {
+            status,
+            stdout,
+            stderr,
+        },
+        duration,
+    })
+}
+
 /// Handle the result of reading a chunk with real-time streaming
 ///
 /// Processes the result of an async read operation, updating the full output
@@ -498,6 +635,311 @@ mod tests {
 
     fn token() -> CancellationToken {
         CancellationToken::new()
+    }
+
+    /// An `AsyncRead` that yields `bytes` and then fails.
+    ///
+    /// Stands in for a pipe that dies part-way through, which cannot be provoked
+    /// reliably from a real child process.
+    struct FailingReader {
+        bytes: Vec<u8>,
+        fail: bool,
+    }
+
+    impl FailingReader {
+        fn failing_after(bytes: &[u8]) -> Self {
+            Self {
+                bytes: bytes.to_vec(),
+                fail: true,
+            }
+        }
+
+        /// The control: the same bytes, then a clean EOF.
+        fn clean(bytes: &[u8]) -> Self {
+            Self {
+                bytes: bytes.to_vec(),
+                fail: false,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if !self.bytes.is_empty() {
+                // Only what fits: `put_slice` panics past the remaining capacity,
+                // which today's 7-byte fixtures never reach but a realistic one
+                // would. The rest is handed over on the next poll.
+                let n = self.bytes.len().min(buf.remaining());
+                let taken: Vec<u8> = self.bytes.drain(..n).collect();
+                buf.put_slice(&taken);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            if self.fail {
+                return std::task::Poll::Ready(Err(std::io::Error::other("pipe died")));
+            }
+            std::task::Poll::Ready(Ok(())) // EOF
+        }
+    }
+
+    fn joined_ok(bytes: &[u8]) -> JoinedRead {
+        Ok(Ok(bytes.to_vec()))
+    }
+
+    fn joined_io_error() -> JoinedRead {
+        Ok(Err(std::io::Error::other("pipe died")))
+    }
+
+    /// Serializes the panic-hook swap below.
+    ///
+    /// The hook is process-global and the lib test binary runs tests in parallel,
+    /// so two callers can interleave their take/set/restore and leave the
+    /// silencing hook installed for the rest of the run. That cannot cause a
+    /// false pass, but it would swallow the panic output of some later genuine
+    /// failure, which is a trap for whoever hits it.
+    ///
+    /// `tokio`'s mutex rather than `std`'s because the guarded region spans the
+    /// `.await` on the spawned task, which is exactly what `std`'s must not do.
+    static PANIC_HOOK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A real `JoinError` from a task that panicked with `payload`.
+    async fn joined_panic(payload: &'static str) -> JoinedRead {
+        // The default hook would print the payload to the test log, which for the
+        // leak test below is the very thing under examination.
+        let guard = PANIC_HOOK.lock().await;
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let joined = tokio::spawn(async move { panic!("{payload}") }).await;
+        std::panic::set_hook(previous);
+        drop(guard);
+        joined.map(|()| Ok(Vec::new()))
+    }
+
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt as _;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    // ---- T1: a failed read is an error, not a short buffer -------------------
+
+    #[tokio::test]
+    async fn a_failed_stdout_read_is_an_error_not_a_short_buffer() {
+        let result = read_stream(Some(FailingReader::failing_after(b"partial"))).await;
+
+        assert!(
+            result.is_err(),
+            "a read that failed part-way returned {result:?} as though it were the whole output"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_that_reaches_eof_returns_every_byte() {
+        // Control for the test above: without this, a `read_stream` that always
+        // failed would pass it.
+        let bytes = read_stream(Some(FailingReader::clean(b"partial")))
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, b"partial");
+    }
+
+    #[tokio::test]
+    async fn an_uncaptured_pipe_is_empty_rather_than_an_error() {
+        let bytes = read_stream(Option::<FailingReader>::None).await.unwrap();
+
+        assert!(bytes.is_empty());
+    }
+
+    // ---- T2/T3/T4: carrying the failure across the join ----------------------
+
+    #[tokio::test]
+    async fn a_failing_read_is_reported_as_output_read_failed_naming_the_stream() {
+        let error = join_read(
+            joined_io_error(),
+            OutputStream::Stderr,
+            "op read x",
+            Path::new("/pkg"),
+        )
+        .unwrap_err();
+
+        match &error {
+            CommandError::OutputReadFailed {
+                command,
+                working_directory,
+                stream,
+                ..
+            } => {
+                assert_eq!(*stream, OutputStream::Stderr);
+                assert_eq!(command, "op read x");
+                assert_eq!(working_directory, Path::new("/pkg"));
+            }
+            other => panic!("expected OutputReadFailed, got: {other:?}"),
+        }
+        assert!(error.to_string().contains("stderr"), "{error}");
+        assert!(error.to_string().contains("op read x"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_reader_task_is_an_error_not_an_empty_buffer() {
+        let joined = joined_panic("boom").await;
+
+        let result = join_read(joined, OutputStream::Stdout, "cmd", Path::new("/pkg"));
+
+        assert!(
+            matches!(result, Err(CommandError::OutputReadFailed { .. })),
+            "a reader task that panicked was reported as empty output: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_reader_does_not_forward_its_panic_payload() {
+        // The panic payload is produced by the task holding the command's
+        // output, so it can be derived from a credential. `OutputReadFailed`'s
+        // `Display` reaches `PackageEvent::Completed`, the CLI, and the MCP
+        // JSON, so the payload must not survive the join.
+        const SECRET: &str = "hunter2-Zk9xQw-vault-token";
+
+        let joined = joined_panic(SECRET).await;
+
+        let error = join_read(joined, OutputStream::Stdout, "cmd", Path::new("/pkg")).unwrap_err();
+        let rendered = error.to_string();
+
+        assert!(
+            !rendered.contains(SECRET),
+            "the panic payload was forwarded: {rendered}"
+        );
+        // Positive control: without this the assertion above passes against an
+        // error that renders nothing at all.
+        assert!(
+            rendered.contains("reader task panicked"),
+            "expected the fixed reason, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_read_still_returns_the_bytes() {
+        // Control for the two tests above: they would pass against a `join_read`
+        // that failed unconditionally.
+        let bytes = join_read(
+            joined_ok(b"hello"),
+            OutputStream::Stdout,
+            "cmd",
+            Path::new("/pkg"),
+        )
+        .unwrap();
+
+        assert_eq!(bytes, b"hello");
+    }
+
+    // ---- The wiring that builds the finished output --------------------------
+
+    #[tokio::test]
+    async fn finish_builds_the_output_when_both_streams_read() {
+        let output = finish(
+            exit_status(0),
+            joined_ok(b"out"),
+            joined_ok(b"err"),
+            "cmd",
+            Path::new("/pkg"),
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(output.stdout(), b"out");
+        assert_eq!(output.stderr(), b"err");
+        assert!(output.is_success());
+    }
+
+    #[tokio::test]
+    async fn finish_refuses_to_report_output_whose_stdout_read_failed() {
+        // Exit 0 with a failed stdout read is the dangerous case: the status says
+        // the command succeeded, and the bytes are not what it produced.
+        let result = finish(
+            exit_status(0),
+            joined_io_error(),
+            joined_ok(b"err"),
+            "which ripgrep",
+            Path::new("/pkg"),
+            Duration::ZERO,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(CommandError::OutputReadFailed {
+                    stream: OutputStream::Stdout,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_refuses_to_report_output_whose_stderr_read_failed() {
+        let result = finish(
+            exit_status(0),
+            joined_ok(b"out"),
+            joined_io_error(),
+            "cmd",
+            Path::new("/pkg"),
+            Duration::ZERO,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(CommandError::OutputReadFailed {
+                    stream: OutputStream::Stderr,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    // ---- T5: the deadlock this shape exists to avoid -------------------------
+
+    #[tokio::test]
+    async fn a_command_writing_past_the_pipe_buffer_on_both_streams_completes() {
+        // The OS pipe buffer is ~64KB. A child that fills both pipes blocks until
+        // something drains them, so a runner that reads only after `wait()`
+        // returns — or that drains one stream fully before the other — deadlocks.
+        // Nothing in this repository covered that: the largest existing output
+        // test writes ~9KB, to stdout only.
+        //
+        // The timeout is what turns a deadlock into a failed assertion instead of
+        // a hung suite.
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let command = "for i in $(seq 1 4000); do \
+                       echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
+                       echo 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >&2; \
+                       done";
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            runner.execute_with_timeout(command, Duration::from_secs(20), &token()),
+        )
+        .await
+        .expect("reading both pipes deadlocked")
+        .expect("command failed");
+
+        // Positive control: without these the test passes even if the command
+        // never exceeded the pipe buffer, which is the only thing it is for.
+        assert!(
+            output.stdout().len() > 200_000,
+            "stdout was only {} bytes, under the pipe buffer",
+            output.stdout().len()
+        );
+        assert!(
+            output.stderr().len() > 200_000,
+            "stderr was only {} bytes, under the pipe buffer",
+            output.stderr().len()
+        );
     }
 
     // These tests will actually run commands on the system

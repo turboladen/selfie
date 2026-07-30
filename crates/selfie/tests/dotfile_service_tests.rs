@@ -1466,6 +1466,160 @@ mod secret_bearing {
         );
     }
 
+    // ---- A provider or binding whose output could not be read (selfie-ql8m) ----
+    //
+    // The harm is not "resolve returns an error" — it is a truncated credential
+    // reaching a file. A short read used to be indistinguishable from a short
+    // command: the `MAX_CONTENT_BYTES` cap is a maximum, so a prefix sails under
+    // it, and for a var binding a prefix is also still non-empty. So these assert
+    // the filesystem, and each has a control proving the same fixture *does*
+    // write when the read succeeds.
+
+    #[tokio::test]
+    async fn a_provider_whose_output_could_not_be_read_writes_no_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !target.exists(),
+            "a truncated credential was written to {}",
+            target.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_whose_output_could_not_be_read_leaves_a_pre_existing_target_intact() {
+        let dirs = TestDirs::new();
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "previous-credential-abc123").unwrap();
+        let mode_before = std::fs::metadata(&target).unwrap().permissions().mode();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
+        let service = dirs.service_with_runner(runner);
+
+        // `accepting()`, not `ApplyOptions::default()`. Without a resolver a
+        // secret-bearing entry whose target differs is reported as a conflict and
+        // skipped, so the target would survive for a reason that has nothing to
+        // do with the read — and mutating `run_capture` to return partial content
+        // left this test passing. It has to take the overwrite path for the
+        // assertion below to mean anything.
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"previous-credential-abc123",
+            "a working credential was replaced with a truncated one"
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode(),
+            mode_before,
+            "the target's mode changed despite nothing being deployed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_provider_fixture_does_write_when_the_read_succeeds() {
+        // Control for both tests above. Without it they pass if apply never
+        // reached the entry at all — a broken fixture would look like a fix.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "previous-credential-abc123").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_binding_whose_output_could_not_be_read_writes_no_target() {
+        // The second write path. A truncated binding is spliced into a rendered
+        // file, and neither the emptiness check nor the size cap can see it.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !target.exists(),
+            "a file holding a truncated credential was written to {}",
+            target.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_binding_whose_output_could_not_be_read_leaves_a_pre_existing_target_intact() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "key: previous-credential-abc123\n").unwrap();
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
+        let service = dirs.service_with_runner(runner);
+
+        // `accepting()` for the same reason as the provider case above: without a
+        // resolver this would be skipped as a conflict and prove nothing.
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "key: previous-credential-abc123\n",
+            "a working credential was replaced with a truncated one"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_binding_fixture_does_write_when_the_read_succeeds() {
+        // Control for the two binding tests above. Seeded and `accepting()` so it
+        // exercises the same overwrite path the pre-existing-target test does —
+        // a control taking a different path would not control anything.
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "key: previous-credential-abc123\n").unwrap();
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            format!("key: {SECRET}\n")
+        );
+    }
+
     #[tokio::test]
     async fn provider_commands_run_in_the_package_directory() {
         let dirs = TestDirs::new();
