@@ -23,15 +23,33 @@ inspection: the event stream, the failure path, and `tracing`. Assume there is a
 
 Test egress at the **boundary**, not by listing known paths:
 
-- Scan every emitted `PackageEvent`'s `Debug` output for the secret literal — every event, not one
-  field of one variant. A leak added to a warning or a deployed event is how this actually happens.
+- Scan every emitted `PackageEvent`'s `Debug` output for the secret — every event, not one field of
+  one variant. A leak added to a warning or a deployed event is how this actually happens.
+- **Scan for the secret as text _and_ as a byte array.** A credential renders both ways and the two
+  share no characters: `Debug` on `Vec<u8>` prints `[115, 51, ...]`, and `std::process::Output`
+  switches to exactly that as soon as the content is not valid UTF-8 — which selfie supports. serde
+  does the same in the MCP server's JSON. A scan for the literal alone passes a leak of the whole
+  credential, and did, in every leak test in this repository. `test_common::assert_secret_free` is
+  the one scan; use it for an event `Debug`, a tracing buffer, or a serialized payload alike. It
+  matches a window of the secret rather than the whole value, so a truncating leak fails too. It is
+  **two** windows, not one, and they are not the same size: 12 _bytes_ from the secret's first
+  non-whitespace byte for the byte form, taken before normalization and keeping interior whitespace;
+  and 12 _characters_ for the text form, taken after it. A leak-test secret therefore has to clear
+  both — high-entropy, and for a **textual** secret still 12 characters once whitespace is stripped,
+  which `"abc def ghi j"` and four emoji both fail. It must also not read like a path, a package
+  name, or an environment name. Too short and the helper refuses it rather than scanning weakly.
 - Install a **capturing `tracing` subscriber** and assert its output is secret-free too. Event
   scanning catches library logging only because `EventSender` mirrors log calls into events; a bare
   `tracing::debug!` bypasses that entirely. Assert the captured buffer is non-empty, or the test
   passes by capturing nothing.
 - Give every leak test a **positive control**: assert the run really did handle the secret (the
   target on disk equals it). A leak test that passes because the secret was never produced is worse
-  than no test.
+  than no test. A control asserts the secret **is** present, so leave it a plain `contains` —
+  `assert_secret_free` is its negation and converting one inverts the test silently, which is easy
+  to do when the converted assertion sits a few lines away and the helper looks like the house
+  idiom. The two also constrain the secret from opposite directions: a newline-leading value
+  satisfies `assert_secret_free` but breaks a control that compares against the target on disk,
+  because `Debug` escapes those newlines.
 
 ## Specific traps, each of which has bitten
 

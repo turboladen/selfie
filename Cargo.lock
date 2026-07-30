@@ -2960,6 +2960,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "test-common",
  "tokio",
  "tokio-util",
  "tracing",

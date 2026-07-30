@@ -86,10 +86,10 @@ async fn a_failing_check_keeps_its_stdout_out_of_the_completed_event() {
          channel — if it does not, this test is no longer observing anything"
     );
 
-    assert!(
-        !format!("{completed:?}").contains(SECRET),
-        "a failing command's stdout reached the failure value, which every adapter \
-         receives:\n{completed:?}"
+    test_common::assert_secret_free(
+        &format!("{completed:?}"),
+        SECRET,
+        "the failure value every adapter receives",
     );
 }
 

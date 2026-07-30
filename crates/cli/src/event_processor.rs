@@ -746,10 +746,7 @@ mod tests {
             .format_summary()
             .expect("two collected errors must produce a summary");
 
-        assert!(
-            !summary.contains(SECRET),
-            "the failed command's stdout was printed verbatim:\n{summary}"
-        );
+        test_common::assert_secret_free(&summary, SECRET, "the CLI error summary");
         // Controls: the summary really was rendered, and the diagnostic survived.
         assert!(
             summary.contains("vault sealed"),

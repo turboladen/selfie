@@ -9,6 +9,7 @@ pub mod events;
 pub mod fixtures;
 pub mod package;
 pub mod runner;
+pub mod secrets;
 pub mod service;
 
 // Re-export the most commonly used items for convenience
@@ -30,6 +31,7 @@ pub use fixtures::{
 };
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use runner::FakeCommandRunner;
+pub use secrets::assert_secret_free;
 pub use service::{
     create_cli_service, create_service_test_service, create_test_service,
     create_test_service_for_env, create_test_service_with_config,
