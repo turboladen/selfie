@@ -69,6 +69,10 @@ Test egress at the **boundary**, not by listing known paths:
   - **The bound counts input bytes, not the length of the string it returns.** Invalid UTF-8 decodes
     lossily and each bad byte becomes a 3-byte `U+FFFD`, so 2000 bytes of binary stderr yield about
     6000 bytes of text. It bounds how much of the command's output survives, not `as_str().len()`.
+  - **It keeps both ends, not a prefix.** The surviving 2000 bytes are split between the head and
+    the tail, with the elided byte count named in between, because a failing command puts its
+    diagnosis last. That means **the last bytes of stderr are always forwarded** — a leak test that
+    plants its secret at the end will now see it where a head-only cut would have dropped it.
   - **It bounds forwarded output, not every string in a failure.** `ExecutionFailed`'s `command` and
     `AuditResultData`'s `audit_command` are plain unbounded `String`s that also reach the MCP JSON.
     They are user-authored package-file text rather than process output, which is why they are not

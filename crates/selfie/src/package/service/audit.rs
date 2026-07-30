@@ -673,8 +673,8 @@ mod tests {
                 match audit_result {
                     AuditResult::Error(message) => {
                         assert!(
-                            message.ends_with("\u{2026} (truncated)"),
-                            "not marked as truncated: {message}"
+                            message.contains("bytes elided"),
+                            "not marked as elided: {message}"
                         );
                         assert_eq!(
                             message.chars().filter(|c| *c == 'Z').count(),
@@ -697,8 +697,6 @@ mod tests {
         // which is unbounded -- so this arm renders untrusted text too. Without
         // this test the bound on it is a line whose removal nothing notices.
         use crate::commands::runner::{CommandError, MAX_BOUNDED_BYTES};
-
-        const MARKER: &str = "\u{2026} (truncated)";
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = test_config(temp_dir.path());
@@ -755,15 +753,18 @@ mod tests {
                 match audit_result {
                     AuditResult::Error(message) => {
                         assert!(
-                            message.ends_with(MARKER),
-                            "not marked as truncated: {message}"
+                            message.contains("bytes elided"),
+                            "not marked as elided: {message}"
                         );
-                        // Every character is ASCII but the ellipsis, so the input
-                        // byte bound equals a character count here.
+                        // 'Z' appears only in the oversized command string, so
+                        // the count measures surviving input and nothing else.
+                        // The rendered prefix eats into the head's share of the
+                        // budget, which is why this is not simply the bound.
+                        const PREFIX: &str = "Command timed out after 5s: ";
                         assert_eq!(
-                            message.chars().count(),
-                            MAX_BOUNDED_BYTES + MARKER.chars().count(),
-                            "exactly the bound plus the marker should survive"
+                            message.chars().filter(|c| *c == 'Z').count(),
+                            MAX_BOUNDED_BYTES - PREFIX.len(),
+                            "the head and tail together should come to the bound"
                         );
                     }
                     other => panic!("Expected AuditResult::Error, got: {other:?}"),

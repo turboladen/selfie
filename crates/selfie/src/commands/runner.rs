@@ -313,16 +313,24 @@ pub enum CommandError {
     Callback(OutputChunk),
 }
 
-/// How many **input bytes** a [`BoundedText`] keeps.
+/// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
 ///
-/// Stated as a number in `docs/package-files.md`, because a user who sees the
-/// truncation marker needs to know how much was lost. Change both together.
+/// Stated as a number in `docs/package-files.md`, because a user reading a
+/// bounded failure needs to know how much of it they are seeing. Change both
+/// together.
 /// `pub(crate)` deliberately: [`BoundedText`] is the public surface, and
 /// exporting the number would pin 2000 as API for no caller that needs it. The
 /// tradeoff is that `selfie-cli` and `selfie-mcp` can *call* [`BoundedText::bound`]
 /// but cannot assert the bound without hardcoding 2000, so a test of the limit
 /// itself belongs in this crate.
 pub(crate) const MAX_BOUNDED_BYTES: usize = 2000;
+
+/// How many input bytes survive at each end when [`BoundedText::bound`] elides.
+///
+/// Derived from [`MAX_BOUNDED_BYTES`] rather than written as a number so the two
+/// cannot drift: head plus tail is the total, so keeping both ends splits the
+/// bound instead of doubling it.
+const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 
 /// Text selfie does not control, bounded before it enters a diagnostic.
 ///
@@ -373,7 +381,14 @@ pub(crate) const MAX_BOUNDED_BYTES: usize = 2000;
 pub struct BoundedText(String);
 
 impl BoundedText {
-    /// Bound `bytes`, appending a marker when anything was cut.
+    /// Bound `bytes`, keeping **both ends** and eliding the middle.
+    ///
+    /// Keeps the first and last [`BOUNDED_END_BYTES`] and replaces what is
+    /// between them with a marker naming how many bytes went. Both ends, because
+    /// a failing command puts its diagnosis at the *end*: `brew` prints pages of
+    /// `==> Downloading` and then one `Error:` line, and a head-only cut kept the
+    /// progress and dropped the reason. The head is worth keeping too - it is
+    /// where a command names what it was doing.
     ///
     /// **The bound is on the input byte count, not on the length of the string
     /// this returns.** Invalid UTF-8 is replaced lossily and each bad byte
@@ -382,17 +397,34 @@ impl BoundedText {
     /// much of the command's output survives, which is what the forwarding paths
     /// need; `as_str().len() <= MAX_BOUNDED_BYTES` does not hold.
     ///
-    /// Truncates the bytes and then decodes, rather than slicing a `String`: a
-    /// multi-byte character straddling the cut would panic on a string slice.
+    /// Cuts the bytes and then decodes, rather than slicing a `String`: a
+    /// multi-byte character straddling either cut would panic on a string slice.
+    /// There are two cuts now, and the tail's is the one that can also land
+    /// mid-character at the *start* of what it keeps.
+    ///
+    /// An input barely over the bound is returned whole. Eliding it would spend
+    /// more bytes on the marker than the elision saved, so the "bounded" form
+    /// would be longer than simply decoding everything - the comparison is
+    /// against the decoded length, since for invalid UTF-8 the decoded string is
+    /// already longer than the input no matter what this does.
     #[must_use]
     pub fn bound(bytes: &[u8]) -> Self {
+        // Borrowed, not allocated, whenever the input is valid UTF-8.
+        let whole = String::from_utf8_lossy(bytes);
+
         if bytes.len() <= MAX_BOUNDED_BYTES {
-            Self(String::from_utf8_lossy(bytes).into_owned())
+            return Self(whole.into_owned());
+        }
+
+        let elided = bytes.len() - MAX_BOUNDED_BYTES;
+        let head = String::from_utf8_lossy(&bytes[..BOUNDED_END_BYTES]);
+        let tail = String::from_utf8_lossy(&bytes[bytes.len() - BOUNDED_END_BYTES..]);
+        let cut = format!("{head}… ({elided} bytes elided) …{tail}");
+
+        if cut.len() < whole.len() {
+            Self(cut)
         } else {
-            Self(format!(
-                "{}… (truncated)",
-                String::from_utf8_lossy(&bytes[..MAX_BOUNDED_BYTES])
-            ))
+            Self(whole.into_owned())
         }
     }
 
@@ -420,14 +452,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bound_does_not_split_a_multibyte_character() {
-        // A multi-byte character straddling the cut would panic a string slice.
-        let mut input = vec![b'a'; MAX_BOUNDED_BYTES - 1];
+    fn bound_does_not_split_a_multibyte_character_at_the_head_cut() {
+        // A multi-byte character straddling a cut would panic a string slice.
+        // Places one across the head cut: its first byte is the last one kept.
+        let mut input = vec![b'a'; BOUNDED_END_BYTES - 1];
         input.extend_from_slice("é".as_bytes());
+        input.extend(std::iter::repeat_n(b'b', MAX_BOUNDED_BYTES * 2));
 
         let bounded = BoundedText::bound(&input);
 
-        assert!(bounded.as_str().ends_with("… (truncated)"));
+        assert!(bounded.as_str().contains("bytes elided"));
+    }
+
+    #[test]
+    fn bound_does_not_split_a_multibyte_character_at_the_tail_cut() {
+        // The second cut, which the head-only shape did not have. Here the
+        // character's *second* byte is the first one the tail keeps, so the
+        // decode starts mid-character rather than ending mid-character.
+        let mut input = vec![b'a'; MAX_BOUNDED_BYTES * 2];
+        input.extend_from_slice("é".as_bytes());
+        input.extend(std::iter::repeat_n(b'b', BOUNDED_END_BYTES - 1));
+
+        let bounded = BoundedText::bound(&input);
+
+        assert!(bounded.as_str().contains("bytes elided"));
     }
 
     #[test]
@@ -439,20 +487,87 @@ mod tests {
     }
 
     #[test]
-    fn bound_cuts_a_long_input() {
-        // The cut is the point of the type; without this the two tests above
-        // pass against an implementation that marks the output as truncated
-        // without cutting it.
+    fn bound_keeps_the_end_where_a_failing_command_says_why() {
+        // The reason this type keeps both ends. A head-only cut kept `brew`'s
+        // download chatter and dropped the `Error:` line it prints last, which
+        // is the one thing the reader needed. This test fails against that
+        // shape, which is the point of it existing.
+        const REASON: &str = "Error: No available formula with the name \"foo\"";
+
+        let mut input = Vec::new();
+        while input.len() < MAX_BOUNDED_BYTES * 4 {
+            input.extend_from_slice(b"==> Downloading https://ghcr.io/v2/homebrew/core/foo\n");
+        }
+        input.extend_from_slice(REASON.as_bytes());
+
+        let bounded = BoundedText::bound(&input);
+
+        assert!(
+            bounded.as_str().contains(REASON),
+            "the failure's reason was elided: {}",
+            bounded.as_str()
+        );
+        assert!(
+            bounded.as_str().starts_with("==> Downloading"),
+            "the head should survive too: {}",
+            bounded.as_str()
+        );
+    }
+
+    #[test]
+    fn bound_cuts_a_long_input_from_the_middle() {
+        // The cut is the point of the type; without this the tests above pass
+        // against an implementation that marks the output as elided without
+        // cutting it. The marker carries no 'x', so the count measures only
+        // surviving input, and it must come to the bound rather than twice it -
+        // keeping both ends splits the budget, it does not double it.
         let input = vec![b'x'; MAX_BOUNDED_BYTES * 3];
 
         let bounded = BoundedText::bound(&input);
 
-        assert!(bounded.as_str().ends_with("… (truncated)"));
         assert_eq!(
             bounded.as_str().chars().filter(|c| *c == 'x').count(),
             MAX_BOUNDED_BYTES,
-            "exactly the bound should survive"
+            "exactly the bound should survive, split across the two ends"
         );
+        assert!(
+            bounded.as_str().starts_with('x') && bounded.as_str().ends_with('x'),
+            "both ends should be kept, so neither is the marker"
+        );
+    }
+
+    #[test]
+    fn bound_names_how_many_bytes_it_elided() {
+        // "(truncated)" told a reader nothing about scale. Losing 40 bytes and
+        // losing 400 KB should not look the same.
+        let input = vec![b'x'; MAX_BOUNDED_BYTES * 3];
+
+        let bounded = BoundedText::bound(&input);
+
+        assert!(
+            bounded
+                .as_str()
+                .contains(&format!("… ({} bytes elided) …", MAX_BOUNDED_BYTES * 2)),
+            "{}",
+            bounded.as_str()
+        );
+    }
+
+    #[test]
+    fn bound_returns_an_input_barely_over_the_bound_whole() {
+        // Eliding one byte would spend ~20 on the marker, making the "bounded"
+        // string longer than the input it bounded. Below that crossover the
+        // input is returned as-is.
+        let input = vec![b'x'; MAX_BOUNDED_BYTES + 1];
+
+        let bounded = BoundedText::bound(&input);
+
+        assert_eq!(
+            bounded.as_str().chars().filter(|c| *c == 'x').count(),
+            input.len()
+        );
+        assert!(!bounded.as_str().contains("elided"));
+        assert!(bounded.as_str().len() <= String::from_utf8_lossy(&input).len());
     }
 
     #[test]

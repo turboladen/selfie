@@ -365,10 +365,29 @@ client**. If a command needs a token, pass it through the environment or have th
 directly — do not `echo` it.
 
 Failure reports are narrower. When a command exits non-zero, what selfie reports about the failure
-itself is the command and its exit code — and its standard error, cut to the first 2000 bytes the
-command wrote, with `… (truncated)` appended when there was more. It does not repeat the command's
-standard output. The same limit applies to a failing `command` or `vars` dotfile entry and to the
-message a failing `audit` command produces.
+itself is the command and its exit code — and its standard error, cut to 2000 bytes of what the
+command wrote. It does not repeat the command's standard output. The same limit applies to a failing
+`command` or `vars` dotfile entry and to the message a failing `audit` command produces.
+
+The cut keeps **both ends** — the first 1000 bytes and the last 1000 — and replaces the middle with
+a marker naming how much went:
+
+```text
+… (3200 bytes elided) …
+```
+
+Both ends, because a failing command usually explains itself on its last line. A `brew install` that
+prints pages of `==> Downloading` progress and then one `Error:` line keeps that `Error:` line;
+cutting only the first 2000 bytes would have kept the progress and dropped the reason. The head is
+worth keeping too, since it is where a command says what it was attempting.
+
+The two cuts land on byte boundaries rather than character boundaries, so a multi-byte character
+straddling either one is replaced rather than split — the head can end mid-character and the tail
+can begin mid-character. Output only slightly over the limit is passed through whole, since eliding
+it would cost more in marker text than it saved.
+
+The 2000 counts what the command wrote, not the length of the message you read: invalid UTF-8 is
+replaced character by character, so binary output can render longer than the bytes it came from.
 
 Where that standard error travels depends on which report carries it. An install or check failure
 shows it in the terminal only — the value an MCP client receives names the command and its exit code

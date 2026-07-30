@@ -514,8 +514,8 @@ mod tests {
         let rendered = err.to_string();
 
         assert!(
-            rendered.ends_with("\u{2026} (truncated)"),
-            "not marked as truncated: {rendered}"
+            rendered.contains("bytes elided"),
+            "not marked as elided: {rendered}"
         );
         assert_eq!(
             rendered.chars().filter(|c| *c == 'Z').count(),
