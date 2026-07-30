@@ -1506,7 +1506,13 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
         let service = dirs.service_with_runner(runner);
 
-        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        // `accepting()`, not `ApplyOptions::default()`. Without a resolver a
+        // secret-bearing entry whose target differs is reported as a conflict and
+        // skipped, so the target would survive for a reason that has nothing to
+        // do with the read — and mutating `run_capture` to return partial content
+        // left this test passing. It has to take the overwrite path for the
+        // assertion below to mean anything.
+        let _ = collect_events(service.apply_all(accepting()).await).await;
 
         assert_eq!(
             std::fs::read(&target).unwrap(),
@@ -1577,7 +1583,9 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
         let service = dirs.service_with_runner(runner);
 
-        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        // `accepting()` for the same reason as the provider case above: without a
+        // resolver this would be skipped as a conflict and prove nothing.
+        let _ = collect_events(service.apply_all(accepting()).await).await;
 
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -1588,9 +1596,12 @@ mod secret_bearing {
 
     #[tokio::test]
     async fn the_same_binding_fixture_does_write_when_the_read_succeeds() {
-        // Control for the two binding tests above.
+        // Control for the two binding tests above. Seeded and `accepting()` so it
+        // exercises the same overwrite path the pre-existing-target test does —
+        // a control taking a different path would not control anything.
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "key: previous-credential-abc123\n").unwrap();
         template_package(
             &dirs.package_dir,
             target.to_str().unwrap(),
@@ -1601,7 +1612,7 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_runner(runner);
 
-        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let _ = collect_events(service.apply_all(accepting()).await).await;
 
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
