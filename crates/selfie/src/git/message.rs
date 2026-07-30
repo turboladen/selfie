@@ -211,7 +211,7 @@ fn redact_credentials(text: &str) -> String {
 }
 
 /// Redact the userinfo at each candidate authority in one whitespace-delimited
-/// token.
+/// token, from the **earliest** candidate that reaches each `@`.
 ///
 /// Surrounding punctuation is left alone, so git's single-quoted URLs survive
 /// as `'http://***@host:8731':` rather than being mangled into unreadability.
@@ -232,18 +232,49 @@ fn redact_credentials(text: &str) -> String {
 /// an authority embedded after `=` or `,`. **This does not examine every
 /// position in the token** — see [`authority_starts`] for exactly which ones it
 /// does, and [`redact_credentials`] for what that leaves uncovered.
+///
+/// # Why the earliest candidate, and not the tightest
+///
+/// Preferring the *latest* candidate that reaches an `@` would destroy less of
+/// the surrounding message — `?u=x&next=<token>@h` could lose only `<token>`.
+/// It was written that way, and it **under-redacted**: a delimiter inside the
+/// userinfo moves the start forward and emits the text before it verbatim, so
+/// `https://user:c2VjcmV0S2V5MQ==dEs9@host/r` kept fifteen of its twenty secret
+/// characters. `=` is base64 padding, so *every* base64 credential carries the
+/// delimiter by construction; this is the common case, not an exotic one.
+///
+/// It cannot be rescued by only collapsing when the skipped span "cannot be
+/// userinfo". Per RFC 3986 the userinfo grammar is
+/// `*( unreserved / pct-encoded / sub-delims / ":" )`, and `=`, `,` and `&` are
+/// all sub-delims — so `x&next=` is *legal userinfo* and byte-identical to
+/// credential material. Nothing in the string distinguishes the two. Keeping it
+/// is a guess that leaks whenever it is wrong, which is the fails-open guess
+/// this module refuses everywhere else.
+///
+/// The price is context: a query string collapses to `https://h/?u=***@evil:1`.
+/// Losing query context is a diagnostic cost; keeping it is a credential
+/// cost.
 fn redact_token(token: &str) -> Cow<'_, str> {
     // No `@`, no userinfo — and no candidate list to build.
     if !token.contains('@') {
         return Cow::Borrowed(token);
     }
 
-    // Each span is `(redact_from, at)` — the userinfo to replace, and the `@`
-    // that ends it. Collected before anything is written so that several
-    // candidates reaching the same `@` can be collapsed to the tightest one.
-    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut out: Option<String> = None;
+    // How much of `token` has already been copied into `out`.
+    let mut copied_to = 0;
 
     for authority_start in authority_starts(token) {
+        // **Load-bearing, not defensive.** A delimiter can sit *inside* a
+        // userinfo — `=` is base64 padding, and every base64 credential ends in
+        // one — so a later candidate routinely points into a span already
+        // redacted. Skipping it is what keeps the **earliest** start, and the
+        // earliest start is the widest span: see the note below on why the
+        // narrowest is not available.
+        if authority_start < copied_to {
+            continue;
+        }
+
         // An authority ends at the first `/` after its start, which begins the
         // path. For the opening candidate of a `scheme://…` token that lands
         // inside the `://` itself, leaving `scheme:` — which holds no `@`, so
@@ -267,35 +298,19 @@ fn redact_token(token: &str) -> Cow<'_, str> {
             continue;
         }
 
-        // Candidates ascend and `at` is non-decreasing across them, so any
-        // repeat arrives adjacent. Prefer the later start: it redacts the same
-        // credential while destroying less around it — `?u=x&next=<token>@h`
-        // should lose `<token>`, not `x&next=<token>`.
-        match spans.last_mut() {
-            Some(last) if last.1 == at => last.0 = authority_start,
-            _ => spans.push((authority_start, at)),
-        }
-    }
-
-    if spans.is_empty() {
-        return Cow::Borrowed(token);
-    }
-
-    let mut buffer = String::with_capacity(token.len());
-    // How much of `token` has already been copied into `buffer`.
-    let mut copied_to = 0;
-    for (redact_from, at) in spans {
-        // A span can start inside one already consumed — skipping those keeps
-        // `copied_to` monotonic, which is what makes the slicing sound.
-        if redact_from < copied_to {
-            continue;
-        }
-        buffer.push_str(&token[copied_to..redact_from]);
+        let buffer = out.get_or_insert_with(|| String::with_capacity(token.len()));
+        buffer.push_str(&token[copied_to..authority_start]);
         buffer.push_str(REDACTION);
         copied_to = at;
     }
-    buffer.push_str(&token[copied_to..]);
-    Cow::Owned(buffer)
+
+    match out {
+        Some(mut buffer) => {
+            buffer.push_str(&token[copied_to..]);
+            Cow::Owned(buffer)
+        }
+        None => Cow::Borrowed(token),
+    }
 }
 
 /// Every offset in `token` where an authority may begin, ascending and unique.
@@ -315,6 +330,13 @@ fn redact_token(token: &str) -> Cow<'_, str> {
 ///   embedded in a larger token: `url.<base>.insteadOf=<url>` is the standard
 ///   way to inject one, and comma-joined values appear in config dumps. Both
 ///   bytes are ASCII, so `i + 1` is always a character boundary.
+///
+///   **Both are also legal *unencoded* inside a userinfo** — RFC 3986 lists them
+///   as sub-delims, and `=` is base64 padding besides. So a candidate generated
+///   here frequently points *into* a credential rather than before one. That is
+///   harmless only because [`redact_token`] takes the earliest start and skips
+///   the rest; a rule preferring the latest start turns each of these into an
+///   under-redaction. Do not add a delimiter here without re-reading that.
 ///
 /// **`/` is deliberately not a delimiter.** Adding it would make every path
 /// segment a fresh authority and rewrite `https://host/a@b` into `https://***b`,
@@ -360,6 +382,13 @@ mod tests {
     /// `.claude/rules/secrets.md` refuses a secret that reads like a path, a
     /// package name, or an environment name.
     const TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
+
+    /// A credential that **contains the candidate delimiters**, which [`TOKEN`]
+    /// does not. Base64 pads with `=`, so a very large class of real tokens
+    /// carries one by construction — and a rule preferring the tightest span
+    /// emits everything before that `=` verbatim. No test using `TOKEN` alone
+    /// can see that class; thirteen mutations sailed through the gap.
+    const TOKEN_WITH_DELIMITERS: &str = "c2VjcmV0S2V5,MQ==dEs9Zx";
 
     // ─── Redaction: the shapes that must be covered ─────────────────────────
 
@@ -534,7 +563,31 @@ mod tests {
         let out = redact_credentials(&format!("https://h/?u=x&next={TOKEN}@evil:1"));
 
         assert_secret_free(&out, TOKEN, "a redacted git message");
-        assert_eq!(out, "https://h/?u=x&next=***@evil:1");
+        // `x&next=` goes with the credential. Every byte of it is legal
+        // userinfo under RFC 3986, so nothing distinguishes query context from
+        // credential material; keeping it is a guess that leaks when wrong.
+        assert_eq!(out, "https://h/?u=***@evil:1");
+    }
+
+    /// The regression a tightest-span rule caused: `=` inside the userinfo moved
+    /// the redaction start past most of the credential and emitted the rest
+    /// verbatim. Fifteen of twenty characters survived.
+    #[test]
+    fn a_delimiter_inside_the_userinfo_does_not_shorten_the_redaction() {
+        let out = redact_credentials(&format!("https://user:{TOKEN_WITH_DELIMITERS}@host/r"));
+
+        assert_secret_free(&out, TOKEN_WITH_DELIMITERS, "a redacted git message");
+        assert_eq!(out, "https://***@host/r");
+    }
+
+    /// The same, with the delimiter in a username rather than a password, and
+    /// reached through the scp-style candidate rather than the `://` one.
+    #[test]
+    fn a_delimiter_inside_an_scp_style_userinfo_does_not_shorten_the_redaction() {
+        let out = redact_credentials(&format!("{TOKEN_WITH_DELIMITERS}@host:org/repo.git"));
+
+        assert_secret_free(&out, TOKEN_WITH_DELIMITERS, "a redacted git message");
+        assert_eq!(out, "***@host:org/repo.git");
     }
 
     // ─── The residual hole, pinned so it stays stated ───────────────────────
