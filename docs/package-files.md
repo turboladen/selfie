@@ -365,10 +365,16 @@ client**. If a command needs a token, pass it through the environment or have th
 directly — do not `echo` it.
 
 Failure reports are narrower. When a command exits non-zero, what selfie reports about the failure
-itself is the command and its exit code — and, to a terminal, its standard error, cut to the first
-2000 bytes with `… (truncated)` appended when there was more. The same limit applies to a failing
-`command` or `vars` dotfile entry. It does not repeat the command's standard output. Anything else
-you see about a failed command reached you through one of the channels above, as it ran.
+itself is the command and its exit code — and its standard error, cut to the first 2000 bytes the
+command wrote, with `… (truncated)` appended when there was more. It does not repeat the command's
+standard output. The same limit applies to a failing `command` or `vars` dotfile entry and to the
+message a failing `audit` command produces.
+
+Where that standard error travels depends on which report carries it. An install or check failure
+shows it in the terminal only — the value an MCP client receives names the command and its exit code
+and stops there. An `audit` error is different: its message reaches a connected MCP client as well,
+which is why the same limit applies to it. Anything else you see about a failed command reached you
+through one of the channels above, as it ran.
 
 If a dotfile's content is itself a secret, use a `command` or `vars` dotfile entry rather than an
 install command — selfie treats those as secret-bearing and never puts their content in a message, a
