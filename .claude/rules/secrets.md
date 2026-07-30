@@ -4,6 +4,8 @@ paths:
   - "crates/selfie/src/package/event.rs"
   - "crates/selfie/src/package/service/audit.rs"
   - "crates/selfie/src/commands/runner.rs"
+  - "crates/selfie/src/git/**/*.rs"
+  - "crates/selfie/src/sync_service/**/*.rs"
   - "crates/selfie/src/fs/**/*.rs"
   - "crates/cli/src/commands/track.rs"
   - "crates/cli/src/display_manager.rs"
@@ -103,6 +105,26 @@ Test egress at the **boundary**, not by listing known paths:
   JSON. Nothing on that path is truncated, redacted, or conditional, which makes it broader than any
   other exit named in this file. A dotfile provider does not use it — the resolve path runs its own
   non-streaming execution — but any install command that echoes a credential is exposed by it.
+- **Git's stderr is untrusted output too, and it has its own bound.** A remote URL can carry a
+  credential in its userinfo, and a git that cannot prompt for a password names that URL in the
+  failure — `could not read Password for 'http://<token>@host'`. That reaches an AI transcript
+  through `selfie_sync_push` / `selfie_sync_pull`. `GitMessage` (`git/message.rs`) is the one place
+  that text is cleaned, and like `CommandFailure::ExecutionFailed`'s `stderr` it is
+  **compiler-enforced**: its field is private, and both `GitSyncError::OperationFailed`'s fields and
+  `GitStatusError::StatusError` are typed as it, so no struct-variant literal anywhere can carry raw
+  git output. Three things about it are worth knowing before extending it:
+  - **It redacts both halves of the userinfo, not just the password.** A personal access token is
+    normally the _username_: `https://ghp_…@host/repo.git`. `gix::Url`'s redacting `Display` blanks
+    only the password — verified in `gix-url/src/impls.rs`, and warned about in that crate's own
+    docs — so reaching for it here produces a fix that passes a `user:pass` test and leaks every
+    token. Do not swap the hand-rolled redaction for it.
+  - **Redaction runs before the bound, and the order is load-bearing.** `BoundedText` elides the
+    middle; a cut falling inside a URL strands `https://user:TOK` in the kept head with no `@` left
+    to anchor on, so bounding first can _manufacture_ a leak.
+  - **It covers URLs, not credentials.** A token outside a userinfo — a `GIT_TRACE` header dump, a
+    credential-helper echo — is not redacted, and deliberately so: matching known token prefixes is
+    an allowlist that fails open for every provider not on it while looking complete. The precise
+    uncovered set is on `redact_credentials`; keep it accurate rather than aspirational.
 - **`auto_accept` must not apply to secret-bearing entries.** Their conflicts are always reported
   and skipped without an interactive resolver. Default-false is not the same as cannot-be-set-true,
   and MCP exposes it as a caller-settable parameter.

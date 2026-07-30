@@ -12,7 +12,10 @@ use tokio::sync::mpsc;
 use crate::{
     config::SelfieConfig,
     dotfile_service::port::DotfileService,
-    git::sync_provider::{ChangeType, GitSyncError, GitSyncProvider},
+    git::{
+        message::GitMessage,
+        sync_provider::{ChangeType, GitSyncError, GitSyncProvider},
+    },
     package::event::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
         OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -87,8 +90,8 @@ where
             format!("blocking task failed: {e}")
         };
         GitSyncError::OperationFailed {
-            operation: op.to_string(),
-            message,
+            operation: GitMessage::new(op),
+            message: GitMessage::new(message),
         }
     })?
 }
@@ -1547,6 +1550,222 @@ mod push_validation_tests {
         assert!(
             matches!(result, Err(SyncError::ValidationFailed { .. })),
             "a package with a real error must still fail, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod credential_egress_tests {
+    //! Whether a credential in a git error survives the trip to the strings the
+    //! CLI prints and the MCP server serializes.
+    //!
+    //! These build their `GitSyncError` through [`GitMessage`], as `run_git`
+    //! does, so what they prove is that **nothing downstream re-leaks** — not
+    //! that redaction fires on real git output. The tests in `git::adapter` that
+    //! run an actual `git` against a loopback 401 are the ones that prove that,
+    //! and they are the only ones that do.
+
+    use futures::StreamExt;
+
+    use super::*;
+    use crate::git::{
+        CommitId, FastForwardResult, GitMessage, GitSyncError, GitSyncProvider, RepoInfo,
+        RepoStatus,
+    };
+    use crate::sync_service::port::PushOptions;
+    use test_common::assert_secret_free;
+
+    const FIXTURE_TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
+
+    /// git 2.50.1's own output for a non-interactive fetch whose remote URL
+    /// carries a token as its username.
+    fn leaky_git_stderr() -> String {
+        format!(
+            "fatal: could not read Password for 'http://{FIXTURE_TOKEN}@127.0.0.1:8731': \
+             terminal prompts disabled"
+        )
+    }
+
+    /// Which git call fails.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FailAt {
+        RepoStatus,
+        Push,
+    }
+
+    /// A `GitSyncProvider` that fails one operation with git's real leaky
+    /// stderr, cleaned exactly as `run_git` cleans it.
+    ///
+    /// Hand-written rather than `MockGitSyncProvider` because `SyncServiceImpl`
+    /// requires `Clone`, which mockall does not generate.
+    #[derive(Clone)]
+    struct GitFailingWith {
+        fail_at: FailAt,
+    }
+
+    impl GitFailingWith {
+        fn error(&self) -> GitSyncError {
+            GitSyncError::OperationFailed {
+                operation: GitMessage::new("git push"),
+                message: GitMessage::from_stderr(leaky_git_stderr().as_bytes()),
+            }
+        }
+    }
+
+    impl GitSyncProvider for GitFailingWith {
+        fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
+            Ok(RepoInfo {
+                root: path.to_path_buf(),
+                branch: Some("main".to_string()),
+                remote_name: Some("origin".to_string()),
+            })
+        }
+
+        fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+            if self.fail_at == FailAt::RepoStatus {
+                return Err(self.error());
+            }
+            Ok(RepoStatus {
+                modified: vec![PathBuf::from("starship.yml")],
+                ..Default::default()
+            })
+        }
+
+        fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+            Ok(())
+        }
+
+        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            Ok(CommitId("abc1234def".to_string()))
+        }
+
+        fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+            if self.fail_at == FailAt::Push {
+                return Err(self.error());
+            }
+            Ok(())
+        }
+
+        fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+            Ok(())
+        }
+
+        fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+            Ok(FastForwardResult::AlreadyUpToDate)
+        }
+
+        fn diff_commits(
+            &self,
+            _: &Path,
+            _: &CommitId,
+            _: &CommitId,
+        ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Never called: neither `prepare_push` nor `execute_push` touches it.
+    #[derive(Clone)]
+    struct UnusedDotfileService;
+
+    impl DotfileService for UnusedDotfileService {
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("the push paths do not deploy dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("the push paths do not deploy dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            unreachable!("only `status` checks drift")
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("the push paths do not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("the push paths do not track dotfiles")
+        }
+    }
+
+    fn service(fail_at: FailAt) -> SyncServiceImpl<GitFailingWith, UnusedDotfileService> {
+        SyncServiceImpl::new(
+            GitFailingWith { fail_at },
+            UnusedDotfileService,
+            // Built with the crate's own types: `test_common` links `selfie` as
+            // an external crate, so its `SelfieConfig` is a different type here.
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+        )
+    }
+
+    /// The event-stream exit: `OperationFailure::Generic` reaches
+    /// `PackageEvent::Completed`, which the CLI prints and which
+    /// `event_collector` serializes into the MCP tool result as
+    /// `{"status":"failure","error": <this>}`.
+    #[tokio::test]
+    async fn a_failed_push_keeps_the_credential_out_of_every_event() {
+        let stream = service(FailAt::Push)
+            .execute_push(vec![ConfirmedCommit {
+                files: vec![PathBuf::from("starship.yml")],
+                message: "chore(starship): update package spec".to_string(),
+            }])
+            .await;
+
+        let events: Vec<PackageEvent> = stream.collect().await;
+        assert!(!events.is_empty(), "the scan must have something to scan");
+
+        // Every event, not the one the leak was expected in.
+        for event in &events {
+            assert_secret_free(&format!("{event:?}"), FIXTURE_TOKEN, "a PackageEvent Debug");
+        }
+
+        let failure = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::Completed {
+                    result: OperationResult::Failure(f),
+                    ..
+                } => Some(f),
+                _ => None,
+            })
+            .expect("the push must have failed");
+
+        // Exactly what `event_collector.rs` puts in the MCP JSON.
+        let rendered = format!("{failure}");
+        assert_secret_free(&rendered, FIXTURE_TOKEN, "the MCP-facing failure string");
+        // Control: git's message really did travel this far, so the scan above
+        // was not passing on an empty or generic error.
+        assert!(
+            rendered.contains("could not read Password"),
+            "git's diagnosis must survive redaction, got: {rendered}"
+        );
+    }
+
+    /// The other MCP exit. `prepare_push` returns `SyncError` directly, and
+    /// `selfie_sync_push` renders it into its own error JSON without ever
+    /// touching the event stream — so the event scan above cannot cover it.
+    #[tokio::test]
+    async fn a_failed_prepare_keeps_the_credential_out_of_the_returned_error() {
+        let error = service(FailAt::RepoStatus)
+            .prepare_push(&PushOptions::default())
+            .await
+            .expect_err("repo_status failed, so prepare must fail");
+
+        let rendered = error.to_string();
+        assert_secret_free(&rendered, FIXTURE_TOKEN, "a SyncError Display");
+        assert_secret_free(&format!("{error:?}"), FIXTURE_TOKEN, "a SyncError Debug");
+        assert!(
+            rendered.contains("could not read Password"),
+            "git's diagnosis must survive redaction, got: {rendered}"
         );
     }
 }

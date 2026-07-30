@@ -407,9 +407,11 @@ mod tests {
         });
 
         let mut mock_git = MockGitStatusProvider::new();
-        mock_git
-            .expect_status_for_directory()
-            .returning(|_| Err(GitStatusError::StatusError("simulated failure".to_string())));
+        mock_git.expect_status_for_directory().returning(|_| {
+            Err(GitStatusError::StatusError(crate::git::GitMessage::new(
+                "simulated failure",
+            )))
+        });
 
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);

@@ -139,3 +139,26 @@ allowing AI assistants to provide meaningful messages without interactive prompt
 - **No multi-repo sync** — `package_directory` and `dotfiles_directory` must be in the same
   repository.
 - **No network auth management** — configure SSH keys or credential helpers yourself.
+
+## Credentials in git error messages
+
+When a git operation fails, selfie forwards git's own stderr into the error it reports — to the
+terminal, and to an AI assistant through the sync MCP tools. Before that happens, the **userinfo
+component of any URL in the message is replaced with `***`**, and the message is truncated if it is
+very long.
+
+This matters because a remote URL can carry a credential. `https://<token>@github.com/you/repo.git`
+is what `gh auth setup-git` writes, and a git that cannot prompt for a password — which is how the
+MCP server runs it — names that URL in the failure:
+
+```text
+fatal: could not read Password for 'http://***@github.com': terminal prompts disabled
+```
+
+Both halves of the userinfo go, not just the password: a personal access token is usually the
+_username_. Redaction also applies to SSH-style remotes, so `git@github.com` reads as
+`***@github.com` in an error, and to any address in git's "please tell me who you are" message.
+
+**It covers URLs, not credentials in general.** A token echoed outside a URL — an `Authorization`
+header in a `GIT_TRACE` dump, or output from a credential helper — is not redacted, because there is
+no reliable way to recognize one. Treat selfie's error output as you would git's own.
