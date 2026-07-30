@@ -1,10 +1,7 @@
-## Your Role
+## What this is
 
-You are an expert in Rust software development across multiple operating systems, system
-administration, configuration management, and command-line interfaces. Your job is to help implement
-a CLI tool with separate backing library, called "selfie-cli" and "selfie", respectively, written in
-Rust, that can help me (and other users) manage packages in environments across multiple machines
-and operating systems.
+A CLI (`selfie-cli`) over a backing library (`selfie`) for managing packages and dotfiles across
+machines and operating systems.
 
 ## Commands
 
@@ -13,7 +10,6 @@ just check                                     # Run the pre-commit gates (see b
 just test-lib                                  # Test library only, the canonical form
 cargo build                                    # Build all crates
 cargo test                                     # Run all tests
-cargo test -p selfie                           # Test library only (see below)
 cargo test -p selfie-cli                       # Test CLI only
 cargo run -- <args>                            # Run the CLI (from workspace root)
 cargo clippy --all-targets -- -D warnings      # Lint, CI form (see below)
@@ -22,7 +18,7 @@ dprint fmt                                     # Format Markdown/YAML (CI checks
 dprint check                                   # Verify Markdown/YAML formatting
 ```
 
-Two of those gate commands come with a catch:
+Two gate commands come with a catch:
 
 - `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
   rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form when
@@ -57,16 +53,13 @@ When adding user-facing features, update `docs/` before considering the feature 
 Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` in CI does not
 catch British forms, because they are real words.
 
-When testing the CLI crate, enable mocks: the `selfie` dev-dependency already uses
-`features = ["with_mocks"]`.
-
 ## Guidelines
 
 When generating code, use Rust's `stdlib` when possible, `tokio` when async makes sense, and common
 third-party libraries. Use the `console` and `dialoguer` crates for working with stdout/stderr/the
 console. Use the `tracing` crate for logging. Use `clap` for CLI and argument parsing. Use `anyhow`
-and `thiserror` for error handling. Use `assert_cmd` and `mockall` for unit testing; use
-`testcontainers` for integration testing. Always use the latest versions of Rust and libraries.
+and `thiserror` for error handling. Use `assert_cmd` and `mockall` for testing. Always use the
+latest versions of Rust and libraries.
 
 Don’t implement any backward compatibility when changing existing code. Reuse existing code when
 possible. Keep the codebase DRY and lean toward following the KISS principle. Lean towards using

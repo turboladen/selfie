@@ -50,6 +50,9 @@ decide how to display information about that event to the user in the current UI
   `config.selfie_config()` when calling into library service methods.
 - **Event consumer tests** (e.g., `EventProcessor`) should construct `EventStream` directly via
   `stream::iter(vec![...])`, not spin up a real service. This avoids adapter dependencies.
+- **Validation reads an entry's fields directly (`source()`, `command()`, `vars()`), never
+  `content_source()`.** That answers apply's question — may this deploy — so gating a check on it
+  lets one defect suppress every other diagnostic for the same entry.
 
 ## MCP server (`selfie-mcp`)
 
