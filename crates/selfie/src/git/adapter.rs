@@ -16,6 +16,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use super::message::GitMessage;
 use super::status_provider::{
     GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider,
 };
@@ -40,8 +41,8 @@ fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
             path: path.to_path_buf(),
         },
         other => GitSyncError::OperationFailed {
-            operation: "discover repository".to_string(),
-            message: other.to_string(),
+            operation: GitMessage::new("discover repository"),
+            message: GitMessage::new(other),
         },
     })
 }
@@ -63,8 +64,8 @@ fn is_executable(_path: &Path) -> bool {
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
 fn git_sync_err(operation: &str, e: impl std::fmt::Display) -> GitSyncError {
     GitSyncError::OperationFailed {
-        operation: operation.to_string(),
-        message: e.to_string(),
+        operation: GitMessage::new(operation),
+        message: GitMessage::new(e),
     }
 }
 
@@ -81,17 +82,20 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .map_err(|e| GitSyncError::OperationFailed {
-            operation: format!("git {}", args.join(" ")),
-            message: e.to_string(),
+            operation: GitMessage::new(format!("git {}", args.join(" "))),
+            message: GitMessage::new(e),
         })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // git's stderr is process output selfie does not control, and it reaches
+        // an AI assistant's transcript through the sync MCP tools.
+        // `GitMessage::from_stderr` is what redacts a credential out of it and
+        // bounds what is left; there is no path here that hands the raw bytes on.
         Err(GitSyncError::OperationFailed {
-            operation: format!("git {}", args.join(" ")),
-            message: stderr,
+            operation: GitMessage::new(format!("git {}", args.join(" "))),
+            message: GitMessage::from_stderr(output.stderr.trim_ascii()),
         })
     }
 }
@@ -194,16 +198,17 @@ impl GitStatusProvider for GixGitAdapter {
                 });
             }
             Err(other) => {
-                return Err(GitStatusError::StatusError(other.to_string()));
+                return Err(GitStatusError::StatusError(GitMessage::new(other)));
             }
         };
 
         let workdir = repo
             .workdir()
-            .ok_or_else(|| GitStatusError::StatusError("bare repository".to_string()))?;
+            .ok_or_else(|| GitStatusError::StatusError(GitMessage::new("bare repository")))?;
         let workdir = dunce::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
 
-        let raw = collect_raw_status(&repo).map_err(GitStatusError::StatusError)?;
+        let raw = collect_raw_status(&repo)
+            .map_err(|e| GitStatusError::StatusError(GitMessage::new(e)))?;
 
         let mut files = HashMap::new();
 
@@ -242,8 +247,8 @@ impl GitSyncProvider for GixGitAdapter {
         let root = repo
             .workdir()
             .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: "discover".to_string(),
-                message: "bare repository".to_string(),
+                operation: GitMessage::new("discover"),
+                message: GitMessage::new("bare repository"),
             })?
             .to_path_buf();
         let root = dunce::canonicalize(&root).unwrap_or(root);
@@ -269,8 +274,8 @@ impl GitSyncProvider for GixGitAdapter {
         let repo = open_repo(repo_root)?;
 
         let raw = collect_raw_status(&repo).map_err(|msg| GitSyncError::OperationFailed {
-            operation: "status".to_string(),
-            message: msg,
+            operation: GitMessage::new("status"),
+            message: GitMessage::new(msg),
         })?;
 
         let modified = raw.worktree_mods.iter().map(PathBuf::from).collect();
@@ -311,8 +316,8 @@ impl GitSyncProvider for GixGitAdapter {
         let workdir = repo
             .workdir()
             .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: "stage".to_string(),
-                message: "bare repository".to_string(),
+                operation: GitMessage::new("stage"),
+                message: GitMessage::new("bare repository"),
             })?;
 
         for file in files {
@@ -457,8 +462,10 @@ impl GitSyncProvider for GixGitAdapter {
             let msg = e.to_string();
             if msg.contains("rejected") || msg.contains("non-fast-forward") {
                 GitSyncError::OperationFailed {
-                    operation: "push".to_string(),
-                    message: "Remote has new commits. Run 'selfie sync pull' first.".to_string(),
+                    operation: GitMessage::new("push"),
+                    message: GitMessage::new(
+                        "Remote has new commits. Run 'selfie sync pull' first.",
+                    ),
                 }
             } else {
                 e
@@ -547,6 +554,8 @@ impl GixGitAdapter {
 mod tests {
     use super::*;
     use std::fs;
+
+    use test_common::assert_secret_free;
 
     /// Create a temporary git repo, returning the tempdir handle and its path.
     fn init_repo() -> (tempfile::TempDir, PathBuf) {
@@ -726,5 +735,163 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, PathBuf::from("b.yml"));
         assert_eq!(changes[0].change_type, ChangeType::Added);
+    }
+
+    // ─── Credential redaction, end to end through the real `git` ─────────────
+    //
+    // These are the only tests that prove redaction fires on output a real
+    // `git` actually produced. Everything else in this change exercises
+    // `GitMessage` on strings a test wrote.
+
+    /// High-entropy and shaped like nothing else in a fixture, per
+    /// `.claude/rules/secrets.md`. A fixture value, never a real credential:
+    /// `assert_secret_free` prints an excerpt of whatever matched.
+    const FIXTURE_TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
+
+    /// A loopback server answering every request `401 Basic`, returning its port.
+    ///
+    /// A 401 is what puts git on the path that leaks: it has a username from the
+    /// URL, decides it needs a password, cannot prompt, and names the URL in the
+    /// failure. Against a *refused* port git fails earlier and strips the
+    /// userinfo, so a listener is required — this cannot be tested by pointing
+    /// at a closed port.
+    ///
+    /// Loops on `accept` because git makes more than one connection (`/info/refs`,
+    /// then the retry once it has decided it needs credentials); a single-shot
+    /// accept leaves the second hanging. The thread is deliberately not joined —
+    /// it blocks in `accept` until the test binary exits.
+    fn spawn_401_server() -> u16 {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                // Drain enough of the request that the client can finish sending;
+                // only the response matters.
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\n\
+                      WWW-Authenticate: Basic realm=\"git\"\r\n\
+                      Content-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                );
+            }
+        });
+
+        port
+    }
+
+    /// A repo whose `origin` carries [`FIXTURE_TOKEN`] as the URL's username —
+    /// the shape `gh auth setup-git` writes, and the one that leaks.
+    fn repo_with_a_credential_bearing_remote(port: u16) -> (tempfile::TempDir, PathBuf) {
+        let (temp, path) = init_repo_for_commits();
+        let url = format!("http://{FIXTURE_TOKEN}@127.0.0.1:{port}/o/r.git");
+
+        run_git(&path, &["remote", "add", "origin", &url]).unwrap();
+        // Repo-local, so an ambient credential helper cannot answer the prompt
+        // and dissolve the premise…
+        run_git(&path, &["config", "credential.helper", ""]).unwrap();
+        // …and so an ambient proxy cannot turn this loopback request into real
+        // network egress, which in a security test is the worse failure.
+        run_git(&path, &["config", "http.proxy", ""]).unwrap();
+
+        // `git push` refuses before contacting the remote without an upstream,
+        // so set one without needing a fetch to succeed first.
+        let branch = run_git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        run_git(
+            &path,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        )
+        .unwrap();
+        run_git(
+            &path,
+            &[
+                "config",
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .unwrap();
+
+        (temp, path)
+    }
+
+    /// The premise: on *this* machine, with the environment `run_git` actually
+    /// gives git, the raw stderr really does contain the token.
+    ///
+    /// Without this the leak tests below pass whenever git stops leaking — or,
+    /// far more likely, whenever something on the machine answers the credential
+    /// prompt so git never names the URL at all. A leak test that passes because
+    /// the secret was never produced is worse than no test.
+    ///
+    /// Mirrors `run_git` exactly: same args, same cwd, same null stdin, same
+    /// `GIT_TERMINAL_PROMPT`. A control run under a different environment would
+    /// be proving the premise for conditions the assertion never sees.
+    fn assert_git_really_leaks_the_token(repo_root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("spawn git");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            stderr.contains(FIXTURE_TOKEN),
+            "PREMISE GONE: raw `git {}` stderr no longer contains the URL's \
+             username, so the redaction assertions below would pass without \
+             proving anything.\n\nBefore concluding that git changed, check \
+             this machine for something that answered the credential prompt or \
+             rewrote the request: GIT_ASKPASS, SSH_ASKPASS, core.askPass, a \
+             global or system credential.helper, url.*.insteadOf, or \
+             http_proxy/https_proxy.\n\ngit said: {stderr}",
+            args.join(" ")
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_remote_url_credential_out_of_the_error() {
+        let port = spawn_401_server();
+        let (_temp, path) = repo_with_a_credential_bearing_remote(port);
+
+        assert_git_really_leaks_the_token(&path, &["fetch"]);
+
+        let error = GixGitAdapter
+            .fetch(&path)
+            .expect_err("a 401 with no password must fail");
+
+        assert_secret_free(&error.to_string(), FIXTURE_TOKEN, "a GitSyncError Display");
+        assert_secret_free(&format!("{error:?}"), FIXTURE_TOKEN, "a GitSyncError Debug");
+        // The other direction: redaction must not have blanked the diagnosis.
+        // Left a plain `contains` deliberately — `assert_secret_free` is its
+        // negation, and converting one inverts the test silently.
+        assert!(
+            error.to_string().contains("127.0.0.1"),
+            "the error must stay diagnosable, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_failed_push_keeps_the_remote_url_credential_out_of_the_error() {
+        let port = spawn_401_server();
+        let (_temp, path) = repo_with_a_credential_bearing_remote(port);
+
+        assert_git_really_leaks_the_token(&path, &["push"]);
+
+        let error = GixGitAdapter
+            .push(&path)
+            .expect_err("a 401 with no password must fail");
+
+        assert_secret_free(&error.to_string(), FIXTURE_TOKEN, "a GitSyncError Display");
+        assert_secret_free(&format!("{error:?}"), FIXTURE_TOKEN, "a GitSyncError Debug");
+        assert!(
+            error.to_string().contains("127.0.0.1"),
+            "the error must stay diagnosable, got: {error}"
+        );
     }
 }

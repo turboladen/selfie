@@ -8,11 +8,13 @@
 //! - [`GitSyncProvider`] — write/sync operations for the sync service
 
 pub mod adapter;
+pub mod message;
 pub mod status_provider;
 pub mod sync_provider;
 
 // Re-export all public types at the module level for convenience.
 pub use self::adapter::GixGitAdapter;
+pub use self::message::GitMessage;
 pub use self::status_provider::{
     GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider,
 };

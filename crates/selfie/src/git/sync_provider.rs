@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::message::GitMessage;
+
 /// Errors from git sync operations.
 #[derive(Debug, Error)]
 pub enum GitSyncError {
@@ -32,8 +34,20 @@ pub enum GitSyncError {
     Diverged,
 
     /// A git operation failed.
+    ///
+    /// Both fields are [`GitMessage`] rather than `String`, and that is what
+    /// closes this variant rather than a convention asking people to be careful.
+    /// `message` is the one that matters: it carries git's stderr, which a
+    /// non-interactive git can fill with a remote URL carrying a credential.
+    /// `operation` is a literal at every site but one — `run_git` builds it from
+    /// the argument list, so a future `run_git(root, &["push", &url])` would put
+    /// a URL there too. Typing both means one rule instead of two, and the
+    /// compiler holds it either way.
     #[error("{operation}: {message}")]
-    OperationFailed { operation: String, message: String },
+    OperationFailed {
+        operation: GitMessage,
+        message: GitMessage,
+    },
 }
 
 /// Information about a discovered git repository.

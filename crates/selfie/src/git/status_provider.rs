@@ -11,6 +11,8 @@ use std::{
 
 use thiserror::Error;
 
+use super::message::GitMessage;
+
 /// Git status of a single file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitFileStatus {
@@ -60,8 +62,15 @@ impl GitDirectoryStatus {
 /// Errors that can occur when checking git status.
 #[derive(Debug, Error)]
 pub enum GitStatusError {
+    /// Carries a [`GitMessage`] for symmetry with
+    /// [`GitSyncError`](super::GitSyncError), **not** because a leak has been
+    /// demonstrated through here. Every path that reaches this variant is a
+    /// local, read-only `gix` call — no network operation and no `run_git`
+    /// output — so there is no known exposure to close. It is typed because
+    /// leaving one of two git error enums untyped is the asymmetry the next
+    /// person copies.
     #[error("failed to query git status: {0}")]
-    StatusError(String),
+    StatusError(GitMessage),
 }
 
 /// Port for checking git status of files (Hexagonal Architecture).
