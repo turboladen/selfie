@@ -306,8 +306,15 @@ where
                     }
                 }
             } else {
-                // Non-zero exit code = Error
-                let stderr = output.stderr_str().to_string();
+                // Non-zero exit code = Error.
+                //
+                // Bounded because this message reaches the event stream and is
+                // serialized straight into the MCP JSON an assistant reads
+                // (`event_collector::audit_details`), so an unbounded stderr here
+                // is unbounded egress. `AuditResult::Error` is a rendered
+                // sentence rather than a stderr field, so it stays a `String` and
+                // the bound is applied at this construction site.
+                let stderr = crate::commands::BoundedText::bound(output.stderr());
                 let exit_code = output.exit_code();
                 AuditResultData {
                     package_name: package_name.to_string(),
@@ -319,11 +326,19 @@ where
                 }
             }
         }
+        // Bounded for the same reason as the non-zero-exit arm above, and with
+        // the same expression `resolve.rs`'s `run_capture` bounds: no
+        // `CommandError` variant's `Display` prints process output, but every one
+        // embeds the package file's own `command:` string, which is unbounded.
+        // Treating two identical expressions differently is how the gap in the
+        // arm above went unnoticed.
         Err(err) => AuditResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
             audit_command: Some(cmd.to_string()),
-            result: AuditResult::Error(err.to_string()),
+            result: AuditResult::Error(
+                crate::commands::BoundedText::bound(err.to_string().as_bytes()).into_string(),
+            ),
         },
     }
 }
@@ -584,6 +599,178 @@ mod tests {
                 assert!(matches!(audit_result, AuditResult::Error(_)));
             }
             other => panic!("Expected PackageAudited Error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_audit_commands_stderr_is_bounded() {
+        // `AuditResult::Error` is serialized straight into the MCP JSON, so an
+        // unbounded stderr here is unbounded egress to an assistant.
+        //
+        // Counts surviving bytes rather than checking for the marker: an
+        // implementation that appends the marker without cutting passes a suffix
+        // check, and that is exactly the defect the marker-only tests missed. The
+        // fixture byte is 'Z' because the message prefix "Audit command failed
+        // (exit code 1): " contains an 'x' -- counting 'x' reads one too many and
+        // measures the prefix as well as the stderr.
+        use crate::commands::runner::MAX_BOUNDED_BYTES;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .audit_some("false")
+            })
+            .path(temp_dir.path().join("test-pkg.yml"))
+            .build();
+
+        let pkg_clone = package.clone();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo.expect_get_package().returning(move |_| {
+            Ok(GetPackage::from_existing(
+                pkg_clone.clone(),
+                pkg_path.clone(),
+            ))
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner.expect_execute().returning(|_, _| {
+            Box::pin(async {
+                Ok(CommandOutput {
+                    output: Output {
+                        status: std::process::ExitStatus::from_raw(256),
+                        stdout: Vec::new(),
+                        stderr: vec![b'Z'; MAX_BOUNDED_BYTES * 3],
+                    },
+                    duration: std::time::Duration::from_millis(10),
+                })
+            })
+        });
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let token = CancellationToken::new();
+
+        let result = handle_audit(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        match result {
+            OperationResult::Success(OperationSuccess::PackageAudited { audit_result, .. }) => {
+                match audit_result {
+                    AuditResult::Error(message) => {
+                        assert!(
+                            message.contains("bytes elided"),
+                            "not marked as elided: {message}"
+                        );
+                        assert_eq!(
+                            message.chars().filter(|c| *c == 'Z').count(),
+                            MAX_BOUNDED_BYTES,
+                            "exactly the bound should survive"
+                        );
+                    }
+                    other => panic!("Expected AuditResult::Error, got: {other:?}"),
+                }
+            }
+            other => panic!("Expected PackageAudited, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_audit_commands_error_message_is_bounded() {
+        // The sibling of the test above, for the `Err(err)` arm rather than the
+        // non-zero-exit arm. No `CommandError` variant's `Display` prints process
+        // output, but every one embeds the package file's own `command:` string,
+        // which is unbounded -- so this arm renders untrusted text too. Without
+        // this test the bound on it is a line whose removal nothing notices.
+        use crate::commands::runner::{CommandError, MAX_BOUNDED_BYTES};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .audit_some("false")
+            })
+            .path(temp_dir.path().join("test-pkg.yml"))
+            .build();
+
+        let pkg_clone = package.clone();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo.expect_get_package().returning(move |_| {
+            Ok(GetPackage::from_existing(
+                pkg_clone.clone(),
+                pkg_path.clone(),
+            ))
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner.expect_execute().returning(|_, _| {
+            Box::pin(async {
+                Err(CommandError::Timeout {
+                    command: "Z".repeat(MAX_BOUNDED_BYTES * 3),
+                    timeout: std::time::Duration::from_secs(5),
+                    working_directory: std::path::PathBuf::from("/pkg"),
+                })
+            })
+        });
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let token = CancellationToken::new();
+
+        let result = handle_audit(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        match result {
+            OperationResult::Success(OperationSuccess::PackageAudited { audit_result, .. }) => {
+                match audit_result {
+                    AuditResult::Error(message) => {
+                        assert!(
+                            message.contains("bytes elided"),
+                            "not marked as elided: {message}"
+                        );
+                        // 'Z' appears only in the oversized command string, so
+                        // the count measures surviving input and nothing else.
+                        // The rendered prefix eats into the head's share of the
+                        // budget, which is why this is not simply the bound.
+                        const PREFIX: &str = "Command timed out after 5s: ";
+                        assert_eq!(
+                            message.chars().filter(|c| *c == 'Z').count(),
+                            MAX_BOUNDED_BYTES - PREFIX.len(),
+                            "the head and tail together should come to the bound"
+                        );
+                    }
+                    other => panic!("Expected AuditResult::Error, got: {other:?}"),
+                }
+            }
+            other => panic!("Expected PackageAudited, got: {other:?}"),
         }
     }
 

@@ -2,6 +2,8 @@
 paths:
   - "crates/selfie/src/dotfile_service/**/*.rs"
   - "crates/selfie/src/package/event.rs"
+  - "crates/selfie/src/package/service/audit.rs"
+  - "crates/selfie/src/commands/runner.rs"
   - "crates/selfie/src/fs/**/*.rs"
   - "crates/cli/src/commands/track.rs"
   - "crates/cli/src/display_manager.rs"
@@ -35,18 +37,46 @@ Test egress at the **boundary**, not by listing known paths:
 
 - **Never `#[derive(Debug)]` on a type holding secret bytes.** Hand-write it to print `<N bytes>`.
   No test can see this exit, because nothing formats the struct today — which is the argument for
-  removing it by construction rather than testing for it.
+  removing it by construction rather than testing for it. The exception is `BoundedText`
+  (`commands/runner.rs`), which holds text selfie **forwards** rather than content it holds back.
+  Its `Debug` is derived on purpose: blinding it would contain nothing, since the text is already
+  bound for the terminal, and it would hide forwarded stderr from the event scan above — a secret
+  arriving on stderr later would go unseen instead of caught. Apply this rule to types that hold a
+  secret, not to types that carry something already on its way out.
 - **`CommandError::NonZeroExit` carries stdout.** Its `Display` omits the field; its `Debug` does
   not, so a `{:?}` on any `Result` holding one prints the command's whole output. Use `to_string()`,
   never `{:?}`. `CommandFailure::ExecutionFailed` deliberately has **no** `stdout` field so that the
-  conversion has nowhere to put it, and forwards stderr only, truncated — do not add one back. A
+  conversion has nowhere to put it, and forwards stderr only, bounded — do not add one back. A
   provider's stdout _is_ the secret, and the general failure path cannot know which commands produce
   one. Still prefer the resolve path's own error type over `OperationFailure::from(CommandError)` or
   `command_failed`: those say "a command failed", not which entry or which var, and the resolve
   variants carry that.
-- **Forward command stderr on failure only**, truncated. It is content selfie does not control; a
-  provider run with a verbose flag can echo secret material there. `truncate_stderr` in
-  `commands/runner.rs` is the one bound; call it rather than deciding a limit per site.
+- **Forward command stderr on failure only**, bounded. It is content selfie does not control; a
+  provider run with a verbose flag can echo secret material there, and a rendered `CommandError`
+  embeds the package file's own unbounded `command:` string. `BoundedText` in `commands/runner.rs`
+  is the one bound. It is `pub` and re-exported as `selfie::commands::BoundedText`, so the CLI and
+  the MCP server can construct one — this rule is followable from every crate it is scoped to. Call
+  `BoundedText::bound` rather than deciding a limit per site. What it _enforces_ is uneven, and the
+  difference is the part worth knowing:
+  - **`CommandFailure::ExecutionFailed`'s `stderr` is the only compiler-enforced site.** Its type is
+    `BoundedText`, whose field is private, so no struct-variant literal — library, adapter, or test
+    — can put unbounded text there. This is the one place the bound is not a convention.
+  - **`AuditResult::Error` and `ResolveError`'s `stderr` fields are `String`.** They build a
+    `BoundedText` at the construction site and unwrap it. Each is a rendered sentence rather than a
+    stderr field, so typing them would claim the whole message is untrusted when only its tail is.
+    The bound there is still something a person has to remember; these are the sites to check when
+    adding a failure exit, and `audit.rs` is the one that was already missing it.
+  - **The bound counts input bytes, not the length of the string it returns.** Invalid UTF-8 decodes
+    lossily and each bad byte becomes a 3-byte `U+FFFD`, so 2000 bytes of binary stderr yield about
+    6000 bytes of text. It bounds how much of the command's output survives, not `as_str().len()`.
+  - **It keeps both ends, not a prefix.** The surviving 2000 bytes are split between the head and
+    the tail, with the elided byte count named in between, because a failing command puts its
+    diagnosis last. That means **the last bytes of stderr are always forwarded** — a leak test that
+    plants its secret at the end will now see it where a head-only cut would have dropped it.
+  - **It bounds forwarded output, not every string in a failure.** `ExecutionFailed`'s `command` and
+    `AuditResultData`'s `audit_command` are plain unbounded `String`s that also reach the MCP JSON.
+    They are user-authored package-file text rather than process output, which is why they are not
+    bounded — do not read the bullet above as a claim that they are.
 - **Streamed command output is unconditional egress to every adapter.** `execute_command_streaming`
   sends each line of an install command's stdout **and** stderr as `PackageEvent::Info`, on success
   and on failure alike. The CLI prints those verbatim and the MCP server serializes them into its

@@ -882,13 +882,16 @@ pub enum CommandFailure {
     /// cannot know which of them print a credential, so a general failure value has
     /// nowhere safe to put a command's whole output: this variant is cloned into
     /// [`PackageEvent::Completed`], which every adapter receives. `stderr` is
-    /// forwarded because a failure has to stay diagnosable, and is truncated at
-    /// construction for the same reason it is bounded on the dotfile resolve path.
-    /// Do not add a `stdout` field back.
+    /// forwarded because a failure has to stay diagnosable, and its
+    /// [`BoundedText`](crate::commands::BoundedText) type is what bounds it: the
+    /// newtype's field is private, so no struct-variant literal — here, in an
+    /// adapter, or in a test — can put unbounded text in this field. That makes
+    /// this the one stderr-forwarding site the compiler enforces rather than the
+    /// convention it used to be. Do not add a `stdout` field back.
     ExecutionFailed {
         command: String,
         exit_code: Option<i32>,
-        stderr: String,
+        stderr: crate::commands::BoundedText,
     },
     CommandNotFound {
         command: String,
@@ -1275,7 +1278,7 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             } => OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                 command,
                 exit_code: Some(exit_code),
-                stderr: crate::commands::runner::truncate_stderr(stderr.as_bytes()),
+                stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
             }),
             crate::commands::runner::CommandError::IoError { command, .. } => {
                 OperationFailure::CommandError(CommandFailure::CommandNotFound { command })
@@ -1709,15 +1712,15 @@ impl OperationFailure {
 
     /// Creates a command execution failed error.
     ///
-    /// Takes no `stdout`: see [`CommandFailure::ExecutionFailed`]. `stderr` is
-    /// truncated here so that every construction path is bounded, rather than
-    /// leaving each caller to remember.
+    /// Takes no `stdout`: see [`CommandFailure::ExecutionFailed`]. Takes `stderr`
+    /// as a `&str` and bounds it here, so a caller cannot supply an already-built
+    /// value that skipped the bound.
     #[must_use]
     pub fn command_failed(command: String, exit_code: Option<i32>, stderr: &str) -> Self {
         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
             command,
             exit_code,
-            stderr: crate::commands::runner::truncate_stderr(stderr.as_bytes()),
+            stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
         })
     }
 

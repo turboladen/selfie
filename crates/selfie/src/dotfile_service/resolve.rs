@@ -16,8 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::deploy::resolve_source_path;
 use super::template;
-use crate::commands::CommandRunner;
-use crate::commands::runner::truncate_stderr;
+use crate::commands::{BoundedText, CommandRunner};
 use crate::fs::filesystem::FileSystem;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
 use crate::paths::is_within;
@@ -252,6 +251,12 @@ where
 /// The error is rendered with `Display`, never `Debug`: `CommandError::NonZeroExit`
 /// carries the command's stdout in a field, which `Debug` would print and which is
 /// the secret itself.
+///
+/// Both exits go through [`BoundedText`] and then unwrap to a `String`, because
+/// [`ResolveError`]'s fields are `String`. The bound is therefore applied here
+/// and not enforced by the error type — unlike `CommandFailure::ExecutionFailed`,
+/// whose field *is* a `BoundedText`. A new failure exit added to this function
+/// has to call `bound` itself; nothing will stop it if it does not.
 async fn run_capture<CR: CommandRunner>(
     command: &str,
     base_dir: &Path,
@@ -262,12 +267,12 @@ async fn run_capture<CR: CommandRunner>(
     let output = runner
         .execute_in_dir(command, base_dir, timeout, token)
         .await
-        .map_err(|e| truncate_stderr(e.to_string().as_bytes()))?;
+        .map_err(|e| BoundedText::bound(e.to_string().as_bytes()).into_string())?;
 
     if output.is_success() {
         Ok(output.stdout().to_vec())
     } else {
-        Err(truncate_stderr(output.stderr()))
+        Err(BoundedText::bound(output.stderr()).into_string())
     }
 }
 
@@ -478,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_provider_forwards_truncated_stderr() {
+    async fn a_failing_provider_forwards_stderr() {
         let runner = FakeRunner::failing("op read x", b"not logged in");
         let entry = provider_entry("op read x", "~/.x");
 
@@ -486,6 +491,37 @@ mod tests {
 
         assert!(err.to_string().contains("not logged in"), "{err}");
         assert!(err.to_string().contains("op read x"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_providers_stderr_is_bounded() {
+        // Separate from the forwarding test above, which was named
+        // `..._forwards_truncated_stderr` while feeding 13 bytes and asserting
+        // only `contains`: it named a property none of its assertions tested.
+        // Removing the bound from `run_capture` entirely killed no test in the
+        // workspace, on the credential path of all places.
+        //
+        // Counts surviving bytes rather than checking for the marker, since an
+        // implementation that appends the marker without cutting passes a suffix
+        // check. 'Z' is absent from the rest of the rendered error, so the count
+        // measures the forwarded stderr and nothing else.
+        use crate::commands::runner::MAX_BOUNDED_BYTES;
+
+        let runner = FakeRunner::failing("op read x", &vec![b'Z'; MAX_BOUNDED_BYTES * 3]);
+        let entry = provider_entry("op read x", "~/.x");
+
+        let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
+        let rendered = err.to_string();
+
+        assert!(
+            rendered.contains("bytes elided"),
+            "not marked as elided: {rendered}"
+        );
+        assert_eq!(
+            rendered.chars().filter(|c| *c == 'Z').count(),
+            MAX_BOUNDED_BYTES,
+            "exactly the bound should survive"
+        );
     }
 
     #[tokio::test]

@@ -207,7 +207,7 @@ impl EventProcessor {
                             operation: operation_info.operation_type.to_string(),
                             command: Some(command.clone()),
                             exit_code: *exit_code,
-                            stderr: Some(stderr.clone()),
+                            stderr: Some(stderr.as_str().to_string()),
                             message: err.to_string(),
                         },
                         _ => ErrorDetail {
@@ -674,7 +674,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "brew install fail-pkg".to_string(),
                     exit_code: Some(1),
-                    stderr: "not found".to_string(),
+                    stderr: selfie::commands::BoundedText::bound(b"not found"),
                 },
             )),
         }];

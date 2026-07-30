@@ -32,7 +32,9 @@ pub(crate) struct ErrorDetail {
     pub operation: String,
     pub command: Option<String>,
     pub exit_code: Option<i32>,
-    /// Already truncated by the library. There is deliberately no `stdout`
+    /// Bounded by the library: the only producer copies it out of
+    /// `CommandFailure::ExecutionFailed`, whose field is a `BoundedText` and so
+    /// cannot hold unbounded text. There is deliberately no `stdout`
     /// counterpart: see `CommandFailure::ExecutionFailed`.
     pub stderr: Option<String>,
     pub message: String,
