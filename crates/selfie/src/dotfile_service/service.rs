@@ -23,7 +23,7 @@ use crate::{
     },
     fs::{
         filesystem::{FileSystem, FileSystemError},
-        target::{TargetPath, expand_target_path, state_file_path},
+        target::{TargetPath, expand_target_path, portable_target, state_file_path},
     },
     package::{
         ContentSource, DotfileEntry, Package,
@@ -1591,11 +1591,12 @@ where
     }
 
     // Create the YAML spec (spec_path already computed above for overwrite check)
+    let recorded_target = portable_target(filesystem, target_path);
     let package = crate::package::PackageBuilder::default()
         .name(name)
         .dotfiles(vec![DotfileEntry::new(
             format!("{name}/{filename}"),
-            target_path,
+            &recorded_target,
         )])
         .path(spec_path.clone())
         .build();
@@ -1617,10 +1618,12 @@ where
         )));
     }
 
+    // The recorded form, not the argument: an adapter that echoed the caller's
+    // path would name a target the spec does not contain.
     OperationResult::Success(OperationSuccess::DotfileTracked {
         name: name.to_string(),
         source_path,
-        target_path: target_path.to_string(),
+        target_path: recorded_target,
         was_already_tracked: false,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),
@@ -1652,16 +1655,19 @@ where
 
     // Check if this target is already tracked in the package
     let expanded_target = expand_target_path(filesystem, target_path);
-    if package_blob
+    let already_tracked = package_blob
         .package()
         .dotfiles()
         .iter()
-        .any(|entry| expand_target_path(filesystem, entry.target()) == expanded_target)
-    {
+        .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
+
+    if let Some(entry) = already_tracked {
+        // The entry's own target, not the argument: "already tracking X" should
+        // name what the spec says, which is what a later apply will use.
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: package_name.to_string(),
             source_path: expanded_target.path().to_path_buf(),
-            target_path: target_path.to_string(),
+            target_path: entry.target().to_string(),
             was_already_tracked: true,
             environment: config.environment().to_string(),
             steps_completed: StepCount::new(1, 1),
@@ -1725,9 +1731,10 @@ where
     }
 
     // Add dotfiles entry and save — source is relative to the YAML's parent dir
+    let recorded_target = portable_target(filesystem, target_path);
     package_blob
         .package_mut()
-        .add_dotfile(DotfileEntry::new(&relative_source, target_path));
+        .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
 
     let file_path = package_blob.file_path().to_path_buf();
     if let Err(e) = repo.save_package(package_blob.package(), &file_path) {
@@ -1749,7 +1756,7 @@ where
     OperationResult::Success(OperationSuccess::DotfileTracked {
         name: package_name.to_string(),
         source_path,
-        target_path: target_path.to_string(),
+        target_path: recorded_target,
         was_already_tracked: false,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),

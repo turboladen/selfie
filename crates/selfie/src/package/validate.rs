@@ -812,7 +812,7 @@ impl Package {
                 ValidationErrorCategory::InvalidValue,
                 &format!("{field}.target"),
                 "Dotfile target path must be absolute or start with '~'",
-                Some("Use an absolute path like '/etc/config' or '~/.config/file'."),
+                Some("Use '~/.config/file' for a path under your home directory, or an absolute path like '/etc/config'."),
             ));
         }
 

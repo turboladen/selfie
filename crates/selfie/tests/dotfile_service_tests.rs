@@ -167,6 +167,107 @@ impl TestDirs {
         )
         .with_dotfiles_repository(dotfiles_repo)
     }
+
+    /// A service that believes the home directory is `home`.
+    ///
+    /// Injected rather than read from the environment: `$HOME` is process-wide
+    /// and these tests run in parallel.
+    fn service_with_home(
+        &self,
+        home: &std::path::Path,
+    ) -> DotfileServiceImpl<YamlPackageRepository<HomeAt>, HomeAt, FakeCommandRunner> {
+        let fs = HomeAt(RealFileSystem, home.to_path_buf());
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .build();
+        DotfileServiceImpl::new(
+            YamlPackageRepository::new(fs.clone(), config.package_directory().clone()),
+            fs.clone(),
+            FakeCommandRunner::new(),
+            config,
+            CancellationToken::new(),
+        )
+        .with_dotfiles_repository(YamlPackageRepository::new(fs, self.dotfiles_dir.clone()))
+    }
+}
+
+/// `RealFileSystem` with a chosen home directory and nothing else changed.
+#[derive(Clone, Debug)]
+struct HomeAt(RealFileSystem, PathBuf);
+
+impl selfie::fs::FileSystem for HomeAt {
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        // Only a bare `~`. Anything else keeps the real behavior, so the
+        // decorator cannot quietly change what the rest of track resolves.
+        if path == std::path::Path::new("~") {
+            return Ok(self.1.clone());
+        }
+        self.0.expand_path(path)
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.0.read_file(path)
+    }
+    fn read_file_bytes(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
+        self.0.read_file_bytes(path)
+    }
+    fn write_file(
+        &self,
+        path: &std::path::Path,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.write_file(path, data)
+    }
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.write_file_private(path, data)
+    }
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.write_file_no_follow(path, data)
+    }
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.symlink_refusal(path)
+    }
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.0.is_owner_only(path)
+    }
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.remove_file(path)
+    }
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.0.path_exists(path)
+    }
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.0.list_directory(path)
+    }
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.0.canonicalize(path)
+    }
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.0.config_dir()
+    }
 }
 
 #[tokio::test]
@@ -1440,6 +1541,163 @@ async fn test_track_for_package_fails_when_package_not_found() {
     assert!(
         matches!(result, OperationResult::Failure(_)),
         "Should fail when package doesn't exist"
+    );
+}
+
+/// Tracking a file under the home directory records it as `~/…`.
+///
+/// The home directory is injected rather than read, so the test says nothing
+/// about the machine it runs on: `/Users` vs `/home` and the real `$HOME` are
+/// both out of the picture.
+#[tokio::test]
+async fn a_tracked_target_under_home_is_recorded_relative_to_it() {
+    use selfie::package::port::PackageRepository;
+
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+    let target_file = home.join(".config").join("ghostty").join("config");
+    std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    std::fs::write(&target_file, "font-size = 13").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_standalone("ghostty", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileTracked { target_path, .. }) => {
+            assert_eq!(
+                target_path, "~/.config/ghostty/config",
+                "the reported target must be the one that was recorded"
+            );
+        }
+        other => panic!("Expected DotfileTracked success, got: {other:?}"),
+    }
+
+    let spec = std::fs::read_to_string(dirs.dotfiles_dir.join("ghostty.yml")).unwrap();
+    assert!(
+        spec.contains("~/.config/ghostty/config"),
+        "spec should record a home-relative target, got:\n{spec}"
+    );
+    assert!(
+        !spec.contains(home.to_str().unwrap()),
+        "spec should not name this machine's home directory, got:\n{spec}"
+    );
+
+    // The recorded form has to survive the reader, or track writes a spec that
+    // apply cannot use. `~` alone is YAML's null.
+    let reread = YamlPackageRepository::new(RealFileSystem, dirs.dotfiles_dir.clone())
+        .get_package("ghostty")
+        .expect("the tracked spec should load again");
+    assert_eq!(
+        reread.package().dotfiles()[0].target(),
+        "~/.config/ghostty/config"
+    );
+}
+
+/// `track_for_package` writes the entry through a different function than
+/// `track_standalone`, so it needs its own proof rather than an argument that
+/// the two are alike.
+#[tokio::test]
+async fn a_target_tracked_into_a_package_is_recorded_relative_to_home() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+    let target_file = home.join(".config").join("bat").join("config");
+    std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    std::fs::write(&target_file, "--theme=ansi").unwrap();
+    create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("bat", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    assert!(
+        matches!(result, OperationResult::Success(_)),
+        "tracking should succeed, got: {result:?}"
+    );
+
+    let spec = std::fs::read_to_string(dirs.package_dir.join("bat.yml")).unwrap();
+    assert!(
+        spec.contains("~/.config/bat/config"),
+        "spec should record a home-relative target, got:\n{spec}"
+    );
+    assert!(
+        !spec.contains(home.to_str().unwrap()),
+        "spec should not name this machine's home directory, got:\n{spec}"
+    );
+}
+
+/// Re-tracking a file already in the spec reports the spec's target, not the
+/// path the caller happened to type. The two differ exactly here: the spec holds
+/// `~/…` and the caller passes an absolute path.
+#[tokio::test]
+async fn re_tracking_reports_the_target_the_spec_holds() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+    let target_file = home.join(".config").join("bat").join("config");
+    std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    std::fs::write(&target_file, "--theme=ansi").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat/config", "~/.config/bat/config")],
+    );
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("bat", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            target_path,
+            was_already_tracked,
+            ..
+        }) => {
+            assert!(was_already_tracked, "the entry was already in the spec");
+            assert_eq!(target_path, "~/.config/bat/config");
+        }
+        other => panic!("Expected DotfileTracked success, got: {other:?}"),
+    }
+}
+
+/// A target outside the home directory keeps its absolute form. Without this the
+/// two tests above would pass on an implementation that tildes every path.
+#[tokio::test]
+async fn a_tracked_target_outside_home_keeps_its_absolute_path() {
+    let dirs = TestDirs::new();
+    let elsewhere = dirs.state_dir.join("nginx.conf");
+    std::fs::write(&elsewhere, "worker_processes 1;").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&dirs.target_dir)
+            .track_standalone("nginx", elsewhere.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileTracked { target_path, .. }) => {
+            assert_eq!(target_path, elsewhere.to_str().unwrap());
+        }
+        other => panic!("Expected DotfileTracked success, got: {other:?}"),
+    }
+
+    let spec = std::fs::read_to_string(dirs.dotfiles_dir.join("nginx.yml")).unwrap();
+    assert!(
+        spec.contains(elsewhere.to_str().unwrap()),
+        "spec should keep the absolute target, got:\n{spec}"
     );
 }
 
