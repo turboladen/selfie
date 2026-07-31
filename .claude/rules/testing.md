@@ -56,6 +56,13 @@ Match **both** verbs, not just the first: `cargo test` prints `Compiling`, but `
 clippy-verified mutation as never having run — which this file's own wording caused, on a run whose
 clippy output contained a real gate failure. Do not "simplify" it back to one verb.
 
+That compile line is **necessary but not sufficient**: cargo prints it when it starts the crate, so
+it appears above `error: could not compile` on a build that then fails. Check `could not compile`
+(and `error[E`) **first**, and only treat the build as having happened if neither is present —
+otherwise a mutation that never built is scored **caught**, because the expected test did not pass
+and the compile line was there. That is the false direction: a false "caught" records a real
+coverage gap as covered.
+
 ## Ordering
 
 Do not depend on filesystem enumeration order. `readdir` returns sorted-ish order on macOS/APFS and
