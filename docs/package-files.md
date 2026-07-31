@@ -578,13 +578,12 @@ To put a target under selfie's management, replace the symlink with a regular fi
 
 A symlinked **parent directory** is still followed. Only the final component is checked.
 
-#### `selfie dotfiles track` refuses one
+#### `selfie dotfiles track` refuses a symlinked target
 
 Tracking a symlinked target **fails** rather than recording it:
 
 ```
-✗ /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write
-  through it. Replace the symlink with a regular file, or track the path it points to.
+✗ /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write through it. Replace the symlink with a regular file, or track the path it points to.
 ```
 
 The refusal is deliberate, and it is stricter than a warning would be, because there is no
@@ -598,14 +597,13 @@ deployment that never happened. Refusing before any of that is the point.
 
 A dangling link is refused the same way, and is reported as a symlink rather than as a missing file.
 
-#### `selfie dotfiles drift` names it
+#### `selfie dotfiles drift` reports the symlink refusal
 
-`drift` reports the refusal whenever `apply` would refuse the entry, using the same wording:
+`drift` names the symlink whenever `apply` would refuse the entry, using the same wording:
 
 ```
-⚠ myapp/config.toml: repo changed
-⚠ Skipping 'myapp/config.toml': /home/you/.gitconfig: target is a symlink to
-  '/home/you/Sync/gitconfig' and selfie will not write through it
+⚠   Drift in ~/.gitconfig: repo changed
+⚠ Skipping 'myapp/config.toml': /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write through it
 ```
 
 The drift type on its own is misleading for a symlinked target, which is why the reason accompanies
@@ -614,8 +612,10 @@ rather than to the target — and because a refused entry never updates its reco
 drift is reported on every subsequent run. That permanence is real, not a display artifact: nothing
 will clear it until the link is dealt with.
 
-Drift stays silent in exactly the cases `apply` does. A symlinked target whose contents already
-match is not something `apply` writes to, so neither command mentions it.
+The **refusal** follows `apply`'s own decision, so it appears only where `apply` would refuse to
+write. The **drift line** does not: an untracked target whose contents already match the repository
+file is still listed as drifted, even though `apply` skips it silently. In that case you get the
+drift line without the symlink reason.
 
 Note that `selfie sync status` summarizes drift counts and does not carry this reason; it points at
 `selfie dotfiles drift`, which does.

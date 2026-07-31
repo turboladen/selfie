@@ -42,33 +42,21 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 /// `base` as a string but escapes it. Both sides are made absolute and normalized
 /// first, which is what makes the comparison meaningful.
 ///
-/// # This check is lexical, and a symlink defeats it
+/// # Lexical, and a symlink defeats it
 ///
-/// It resolves `.` and `..` textually and touches the file system not at all, so a
-/// symlink planted *inside* `base_dir` passes while pointing outside it:
-/// `packages/creds/link.tpl -> ../outside.tpl` is accepted, and the outside file's
-/// contents are then read and rendered into a deployed dotfile. A symlinked
-/// *directory* component does the same and is the harder case — with
-/// `packages/myapp -> /elsewhere`, `symlink_metadata` on the full path reports a
-/// regular file, so a check that only inspected the final component would report
-/// containment just as confidently. `a_symlinked_source_escapes_the_containment_
-/// guard` in `dotfile_service_tests.rs` records both.
+/// A link inside `base_dir` passes while pointing outside. Watch the
+/// linked-*directory* form: with `packages/myapp -> /elsewhere`, `symlink_metadata`
+/// on the source path reports a regular file, so checking only the final component
+/// would not catch it. Both forms are pinned by
+/// `a_symlinked_source_escapes_the_containment_guard`.
 ///
-/// That is accepted rather than unnoticed. Escaping needs a hostile package
-/// repository, and such a repository can already run arbitrary commands through a
-/// dotfile's `command:` field, so this guard is not the security boundary in the
-/// scenario where it fails. It stops the traversal a *mistake* produces.
+/// Accepted — escaping needs a hostile package repository, which can already run
+/// arbitrary commands via a dotfile's `command:`. Being lexical is also what lets
+/// this work on paths that do not exist yet.
 ///
-/// Closing it honestly would mean a `FileSystem` port method resolving each
-/// component against the base — `openat2`'s `RESOLVE_BENEATH` or `cap-std`, which
-/// are kernel-enforced and so free of the check-then-read race a `symlink_metadata`
-/// walk would reintroduce. That is a real fix and deliberately not taken here: this
-/// module's value is that it touches no file system at all, and threading a port
-/// through for a guard that is not the boundary buys little. Do not "strengthen"
-/// this function by calling `std::fs` from it — that trades a limit this comment
-/// states for one nothing does, and takes the library around its own port.
-///
-/// Being lexical is also what lets it work on paths that do not exist yet.
+/// Do not call `std::fs` from here: that takes the library around its own port, and
+/// a `symlink_metadata` walk adds a check-then-read race. selfie-9pdh tracks the
+/// real fix (`openat2`'s `RESOLVE_BENEATH`, kernel-enforced on Linux).
 #[must_use]
 pub(crate) fn is_within(path: &Path, base_dir: &Path) -> bool {
     match (std::path::absolute(path), std::path::absolute(base_dir)) {
