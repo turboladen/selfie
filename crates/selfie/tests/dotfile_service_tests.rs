@@ -3598,21 +3598,19 @@ mod secret_bearing {
     mod noisy_shell {
         use super::*;
         use selfie::commands::ShellCommandRunner;
-        use std::io::Write as _;
         use std::time::Duration;
 
         /// A shell that writes before, during and after the command it is given.
         fn noisy_runner(dir: &std::path::Path) -> ShellCommandRunner {
             let path = dir.join("noisy-shell");
-            let mut file = std::fs::File::create(&path).unwrap();
-            writeln!(file, "#!/bin/sh").unwrap();
-            writeln!(file, "printf '%s' 'LEADBANNER'").unwrap();
-            writeln!(file, "/bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &").unwrap();
-            writeln!(file, "trap 'printf TRAILCHATTER' EXIT").unwrap();
-            writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
-            drop(file);
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            test_common::write_executable(
+                &path,
+                "#!/bin/sh\n\
+                 printf '%s' 'LEADBANNER'\n\
+                 /bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &\n\
+                 trap 'printf TRAILCHATTER' EXIT\n\
+                 shift $(($# - 1)); eval \"$1\"\n",
+            );
 
             ShellCommandRunner::new(path.to_str().unwrap(), Duration::from_secs(30))
         }

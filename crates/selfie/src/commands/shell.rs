@@ -2100,7 +2100,6 @@ mod tests {
 #[cfg(all(test, unix))]
 mod content_tests {
     use super::*;
-    use std::io::Write as _;
     use std::path::PathBuf;
 
     const TIMEOUT: Duration = Duration::from_secs(30);
@@ -2119,24 +2118,21 @@ mod content_tests {
     /// drawn in the output stream can catch, because it depends on timing rather
     /// than on position.
     fn noisy_shell(dir: &Path, before: &str, after: &str, background: bool) -> PathBuf {
-        let path = dir.join("noisy-shell");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "#!/bin/sh").unwrap();
+        let mut body = String::from("#!/bin/sh\n");
         if !before.is_empty() {
-            writeln!(file, "printf '%s' '{before}'").unwrap();
+            body.push_str(&format!("printf '%s' '{before}'\n"));
         }
         if background {
-            writeln!(file, "/bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &").unwrap();
+            body.push_str("/bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &\n");
         }
         if !after.is_empty() {
-            writeln!(file, "trap 'printf {after}' EXIT").unwrap();
+            body.push_str(&format!("trap 'printf {after}' EXIT\n"));
         }
         // The recipe is the last argument, whether or not `-l` precedes `-c`.
-        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
-        drop(file);
+        body.push_str("shift $(($# - 1)); eval \"$1\"\n");
 
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("noisy-shell");
+        test_common::write_executable(&path, &body);
         path
     }
 
@@ -2375,13 +2371,7 @@ mod content_tests {
         // is what this path exists to stop.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exiting-shell");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "#!/bin/sh").unwrap();
-        writeln!(file, "printf '%s' 'goodbye'").unwrap();
-        writeln!(file, "exit 0").unwrap();
-        drop(file);
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_common::write_executable(&path, "#!/bin/sh\nprintf '%s' 'goodbye'\nexit 0\n");
         let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
 
         let result = runner
@@ -2397,13 +2387,10 @@ mod content_tests {
     /// A stand-in shell whose startup does `redirect` before running its `-c`.
     fn shell_redirecting(dir: &Path, name: &str, redirect: &str) -> PathBuf {
         let path = dir.join(name);
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "#!/bin/sh").unwrap();
-        writeln!(file, "{redirect}").unwrap();
-        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
-        drop(file);
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_common::write_executable(
+            &path,
+            &format!("#!/bin/sh\n{redirect}\nshift $(($# - 1)); eval \"$1\"\n"),
+        );
         path
     }
 
