@@ -688,9 +688,13 @@ shell is given, so a trailing comment or line continuation is harmless. Under `f
 run inside a block, so a command whose last line ends in a backslash is refused outright with
 `Missing end to balance this begin` rather than deploying anything.
 
-Your command cannot write to the descriptor its own output travels on: selfie closes it before the
-command runs. A command that `cd`s, or a profile that does, still changes the working directory the
-command ends up in — that has always been true.
+On every shell but `fish`, your command cannot write to the descriptor its own output travels on:
+selfie closes it before the command runs. Under `fish` it stays open, but inside the block that
+descriptor **is** the command's stdout, so writing to it is writing to stdout — there is nothing
+there a command could not already reach.
+
+A command that `cd`s, or a profile that does, still changes the working directory the command ends
+up in — that has always been true.
 
 On Windows there is no separation: `cmd.exe` has no login profile to source, and nothing
 distinguishes its output from the command's.
