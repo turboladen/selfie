@@ -9,6 +9,7 @@ use std::{
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{FileSystem, FileSystemError};
+use super::target::TargetPath;
 
 /// Real file system implementation
 #[derive(Clone, Copy, Debug)]
@@ -47,9 +48,10 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
-    fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
+    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
         use std::io::Write as _;
 
+        let path = path.path();
         let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
         // The temporary file's name is random and the rename carries no path at all,
         // so failures would otherwise name a file the operator never chose -- or
@@ -111,9 +113,10 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
-    fn write_file_no_follow(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
+    fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
         use std::io::Write as _;
 
+        let path = path.path();
         let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
 
         // Matches `write_file`: a target whose directory does not exist yet is
@@ -170,12 +173,13 @@ impl FileSystem for RealFileSystem {
         file.write_all(data).map_err(io_err)
     }
 
-    fn symlink_refusal(&self, path: &Path) -> Option<FileSystemError> {
-        symlink_refusal(path)
+    fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
+        symlink_refusal(path.path())
     }
 
-    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError> {
-        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+    fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
+        let metadata =
+            fs::metadata(path.path()).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
 
         #[cfg(unix)]
         {
@@ -523,6 +527,12 @@ mod tests {
     }
 }
 
+/// A [`TargetPath`] for a test fixture: the writers under test take nothing else.
+#[cfg(test)]
+fn tp(path: &Path) -> TargetPath {
+    super::target::expand_target_path(&RealFileSystem, path.to_str().unwrap())
+}
+
 /// Tests for [`FileSystem::write_file_private`].
 ///
 /// Grouped by what each test actually proves.
@@ -556,7 +566,7 @@ mod private_write_tests {
         let target = dir.path().join("creds");
 
         RealFileSystem
-            .write_file_private(&target, b"secret")
+            .write_file_private(&tp(&target), b"secret")
             .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"secret");
@@ -568,7 +578,9 @@ mod private_write_tests {
         let target = dir.path().join("creds");
         fs::write(&target, b"a much longer previous value").unwrap();
 
-        RealFileSystem.write_file_private(&target, b"new").unwrap();
+        RealFileSystem
+            .write_file_private(&tp(&target), b"new")
+            .unwrap();
 
         // Not merely overwritten in place: nothing of the old value survives.
         assert_eq!(fs::read(&target).unwrap(), b"new");
@@ -580,7 +592,7 @@ mod private_write_tests {
         let target = dir.path().join("nested").join("deeper").join("creds");
 
         RealFileSystem
-            .write_file_private(&target, b"secret")
+            .write_file_private(&tp(&target), b"secret")
             .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"secret");
@@ -591,7 +603,9 @@ mod private_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("creds");
 
-        RealFileSystem.write_file_private(&target, b"").unwrap();
+        RealFileSystem
+            .write_file_private(&tp(&target), b"")
+            .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
@@ -602,7 +616,7 @@ mod private_write_tests {
         let target = dir.path().join("creds");
 
         RealFileSystem
-            .write_file_private(&target, b"secret")
+            .write_file_private(&tp(&target), b"secret")
             .unwrap();
 
         assert_eq!(entries(dir.path()), ["creds"]);
@@ -617,7 +631,7 @@ mod private_write_tests {
         let target = dir.path().join("creds");
         fs::create_dir(&target).unwrap();
 
-        let err = RealFileSystem.write_file_private(&target, b"secret");
+        let err = RealFileSystem.write_file_private(&tp(&target), b"secret");
 
         assert!(err.is_err());
         assert_eq!(entries(dir.path()), ["creds"]);
@@ -651,7 +665,7 @@ mod private_write_tests {
             let target = dir.path().join("creds");
 
             RealFileSystem
-                .write_file_private(&target, b"secret")
+                .write_file_private(&tp(&target), b"secret")
                 .unwrap();
 
             assert_owner_only(&target);
@@ -664,7 +678,9 @@ mod private_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
 
-            RealFileSystem.write_file_private(&target, b"new").unwrap();
+            RealFileSystem
+                .write_file_private(&tp(&target), b"new")
+                .unwrap();
 
             // `OpenOptions::mode` applies only when a file is created, so an
             // implementation that opens the target directly would silently leave
@@ -682,7 +698,7 @@ mod private_write_tests {
             std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
 
             RealFileSystem
-                .write_file_private(&target, b"secret")
+                .write_file_private(&tp(&target), b"secret")
                 .unwrap();
 
             assert_eq!(fs::read(&elsewhere).unwrap(), b"untouched");
@@ -704,7 +720,7 @@ mod private_write_tests {
             std::os::unix::fs::symlink(&never_created, &target).unwrap();
 
             RealFileSystem
-                .write_file_private(&target, b"secret")
+                .write_file_private(&tp(&target), b"secret")
                 .unwrap();
 
             // `fs::write` would have created the file the symlink points at.
@@ -724,7 +740,9 @@ mod private_write_tests {
             let held = fs::File::open(&target).unwrap();
             let before = fs::metadata(&target).unwrap().ino();
 
-            RealFileSystem.write_file_private(&target, b"new").unwrap();
+            RealFileSystem
+                .write_file_private(&tp(&target), b"new")
+                .unwrap();
 
             let after = fs::metadata(&target).unwrap().ino();
             assert_ne!(
@@ -751,7 +769,7 @@ mod private_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
-            let result = RealFileSystem.write_file_private(&target, b"secret");
+            let result = RealFileSystem.write_file_private(&tp(&target), b"secret");
 
             assert!(result.is_err());
             assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
@@ -793,7 +811,7 @@ mod private_write_tests {
             let target = dir.path().join("creds");
 
             RealFileSystem
-                .write_file_private(&target, b"secret")
+                .write_file_private(&tp(&target), b"secret")
                 .unwrap();
 
             assert_eq!(fs::read(&target).unwrap(), b"secret");
@@ -827,7 +845,7 @@ mod no_follow_write_tests {
         let target = dir.path().join("config");
 
         RealFileSystem
-            .write_file_no_follow(&target, b"content")
+            .write_file_no_follow(&tp(&target), b"content")
             .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"content");
@@ -840,7 +858,7 @@ mod no_follow_write_tests {
         fs::write(&target, b"a much longer previous value").unwrap();
 
         RealFileSystem
-            .write_file_no_follow(&target, b"new")
+            .write_file_no_follow(&tp(&target), b"new")
             .unwrap();
 
         // Without O_TRUNC the tail of the old value would survive past the new one.
@@ -853,7 +871,7 @@ mod no_follow_write_tests {
         let target = dir.path().join("nested").join("deeper").join("config");
 
         RealFileSystem
-            .write_file_no_follow(&target, b"content")
+            .write_file_no_follow(&tp(&target), b"content")
             .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"content");
@@ -864,7 +882,9 @@ mod no_follow_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
 
-        RealFileSystem.write_file_no_follow(&target, b"").unwrap();
+        RealFileSystem
+            .write_file_no_follow(&tp(&target), b"")
+            .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
@@ -876,7 +896,7 @@ mod no_follow_write_tests {
         fs::create_dir(&target).unwrap();
 
         let err = RealFileSystem
-            .write_file_no_follow(&target, b"content")
+            .write_file_no_follow(&tp(&target), b"content")
             .unwrap_err();
 
         // Not every failure is a refusal. Misclassifying this one would report
@@ -905,7 +925,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&destination, &target).unwrap();
 
             let err = RealFileSystem
-                .write_file_no_follow(&target, b"content")
+                .write_file_no_follow(&tp(&target), b"content")
                 .unwrap_err();
 
             assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
@@ -927,7 +947,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&never_created, &target).unwrap();
 
             let err = RealFileSystem
-                .write_file_no_follow(&target, b"content")
+                .write_file_no_follow(&tp(&target), b"content")
                 .unwrap_err();
 
             assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
@@ -944,7 +964,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&destination, &target).unwrap();
 
             match RealFileSystem
-                .write_file_no_follow(&target, b"content")
+                .write_file_no_follow(&tp(&target), b"content")
                 .unwrap_err()
             {
                 FileSystemError::SymlinkedTarget { path, points_to } => {
@@ -966,7 +986,7 @@ mod no_follow_write_tests {
             fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
 
             RealFileSystem
-                .write_file_no_follow(&target, b"new")
+                .write_file_no_follow(&tp(&target), b"new")
                 .unwrap();
 
             // An executable dotfile stays executable. This is where the method
@@ -998,7 +1018,7 @@ mod no_follow_write_tests {
 
             let target = dir.path().join("config");
             RealFileSystem
-                .write_file_no_follow(&target, b"content")
+                .write_file_no_follow(&tp(&target), b"content")
                 .unwrap();
 
             assert_eq!(mode_of(&target), mode_of(&control));
@@ -1013,7 +1033,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&real, &linked).unwrap();
 
             RealFileSystem
-                .write_file_no_follow(&linked.join("config"), b"content")
+                .write_file_no_follow(&tp(&linked.join("config")), b"content")
                 .unwrap();
 
             // Asserted rather than only documented, so the limitation cannot be

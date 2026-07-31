@@ -180,7 +180,7 @@ fn suggest_name(file_path: &str) -> String {
 /// package that tracks it, or `None`.
 fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
     let fs = RealFileSystem;
-    let expanded = selfie::dotfile_service::service::expand_target_path(&fs, file);
+    let expanded = selfie::fs::expand_target_path(&fs, file);
 
     let repos: Vec<YamlPackageRepository<RealFileSystem>> = [
         Some(config.selfie_config().package_directory().to_path_buf()),
@@ -198,8 +198,7 @@ fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
         if let Ok(output) = repo.list_packages() {
             for pkg in output.valid_packages() {
                 for (_scope, entry) in pkg.dotfiles_with_scope() {
-                    let entry_expanded =
-                        selfie::dotfile_service::service::expand_target_path(&fs, entry.target());
+                    let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
                     if entry_expanded == expanded {
                         return Some(pkg.name().to_string());
                     }

@@ -21,7 +21,10 @@ use crate::{
         resolve::{ResolvedContent, check_resolvable, resolve_content},
         state::{DeployState, DriftType},
     },
-    fs::filesystem::{FileSystem, FileSystemError},
+    fs::{
+        filesystem::{FileSystem, FileSystemError},
+        target::{TargetPath, expand_target_path, state_file_path},
+    },
     package::{
         ContentSource, DotfileEntry, Package,
         event::{
@@ -30,7 +33,7 @@ use crate::{
         },
         port::PackageRepository,
     },
-    paths::{is_within, normalize_path},
+    paths::is_within,
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -194,37 +197,15 @@ where
     }
 }
 
-/// Resolve the deploy state file path.
-///
-/// Uses the configured `state_directory` if available, otherwise defaults to
-/// `~/.local/state/selfie/deploy-state.yml` (XDG_STATE_HOME) via the filesystem abstraction.
-///
-/// # Errors
-///
-/// Returns `FileSystemError` if the home directory cannot be resolved.
 fn deploy_state_path<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
-) -> Result<PathBuf, FileSystemError> {
-    // Use configured state directory if available
-    if let Some(state_dir) = config.state_directory() {
-        return Ok(state_dir.join(DEPLOY_STATE_FILENAME));
-    }
-
-    // Default to XDG_STATE_HOME/selfie (~/.local/state/selfie) per the XDG Base
-    // Directory Specification. Deploy state is per-machine, non-portable data —
-    // exactly what XDG_STATE_HOME is designed for.
-    //
-    // expand_path canonicalizes, which fails if the directory doesn't exist yet.
-    // To avoid requiring ~/.local/state/selfie to already exist on first run,
-    // expand just "~" (which should always exist) and join the rest.
-    let home = filesystem.expand_path(&PathBuf::from("~")).map_err(|_| {
-        FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
-            "Cannot determine home directory for deploy state file",
-        )))
-    })?;
-    let parent = home.join(".local").join("state").join("selfie");
-    Ok(parent.join(DEPLOY_STATE_FILENAME))
+) -> Result<TargetPath, FileSystemError> {
+    state_file_path(
+        filesystem,
+        config.state_directory().map(PathBuf::as_path),
+        DEPLOY_STATE_FILENAME,
+    )
 }
 
 /// Load the deploy state from disk, or return an empty state
@@ -233,10 +214,10 @@ fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> De
         Ok(p) => p,
         Err(_) => return DeployState::empty(),
     };
-    if !filesystem.path_exists(&path) {
+    if !filesystem.path_exists(path.path()) {
         return DeployState::empty();
     }
-    match filesystem.read_file(&path) {
+    match filesystem.read_file(path.path()) {
         Ok(content) => serde_saphyr::from_str(&content).unwrap_or_else(|_| DeployState::empty()),
         Err(_) => DeployState::empty(),
     }
@@ -244,12 +225,12 @@ fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> De
 
 /// Save the deploy state to disk, owner-only where the platform allows it.
 ///
-/// The contents are not credentials, but they map each repository-file dotfile
-/// selfie manages on this machine to its target path, with checksums of the
-/// repository files behind them — those it deployed, and those it found already
-/// matching. At the process umask default that is typically
-/// world-readable — a reconnaissance aid on a shared host, readable by people who
-/// cannot read several of the files it describes.
+/// The contents are not credentials, but they name each repository-file dotfile
+/// selfie manages on this machine, with checksums of the repository files behind
+/// them — those it deployed, and those it found already matching. At the process
+/// umask default that is typically world-readable — a reconnaissance aid on a
+/// shared host, readable by people who cannot read several of the files it
+/// describes.
 ///
 /// Secret-bearing entries are *not* in here: they record nothing at all, per
 /// ADR-0003. So this is not a complete list of what selfie manages, and tightening
@@ -280,89 +261,6 @@ fn is_safe_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-/// Expand a deploy target without resolving its final component.
-///
-/// Expands a leading `~` and resolves `.`/`..` textually, and deliberately does
-/// **not** canonicalize. Both writers this feeds --
-/// [`FileSystem::write_file_no_follow`] for repository files and
-/// [`FileSystem::write_file_private`] for credentials -- refuse or replace a
-/// symlink at the path **as given**, so handing either an already-resolved path
-/// forfeits the protection completely: `canonicalize` returns the link's
-/// destination, and the writer is then looking at an ordinary file.
-///
-/// This is security-load-bearing, not tidiness, and it is measured rather than
-/// argued (selfie-4m9): reintroducing the canonicalization here fails the
-/// credential path's own symlink guard, both expansion tests, and every
-/// repository-file refusal test **whose link resolves**. Do not "simplify" it back
-/// to `expand_path` or `canonicalize`.
-///
-/// A *dangling* link survives that mutation, which is worth understanding rather
-/// than treating as a gap in coverage: `canonicalize` fails on one, so the path
-/// falls through unresolved and the refusal still fires. It is the same asymmetry
-/// `.claude/rules/secrets.md` states -- canonicalization forfeits the guarantee
-/// exactly when it *succeeds*.
-///
-/// No count of failing tests is given, deliberately. Two successive versions of
-/// this comment carried one and both went stale as soon as a test was added -- the
-/// second time inside the very change that corrected the first. A tally is a
-/// measurement with an expiry date and every edit to the suite expires it, so this
-/// says which tests fail and why instead.
-///
-/// Note the two halves of that fix are **not** symmetric, and an earlier version of
-/// this comment claimed they were. Refusing at the write site alone would leave the
-/// hole wide open, because a canonicalized path never reaches the writer as a link
-/// at all. Expanding correctly alone leaves apply's own check
-/// (`handle_apply`, before the deploy decision) catching every non-racing case --
-/// which is why reverting the writer to `write_file` fails no test but the one
-/// written for it. The writer is the TOCTOU defense; this expansion is what any of
-/// it depends on.
-///
-/// A symlinked *parent* directory is still followed. That limitation is inherent
-/// to both writers and is documented rather than papered over.
-///
-/// The converse also follows from resolving `..` textually: `a/link/../b` becomes
-/// `a/b` here, where canonicalizing would have followed `link` first and landed
-/// somewhere else. Both are consequences of not touching the filesystem, and the
-/// textual answer is the one that matches what the user wrote.
-///
-/// Serves repository-file and secret-bearing entries alike, so it is on the
-/// credential path. See `.claude/rules/secrets.md`; selfie-zv4b tracks making the
-/// distinction a compile error rather than a comment.
-pub fn expand_target_path<F: FileSystem>(filesystem: &F, target: &str) -> PathBuf {
-    let raw = if target.starts_with('~') {
-        // Expand only the leading `~` component; everything after it is joined
-        // unresolved, which is the whole point. A home directory always exists,
-        // so canonicalizing just that part succeeds.
-        //
-        // The named form `~user/x` is NOT supported: `expand_path` runs
-        // `shellexpand::tilde`, which expands a bare `~` and `~/…` only and
-        // returns `~user` unchanged, so canonicalizing it fails and the entry
-        // falls through to the literal path below and is then skipped as
-        // relative. Same as the repository-file path, which has never handled it
-        // either.
-        let (tilde, rest) = match target.split_once('/') {
-            Some((tilde, rest)) => (tilde, Some(rest)),
-            None => (target, None),
-        };
-
-        match filesystem.expand_path(Path::new(tilde)) {
-            Ok(home) => match rest {
-                Some(rest) => home.join(rest),
-                None => home,
-            },
-            // No home directory, or no such user. Falling back to the literal path
-            // leaves it relative, and the caller's absolute-path guard then refuses
-            // it — better to skip than to write a credential into a directory
-            // literally named `~` beneath the current directory.
-            Err(_) => PathBuf::from(target),
-        }
-    } else {
-        PathBuf::from(target)
-    };
-
-    normalize_path(&raw)
 }
 
 impl<R, F, CR> DotfileService for DotfileServiceImpl<R, F, CR>
@@ -614,9 +512,8 @@ struct SecretTarget<'a> {
     /// How the entry is named in events: the command, or the template and its
     /// var names. A reference drawn from the package file, never a value.
     origin: String,
-    /// Expanded and absolute — and deliberately not canonicalized, so
-    /// `write_file_private` still sees an unresolved final component.
-    path: PathBuf,
+    // Absolute, checked below. Unresolved is the type's job, not a caller's.
+    path: TargetPath,
 }
 
 /// Deploying the secret-bearing entries of one package.
@@ -687,7 +584,7 @@ where
     ) -> Phase<SecretTarget<'e>> {
         let path = expand_target_path(self.filesystem, entry.target());
 
-        if !path.is_absolute() {
+        if !path.path().is_absolute() {
             self.sender
                 .send_warning(format!(
                     "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
@@ -784,11 +681,11 @@ where
     /// neither side is guaranteed to be UTF-8, and a lossy decode would report
     /// two different files as identical.
     fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
-        if !self.filesystem.path_exists(&target.path) {
+        if !self.filesystem.path_exists(target.path.path()) {
             return TargetState::Absent;
         }
 
-        match self.filesystem.read_file_bytes(&target.path) {
+        match self.filesystem.read_file_bytes(target.path.path()) {
             Ok(bytes) => TargetState::Readable(bytes),
             // An unreadable file is still a file, and it may well be the
             // credential we would be destroying. Treating it as absent would
@@ -989,7 +886,7 @@ fn track_refusal(refusal: &FileSystemError) -> String {
 /// Describes a single config file deployment operation
 struct DeployUnit<'a> {
     source_path: &'a Path,
-    target_path: &'a Path,
+    target_path: &'a TargetPath,
     source_content: &'a str,
     source_checksum: &'a str,
     source_key: &'a str,
@@ -1020,8 +917,7 @@ async fn perform_deploy<F: FileSystem>(
 
     // Refuses a symlinked target rather than writing through it: the content would
     // otherwise land wherever the link points, which may be a path chosen by
-    // whoever planted it. The target reaches here unresolved -- see
-    // `expand_target_path` -- which is what lets the writer see the link at all.
+    // whoever planted it.
     if let Err(e) =
         filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
     {
@@ -1050,11 +946,7 @@ async fn perform_deploy<F: FileSystem>(
         // check call the damage clean.
         return Err(());
     }
-    deploy_state.record_deployment(
-        unit.source_key,
-        &unit.target_path.to_string_lossy(),
-        unit.source_checksum,
-    );
+    deploy_state.record_deployment(unit.source_key, unit.source_checksum);
 
     sender
         .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
@@ -1231,7 +1123,7 @@ where
             // Enforce documented rule: target must be absolute after expansion.
             // A relative target would write relative to CWD, which is surprising
             // and potentially dangerous.
-            if !target_path.is_absolute() {
+            if !target_path.path().is_absolute() {
                 sender
                     .send_warning(format!(
                         "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
@@ -1259,11 +1151,11 @@ where
             };
 
             let source_checksum = compute_checksum(source_content.as_bytes());
-            let target_exists = filesystem.path_exists(&target_path);
+            let target_exists = filesystem.path_exists(target_path.path());
 
             // Read target if exists
             let target_checksum = if target_exists {
-                match filesystem.read_file(&target_path) {
+                match filesystem.read_file(target_path.path()) {
                     Ok(content) => compute_checksum(content.as_bytes()),
                     Err(_) => String::new(),
                 }
@@ -1342,11 +1234,7 @@ where
                     // If this was an untracked file that's already in sync,
                     // record the state so future runs see DriftType::None.
                     if drift == DriftType::NotTracked && !options.dry_run {
-                        deploy_state.record_deployment(
-                            source,
-                            &target_path.to_string_lossy(),
-                            &source_checksum,
-                        );
+                        deploy_state.record_deployment(source, &source_checksum);
                     }
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
@@ -1356,11 +1244,12 @@ where
                 DeployDecision::Conflict => {
                     // Build the diff for display/resolution (needed by both
                     // the resolver and the fallback conflict event).
-                    let target_content = filesystem.read_file(&target_path).unwrap_or_default();
+                    let target_content =
+                        filesystem.read_file(target_path.path()).unwrap_or_default();
                     let diff = unified_diff(
                         &target_content,
                         &source_content,
-                        &target_path.to_string_lossy(),
+                        &target_path.display().to_string(),
                         &source_path.to_string_lossy(),
                     );
 
@@ -1527,7 +1416,7 @@ where
             let target_path = expand_target_path(filesystem, entry.target());
 
             // Reject relative targets (same guard as handle_apply)
-            if !target_path.is_absolute() {
+            if !target_path.path().is_absolute() {
                 sender
                     .send_warning(format!(
                         "Skipping '{}': target path '{}' is not absolute",
@@ -1567,9 +1456,9 @@ where
             // is checksummed by its destination. Following the link is deliberate:
             // not following would change the drift type, and with it the counts
             // `sync status` reads.
-            let target_exists = filesystem.path_exists(&target_path);
+            let target_exists = filesystem.path_exists(target_path.path());
             let target_checksum = if target_exists {
-                match filesystem.read_file(&target_path) {
+                match filesystem.read_file(target_path.path()) {
                     Ok(content) => compute_checksum(content.as_bytes()),
                     Err(_) => String::new(),
                 }
@@ -1650,7 +1539,7 @@ where
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
     }
 
-    if !filesystem.path_exists(&expanded_target) {
+    if !filesystem.path_exists(expanded_target.path()) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
             expanded_target.display()
@@ -1658,7 +1547,7 @@ where
     }
 
     // Read the target file content
-    let content = match filesystem.read_file(&expanded_target) {
+    let content = match filesystem.read_file(expanded_target.path()) {
         Ok(c) => c,
         Err(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -1669,6 +1558,7 @@ where
 
     // Determine source filename (just the basename of the target)
     let filename = expanded_target
+        .path()
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -1720,7 +1610,7 @@ where
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
     let source_key = format!("{name}/{filename}");
-    deploy_state.record_deployment(&source_key, target_path, &checksum);
+    deploy_state.record_deployment(&source_key, &checksum);
     if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Cannot save deploy state: {e}"
@@ -1770,7 +1660,7 @@ where
     {
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: package_name.to_string(),
-            source_path: expanded_target,
+            source_path: expanded_target.path().to_path_buf(),
             target_path: target_path.to_string(),
             was_already_tracked: true,
             environment: config.environment().to_string(),
@@ -1786,7 +1676,7 @@ where
     }
 
     // Validate the target path
-    if !filesystem.path_exists(&expanded_target) {
+    if !filesystem.path_exists(expanded_target.path()) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
             expanded_target.display()
@@ -1794,7 +1684,7 @@ where
     }
 
     // Read the target file content
-    let content = match filesystem.read_file(&expanded_target) {
+    let content = match filesystem.read_file(expanded_target.path()) {
         Ok(c) => c,
         Err(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -1810,6 +1700,7 @@ where
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let filename = expanded_target
+        .path()
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -1848,7 +1739,7 @@ where
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
     let mut deploy_state = load_deploy_state(filesystem, config);
-    deploy_state.record_deployment(&relative_source, target_path, &checksum);
+    deploy_state.record_deployment(&relative_source, &checksum);
     if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Cannot save deploy state: {e}"
@@ -1863,35 +1754,4 @@ where
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fs::RealFileSystem;
-
-    #[test]
-    fn test_expand_target_path_absolute() {
-        let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "/tmp/some/file");
-        // Should be an absolute path starting with /tmp
-        assert!(result.is_absolute());
-        assert!(result.starts_with("/tmp"));
-    }
-
-    #[test]
-    fn test_expand_target_path_tilde() {
-        let fs = RealFileSystem;
-        let result = expand_target_path(&fs, "~/test-file");
-        // Should start with the actual home directory, not literal "~"
-        assert!(result.is_absolute());
-        assert!(
-            !result.starts_with("~"),
-            "Tilde should be expanded to actual home directory"
-        );
-        assert!(
-            result.to_string_lossy().contains("test-file"),
-            "Should preserve the filename after tilde expansion"
-        );
-    }
 }

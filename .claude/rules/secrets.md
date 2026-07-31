@@ -159,12 +159,23 @@ Test egress at the **boundary**, not by listing known paths:
   entries go through it (selfie-4m9 unified them by bringing the repository path up to the secret
   path's behavior, never the reverse). It must never resolve the **final component**, and never
   canonicalize the path as a whole — for any caller, for any reason. Duplicate detection comparing
-  unresolved paths is a known cost and is not a reason to. It does call `expand_path` on a leading
-  `~` by itself, which is deliberate: for any target with a component after the `~`, that cannot
-  reach the last one. (A bare `~` or `~/` is the whole path, so it does — those are directories and
-  fail the write anyway.) Read that call as the boundary, not as license to widen it. Only prose
-  separates the two paths now; selfie-zv4b tracks making it a `TargetPath` newtype so the compiler
-  does instead.
+  unresolved paths is a known cost and is not a reason to.
+- **`TargetPath` (`fs/target.rs`) is what enforces that, and it enforces exactly one half.**
+  `write_file_private`, `write_file_no_follow`, `symlink_refusal` and `is_owner_only` take a
+  `TargetPath` rather than a `&Path`, so a call site that canonicalizes and then writes fails to
+  build. Be precise about what that buys, because the wrong summary invites the wrong fix:
+  - The guarantee is **you cannot resolve a `TargetPath` once you hold one** — there is no `Deref`,
+    so `Path`'s own `canonicalize`, `exists` and `metadata` are not in reach. It is _not_ "the path
+    inside was never resolved": `expand_target_path` is `pub` and takes a `&str`, so feeding it a
+    canonicalized path mints a `TargetPath` around one. That takes three deliberate steps instead of
+    one accidental token, which is the whole gain.
+  - It does **not** stop someone editing `expand_target_path` itself. That half is held by the
+    expansion and refusal tests, and by the expander taking a `HomeDir` — a trait with one method,
+    `home()` — instead of a `FileSystem`, so neither `canonicalize` nor `expand_path` is reachable
+    from inside it. There is no longer a resolving call in that function to defend.
+  - Two things construct a `TargetPath`, and that set **is** the guarantee: `expand_target_path`,
+    and `state_file_path` for the deploy state file. The second is the weaker one — its configured
+    branch joins `state_directory` exactly as given — and it is documented as such where it lives.
 - **Secret targets are written with `write_file_private`, never `write_file`,
   `write_file_no_follow`, or any other writer** — temp file in the target's own directory at mode
   `0600`, then rename. Symlink-safe is **not** the same as owner-only: `write_file_no_follow` also

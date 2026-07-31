@@ -927,6 +927,58 @@ async fn test_deploy_state_persists_across_service_instances() {
     }
 }
 
+/// A state file written before `DeployEntry::target` was removed still loads.
+///
+/// Every state file on every machine still carries a `target:` key. If it stopped
+/// deserializing, `load_deploy_state` would swallow the error and return an empty
+/// state, so every entry everywhere would become `NotTracked` at once — a mass
+/// re-deploy and a conflict prompt per file, from a field nobody reads.
+#[tokio::test]
+async fn a_state_file_carrying_the_removed_target_field_still_loads() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    std::fs::write(&target_file, "key = \"value\"").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let checksum = selfie::dotfile_service::deploy::compute_checksum(b"key = \"value\"");
+    std::fs::write(
+        dirs.state_dir.join("deploy-state.yml"),
+        format!(
+            "deployed:\n  myapp/config.toml:\n    target: {}\n    source_checksum: {checksum}\n    \
+             deployed_checksum: {checksum}\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n",
+            target_file.display()
+        ),
+    )
+    .unwrap();
+
+    let events = collect_events(dirs.service().check_drift().await).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            drift_count,
+            total_count,
+            ..
+        }) => {
+            assert_eq!(*total_count, 1);
+            assert_eq!(
+                *drift_count, 0,
+                "the old entry was not read, so a tracked file was reported as drifted: {events:?}"
+            );
+        }
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_dry_run_does_not_persist_state() {
     let dirs = TestDirs::new();
@@ -4025,7 +4077,7 @@ mod symlinked_targets {
     async fn the_writer_refuses_even_when_the_check_is_blinded() {
         use selfie::config::SelfieConfigBuilder;
         use selfie::dotfile_service::service::DotfileServiceImpl;
-        use selfie::fs::{FileSystem, FileSystemError, RealFileSystem};
+        use selfie::fs::{FileSystem, FileSystemError, RealFileSystem, TargetPath};
         use selfie::package::repository::YamlPackageRepository;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4043,7 +4095,7 @@ mod symlinked_targets {
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
         impl FileSystem for BlindToSymlinks {
-            fn symlink_refusal(&self, _path: &Path) -> Option<FileSystemError> {
+            fn symlink_refusal(&self, _path: &TargetPath) -> Option<FileSystemError> {
                 None
             }
 
@@ -4056,18 +4108,22 @@ mod symlinked_targets {
             fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
                 self.0.write_file(path, data)
             }
-            fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
+            fn write_file_private(
+                &self,
+                path: &TargetPath,
+                data: &[u8],
+            ) -> Result<(), FileSystemError> {
                 self.0.write_file_private(path, data)
             }
             fn write_file_no_follow(
                 &self,
-                path: &Path,
+                path: &TargetPath,
                 data: &[u8],
             ) -> Result<(), FileSystemError> {
                 self.1.fetch_add(1, Ordering::SeqCst);
                 self.0.write_file_no_follow(path, data)
             }
-            fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError> {
+            fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
                 self.0.is_owner_only(path)
             }
             fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
@@ -4244,8 +4300,7 @@ mod symlinked_targets {
 /// and visible rather than discovered later.
 #[cfg(unix)]
 mod target_expansion {
-    use selfie::dotfile_service::service::expand_target_path;
-    use selfie::fs::RealFileSystem;
+    use selfie::fs::{RealFileSystem, expand_target_path};
     use tempfile::TempDir;
 
     /// The final component is never resolved, which is what lets the writers see a
@@ -4261,7 +4316,8 @@ mod target_expansion {
         let expanded = expand_target_path(&RealFileSystem, target.to_str().unwrap());
 
         assert_eq!(
-            expanded, target,
+            expanded.path(),
+            target,
             "the target was resolved to its destination"
         );
     }
