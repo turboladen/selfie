@@ -4,6 +4,10 @@
 //! directory. Nothing stops a package from writing `../../../etc/passwd`, so
 //! every read of a package-relative path has to be checked before it happens —
 //! not only the ones that go through the dotfile deploy path.
+//!
+//! The check is **lexical**: it resolves `.` and `..` textually and does not follow
+//! symlinks, so it catches a written traversal and not a planted link. See
+//! [`is_within`] for what that does and does not rule out.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -37,6 +41,34 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 /// A plain `starts_with` is not sufficient: `base/../../etc/passwd` starts with
 /// `base` as a string but escapes it. Both sides are made absolute and normalized
 /// first, which is what makes the comparison meaningful.
+///
+/// # This check is lexical, and a symlink defeats it
+///
+/// It resolves `.` and `..` textually and touches the file system not at all, so a
+/// symlink planted *inside* `base_dir` passes while pointing outside it:
+/// `packages/creds/link.tpl -> ../outside.tpl` is accepted, and the outside file's
+/// contents are then read and rendered into a deployed dotfile. A symlinked
+/// *directory* component does the same and is the harder case — with
+/// `packages/myapp -> /elsewhere`, `symlink_metadata` on the full path reports a
+/// regular file, so a check that only inspected the final component would report
+/// containment just as confidently. `a_symlinked_source_escapes_the_containment_
+/// guard` in `dotfile_service_tests.rs` records both.
+///
+/// That is accepted rather than unnoticed. Escaping needs a hostile package
+/// repository, and such a repository can already run arbitrary commands through a
+/// dotfile's `command:` field, so this guard is not the security boundary in the
+/// scenario where it fails. It stops the traversal a *mistake* produces.
+///
+/// Closing it honestly would mean a `FileSystem` port method resolving each
+/// component against the base — `openat2`'s `RESOLVE_BENEATH` or `cap-std`, which
+/// are kernel-enforced and so free of the check-then-read race a `symlink_metadata`
+/// walk would reintroduce. That is a real fix and deliberately not taken here: this
+/// module's value is that it touches no file system at all, and threading a port
+/// through for a guard that is not the boundary buys little. Do not "strengthen"
+/// this function by calling `std::fs` from it — that trades a limit this comment
+/// states for one nothing does, and takes the library around its own port.
+///
+/// Being lexical is also what lets it work on paths that do not exist yet.
 #[must_use]
 pub(crate) fn is_within(path: &Path, base_dir: &Path) -> bool {
     match (std::path::absolute(path), std::path::absolute(base_dir)) {
