@@ -165,10 +165,11 @@ Test egress at the **boundary**, not by listing known paths:
   `TargetPath` rather than a `&Path`, so a call site that canonicalizes and then writes fails to
   build. Be precise about what that buys, because the wrong summary invites the wrong fix:
   - The guarantee is **you cannot resolve a `TargetPath` once you hold one** — there is no `Deref`,
-    so `Path`'s own `canonicalize`, `exists` and `metadata` are not in reach. It is _not_ "the path
-    inside was never resolved": `expand_target_path` is `pub` and takes a `&str`, so feeding it a
-    canonicalized path mints a `TargetPath` around one. That takes three deliberate steps instead of
-    one accidental token, which is the whole gain.
+    so `Path`'s own `canonicalize`, `exists` and `metadata` are not _on_ the type. They are still
+    one explicit `.path()` away; what the newtype removes is reaching them by autoderef. It is _not_
+    "the path inside was never resolved" either: `expand_target_path` is `pub` and takes a `&str`,
+    so feeding it a canonicalized path mints a `TargetPath` around one. Both gaps take deliberate
+    steps instead of one accidental token, which is the whole gain.
   - It does **not** stop someone editing `expand_target_path` itself. That half is held by the
     expansion and refusal tests, and by the expander taking a `HomeDir` — a trait with one method,
     `home()` — instead of a `FileSystem`, so neither `canonicalize` nor `expand_path` is reachable

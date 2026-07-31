@@ -38,8 +38,9 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
 ///
 /// The guarantee is that you cannot resolve a `TargetPath` once you hold one --
 /// not that the path inside was never resolved. There is deliberately no
-/// `Deref`, so `Path`'s own `canonicalize`, `exists` and `metadata` are out of
-/// reach:
+/// `Deref`, so `Path`'s own `canonicalize`, `exists` and `metadata` are not *on*
+/// the type. They stay one explicit [`path`](TargetPath::path) away, which is the
+/// point: resolving has to be written down rather than reached by autoderef.
 ///
 /// ```compile_fail
 /// use selfie::fs::{RealFileSystem, expand_target_path};
@@ -59,12 +60,13 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
 /// ```
 ///
 /// Neither of those may fail for some unrelated reason -- a renamed export, a
-/// bad import -- so this one has to build:
+/// bad import -- so this one has to build, naming every item the two above
+/// import:
 ///
 /// ```
-/// use selfie::fs::{RealFileSystem, expand_target_path};
+/// use selfie::fs::{RealFileSystem, TargetPath, expand_target_path};
 ///
-/// let target = expand_target_path(&RealFileSystem, "/etc/hosts");
+/// let target: TargetPath = expand_target_path(&RealFileSystem, "/etc/hosts");
 /// assert_eq!(target.path(), std::path::Path::new("/etc/hosts"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
