@@ -20,7 +20,14 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-use super::runner::{CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream};
+use super::runner::{
+    CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+};
+
+/// Unix-only: the separation is built out of descriptor redirection and a
+/// `printf` builtin, neither of which `cmd.exe` has.
+#[cfg(unix)]
+mod content;
 
 /// Shell command runner implementation
 ///
@@ -117,14 +124,43 @@ impl ShellCommandRunner {
         cmd
     }
 
-    /// Run a command to completion, buffering stdout and stderr.
+    /// Build the `Command` that runs `recipe` with the capture out of its reach.
     ///
-    /// Shared by [`execute_with_timeout`](CommandRunner::execute_with_timeout) and
-    /// [`execute_in_dir`](CommandRunner::execute_in_dir); the only difference
-    /// between them is whether a working directory is supplied.
+    /// The outer shell is `/bin/sh` rather than the configured one because it must
+    /// source nothing before its redirection takes effect. The four variables
+    /// removed here are the ways it could be made to: `ENV` and `BASH_ENV` name a
+    /// file it would source, and `SHELLOPTS`/`BASH_XTRACEFD` put its own trace
+    /// output on a descriptor of the caller's choosing.
+    #[cfg(unix)]
+    fn build_content_command(&self, recipe: &str, working_dir: &Path, fd: u8) -> Command {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(content::wrapper(fd, self.login))
+            .env(content::SHELL_VAR, &self.shell)
+            .env(content::COMMAND_VAR, recipe)
+            .env_remove("ENV")
+            .env_remove("BASH_ENV")
+            .env_remove("SHELLOPTS")
+            .env_remove("BASH_XTRACEFD")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(working_dir);
+        cmd
+    }
+
+    /// Run `cmd` to completion, buffering stdout and stderr.
+    ///
+    /// Takes the `Command` already built and, separately, the command string to
+    /// **report**. Every error below names `reported`, and this function has no
+    /// access to the text the shell was actually given — which is what keeps
+    /// selfie's own scaffolding out of a failure a user reads. `collect` gets
+    /// `reported` for the same reason: it builds two of the five error variants
+    /// itself.
     async fn run_buffered(
         &self,
-        command: &str,
+        mut cmd: Command,
+        reported: &str,
         working_dir: Option<&Path>,
         timeout: Duration,
         token: &CancellationToken,
@@ -140,15 +176,13 @@ impl ShellCommandRunner {
         // Check for pre-cancellation before spawning
         if token.is_cancelled() {
             return Err(CommandError::Cancelled {
-                command: command.to_string(),
+                command: reported.to_string(),
                 working_directory,
             });
         }
 
-        let mut cmd = self.build_command(command, working_dir);
-
         let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
-            command: command.to_string(),
+            command: reported.to_string(),
             working_directory: working_directory.clone(),
             source: Arc::new(e),
         })?;
@@ -168,14 +202,14 @@ impl ShellCommandRunner {
             biased;
             result = tokio::time::timeout(
                 timeout,
-                collect(child.wait(), stdout, stderr, command, &working_directory),
+                collect(child.wait(), stdout, stderr, reported, &working_directory),
             ) => result.unwrap_or_else(|_elapsed| Err(CommandError::Timeout {
-                command: command.to_string(),
+                command: reported.to_string(),
                 timeout,
                 working_directory: working_directory.clone(),
             })),
             () = token.cancelled() => Err(CommandError::Cancelled {
-                command: command.to_string(),
+                command: reported.to_string(),
                 working_directory: working_directory.clone(),
             }),
         };
@@ -298,7 +332,14 @@ impl CommandRunner for ShellCommandRunner {
         timeout: Duration,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.run_buffered(command, None, timeout, token).await
+        self.run_buffered(
+            self.build_command(command, None),
+            command,
+            None,
+            timeout,
+            token,
+        )
+        .await
     }
 
     /// Execute a command in a specific working directory
@@ -320,8 +361,14 @@ impl CommandRunner for ShellCommandRunner {
         timeout: Duration,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.run_buffered(command, Some(working_dir), timeout, token)
-            .await
+        self.run_buffered(
+            self.build_command(command, Some(working_dir)),
+            command,
+            Some(working_dir),
+            timeout,
+            token,
+        )
+        .await
     }
 
     /// Execute a command with streaming output processing
@@ -445,6 +492,100 @@ impl CommandRunner for ShellCommandRunner {
             },
             duration: start_time.elapsed(),
         })
+    }
+
+    /// Run a command whose stdout becomes a file's content.
+    ///
+    /// Deliberately **not** conditioned on `self.login`: a non-login shell is
+    /// quieter, not silent, and gating on the flag would leave every test built
+    /// with [`ShellCommandRunner::new`] passing against a splicing production
+    /// path.
+    #[cfg(unix)]
+    async fn execute_for_content(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<ContentOutput, CommandError> {
+        let markers = content::Markers::new();
+        let fd = content::capture_fd();
+        let recipe = if content::is_fish(&self.shell) {
+            content::fish_recipe(command, &markers, fd)
+        } else {
+            content::posix_recipe(command, &markers, fd)
+        };
+
+        let output = self
+            .run_buffered(
+                self.build_content_command(&recipe, working_dir, fd),
+                command,
+                Some(working_dir),
+                timeout,
+                token,
+            )
+            .await?;
+
+        let success = output.is_success();
+        let stderr = output.stderr().to_vec();
+        match content::extract(output.into_stdout(), &markers) {
+            Some(extracted) => Ok(ContentOutput::from_capture(
+                success,
+                extracted.content,
+                stderr,
+                extracted.discarded_before,
+                extracted.tail_verified,
+            )),
+            // A failed run's stderr holds the diagnosis — an unusable `$SHELL`, a
+            // profile that exited — and reporting absent markers instead would
+            // drop it. There is no content either way.
+            None if !success => Ok(ContentOutput::from_capture(
+                false,
+                Vec::new(),
+                stderr,
+                0,
+                false,
+            )),
+            None => Err(CommandError::ContentMarkersAbsent {
+                command: command.to_string(),
+                working_directory: working_dir.to_path_buf(),
+            }),
+        }
+    }
+
+    /// Run a command whose stdout becomes a file's content.
+    ///
+    /// Windows has no login profile to source and no `printf` in `cmd.exe`, so
+    /// the command runs as it always did and the tail is reported unverified —
+    /// which is what it is. Nothing separates a `cmd.exe` `AutoRun` command's
+    /// output from the command's own here.
+    #[cfg(not(unix))]
+    async fn execute_for_content(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<ContentOutput, CommandError> {
+        let output = self
+            .run_buffered(
+                self.build_command(command, Some(working_dir)),
+                command,
+                Some(working_dir),
+                timeout,
+                token,
+            )
+            .await?;
+
+        let success = output.is_success();
+        let stderr = output.stderr().to_vec();
+        Ok(ContentOutput::from_capture(
+            success,
+            output.into_stdout(),
+            stderr,
+            0,
+            false,
+        ))
     }
 }
 
@@ -1971,4 +2112,446 @@ mod tests {
     // racing the two would flake in the *false failure* direction, since a token
     // cancelled while the command is still running makes `Cancelled` the correct
     // answer. Left untested rather than covered by a test that cannot fail.
+}
+
+// What a noisy login shell does to a command whose output becomes a file.
+//
+// The fixture is a script standing in for the user's shell, never the
+// developer's own: a noisy profile is, at the descriptor level, a shell that
+// writes before, during and after the `-c` string it was given. It `eval`s the
+// recipe in a real `/bin/sh`, so behaviour that depends on the shell — selfie's
+// `EXIT` trap displacing the profile's — is real rather than simulated.
+//
+// fish is not tested here. CI does not have it, and a test that skips when its
+// subject is missing reports success for having done nothing.
+#[cfg(all(test, unix))]
+mod content_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    const SECRET: &str = "s3cr3t-Value-9x7";
+
+    fn token() -> CancellationToken {
+        CancellationToken::new()
+    }
+
+    /// Write a stand-in shell into `dir` and return its path.
+    ///
+    /// `before` is written when the shell starts, as a profile banner is. `after`
+    /// is written from an `EXIT` trap, as a profile's own trap would be.
+    /// `background` is written by a detached child a fraction of a second later,
+    /// as an update checker started by a profile does — the case no boundary
+    /// drawn in the output stream can catch, because it depends on timing rather
+    /// than on position.
+    fn noisy_shell(dir: &Path, before: &str, after: &str, background: bool) -> PathBuf {
+        let path = dir.join("noisy-shell");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        if !before.is_empty() {
+            writeln!(file, "printf '%s' '{before}'").unwrap();
+        }
+        if background {
+            writeln!(file, "/bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &").unwrap();
+        }
+        if !after.is_empty() {
+            writeln!(file, "trap 'printf {after}' EXIT").unwrap();
+        }
+        // The recipe is the last argument, whether or not `-l` precedes `-c`.
+        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
+        drop(file);
+
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A runner whose shell is noisy in every way at once.
+    fn noisy_runner(dir: &Path) -> ShellCommandRunner {
+        let shell = noisy_shell(dir, "LEADBANNER", "TRAILCHATTER", true);
+        ShellCommandRunner::new(shell.to_str().unwrap(), TIMEOUT)
+    }
+
+    /// A command that takes long enough for the backgrounded writer to land in
+    /// the middle of it. Without the wait the race is won by accident and the
+    /// test passes for the wrong reason.
+    fn slow_secret() -> String {
+        format!("sleep 0.6; printf '%s' '{SECRET}'")
+    }
+
+    #[tokio::test]
+    async fn the_unfenced_path_splices_every_kind_of_shell_noise() {
+        // The control for every test below. If this stops holding, the fixture
+        // has stopped being noisy and the other tests pass by having nothing to
+        // separate.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_in_dir(&slow_secret(), dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+        let captured = String::from_utf8_lossy(output.stdout()).to_string();
+
+        assert!(captured.contains("LEADBANNER"), "{captured}");
+        assert!(captured.contains("BACKGROUNDNOISE"), "{captured}");
+        assert!(captured.contains("TRAILCHATTER"), "{captured}");
+        assert!(captured.contains(SECRET), "{captured}");
+    }
+
+    #[tokio::test]
+    async fn content_capture_returns_only_what_the_command_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(&slow_secret(), dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+
+        assert!(output.is_success());
+        assert!(output.tail_verified());
+        assert_eq!(output.discarded_before(), 0);
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_login_runner_separates_the_output_too() {
+        // The login runner is the one users get: `create_command_runner` in the
+        // CLI and the MCP server both build one, and it takes a different wrapper
+        // because it passes `-l`. Every other test here uses a non-login runner,
+        // so without this the production wrapper has no coverage at all.
+        //
+        // Built as a literal rather than through `login_shell`, which reads the
+        // developer's own `SHELL`.
+        let dir = tempfile::tempdir().unwrap();
+        let shell = noisy_shell(dir.path(), "LEADBANNER", "TRAILCHATTER", true);
+        let runner = ShellCommandRunner {
+            shell: shell.to_str().unwrap().to_string(),
+            default_timeout: TIMEOUT,
+            login: true,
+        };
+
+        let output = runner
+            .execute_for_content(&slow_secret(), dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+
+        assert!(output.tail_verified());
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), SECRET);
+    }
+
+    #[tokio::test]
+    async fn content_capture_is_not_gated_on_the_login_flag() {
+        // `ShellCommandRunner::new` is not a login runner, and every test here
+        // uses one. Were the separation conditioned on that flag, all of them
+        // would pass against a production path that still splices — so this
+        // asserts the flag directly rather than relying on the others.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+        assert!(!runner.login, "the fixture must be a non-login runner");
+
+        let output = runner
+            .execute_for_content("printf '%s' 'plain'", dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), "plain");
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_is_left_unfenced() {
+        // Install, check and audit parse a command's output and show it. They
+        // must not start finding selfie's markers in it because a later refactor
+        // routed them through the content path.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_in_dir("printf '%s' 'plain'", dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+        let captured = String::from_utf8_lossy(output.stdout()).to_string();
+
+        assert!(captured.starts_with("LEADBANNER"), "{captured}");
+        assert!(
+            !captured.contains("sfo"),
+            "markers reached a parsed command"
+        );
+        assert!(
+            !captured.contains("sfc"),
+            "markers reached a parsed command"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_capture_keeps_the_status_the_stderr_and_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(
+                "pwd; printf 'boom' >&2; exit 7",
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_success());
+        assert_eq!(String::from_utf8_lossy(output.stderr()), "boom");
+        let printed = String::from_utf8_lossy(&output.into_stdout())
+            .trim()
+            .to_string();
+        assert!(
+            printed.ends_with(dir.path().file_name().unwrap().to_str().unwrap()),
+            "the command ran in {printed}, not the directory it was given"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_capture_is_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        // Octal escapes: `\xNN` is a bash and BSD extension, and CI's `/bin/sh`
+        // is dash.
+        let output = runner
+            .execute_for_content(r"printf '\000\377\012'", dir.path(), TIMEOUT, &token())
+            .await
+            .unwrap();
+
+        assert_eq!(output.into_stdout(), vec![0x00, 0xff, 0x0a]);
+    }
+
+    #[tokio::test]
+    async fn a_command_ending_in_a_line_continuation_still_runs() {
+        // Safe only because the command is the last thing in the recipe. A line
+        // appended below it would be eaten by the backslash, and a trailing
+        // comment would eat it too.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(
+                "printf '%s' \\\n 'continued'",
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), "continued");
+    }
+
+    #[tokio::test]
+    async fn a_command_ending_in_a_comment_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(
+                "printf '%s' 'commented' # why",
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), "commented");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_installs_its_own_exit_trap_loses_the_tail_guarantee() {
+        // The one shape the separation cannot cover: the command displaces the
+        // trap selfie uses to find the end of its output, so what that trap
+        // prints is appended to the content. The content is still returned —
+        // refusing it would break a working command — and the caller is told the
+        // tail is not established, because appending foreign bytes to a
+        // credential and reporting success is the defect this change exists to
+        // fix.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(
+                &format!("trap 'printf MYCLEANUP' EXIT; printf '%s' '{SECRET}'"),
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.tail_verified());
+        assert_eq!(
+            String::from_utf8_lossy(&output.into_stdout()),
+            format!("{SECRET}MYCLEANUP"),
+        );
+    }
+
+    #[tokio::test]
+    async fn content_capture_fails_closed_when_it_cannot_find_the_command_s_output() {
+        // A shell whose startup files exit before the command runs — the recipe
+        // is never evaluated, so neither marker is there to find. What was
+        // captured may be anything; it is not the command's output, and guessing
+        // is what this path exists to stop.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exiting-shell");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(file, "printf '%s' 'goodbye'").unwrap();
+        writeln!(file, "exit 0").unwrap();
+        drop(file);
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
+
+        let result = runner
+            .execute_for_content("printf '%s' 'anything'", dir.path(), TIMEOUT, &token())
+            .await;
+
+        assert!(
+            matches!(result, Err(CommandError::ContentMarkersAbsent { .. })),
+            "expected a refusal, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_holding_the_conventional_descriptors_does_not_receive_the_content() {
+        // `exec 3>somewhere` in a profile is an ordinary debugging idiom, and
+        // whichever descriptor the content travels on is one such a profile can
+        // take over and be handed the credential on.
+        let dir = tempfile::tempdir().unwrap();
+        let stolen = dir.path().join("stolen.log");
+        let path = dir.path().join("collecting-shell");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(file, "exec 3>{} 4>&3", stolen.display()).unwrap();
+        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
+        drop(file);
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
+
+        let output = runner
+            .execute_for_content(
+                &format!("printf '%s' '{SECRET}'"),
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), SECRET);
+        assert_eq!(
+            std::fs::read_to_string(&stolen).unwrap_or_default(),
+            "",
+            "the credential was written where the profile could read it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_holding_every_usable_descriptor_fails_closed() {
+        // The residual of the one above, pinned: a profile that takes *all* of
+        // them does receive the content, and selfie's own capture comes up empty.
+        // Nothing is deployed, and this is what `docs/package-files.md` describes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("greedy-shell");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(
+            file,
+            "for n in 5 6 7 8 9; do eval \"exec $n>{}/stolen.$n\"; done",
+            dir.path().display()
+        )
+        .unwrap();
+        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
+        drop(file);
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
+
+        let result = runner
+            .execute_for_content("printf '%s' 'anything'", dir.path(), TIMEOUT, &token())
+            .await;
+
+        assert!(
+            matches!(result, Err(CommandError::ContentMarkersAbsent { .. })),
+            "expected a refusal, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unusable_shell_reports_what_the_wrapper_said_about_it() {
+        // The wrapper turns what used to be a spawn failure into a non-zero exit
+        // with the diagnosis on stderr. Reporting absent markers here instead
+        // would leave the user with no idea their `$SHELL` is the problem.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = ShellCommandRunner::new("/nonexistent/shell", TIMEOUT);
+
+        let output = runner
+            .execute_for_content("printf hi", dir.path(), TIMEOUT, &token())
+            .await
+            .expect("an unusable shell is a command failure, not an unreadable capture");
+
+        assert!(!output.is_success());
+        assert!(
+            String::from_utf8_lossy(output.stderr()).contains("/nonexistent/shell"),
+            "stderr must name the shell: {:?}",
+            String::from_utf8_lossy(output.stderr())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_command_cannot_write_to_the_capture_descriptor() {
+        // Closed in the recipe, so a command can no longer address the descriptor
+        // its own output travels on.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let output = runner
+            .execute_for_content(
+                "for n in 5 6 7 8 9; do eval \"printf REACHED >&$n\" 2>/dev/null; done; \
+                 printf '%s' 'done'",
+                dir.path(),
+                TIMEOUT,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.into_stdout()), "done");
+    }
+
+    #[tokio::test]
+    async fn a_failure_names_the_command_the_user_wrote() {
+        // The shell is given a recipe selfie composed. A user reading a timeout
+        // must see the command from their package file, not that.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = noisy_runner(dir.path());
+
+        let result = runner
+            .execute_for_content("sleep 30", dir.path(), Duration::from_millis(200), &token())
+            .await;
+
+        let Err(error) = result else {
+            panic!("expected a timeout, got {result:?}");
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("sleep 30"), "{rendered}");
+        assert!(
+            !rendered.contains("printf"),
+            "the recipe leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("exec >&3"),
+            "the recipe leaked: {rendered}"
+        );
+    }
 }

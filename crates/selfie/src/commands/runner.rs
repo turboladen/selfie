@@ -180,6 +180,30 @@ pub trait CommandRunner: Send + Sync {
         output_sender: mpsc::Sender<OutputChunk>,
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
+
+    /// Execute a command whose stdout becomes a file's content.
+    ///
+    /// Like [`execute_in_dir`](CommandRunner::execute_in_dir), except that the
+    /// captured stdout is the command's **own**: an implementation running
+    /// commands through a shell must return nothing the shell, the profile it
+    /// sources, or a process either started wrote to the stdout the command
+    /// inherited. Separate method and separate type so the difference is a
+    /// compile error rather than a convention.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] for everything `execute_in_dir` does, plus
+    /// [`CommandError::ContentMarkersAbsent`] when the command **succeeded** but
+    /// its output could not be told from the shell's — content that might carry a
+    /// foreign prefix is not content. A command that *failed* is reported as a
+    /// failure instead, so its stderr survives.
+    fn execute_for_content(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> impl Future<Output = Result<ContentOutput, CommandError>> + Send;
 }
 
 /// Result of executing a command
@@ -287,6 +311,129 @@ impl CommandOutput {
     }
 }
 
+/// What a command produced when its stdout is destined for a file.
+///
+/// Distinct from [`CommandOutput`] because the two carry different guarantees
+/// about the same bytes: this one's stdout is the command's own. It must not
+/// wrap or expose a `CommandOutput`, or the unseparated capture is back within
+/// reach of the resolve path.
+///
+/// Holds a credential. It is compared and written, never recorded or rendered.
+pub struct ContentOutput {
+    /// The command's own stdout.
+    stdout: Vec<u8>,
+
+    /// The command's stderr, forwarded on failure only.
+    ///
+    /// **Not separated**: a profile writes to stderr through the same inherited
+    /// descriptor and selfie cannot tell those bytes apart.
+    stderr: Vec<u8>,
+
+    /// Whether the command exited zero.
+    success: bool,
+
+    /// Bytes that reached the capture descriptor before the command's output.
+    ///
+    /// Should be zero — the shell's own output goes elsewhere — so a non-zero
+    /// value means something wrote where only the command should be able to.
+    discarded_before: usize,
+
+    /// Whether the end of the command's output was identified.
+    ///
+    /// False means selfie captured the command's output but could not establish
+    /// where it stopped, so anything the shell wrote afterwards — an exit trap
+    /// the command itself installed, for instance — is part of `stdout`. The
+    /// content is still returned; the caller reports the uncertainty.
+    tail_verified: bool,
+}
+
+/// Prints lengths, never content. **Never derive this**: a derived `Debug` is an
+/// exit for the credential, opened by the first `{:?}` or `unwrap()` on a
+/// `Result<ContentOutput, _>`.
+impl std::fmt::Debug for ContentOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentOutput")
+            .field("stdout", &format_args!("<{} bytes>", self.stdout.len()))
+            .field("stderr", &format_args!("<{} bytes>", self.stderr.len()))
+            .field("success", &self.success)
+            .field("discarded_before", &self.discarded_before)
+            .field("tail_verified", &self.tail_verified)
+            .finish()
+    }
+}
+
+impl ContentOutput {
+    /// Build a `ContentOutput` from what a runner captured.
+    ///
+    /// Crate-internal: the shell adapter is the only production caller, being the
+    /// only code that can separate a command's output from its shell's.
+    pub(crate) fn from_capture(
+        success: bool,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        discarded_before: usize,
+        tail_verified: bool,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            success,
+            discarded_before,
+            tail_verified,
+        }
+    }
+
+    /// Build a `ContentOutput` from its parts.
+    ///
+    /// For test doubles that stand in for a real runner, and gated for the same
+    /// reason [`CommandOutput::from_parts`] is: production code must not be able
+    /// to declare that a command's output was separated when no command ran.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_parts(
+        success: bool,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        discarded_before: usize,
+        tail_verified: bool,
+    ) -> Self {
+        Self::from_capture(success, stdout, stderr, discarded_before, tail_verified)
+    }
+
+    /// Whether the command exited zero.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.success
+    }
+
+    /// Take the command's own stdout.
+    ///
+    /// Consuming rather than borrowing, so a credential is not left alive in two
+    /// buffers at once — see [`CommandOutput::into_stdout`].
+    #[must_use]
+    pub fn into_stdout(self) -> Vec<u8> {
+        self.stdout
+    }
+
+    /// The command's stderr.
+    #[must_use]
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+
+    /// How many bytes reached the capture channel before the command's output.
+    #[must_use]
+    pub fn discarded_before(&self) -> usize {
+        self.discarded_before
+    }
+
+    /// Whether the end of the command's own output was identified.
+    #[must_use]
+    pub fn tail_verified(&self) -> bool {
+        self.tail_verified
+    }
+}
+
 /// Which of a command's two output streams something happened to.
 ///
 /// Carried by [`CommandError::OutputReadFailed`] so a failure names the pipe it
@@ -362,6 +509,22 @@ pub enum CommandError {
     /// Command was cancelled via a cancellation token
     #[error("Command cancelled: {command}")]
     Cancelled {
+        command: String,
+        working_directory: PathBuf,
+    },
+
+    /// A content command's own output could not be told from the shell's.
+    ///
+    /// Raised by [`execute_for_content`](CommandRunner::execute_for_content) when
+    /// the markers that delimit the command's output are missing from what was
+    /// captured — a shell that never ran the command, a profile that redirected
+    /// the shell's output wholesale, or a shell whose syntax the implementation
+    /// guessed wrong. Fails closed: the capture may carry a foreign prefix, and
+    /// there is no way to find out which bytes are the command's.
+    ///
+    /// Carries no output bytes, like every other variant here.
+    #[error("Could not separate the output of command '{command}' from the shell's")]
+    ContentMarkersAbsent {
         command: String,
         working_directory: PathBuf,
     },

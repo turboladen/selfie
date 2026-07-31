@@ -1300,8 +1300,14 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             // `commands::shell` reads both pipes inline, so no `JoinError` is
             // reachable from this variant. See that function on why a `spawn`
             // must not be reintroduced there without restoring the guard.
+            //
+            // `ContentMarkersAbsent` was checked the same way: it renders the
+            // command and nothing else. It cannot render what was captured,
+            // because the whole reason it exists is that selfie could not tell
+            // which part of that capture the command wrote.
             crate::commands::runner::CommandError::Cancelled { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
+            | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }
             | crate::commands::runner::CommandError::StdoutSpawn(_)
             | crate::commands::runner::CommandError::StderrSpawn(_) => {
                 OperationFailure::Generic(err.to_string())

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use selfie::commands::{CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream};
+use selfie::commands::{
+    CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+};
 use tokio_util::sync::CancellationToken;
 
 /// What a scripted command does when run.
@@ -208,6 +210,31 @@ impl CommandRunner for FakeCommandRunner {
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         self.answer(command, Path::new("."))
+    }
+
+    /// Answers with the scripted output, already separated.
+    ///
+    /// A fake runs no shell, so there is nothing to separate a command's output
+    /// from: the script *is* the command's own output. That makes this the right
+    /// answer here and the wrong one for a real runner, which is why the
+    /// separation is the shell adapter's job and not a default on the trait.
+    async fn execute_for_content(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        _timeout: Duration,
+        _token: &CancellationToken,
+    ) -> Result<ContentOutput, CommandError> {
+        let output = self.answer(command, working_dir)?;
+        let success = output.is_success();
+        let stderr = output.stderr().to_vec();
+        Ok(ContentOutput::from_parts(
+            success,
+            output.into_stdout(),
+            stderr,
+            0,
+            true,
+        ))
     }
 }
 

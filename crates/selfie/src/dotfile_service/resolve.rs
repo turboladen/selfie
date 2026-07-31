@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::deploy::resolve_source_path;
 use super::template;
-use crate::commands::{BoundedText, CommandRunner};
+use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::FileSystem;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
 use crate::paths::is_within;
@@ -68,6 +68,10 @@ pub(crate) enum ResolveError {
     EmptyOutput { command: String },
     #[error("dotfile var '{name}' produced no output")]
     EmptyBinding { name: String },
+    #[error("dotfile command '{command}' produced output selfie could not tell from the shell's")]
+    UnseparableOutput { command: String },
+    #[error("dotfile var '{name}' produced output selfie could not tell from the shell's")]
+    UnseparableBinding { name: String },
     #[error("dotfile content exceeds {MAX_CONTENT_BYTES} bytes")]
     TooLarge,
     // The field is `template` rather than `source` because thiserror treats a
@@ -160,12 +164,25 @@ where
         }
 
         Ok(ContentSource::Provider(command)) => {
-            let bytes = run_capture(command, base_dir, runner, timeout, token)
+            let captured = run_capture(command, base_dir, runner, timeout, token)
                 .await
-                .map_err(|stderr| ResolveError::CommandFailed {
-                    command: command.to_string(),
-                    stderr,
+                .map_err(|failure| match failure {
+                    CaptureFailure::Failed(stderr) => ResolveError::CommandFailed {
+                        command: command.to_string(),
+                        stderr,
+                    },
+                    CaptureFailure::Unseparable => ResolveError::UnseparableOutput {
+                        command: command.to_string(),
+                    },
                 })?;
+
+            let mut warnings = Vec::new();
+            capture_warnings(
+                &format!("dotfile command '{command}'"),
+                &captured,
+                &mut warnings,
+            );
+            let bytes = captured.bytes;
 
             // Zero length is an error regardless of exit code: writing an empty
             // file over a credentials target is destructive, and empty output
@@ -181,10 +198,7 @@ where
                 return Err(ResolveError::TooLarge);
             }
 
-            Ok(ResolvedContent {
-                bytes,
-                warnings: Vec::new(),
-            })
+            Ok(ResolvedContent { bytes, warnings })
         }
 
         Ok(ContentSource::Template { source, vars }) => {
@@ -205,12 +219,20 @@ where
             // BTreeMap iterates in key order, so bindings resolve — and failures
             // are reported — deterministically.
             for (name, command) in vars {
-                let value = run_capture(command, base_dir, runner, timeout, token)
+                let captured = run_capture(command, base_dir, runner, timeout, token)
                     .await
-                    .map_err(|stderr| ResolveError::BindingFailed {
-                        name: name.clone(),
-                        stderr,
+                    .map_err(|failure| match failure {
+                        CaptureFailure::Failed(stderr) => ResolveError::BindingFailed {
+                            name: name.clone(),
+                            stderr,
+                        },
+                        CaptureFailure::Unseparable => {
+                            ResolveError::UnseparableBinding { name: name.clone() }
+                        }
                     })?;
+
+                capture_warnings(&format!("dotfile var '{name}'"), &captured, &mut warnings);
+                let value = captured.bytes;
 
                 // A structurally valid file holding an empty credential is worse
                 // than a loud failure.
@@ -276,27 +298,81 @@ async fn run_capture<CR: CommandRunner>(
     runner: &CR,
     timeout: Duration,
     token: &CancellationToken,
-) -> Result<Vec<u8>, String> {
+) -> Result<Captured, CaptureFailure> {
     let output = runner
-        .execute_in_dir(command, base_dir, timeout, token)
+        .execute_for_content(command, base_dir, timeout, token)
         .await
-        .map_err(|e| BoundedText::bound(e.to_string().as_bytes()).into_string())?;
+        .map_err(|e| match e {
+            CommandError::ContentMarkersAbsent { .. } => CaptureFailure::Unseparable,
+            other => CaptureFailure::Failed(
+                BoundedText::bound(other.to_string().as_bytes()).into_string(),
+            ),
+        })?;
 
     if output.is_success() {
-        // Consumed rather than borrowed-and-copied: `stdout().to_vec()` left the
-        // provider's whole output alive twice at peak, and on this path that
-        // output is a credential. One buffer is also one thing to zeroize later
-        // rather than two.
-        Ok(output.into_stdout())
+        let discarded_before = output.discarded_before();
+        let tail_verified = output.tail_verified();
+        Ok(Captured {
+            // Consumed rather than borrowed-and-copied: `stdout().to_vec()` left
+            // the provider's whole output alive twice at peak, and on this path
+            // that output is a credential. One buffer is also one thing to
+            // zeroize later rather than two.
+            bytes: output.into_stdout(),
+            discarded_before,
+            tail_verified,
+        })
     } else {
-        Err(BoundedText::bound(output.stderr()).into_string())
+        Err(CaptureFailure::Failed(
+            BoundedText::bound(output.stderr()).into_string(),
+        ))
+    }
+}
+
+// One command's output, and what the runner could establish about it. The two
+// flags are `ContentOutput`'s; see it for what they mean.
+struct Captured {
+    bytes: Vec<u8>,
+    discarded_before: usize,
+    tail_verified: bool,
+}
+
+// Why a capture produced no content. Two cases because they need different
+// errors: a failed command has stderr worth forwarding, one whose output could
+// not be told from the shell's has nothing beyond that fact.
+enum CaptureFailure {
+    /// Bounded stderr, or a bounded rendering of the runner's error.
+    Failed(String),
+    Unseparable,
+}
+
+/// Advisories about what the runner could not establish, named for `origin`.
+///
+/// Neither carries a byte of what was captured. Both must stay warnings rather
+/// than becoming refusals: the content is the command's and deploying it is what
+/// the user asked for — what must not happen is deploying bytes selfie cannot
+/// account for while reporting a clean success.
+fn capture_warnings(origin: &str, captured: &Captured, into: &mut Vec<String>) {
+    if captured.discarded_before > 0 {
+        into.push(format!(
+            "{} bytes reached the content channel before {origin} produced output; \
+             they were discarded, but nothing should have been able to write there",
+            captured.discarded_before
+        ));
+    }
+
+    if !captured.tail_verified {
+        into.push(format!(
+            "selfie could not establish where the output of {origin} ended, so anything the \
+             shell wrote after it — an exit trap the command installed, for instance — is part \
+             of the deployed content"
+        ));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::runner::{CommandError, CommandOutput};
+    use crate::commands::runner::{CommandError, CommandOutput, ContentOutput};
     use crate::fs::MockFileSystem;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
@@ -319,6 +395,11 @@ mod tests {
         responses: std::collections::HashMap<String, (i32, Vec<u8>, Vec<u8>)>,
         /// Commands whose output cannot be read to the end.
         read_failing: std::collections::HashSet<String>,
+        /// Commands whose output could not be told from the shell's.
+        unseparable: std::collections::HashSet<String>,
+        /// command -> (bytes discarded ahead of the output, tail established).
+        /// Absent means the clean answer: nothing discarded, tail established.
+        separation: std::collections::HashMap<String, (usize, bool)>,
         calls: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>,
     }
 
@@ -353,6 +434,29 @@ mod tests {
         fn also_read_failing(mut self, command: &str) -> Self {
             self.read_failing.insert(command.to_string());
             self
+        }
+
+        /// The command ran, but its output could not be told from the shell's.
+        fn unseparable(command: &str) -> Self {
+            let mut this = Self::default();
+            this.unseparable.insert(command.to_string());
+            this
+        }
+
+        /// The command succeeded, with `discarded` bytes cut off ahead of its
+        /// output.
+        fn with_noise_before(command: &str, stdout: &[u8], discarded: usize) -> Self {
+            let mut this = Self::succeeding(command, stdout);
+            this.separation
+                .insert(command.to_string(), (discarded, true));
+            this
+        }
+
+        /// The command succeeded, but where its output ended is not established.
+        fn with_unverified_tail(command: &str, stdout: &[u8]) -> Self {
+            let mut this = Self::succeeding(command, stdout);
+            this.separation.insert(command.to_string(), (0, false));
+            this
         }
 
         fn calls(&self) -> Vec<(String, PathBuf)> {
@@ -430,6 +534,40 @@ mod tests {
         ) -> Result<CommandOutput, CommandError> {
             unimplemented!("not used by resolve")
         }
+
+        async fn execute_for_content(
+            &self,
+            command: &str,
+            working_dir: &Path,
+            timeout: Duration,
+            token: &CancellationToken,
+        ) -> Result<ContentOutput, CommandError> {
+            if self.unseparable.contains(command) {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((command.to_string(), working_dir.to_path_buf()));
+                return Err(CommandError::ContentMarkersAbsent {
+                    command: command.to_string(),
+                    working_directory: working_dir.to_path_buf(),
+                });
+            }
+
+            let output = self
+                .execute_in_dir(command, working_dir, timeout, token)
+                .await?;
+            let (discarded_before, tail_verified) =
+                self.separation.get(command).copied().unwrap_or((0, true));
+            let success = output.is_success();
+            let stderr = output.stderr().to_vec();
+            Ok(ContentOutput::from_capture(
+                success,
+                output.into_stdout(),
+                stderr,
+                discarded_before,
+                tail_verified,
+            ))
+        }
     }
 
     fn no_fs() -> MockFileSystem {
@@ -480,6 +618,104 @@ mod tests {
 
         assert_eq!(resolved.bytes, b"secret-token");
         assert!(resolved.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unverified_tail_warns_and_still_deploys() {
+        // The content is returned: refusing it would break a command that works.
+        // The warning is what stops selfie reporting a credential with foreign
+        // bytes appended to it as a clean success.
+        let runner = FakeRunner::with_unverified_tail("op read x", b"secret-tokenMYCLEANUP");
+        let entry = provider_entry("op read x", "~/.gem/credentials");
+
+        let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
+
+        assert_eq!(resolved.bytes, b"secret-tokenMYCLEANUP");
+        assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
+        assert!(
+            resolved.warnings[0].contains("could not establish where the output"),
+            "{}",
+            resolved.warnings[0]
+        );
+        assert!(resolved.warnings[0].contains("op read x"));
+    }
+
+    #[tokio::test]
+    async fn a_binding_with_an_unverified_tail_warns_and_names_the_var() {
+        let runner = FakeRunner::with_unverified_tail("op read t", b"secret-tokenMYCLEANUP");
+        let entry = template_entry("f", &[("token", "op read t")], "~/.netrc");
+
+        let resolved = resolve(&entry, &fs_with_template("t={{token}}"), &runner)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
+        assert!(resolved.warnings[0].contains("dotfile var 'token'"));
+    }
+
+    #[tokio::test]
+    async fn bytes_arriving_before_the_output_are_reported() {
+        let runner = FakeRunner::with_noise_before("op read x", b"secret-token", 12);
+        let entry = provider_entry("op read x", "~/.gem/credentials");
+
+        let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
+
+        assert_eq!(resolved.bytes, b"secret-token");
+        assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
+        assert!(
+            resolved.warnings[0].contains("12 bytes"),
+            "{}",
+            resolved.warnings[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_warning_carries_no_part_of_the_content() {
+        // Both advisories describe bytes selfie handled. Neither may repeat one.
+        let secret = b"Kp7-vault-Token-93xQ";
+        let runner = FakeRunner::with_unverified_tail("op read x", secret);
+        let entry = provider_entry("op read x", "~/.gem/credentials");
+
+        let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
+
+        // Positive control: the run really did handle the secret, so an empty
+        // scan cannot be what makes this pass.
+        assert_eq!(resolved.bytes, secret);
+        for warning in &resolved.warnings {
+            assert!(
+                !warning.contains("Kp7-vault-Token"),
+                "a warning repeated the content: {warning}"
+            );
+        }
+        assert!(!resolved.warnings.is_empty(), "nothing was scanned");
+    }
+
+    #[tokio::test]
+    async fn output_that_cannot_be_told_from_the_shells_is_refused() {
+        let runner = FakeRunner::unseparable("op read x");
+        let entry = provider_entry("op read x", "~/.gem/credentials");
+
+        let error = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
+
+        assert!(
+            matches!(error, ResolveError::UnseparableOutput { .. }),
+            "expected a refusal naming the cause, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_binding_that_cannot_be_told_from_the_shells_is_refused() {
+        let runner = FakeRunner::unseparable("op read t");
+        let entry = template_entry("f", &[("token", "op read t")], "~/.netrc");
+
+        let error = resolve(&entry, &fs_with_template("t={{token}}"), &runner)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ResolveError::UnseparableBinding { .. }),
+            "expected a refusal naming the binding, got {error}"
+        );
     }
 
     #[tokio::test]

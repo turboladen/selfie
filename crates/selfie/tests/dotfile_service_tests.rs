@@ -3033,7 +3033,9 @@ mod secret_bearing {
     /// `command_timeout`.
     mod cancellation {
         use super::*;
-        use selfie::commands::{CommandError, CommandOutput, CommandRunner, OutputChunk};
+        use selfie::commands::{
+            CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
+        };
         use std::path::Path;
         use std::time::Duration;
 
@@ -3197,6 +3199,27 @@ mod secret_bearing {
                 token: &CancellationToken,
             ) -> Result<CommandOutput, CommandError> {
                 self.answer(command, token)
+            }
+
+            /// The path resolve actually takes, so this is the one these tests
+            /// observe the token through.
+            async fn execute_for_content(
+                &self,
+                command: &str,
+                _working_dir: &Path,
+                _timeout: Duration,
+                token: &CancellationToken,
+            ) -> Result<ContentOutput, CommandError> {
+                let output = self.answer(command, token)?;
+                let success = output.is_success();
+                let stderr = output.stderr().to_vec();
+                Ok(ContentOutput::from_parts(
+                    success,
+                    output.into_stdout(),
+                    stderr,
+                    0,
+                    true,
+                ))
             }
         }
 
@@ -3559,6 +3582,124 @@ mod secret_bearing {
                 !state.contains("creds/third"),
                 "nothing may be recorded for an entry that never deployed: {state}"
             );
+        }
+    }
+
+    /// What a noisy login shell puts in a credentials file (selfie-evf9).
+    ///
+    /// The unit tests in `commands::shell` assert what the runner returns. These
+    /// assert the thing that actually matters: the bytes on disk, through the
+    /// whole service, with a real shell process in the middle.
+    ///
+    /// The shell is a script standing in for the user's, so nothing here reads or
+    /// writes the developer's own configuration. See `commands::shell`'s
+    /// `content_tests` for why that is a faithful stand-in.
+    #[cfg(unix)]
+    mod noisy_shell {
+        use super::*;
+        use selfie::commands::ShellCommandRunner;
+        use std::io::Write as _;
+        use std::time::Duration;
+
+        /// A shell that writes before, during and after the command it is given.
+        fn noisy_runner(dir: &std::path::Path) -> ShellCommandRunner {
+            let path = dir.join("noisy-shell");
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "#!/bin/sh").unwrap();
+            writeln!(file, "printf '%s' 'LEADBANNER'").unwrap();
+            writeln!(file, "/bin/sh -c 'sleep 0.3; printf BACKGROUNDNOISE' &").unwrap();
+            writeln!(file, "trap 'printf TRAILCHATTER' EXIT").unwrap();
+            writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
+            drop(file);
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            ShellCommandRunner::new(path.to_str().unwrap(), Duration::from_secs(30))
+        }
+
+        /// Where the command reads the credential from.
+        ///
+        /// The command must not *contain* the secret: a package file's command
+        /// string is quoted back in events and errors on purpose, so a fixture
+        /// that spells the credential into it fails the leak scan for a reason
+        /// that has nothing to do with what is under test. A real provider is
+        /// `op read …`, which names a credential without being one.
+        fn secret_source(dir: &std::path::Path) -> PathBuf {
+            let path = dir.join("vault-stand-in");
+            std::fs::write(&path, SECRET).unwrap();
+            path
+        }
+
+        #[tokio::test]
+        async fn a_noisy_shell_puts_nothing_of_its_own_in_the_deployed_file() {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            // Slow enough for the backgrounded writer to land mid-command. A
+            // command that returns instantly wins the race by accident, and the
+            // test would pass without separating anything.
+            let source = secret_source(dirs.package_dir.as_path());
+            provider_package(
+                &dirs.package_dir,
+                target.to_str().unwrap(),
+                &format!("sleep 0.6; cat {}", source.display()),
+            );
+            let service = dirs.service_with_runner_and_token(
+                noisy_runner(dirs.package_dir.as_path()),
+                CancellationToken::new(),
+            );
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            // The positive control: the credential really was produced and
+            // written, so the scans below are not passing over an empty file.
+            let deployed = std::fs::read_to_string(&target).unwrap();
+            assert_eq!(deployed, SECRET);
+            for noise in ["LEADBANNER", "BACKGROUNDNOISE", "TRAILCHATTER"] {
+                assert!(
+                    !deployed.contains(noise),
+                    "the shell's own {noise} reached the credentials file: {deployed:?}"
+                );
+            }
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+                "the entry did not deploy: {events:?}"
+            );
+            assert_no_event_mentions(&events, SECRET);
+        }
+
+        #[tokio::test]
+        async fn a_command_that_installs_an_exit_trap_deploys_and_warns() {
+            // selfie cannot find the end of this command's output, so what the
+            // command's own trap prints is appended to the credential. It still
+            // deploys — the command works and the user asked for it — but the run
+            // says so rather than reporting a clean success.
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            let source = secret_source(dirs.package_dir.as_path());
+            provider_package(
+                &dirs.package_dir,
+                target.to_str().unwrap(),
+                &format!("trap 'printf MYCLEANUP' EXIT; cat {}", source.display()),
+            );
+            let service = dirs.service_with_runner_and_token(
+                noisy_runner(dirs.package_dir.as_path()),
+                CancellationToken::new(),
+            );
+
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                format!("{SECRET}MYCLEANUP"),
+                "the appended bytes are what the warning is about"
+            );
+            let warned = events
+                .iter()
+                .any(|event| format!("{event:?}").contains("could not establish where the output"));
+            assert!(warned, "appending foreign bytes silently: {events:?}");
+            assert_no_event_mentions(&events, SECRET);
         }
     }
 }

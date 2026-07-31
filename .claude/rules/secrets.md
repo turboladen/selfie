@@ -55,6 +55,22 @@ Test egress at the **boundary**, not by listing known paths:
 
 ## Specific traps, each of which has bitten
 
+- **A command whose stdout becomes content goes through `CommandRunner::execute_for_content`, never
+  `execute_in_dir`.** The shell writes to the same stdout the command does — a profile banner, a
+  background job it started, an exit trap — and `execute_in_dir` returns all of it, which on this
+  path is foreign bytes in a credentials file with the deploy reporting success. Enforced by type:
+  `execute_for_content` returns `ContentOutput`, `run_capture` accepts nothing else, and
+  `ContentOutput` neither wraps nor exposes a `CommandOutput`. Do not restate the guarantee as
+  "profile output is discarded" — the mechanism is a descriptor plus two markers, and what it cannot
+  account for is on `ContentOutput::tail_verified` and in `docs/package-files.md`.
+- **The capture descriptor is an egress: whatever holds it receives the credential.** A startup file
+  doing `exec 5>~/debug.log` is handed the content verbatim, and selfie then captures nothing and
+  fails closed — the user sees a failed apply, not a leak. Two things keep it narrow, and both are
+  load-bearing: the descriptor is **chosen per run** so a fixed profile cannot reliably sit on it,
+  and it is never 3 or 4, the ones a profile is most likely to have taken. It cannot be 10 or above:
+  `dash`, `zsh` and `ksh` reject those. Do not pin it to a constant, and do not read this as new
+  exposure — before the descriptor existed, the content travelled on stdout, where `exec >somewhere`
+  in a profile collected it every time.
 - **Never `#[derive(Debug)]` on a type holding secret bytes.** Hand-write it to print `<N bytes>`.
   No test can see this exit, because nothing formats the struct today — which is the argument for
   removing it by construction rather than testing for it. The exception is `BoundedText`

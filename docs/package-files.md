@@ -656,10 +656,42 @@ behaves identically however you invoke it. Because the login profile is sourced,
 profile _sets_ rather than exports — `SSH_AUTH_SOCK`, `OP_*` variables, PATH additions — is
 available to a provider command.
 
-**A profile that writes to stdout will corrupt the file selfie deploys.** A provider command's
-entire stdout becomes the target's content, and `-l` splices your profile's own output into that
-same stream — so an `echo` in `.zprofile` or `.bash_profile` lands in your credentials file ahead of
-the credential. Keep login-shell output on stderr, or guard it on the shell being interactive.
+**Only what your command itself writes to stdout becomes the file's content.** The shell's own
+output does not: selfie hands the shell a stdout of `/dev/null` and captures the command's on a
+separate descriptor, so a banner from `.zprofile`, a version manager's notice, a background job your
+profile started, and anything your profile prints as the shell exits are all discarded rather than
+deployed. This holds whether the profile writes before your command, while it is running, or after
+it finishes.
+
+Three cases remain, and they are not covered:
+
+- If your **command** installs its own `EXIT` trap (or, under `fish`, exits outright), selfie loses
+  the marker it uses to find the end of the output, and whatever the shell prints after the command
+  is appended to the content. selfie cannot tell those bytes from the command's, so it deploys them
+  and warns that it could not establish where the output ended.
+- **A startup file that redirects the descriptor selfie captures on receives your content.** The
+  content travels on a descriptor above 4, chosen afresh on every run so that a fixed
+  `exec 5>somewhere` in a profile cannot reliably sit on it; if one does collide, that file gets the
+  content and selfie's own capture comes up empty, so the apply fails and nothing is deployed. This
+  is narrower than the same hazard before: a profile doing `exec >somewhere` — the far more common
+  idiom — used to receive it every time.
+- **stderr is not separated at all.** A profile writing to stderr is mixed with the command's, which
+  selfie forwards (truncated) only when the command fails.
+
+Keep login-shell output on stderr or guard it on the shell being interactive if you want a quiet
+run; you no longer have to in order to get a correct file.
+
+Your command is passed through unchanged, and on every shell but `fish` it is the last thing the
+shell is given, so a trailing comment or line continuation is harmless. Under `fish` the command is
+run inside a block, so a command whose last line ends in a backslash is refused outright with
+`Missing end to balance this begin` rather than deploying anything.
+
+Your command cannot write to the descriptor its own output travels on: selfie closes it before the
+command runs. A command that `cd`s, or a profile that does, still changes the working directory the
+command ends up in — that has always been true.
+
+On Windows there is no separation: `cmd.exe` has no login profile to source, and nothing
+distinguishes its output from the command's.
 
 Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
 your existing target lacks it you will get a conflict on first apply. Strip it in your own command

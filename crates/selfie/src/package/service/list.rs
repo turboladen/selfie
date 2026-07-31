@@ -317,6 +317,16 @@ mod tests {
         ) -> Result<CommandOutput, CommandError> {
             unimplemented!("not needed for list tests")
         }
+
+        async fn execute_for_content(
+            &self,
+            _command: &str,
+            _working_dir: &std::path::Path,
+            _timeout: std::time::Duration,
+            _token: &CancellationToken,
+        ) -> Result<crate::commands::runner::ContentOutput, CommandError> {
+            unimplemented!("listing runs no content commands")
+        }
     }
 
     fn test_sender() -> (
