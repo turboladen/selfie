@@ -1,6 +1,6 @@
 //! Per-machine deploy state persistence and drift detection.
 //!
-//! Each time selfie deploys a config file, it records the source and target
+//! Each time selfie deploys a config file, it records the source and deployed
 //! checksums in a [`DeployState`] file (typically `~/.local/state/selfie/deploy-state.yml`,
 //! i.e., under XDG_STATE_HOME).
 //! On subsequent runs, these stored checksums are compared against the current
@@ -23,7 +23,6 @@ pub struct DeployState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployEntry {
-    target: String,
     source_checksum: String,
     deployed_checksum: String,
     deployed_at: String,
@@ -63,11 +62,10 @@ impl DeployState {
         self.deployed.get(source)
     }
 
-    pub fn record_deployment(&mut self, source: &str, target: &str, checksum: &str) {
+    pub fn record_deployment(&mut self, source: &str, checksum: &str) {
         self.deployed.insert(
             source.to_string(),
             DeployEntry {
-                target: target.to_string(),
                 source_checksum: checksum.to_string(),
                 deployed_checksum: checksum.to_string(),
                 deployed_at: chrono::Utc::now().to_rfc3339(),
@@ -97,10 +95,6 @@ impl DeployState {
 }
 
 impl DeployEntry {
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-
     pub fn source_checksum(&self) -> &str {
         &self.source_checksum
     }
@@ -123,13 +117,8 @@ mod tests {
     #[test]
     fn test_record_deployment() {
         let mut state = DeployState::empty();
-        state.record_deployment(
-            "fnm/fish-conf.fish",
-            "/home/user/.config/fish/conf.d/fnm.fish",
-            "abc123",
-        );
+        state.record_deployment("fnm/fish-conf.fish", "abc123");
         let entry = state.get("fnm/fish-conf.fish").unwrap();
-        assert_eq!(entry.target(), "/home/user/.config/fish/conf.d/fnm.fish");
         assert_eq!(entry.source_checksum(), "abc123");
         assert_eq!(entry.deployed_checksum(), "abc123");
     }
@@ -137,7 +126,7 @@ mod tests {
     #[test]
     fn test_roundtrip_serialization() {
         let mut state = DeployState::empty();
-        state.record_deployment("a/b.txt", "/home/user/b.txt", "hash1");
+        state.record_deployment("a/b.txt", "hash1");
         let yaml = serde_saphyr::to_string(&state).unwrap();
         let loaded: DeployState = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(loaded.entries().len(), 1);
@@ -146,7 +135,7 @@ mod tests {
     #[test]
     fn test_detect_drift_no_change() {
         let mut state = DeployState::empty();
-        state.record_deployment("a/b.txt", "/target/b.txt", "hash1");
+        state.record_deployment("a/b.txt", "hash1");
         assert_eq!(
             state.detect_drift("a/b.txt", "hash1", "hash1"),
             DriftType::None
@@ -156,7 +145,7 @@ mod tests {
     #[test]
     fn test_detect_drift_repo_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("a/b.txt", "/target/b.txt", "hash1");
+        state.record_deployment("a/b.txt", "hash1");
         assert_eq!(
             state.detect_drift("a/b.txt", "hash2", "hash1"),
             DriftType::RepoChanged
@@ -166,7 +155,7 @@ mod tests {
     #[test]
     fn test_detect_drift_target_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("a/b.txt", "/target/b.txt", "hash1");
+        state.record_deployment("a/b.txt", "hash1");
         assert_eq!(
             state.detect_drift("a/b.txt", "hash1", "hash_different"),
             DriftType::TargetChanged
@@ -176,7 +165,7 @@ mod tests {
     #[test]
     fn test_detect_drift_both_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("a/b.txt", "/target/b.txt", "hash1");
+        state.record_deployment("a/b.txt", "hash1");
         assert_eq!(
             state.detect_drift("a/b.txt", "hash2", "hash3"),
             DriftType::BothChanged

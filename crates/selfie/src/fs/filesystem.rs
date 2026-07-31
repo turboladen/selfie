@@ -12,6 +12,8 @@ use std::{
 
 use thiserror::Error;
 
+use crate::fs::target::TargetPath;
+
 /// Port for file system operations (Hexagonal Architecture)
 ///
 /// This trait abstracts file system operations to allow for different implementations
@@ -98,22 +100,9 @@ pub trait FileSystem: Send + Sync {
     /// through. Symlinked **parent** directories are still followed, so a planted
     /// directory symlink can still redirect where the file lands.
     ///
-    /// This applies to `path` **as given**, so a caller that resolves the path first
-    /// can forfeit it. The precise rule, for callers going through
-    /// [`expand_path`](FileSystem::expand_path): the guarantee survives exactly when
-    /// `expand_path` on the *full* path fails.
-    ///
-    /// `expand_path` canonicalizes, which only succeeds for a path that already
-    /// exists. So a symlink that **resolves** is followed by the caller, and this
-    /// method receives the destination rather than the symlink -- the guarantee is
-    /// gone. A **dangling** symlink makes canonicalization fail with `ENOENT`; a
-    /// caller that then falls back to resolving only the parent, or to the raw path,
-    /// hands over an unresolved final component and the guarantee **holds**.
-    ///
-    /// Do not read this as "canonicalizing callers always forfeit it" -- that is too
-    /// pessimistic -- nor as "it is forfeited whenever a symlink is planted", which is
-    /// too optimistic in the other direction. It turns on whether the full path
-    /// resolved.
+    /// This applies to `path` **as given**: a resolved path names the link's
+    /// destination, so the link is never seen and the guarantee is gone. That is what
+    /// the [`TargetPath`] parameter is for -- nothing can resolve one.
     ///
     /// # Platform and metadata notes
     ///
@@ -145,7 +134,7 @@ pub trait FileSystem: Send + Sync {
     /// Note this differs from [`write_file`](FileSystem::write_file), which can still
     /// succeed on an existing file inside a read-only directory; an atomic replace
     /// cannot, because it must create a sibling first.
-    fn write_file_private(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// Write data to a file, refusing a symlink at the final component
     ///
@@ -168,10 +157,9 @@ pub trait FileSystem: Send + Sync {
     ///
     /// # Symlinks
     ///
-    /// The refusal applies to `path` **as given**. A caller that resolves the path
-    /// first forfeits it entirely: `canonicalize` returns the link's destination, so
-    /// this method is handed an ordinary file and writes to it. Targets must arrive
-    /// here unresolved -- see `expand_target_path`, which exists for this reason.
+    /// The refusal applies to `path` **as given**. A resolved path names the link's
+    /// destination, so this method would be handed an ordinary file and write to it;
+    /// [`TargetPath`] is what keeps one from arriving here.
     ///
     /// Symlinked **parent** directories are still followed, so a planted directory
     /// symlink can still redirect where the file lands. Same limitation as
@@ -199,7 +187,7 @@ pub trait FileSystem: Send + Sync {
     /// is identified by looking at the path afterwards, so a link deleted in that
     /// window surfaces as an `IoError` rather than `SymlinkedTarget`. Nothing was
     /// written either way -- only the wording of the report differs.
-    fn write_file_no_follow(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
+    fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
     /// give for `path`, if it would refuse
@@ -221,7 +209,7 @@ pub trait FileSystem: Send + Sync {
     /// on Unix in the kernel. Checking here and writing there would reintroduce
     /// exactly the race that method avoids; this only ever moves *when the user is
     /// told*, never whether the write happens.
-    fn symlink_refusal(&self, path: &Path) -> Option<FileSystemError>;
+    fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
     ///
@@ -234,7 +222,10 @@ pub trait FileSystem: Send + Sync {
     /// # Platform notes
     ///
     /// On Unix this is exact: true when no group or other permission bit is set.
-    /// Symlinks are followed, so this reports on the file the path resolves to.
+    /// Symlinks are followed, so this reports on the file the path resolves to --
+    /// which is why it takes a [`TargetPath`]. Handed an already-resolved path it
+    /// would report on a link's destination and call the target private, and the
+    /// caller would then skip the write that replaces the link.
     ///
     /// On every other platform this returns `true`, because there are no Unix
     /// permission bits to inspect and nothing this method could meaningfully
@@ -245,7 +236,7 @@ pub trait FileSystem: Send + Sync {
     /// # Errors
     ///
     /// Returns [`FileSystemError`] if the file's metadata cannot be read.
-    fn is_owner_only(&self, path: &Path) -> Result<bool, FileSystemError>;
+    fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
 
     /// Remove a file from the file system
     ///

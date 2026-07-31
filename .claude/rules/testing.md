@@ -63,6 +63,13 @@ otherwise a mutation that never built is scored **caught**, because the expected
 and the compile line was there. A false "caught" is the worse of the two: it records a real coverage
 gap as covered, and nobody looks again.
 
+**An absent diagnostic is evidence only if every earlier compiler pass succeeded.** rustc stops
+before privacy checking when type checking fails, so a `field is private` error that a clean tree
+reports is **absent entirely** — not reordered, not truncated — from a tree that has two unrelated
+type errors in it. Anyone verifying "rustc does not complain about X" mid-refactor gets the opposite
+of the truth. This is not specific to privacy: it holds for any post-typeck diagnostic. Confirm the
+tree is otherwise clean before recording a negative.
+
 A substitution the compiler can discard has not run either — one that binds a value nothing reads,
 or that adds a call beside the original instead of replacing it, compiles clean and changes nothing,
 so every check passes and it is scored **survived**. Confirm the mutated line is reachable and its
