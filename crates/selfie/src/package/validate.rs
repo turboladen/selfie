@@ -556,7 +556,8 @@ impl Package {
     /// Checks each dotfile entry for:
     /// - Empty source path (error)
     /// - Path traversal in source via `..` (error)
-    /// - Target path that is not absolute and doesn't start with `~` (error)
+    /// - Target path that is not absolute and doesn't start with `~/` (error)
+    /// - Target path using the `~user/…` form, which selfie does not resolve (error)
     pub(crate) fn validate_dotfiles(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -807,12 +808,21 @@ impl Package {
             }
         }
 
-        if !target.starts_with('/') && !target.starts_with('~') {
+        // The textual half of the rule `deploy_target` applies, reported here with
+        // a field path and a suggestion. One function decides, so a spec cannot
+        // pass validation with a target apply refuses *on the text* -- which is
+        // what let `~alice/.gemrc` pass and be silently skipped (selfie-jlum).
+        //
+        // Only the textual half: `TargetRejection::NoHome` is machine state, so
+        // `~/x` validates here and can still be refused at deploy time on a
+        // machine with no determinable home directory.
+        // `the_validator_matches_the_textual_rule` holds the two in step.
+        if let Some(rejection) = crate::fs::TargetRejection::of(target) {
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{field}.target"),
-                "Dotfile target path must be absolute or start with '~'",
-                Some("Use '~/.config/file' for a path under your home directory, or an absolute path like '/etc/config'."),
+                &format!("Dotfile {}", rejection.message()),
+                Some(rejection.suggestion()),
             ));
         }
 
@@ -1620,6 +1630,77 @@ dotfiles:
             .build();
         let result = package.validate("test-env");
         assert!(result.issues().has_errors());
+    }
+
+    /// selfie-jlum: `~alice/.gemrc` passed `selfie spec validate` and was then
+    /// silently skipped by apply, because the validator tested `starts_with('~')`
+    /// and `shellexpand` leaves `~user` alone.
+    ///
+    /// Asserts the message names the unsupported form rather than merely that
+    /// some error exists: this entry has a valid source, so an error here can
+    /// only come from the target rule, but a future fixture might not be so
+    /// clean and "has_errors" would then pass for the wrong reason.
+    #[test]
+    fn a_named_user_target_is_a_validation_error() {
+        for target in ["~alice/.gemrc", "~alice"] {
+            let package = PackageBuilder::default()
+                .name("bad-target")
+                .environment("test-env", |b| b.install("echo hi"))
+                .dotfiles(vec![DotfileEntry::new("src/file.txt", target)])
+                .build();
+
+            let result = package.validate("test-env");
+            let issues = result.issues().all_issues();
+            let named = issues.iter().any(|issue| issue.message().contains("~user"));
+
+            assert!(
+                named,
+                "the diagnostic for {target:?} must name the '~user' form, got: {issues:?}"
+            );
+        }
+    }
+
+    /// The validator's decision must be the one `TargetRejection::of` gives, or a
+    /// spec passes validation and then cannot deploy.
+    ///
+    /// Named for the *textual* rule on purpose: `TargetRejection::NoHome` is
+    /// machine state rather than spec state, so the validator can never match the
+    /// whole deploy rule -- only this half of it.
+    ///
+    /// What it catches is a call site that stops delegating and reimplements the
+    /// rule inline, which is the regression that produced selfie-jlum. It cannot
+    /// catch a bug *inside* `of`, because both sides here call it -- the same
+    /// property its model `var_name_rule_matches_the_content_source_refusal`
+    /// (`package.rs`) has, for the same reason. `of`'s own content is held by
+    /// `a_named_user_target_is_a_validation_error` above and by the unit tests in
+    /// `fs::target`, which assert specific rejections rather than agreement.
+    ///
+    /// Checks the *decision* rather than the predicate, and carries agree-accept
+    /// rows as well as agree-reject rows.
+    #[test]
+    fn the_validator_matches_the_textual_rule() {
+        for target in [
+            "/etc/x", "~/x", "~", "~alice", "~alice/x", "rel/x", "", "./x", "../x",
+        ] {
+            let package = PackageBuilder::default()
+                .name("target-rule")
+                .environment("test-env", |b| b.install("echo hi"))
+                .dotfiles(vec![DotfileEntry::new("src/file.txt", target)])
+                .build();
+
+            let refused_by_validate = package
+                .validate("test-env")
+                .issues()
+                .all_issues()
+                .iter()
+                .any(|issue| issue.field() == "dotfiles[0].target");
+
+            assert_eq!(
+                refused_by_validate,
+                crate::fs::TargetRejection::of(target).is_some(),
+                "validate and the deploy rule disagree about {target:?}"
+            );
+        }
     }
 
     #[test]

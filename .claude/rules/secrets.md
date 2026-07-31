@@ -174,9 +174,24 @@ Test egress at the **boundary**, not by listing known paths:
     expansion and refusal tests, and by the expander taking a `HomeDir` — a trait with one method,
     `home()` — instead of a `FileSystem`, so neither `canonicalize` nor `expand_path` is reachable
     from inside it. There is no longer a resolving call in that function to defend.
-  - Two things construct a `TargetPath`, and that set **is** the guarantee: `expand_target_path`,
-    and `state_file_path` for the deploy state file. The second is the weaker one — its configured
-    branch joins `state_directory` exactly as given — and it is documented as such where it lives.
+  - **A deploy or track path must obtain its target from `deploy_target`; `expand_target_path` is
+    for callers that only compare or display one.** Three functions hand out a `TargetPath` and only
+    two construct one — the count is of **functions**, not of `TargetPath { … }` literals, of which
+    `state_file_path` holds two — and the three promise different things, so do not collapse them
+    into a list:
+    - `deploy_target` is the **strongest** and the only one a deploy or track path may use. It
+      refuses `~user/…` and anything not absolute _before_ expanding, and re-checks absoluteness
+      after — so a `~/…` that could not be expanded for want of a home directory is refused rather
+      than written relative to the current directory. It mints nothing: it calls
+      `expand_target_path` and adds the rule.
+    - `expand_target_path` **mints**, and is unresolved by construction — it takes a `HomeDir`
+      rather than a `FileSystem`, so neither `canonicalize` nor `expand_path` is reachable from
+      inside it. It says nothing about whether the path can be _deployed to_: `~alice/.gemrc` comes
+      back as the literal relative path. Callers that only compare or display a target use it
+      deliberately.
+    - `state_file_path` is the **weakest** — its configured branch joins `state_directory` exactly
+      as given, so what comes back is only as unresolved as the caller was configured with — and it
+      is documented as such where it lives.
 - **Secret targets are written with `write_file_private`, never `write_file`,
   `write_file_no_follow`, or any other writer** — temp file in the target's own directory at mode
   `0600`, then rename. Symlink-safe is **not** the same as owner-only: `write_file_no_follow` also
