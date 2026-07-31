@@ -1,29 +1,10 @@
-# The CLI decides once, in `commands::common::create_command_runner`, what shell
-# runs a user's commands. It used to be decided per construction site: of this
-# crate's three, the two that built a dotfile service picked `/bin/sh` and the
-# one that built a package service picked a login shell — so the same package
-# behaved differently under `selfie apply` than under `selfie package install`,
-# and a provider command lost the user's profile (PATH, SSH_AUTH_SOCK, OP_*) on
-# exactly the path that fetches credentials.
+# Crate-scoped: `selfie`'s own tests want a deterministic `/bin/sh`.
 #
-# Scoped to this crate on purpose: `selfie`'s own tests and `test-common`
-# legitimately want a deterministic `/bin/sh` rather than whatever profile the
-# developer or CI runner happens to have, so the constructors stay available
-# there.
-# What this enforces, exactly: **no non-login runner can be built anywhere in this
-# crate.** That is the property the bug was about — apply ran provider commands
-# under `/bin/sh` while install ran them under a login shell.
-#
-# What it does NOT enforce: that `create_command_runner` is the only place a
-# runner is built at all. `login_shell` is deliberately absent from this list.
-# Adding it would require an `#[expect]` on `create_command_runner`, and a
-# function-wide `#[expect]` also suppresses `new` and `default_shell` *inside that
-# function* — so the one site that decides the shell could quietly go back to
-# `/bin/sh` with clippy silent. That was measured, not assumed: with the
-# `#[expect]` in place, the mutation reverting `create_command_runner` to
-# `default_shell()` passed clippy cleanly. Trading a guard on the shell for a
-# guard on the call-site count is a bad trade; a second `login_shell` call would
-# be duplication, whereas a `/bin/sh` call is the defect.
+# `login_shell` is deliberately not listed. Adding it would need an `#[expect]` on
+# `create_command_runner`, and a function-wide `#[expect]` also suppresses the two
+# below *inside* it — letting the one function that picks the shell silently revert
+# to `/bin/sh`. A second `login_shell` call is duplication; a `/bin/sh` call is the
+# defect.
 disallowed-methods = [
   { path = "selfie::commands::ShellCommandRunner::new", reason = "use commands::common::create_command_runner — the CLI runs a login shell so provider commands see the user's profile" },
   { path = "selfie::commands::ShellCommandRunner::default_shell", reason = "the CLI runs a login shell so provider commands see the user's profile; use commands::common::create_command_runner" },

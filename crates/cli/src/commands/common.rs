@@ -44,23 +44,8 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     YamlPackageRepository::new(fs, config.package_directory().clone())
 }
 
-/// Build the command runner every CLI service uses.
-///
-/// The one place the CLI decides what shell runs a user's commands. It used to be
-/// decided per construction site: of this crate's three, the two that built a
-/// dotfile service picked `/bin/sh` and the one that built a package service
-/// picked a login shell — so the same package behaved one way under
-/// `selfie package install` and another under `selfie apply`. A login shell
-/// sources the user's profile, which is where `SSH_AUTH_SOCK`, `OP_*` and PATH
-/// additions are usually *set* rather than exported, and it is what makes a
-/// command written in fish or zsh syntax work at all.
-///
-/// `crates/cli/clippy.toml` makes the *shell choice* a build error: `new` and
-/// `default_shell` are disallowed crate-wide with no exemptions, so a non-login
-/// runner cannot be constructed here at all — including inside this function.
-/// It does not prevent a second site from calling `login_shell`; that would need
-/// an `#[expect]` here, which would also stop clippy noticing if *this* function
-/// went back to `/bin/sh`. See the comment in `clippy.toml` for the measurement.
+// The one place the CLI picks a shell. `clippy.toml` makes a non-login runner a
+// build error crate-wide, including inside this function.
 fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
     ShellCommandRunner::login_shell(config.command_timeout())
 }
