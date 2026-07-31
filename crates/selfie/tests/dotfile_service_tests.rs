@@ -4150,3 +4150,439 @@ mod target_expansion {
         assert_ne!(via_link, via_real);
     }
 }
+
+/// What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
+/// what the lexical containment guard does not say about a symlinked source.
+///
+/// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
+/// two commands that used to be silent about it and the guard that documents a limit
+/// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
+/// of this is observable through it. Everything runs inside a `TempDir`.
+#[cfg(unix)]
+mod symlink_consistency {
+    use super::*;
+    use std::path::Path;
+
+    fn repo_source(dirs: &TestDirs, relative: &str, content: &str) {
+        let path = dirs.package_dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn warnings(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drift_types(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn symlink_warnings(events: &[PackageEvent]) -> Vec<String> {
+        warnings(events)
+            .into_iter()
+            .filter(|w| w.contains("is a symlink"))
+            .collect()
+    }
+
+    fn failure_message(events: &[PackageEvent]) -> String {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Failure(failure) => failure.to_string(),
+            other => panic!("expected a Failure, got {other:?}"),
+        }
+    }
+
+    /// A package whose one entry targets `target`, with `content` in the repository.
+    fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
+        repo_source(dirs, "myapp/config.toml", content);
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    /// Deploy normally, then migrate the target to a stow-style link: move the
+    /// deployed file aside and symlink to it. Leaves the recorded deploy state
+    /// matching the link's destination exactly, which is the state a user reaches by
+    /// adopting a symlink layout after using selfie.
+    async fn deploy_then_link_aside(dirs: &TestDirs, target: &Path) -> PathBuf {
+        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let destination = dirs.target_dir.join("destination");
+        std::fs::rename(target, &destination).unwrap();
+        std::os::unix::fs::symlink(&destination, target).unwrap();
+        destination
+    }
+
+    // ── drift ───────────────────────────────────────────────────────────────
+
+    /// D1. The case in selfie-qvwq's title: a repository edit that can never reach
+    /// the target, reported as `repo changed` on every run forever because the
+    /// deploy state can never advance. Drift now names the symlink alongside it.
+    #[tokio::test]
+    async fn drift_names_the_symlink_when_it_reports_drift() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "V1", &target);
+        let destination = deploy_then_link_aside(&dirs, &target).await;
+        repo_source(&dirs, "myapp/config.toml", "V2");
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_types(&events), vec!["repo changed"]);
+        let named = symlink_warnings(&events);
+        assert_eq!(named.len(), 1, "expected one refusal, got {named:?}");
+        assert!(
+            named[0].contains(&*target.to_string_lossy())
+                && named[0].contains(&*destination.to_string_lossy()),
+            "the refusal must name both the target and where the link points: {named:?}"
+        );
+    }
+
+    /// D2. Parity in the silent direction: a symlinked target already in sync is one
+    /// apply has no reason to write to, and apply says nothing about it
+    /// (`an_in_sync_symlinked_target_is_left_alone_and_not_reported`). Drift must not
+    /// invent a complaint apply does not make.
+    ///
+    /// Without this, D1 would also pass against an implementation that warned about
+    /// every symlinked target it saw.
+    #[tokio::test]
+    async fn drift_says_nothing_about_an_in_sync_symlinked_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "V1", &target);
+        deploy_then_link_aside(&dirs, &target).await;
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_types(&events), Vec::<String>::new());
+        assert_eq!(
+            warnings(&events),
+            Vec::<String>::new(),
+            "nothing is out of sync, so there is nothing to report"
+        );
+    }
+
+    /// D3 (row 1a). The fresh-machine case: a target already symlinked into place by
+    /// another tool, never deployed by selfie, whose destination differs from the
+    /// repository file. Drift classifies it `not tracked` rather than `repo changed`,
+    /// so a fix that only handled `RepoChanged` would leave this silent — which is
+    /// why the fixture varies along the drift-type axis.
+    #[tokio::test]
+    async fn drift_names_the_symlink_on_a_never_deployed_target() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SOMETHING ELSE").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        package_targeting(&dirs, "V1", &target);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_types(&events), vec!["not tracked"]);
+        assert_eq!(
+            symlink_warnings(&events).len(),
+            1,
+            "a never-deployed symlinked target is refused too: {:?}",
+            warnings(&events)
+        );
+    }
+
+    /// D5 (row 1b). The fixture that separates `deploy_decision` from `drift != None`.
+    ///
+    /// Never deployed, so drift is `NotTracked` and the entry is reported as drifted
+    /// — but the destination's contents already match the repository file, so
+    /// `deploy_decision` returns `Skip` and **apply is silent**. Gating the refusal on
+    /// the drift type instead of on apply's own decision would warn here, recreating
+    /// the drift-vs-apply disagreement in the opposite direction.
+    ///
+    /// The apply half is asserted in the same test on purpose: the property is that
+    /// the two commands agree, and a test that only looked at drift could not see it.
+    #[tokio::test]
+    async fn drift_is_silent_where_apply_is_silent_on_an_untracked_matching_link() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SAME BYTES").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        package_targeting(&dirs, "SAME BYTES", &target);
+
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            symlink_warnings(&apply),
+            Vec::<String>::new(),
+            "control: apply must be silent here, or this fixture proves nothing"
+        );
+        assert_eq!(
+            symlink_warnings(&drift),
+            Vec::<String>::new(),
+            "drift warned where apply did not"
+        );
+        assert_eq!(
+            drift_types(&drift),
+            vec!["not tracked"],
+            "control: the entry is still reported as drifted, so a `drift != None` \
+             gate really would have fired here"
+        );
+    }
+
+    /// D4. Drift and apply describe the same refusal with the same sentence, because
+    /// they call the same `refusal_warning`. A user who runs one then the other must
+    /// not have to work out whether two different messages mean the same thing.
+    #[tokio::test]
+    async fn drift_and_apply_word_the_refusal_identically() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "V1", &target);
+        deploy_then_link_aside(&dirs, &target).await;
+        repo_source(&dirs, "myapp/config.toml", "V2");
+
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let from_drift = symlink_warnings(&drift);
+        let from_apply = symlink_warnings(&apply);
+        assert_eq!(from_drift.len(), 1, "drift said nothing: {from_drift:?}");
+        assert_eq!(from_apply.len(), 1, "apply said nothing: {from_apply:?}");
+        assert_eq!(from_drift[0], from_apply[0]);
+    }
+
+    // ── track ───────────────────────────────────────────────────────────────
+
+    /// T1. Tracking a symlinked target is refused rather than recorded.
+    ///
+    /// There is no configuration in which tracking one does what the user asked:
+    /// apply refuses to write through it, so the entry is either permanently inert or
+    /// permanently broken. The refusal names the destination, because deciding what
+    /// to do about it needs to know where the link goes.
+    #[tokio::test]
+    async fn tracking_a_symlinked_target_is_refused() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("real_config");
+        std::fs::write(&destination, "content").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("is a symlink") && message.contains(&*destination.to_string_lossy()),
+            "the refusal must say symlink and name the destination: {message}"
+        );
+    }
+
+    /// T2. The refusal lands before every write, which is the part that matters.
+    ///
+    /// Tracking reads *through* a link, so a refusal placed after any of the three
+    /// writes would already have copied the destination's contents into the dotfiles
+    /// directory — a file the user never named, and one `selfie sync push` would
+    /// commit — written a spec, and recorded a deploy state entry for a deployment
+    /// that never happened. T1 cannot see any of that; it only sees the verdict.
+    #[tokio::test]
+    async fn a_refused_track_writes_nothing() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("real_config");
+        std::fs::write(&destination, "NEVER COPIED ANYWHERE").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(matches!(
+            get_operation_result(&events).expect("no Completed event"),
+            OperationResult::Failure(_)
+        ));
+        assert!(
+            !dirs.dotfiles_dir.join("myapp/config.toml").exists(),
+            "the link's destination was copied into the dotfiles directory"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("myapp.yml").exists(),
+            "a spec was written for an entry that cannot deploy"
+        );
+        assert!(
+            !dirs.state_dir.join("deploy-state.yml").exists(),
+            "deploy state was recorded for a deployment that never happened"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "NEVER COPIED ANYWHERE",
+            "control: the destination itself must be untouched"
+        );
+    }
+
+    /// T3. A dangling link is refused as a symlink, not reported as a missing file.
+    ///
+    /// `path_exists` follows the link, so the existence check answers "no" for a path
+    /// the user can see in their own shell. This is the only fixture on which the
+    /// refusal's position relative to that check is observable.
+    #[tokio::test]
+    async fn tracking_a_dangling_symlink_says_symlink_not_missing() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(dirs.target_dir.join("never_created"), &target).unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("is a symlink"),
+            "a dangling link is still a link: {message}"
+        );
+        assert!(
+            !message.contains("does not exist"),
+            "the path the user typed does exist; calling it missing sends them \
+             looking for the wrong problem: {message}"
+        );
+    }
+
+    /// T4. The other track handler refuses too.
+    ///
+    /// `track_for_package` is a separate function with its own copy of the read, the
+    /// write and the state record, so a fix applied to one handler leaves the other
+    /// exfiltrating the destination exactly as before.
+    #[tokio::test]
+    async fn tracking_a_symlinked_target_for_a_package_is_refused() {
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("myapp.yml"),
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo installed\"\n",
+        )
+        .unwrap();
+        let destination = dirs.target_dir.join("real_config");
+        std::fs::write(&destination, "NEVER COPIED ANYWHERE").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let events = collect_events(
+            dirs.service()
+                .track_for_package("myapp", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("is a symlink"),
+            "track_for_package accepted a symlinked target: {message}"
+        );
+        assert!(
+            !dirs.package_dir.join("myapp/config.toml").exists(),
+            "the link's destination was copied into the package directory"
+        );
+    }
+
+    // ── the lexical containment guard (selfie-86o) ──────────────────────────
+
+    /// The containment guard is lexical, so a symlink inside the package directory
+    /// escapes it. Recorded as an executable fact rather than only as prose.
+    ///
+    /// **This test asserts a limitation, and it is meant to fail if the limitation is
+    /// removed.** Anyone who makes the guard symlink-aware should delete it together
+    /// with the paragraph on `crate::paths::is_within` that it pins — the two must not
+    /// be able to disagree.
+    ///
+    /// Both forms are covered because they are not equally visible. With a symlinked
+    /// **file** the escape is at the final component. With a symlinked **directory**
+    /// it is not: `symlink_metadata` on the full source path reports a regular file,
+    /// asserted below, so a guard that inspected only the final component would report
+    /// containment with complete confidence and let this through unchanged.
+    #[tokio::test]
+    async fn a_symlinked_source_escapes_the_containment_guard() {
+        // A symlinked file inside the package directory.
+        {
+            let dirs = TestDirs::new();
+            let outside = dirs.state_dir.join("outside.txt");
+            std::fs::write(&outside, "OUTSIDE THE PACKAGE DIRECTORY").unwrap();
+            std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+            std::os::unix::fs::symlink(&outside, dirs.package_dir.join("myapp/config.toml"))
+                .unwrap();
+            let target = dirs.target_dir.join("config.toml");
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                "myapp",
+                &[("myapp/config.toml", target.to_str().unwrap())],
+            );
+
+            let events =
+                collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+            assert!(
+                warnings(&events).is_empty(),
+                "the guard is lexical; if it started refusing this, update \
+                 `is_within`'s documentation too: {:?}",
+                warnings(&events)
+            );
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "OUTSIDE THE PACKAGE DIRECTORY"
+            );
+        }
+
+        // A symlinked directory inside the package directory.
+        {
+            let dirs = TestDirs::new();
+            let outside = dirs.state_dir.join("outside_dir");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(
+                outside.join("config.toml"),
+                "OUTSIDE VIA A LINKED DIRECTORY",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&outside, dirs.package_dir.join("myapp")).unwrap();
+            let target = dirs.target_dir.join("config.toml");
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                "myapp",
+                &[("myapp/config.toml", target.to_str().unwrap())],
+            );
+
+            assert!(
+                !std::fs::symlink_metadata(dirs.package_dir.join("myapp/config.toml"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the source path's final component is a regular file, which is why \
+                 checking only the final component would not catch this"
+            );
+
+            let events =
+                collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+            assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "OUTSIDE VIA A LINKED DIRECTORY"
+            );
+        }
+    }
+}

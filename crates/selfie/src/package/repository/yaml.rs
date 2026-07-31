@@ -139,6 +139,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // A package names its referenced files with paths relative to its own
         // directory, and nothing stops one naming `../../../etc/passwd`. Reading
         // it would let validation report the contents of an arbitrary file.
+        //
+        // Lexical, so it rules out a written traversal and not a symlink planted
+        // inside the package directory — see `crate::paths::is_within`.
         if !crate::paths::is_within(&resolved, base_dir) {
             return Err(FileSystemError::IoError(Arc::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

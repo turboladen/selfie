@@ -4,6 +4,10 @@
 //! directory. Nothing stops a package from writing `../../../etc/passwd`, so
 //! every read of a package-relative path has to be checked before it happens —
 //! not only the ones that go through the dotfile deploy path.
+//!
+//! The check is **lexical**: it resolves `.` and `..` textually and does not follow
+//! symlinks, so it catches a written traversal and not a planted link. See
+//! [`is_within`] for what that does and does not rule out.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -37,6 +41,22 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 /// A plain `starts_with` is not sufficient: `base/../../etc/passwd` starts with
 /// `base` as a string but escapes it. Both sides are made absolute and normalized
 /// first, which is what makes the comparison meaningful.
+///
+/// # Lexical, and a symlink defeats it
+///
+/// A link inside `base_dir` passes while pointing outside. Watch the
+/// linked-*directory* form: with `packages/myapp -> /elsewhere`, `symlink_metadata`
+/// on the source path reports a regular file, so checking only the final component
+/// would not catch it. Both forms are pinned by
+/// `a_symlinked_source_escapes_the_containment_guard`.
+///
+/// Accepted — escaping needs a hostile package repository, which can already run
+/// arbitrary commands via a dotfile's `command:`. Being lexical is also what lets
+/// this work on paths that do not exist yet.
+///
+/// Do not call `std::fs` from here: that takes the library around its own port, and
+/// a `symlink_metadata` walk adds a check-then-read race. selfie-9pdh tracks the
+/// real fix (`openat2`'s `RESOLVE_BENEATH`, kernel-enforced on Linux).
 #[must_use]
 pub(crate) fn is_within(path: &Path, base_dir: &Path) -> bool {
     match (std::path::absolute(path), std::path::absolute(base_dir)) {
