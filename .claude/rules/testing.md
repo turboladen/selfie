@@ -60,8 +60,14 @@ That compile line is **necessary but not sufficient**: cargo prints it when it s
 it appears above `error: could not compile` on a build that then fails. Check `could not compile`
 (and `error[E`) **first**, and only treat the build as having happened if neither is present —
 otherwise a mutation that never built is scored **caught**, because the expected test did not pass
-and the compile line was there. That is the false direction: a false "caught" records a real
-coverage gap as covered.
+and the compile line was there. A false "caught" is the worse of the two: it records a real coverage
+gap as covered, and nobody looks again.
+
+A substitution the compiler can discard has not run either — one that binds a value nothing reads,
+or that adds a call beside the original instead of replacing it, compiles clean and changes nothing,
+so every check passes and it is scored **survived**. Confirm the mutated line is reachable and its
+value observed before recording either verdict: the two failure modes are symmetric, and neither
+shows up in an exit status.
 
 ## Ordering
 
