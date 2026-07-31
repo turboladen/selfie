@@ -290,6 +290,11 @@ async fn run_capture<CR: CommandRunner>(
             ),
         })?;
 
+    // **This check is what keeps a failed run's bytes out of a file.** Nothing
+    // downstream looks at the status again, and the runner is free to return a
+    // capture alongside a non-zero exit — so reading `stdout` before this point,
+    // or narrowing this to particular failures, deploys whatever the shell left
+    // behind when the command did not work.
     if output.is_success() {
         let discarded_before = output.discarded_before();
         let tail_verified = output.tail_verified();

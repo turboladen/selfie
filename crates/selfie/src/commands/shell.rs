@@ -534,7 +534,10 @@ impl CommandRunner for ShellCommandRunner {
             )),
             // A failed run's stderr holds the diagnosis — an unusable `$SHELL`, a
             // profile that exited — and reporting absent markers instead would
-            // drop it. There is no content either way.
+            // drop it. What keeps this from deploying anything is the guard: a
+            // `ContentOutput` that says it failed is refused by `run_capture`
+            // before its bytes are read at all. The empty buffer is belt and
+            // braces, not the guarantee.
             None if !success => Ok(ContentOutput::from_capture(
                 false,
                 Vec::new(),
@@ -2483,6 +2486,10 @@ mod content_tests {
             "stderr must name the shell: {:?}",
             String::from_utf8_lossy(output.stderr())
         );
+        // `run_capture` refuses a failed capture before reading this, so the
+        // empty buffer is not what keeps it out of a file. Asserted anyway, so
+        // that a later edit filling it in has to be a deliberate one.
+        assert!(output.into_stdout().is_empty());
     }
 
     #[tokio::test]
