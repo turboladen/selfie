@@ -84,8 +84,13 @@ A list of dotfile mappings that define files to deploy from your dotfiles reposi
 locations. Unlike environment-specific fields, `dotfiles` is a top-level field that applies across
 all environments.
 
-Every entry has a `target` — the absolute destination path, supporting `~` for the home directory —
-plus one of three ways of saying where the content comes from.
+Every entry has a `target` — the destination path, either `~/…` or absolute — plus one of three ways
+of saying where the content comes from.
+
+Prefer `~/` for anything under your home directory. `~/.gemrc` names the same file on every machine;
+`/Users/you/.gemrc` names it on one. An absolute path is for destinations that are genuinely the
+same everywhere, such as `/etc/nginx.conf`. selfie deploys as whoever runs it and never elevates, so
+a target like that one needs write access you may not have.
 
 ```yaml
 dotfiles:
@@ -918,11 +923,15 @@ selfie package track-dotfile starship ~/.config/starship.toml
 The track commands copy the file into the repo, create or update the YAML spec with the
 source→target mapping, and record initial deploy state for drift detection.
 
+The recorded `target` is `~/…` whenever the file lives under your home directory, whichever form you
+passed on the command line — so a spec tracked on one machine works on the next. A file elsewhere is
+recorded absolute. The path is also normalized, so `~/.config/../.gemrc` is recorded as `~/.gemrc`.
+
 ### Validation Rules for Dotfiles
 
 - `source` must not be empty
 - `source` must not contain path traversal sequences (`../`)
-- `target` must be an absolute path (or start with `~`)
+- `target` must be an absolute path (or start with `~`) — see [Dotfiles](#dotfiles) for which to use
 - A dotfile entry accepts only `source`, `command`, `vars` and `target`
 
 Selfie validates these rules when you run `selfie spec validate`.

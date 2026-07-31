@@ -48,10 +48,9 @@ pub(crate) async fn handle_track(
     let repo = create_package_repository(config);
 
     // Check if this file is already tracked anywhere
-    if let Some(pkg_name) = find_existing_tracker(file, config) {
+    if let Some((pkg_name, tracked_target)) = find_existing_tracker(file, config) {
         display.print_info(format!(
-            "Already tracking '{}' in spec '{}'",
-            file, pkg_name
+            "Already tracking '{tracked_target}' in spec '{pkg_name}'"
         ));
         return 0;
     }
@@ -177,8 +176,11 @@ fn suggest_name(file_path: &str) -> String {
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
 /// entry whose target matches the given file path. Returns the name of the
-/// package that tracks it, or `None`.
-fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
+/// package that tracks it and the entry's own target, or `None`.
+///
+/// The entry's target rather than the argument, because the two differ: the spec
+/// holds `~/…` and the caller may pass an absolute path for the same file.
+fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<(String, String)> {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
 
@@ -200,7 +202,7 @@ fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<String> {
                 for (_scope, entry) in pkg.dotfiles_with_scope() {
                     let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
                     if entry_expanded == expanded {
-                        return Some(pkg.name().to_string());
+                        return Some((pkg.name().to_string(), entry.target().to_string()));
                     }
                 }
             }

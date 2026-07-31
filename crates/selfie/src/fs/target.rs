@@ -141,6 +141,64 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
     }
 }
 
+// The form of `target` to record in a spec: `~`-relative when it names a path
+// under the home directory, so the entry means the same file on another machine.
+//
+// The inverse of `expand_target_path`, and the reason a tracked entry matches a
+// hand-written one. A target outside the home directory is left absolute:
+// `/etc/nginx.conf` names the same file everywhere already.
+//
+// Returns `target` unchanged when there is no home directory to measure against,
+// since an unexpandable `~` is not something a recorded path can carry.
+//
+// Home is taken as `expand_path` gives it, which canonicalizes. A `$HOME` with a
+// symlinked component that the caller names unresolved therefore fails to match
+// and records absolute -- today's behavior, not a regression.
+#[must_use]
+pub(crate) fn portable_target<H: HomeDir + ?Sized>(home_dir: &H, target: &str) -> String {
+    let Ok(home) = home_dir.home() else {
+        return target.to_string();
+    };
+
+    // One lookup, used for both halves. Expanding against one home and
+    // collapsing against another would leave the tilde in place or strip the
+    // wrong prefix.
+    let home = KnownHome(home);
+    let expanded = expand_target_path(&home, target);
+
+    collapse_home(&home.0, expanded.path())
+}
+
+// A home directory already in hand, so `portable_target` can hand the same one
+// to `expand_target_path` instead of asking twice.
+struct KnownHome(PathBuf);
+
+impl HomeDir for KnownHome {
+    fn home(&self) -> Result<PathBuf, FileSystemError> {
+        Ok(self.0.clone())
+    }
+}
+
+// Comparison must stay component-wise. `/home/steven` is not under `/home/steve`,
+// but a byte-prefix strip yields `~n/.gemrc` -- a path that deploys somewhere
+// else and reports success.
+fn collapse_home(home: &Path, expanded: &Path) -> String {
+    // A home with no normal component -- `HOME=/`, a container running as root --
+    // would put every absolute path under it, `/etc/nginx.conf` included.
+    if !home
+        .components()
+        .any(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return expanded.to_string_lossy().into_owned();
+    }
+
+    match expanded.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => Path::new("~").join(rest).to_string_lossy().into_owned(),
+        Err(_) => expanded.to_string_lossy().into_owned(),
+    }
+}
+
 // The deploy state file's path.
 //
 // The second and weaker of the two constructors: the configured branch joins
@@ -206,6 +264,84 @@ mod tests {
         let fs = MockFileSystem::default();
         let result = expand_target_path(&fs, "~alice/test-file");
         assert_eq!(result.path(), Path::new("~alice/test-file"));
+    }
+
+    fn collapsed(home: &str, expanded: &str) -> String {
+        collapse_home(Path::new(home), Path::new(expanded))
+    }
+
+    #[test]
+    fn a_target_under_home_is_recorded_with_a_tilde() {
+        assert_eq!(
+            collapsed(
+                "/Users/sloveless",
+                "/Users/sloveless/.config/ghostty/config"
+            ),
+            "~/.config/ghostty/config"
+        );
+    }
+
+    #[test]
+    fn a_home_that_is_only_a_string_prefix_is_not_collapsed() {
+        assert_eq!(
+            collapsed("/home/steve", "/home/steven/.gemrc"),
+            "/home/steven/.gemrc"
+        );
+        assert_eq!(
+            collapsed("/Users/sloveless", "/Users/sloveless-old/.config/x"),
+            "/Users/sloveless-old/.config/x"
+        );
+    }
+
+    #[test]
+    fn a_root_home_does_not_swallow_a_system_path() {
+        assert_eq!(collapsed("/", "/etc/nginx.conf"), "/etc/nginx.conf");
+    }
+
+    #[test]
+    fn a_target_outside_home_is_recorded_unchanged() {
+        assert_eq!(
+            collapsed("/home/steve", "/etc/nginx.conf"),
+            "/etc/nginx.conf"
+        );
+    }
+
+    #[test]
+    fn home_itself_collapses_to_a_bare_tilde() {
+        assert_eq!(collapsed("/home/steve", "/home/steve"), "~");
+    }
+
+    #[test]
+    fn a_hand_written_tilde_target_round_trips_unchanged() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_expand_path("~", "/home/user");
+        assert_eq!(
+            portable_target(&fs, "~/.config/bat/config"),
+            "~/.config/bat/config"
+        );
+    }
+
+    // `docs/package-files.md` promises this. It holds only transitively, through
+    // `expand_target_path`'s `normalize_path`, so nothing else asserts it.
+    #[test]
+    fn a_recorded_target_is_normalized() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_expand_path("~", "/home/user");
+        assert_eq!(portable_target(&fs, "~/.config/../.gemrc"), "~/.gemrc");
+    }
+
+    #[test]
+    fn a_target_is_recorded_as_given_when_there_is_no_home() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("no home"),
+            )))
+        });
+        assert_eq!(
+            portable_target(&fs, "/Users/sloveless/.gemrc"),
+            "/Users/sloveless/.gemrc"
+        );
     }
 
     #[test]
