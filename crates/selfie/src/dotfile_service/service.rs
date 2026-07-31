@@ -975,11 +975,24 @@ where
 
 /// How a refused deploy is reported, worded once.
 ///
-/// Two sites produce it — the check in `handle_apply` and the write itself, which
-/// still refuses if a link appears in between — and only the first is reachable in
-/// a test, so the second would be free to drift if each formatted its own.
+/// Three sites produce it — the check in `handle_apply`, the write itself (which
+/// still refuses if a link appears in between), and `handle_check_drift`, which
+/// reports what apply would refuse without writing anything. Only the first and
+/// third are reachable in a test, so the second would be free to drift if each
+/// formatted its own.
 fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
+}
+
+/// How a refused *track* is reported, worded once.
+///
+/// Both track handlers produce it. It embeds the same [`FileSystemError`] apply
+/// renders through [`refusal_warning`], so the reason a symlinked target is refused
+/// reads identically wherever the user meets it, and adds the remedy that only
+/// makes sense at track time — apply's caller has already committed to the entry,
+/// while track's caller is standing at the target and can still choose another one.
+fn track_refusal(refusal: &FileSystemError) -> String {
+    format!("{refusal}. Replace the symlink with a regular file, or track the path it points to.")
 }
 
 /// Describes a single config file deployment operation
@@ -1208,7 +1221,9 @@ where
 
             let source_path = resolve_source_path(&base_dir, source);
 
-            // Runtime path traversal guard: verify resolved path stays within base_dir
+            // Runtime path traversal guard. Lexical: it catches a `..` written into
+            // `source`, not a symlink planted inside the package directory. See
+            // `crate::paths::is_within` for why that limit is accepted.
             if !is_within(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
@@ -1531,7 +1546,8 @@ where
                 continue;
             }
 
-            // Runtime path traversal guard (same as handle_apply)
+            // Runtime path traversal guard (same as handle_apply, and lexical for
+            // the same reason — see `crate::paths::is_within`)
             if !is_within(&source_path, &base_dir) {
                 sender
                     .send_warning(format!(
@@ -1556,8 +1572,18 @@ where
             };
             let source_checksum = compute_checksum(source_content.as_bytes());
 
-            // Read target
-            let target_checksum = if filesystem.path_exists(&target_path) {
+            // Read target.
+            //
+            // `read_file` follows a final-component symlink, so for a symlinked
+            // target this checksums the link's *destination* rather than the target
+            // itself. That is what lets the drift type below describe a file apply
+            // will never write to, and it is why the refusal is reported alongside
+            // the drift type rather than inferred from it.
+            //
+            // The following is deliberate: not following would change the computed
+            // drift type, and with it the counts `sync status` reads.
+            let target_exists = filesystem.path_exists(&target_path);
+            let target_checksum = if target_exists {
                 match filesystem.read_file(&target_path) {
                     Ok(content) => compute_checksum(content.as_bytes()),
                     Err(_) => String::new(),
@@ -1573,6 +1599,30 @@ where
                     .send_dotfile_drift_detected(target_path.display(), &drift)
                     .await;
                 drift_count += 1;
+            }
+
+            // Name the symlink whenever apply would refuse this entry, worded by the
+            // same `refusal_warning` apply uses so both commands say one sentence.
+            //
+            // The gate is `deploy_decision` — the function apply itself calls — and
+            // not `drift != None`, which is the obvious choice and the wrong one. An
+            // untracked target whose contents already match the repository file is
+            // `NotTracked`, so it is reported as drift by the block above, but it is
+            // `Skip` and apply is silent for it. Gating on drift would warn in
+            // exactly the case apply says nothing, recreating the disagreement this
+            // is meant to end, in the opposite direction. Calling the same function
+            // makes the parity a fact rather than a claim.
+            //
+            // Note the drift *event* above keeps its own `drift != None` gate. An
+            // untracked-but-matching target is still reported as drifted while apply
+            // skips it; that gap is pre-existing and not symlink-specific, so only
+            // the refusal follows apply's decision.
+            if !matches!(
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum),
+                DeployDecision::Skip(_)
+            ) && let Some(refusal) = filesystem.symlink_refusal(&target_path)
+            {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
             }
         }
     }
@@ -1615,6 +1665,32 @@ where
 
     // Expand and validate the target path
     let expanded_target = expand_target_path(filesystem, target_path);
+
+    // Refuse a symlinked target before anything is read or written.
+    //
+    // Refusing rather than warning because there is no configuration in which a
+    // tracked symlinked target does what the user asked. Apply refuses to write
+    // through one, so the entry is either permanently inert (its contents already
+    // match, and nothing ever happens) or permanently broken (they do not, and every
+    // apply refuses). A warning would leave all three of this function's writes in
+    // place, and there is no correct answer for which content to copy or what state
+    // to record for a deploy that cannot occur. selfie-paa5 adds the deliberate
+    // opt-in; it cannot be the per-entry field proposed there, because this is the
+    // command that creates the entry.
+    //
+    // The position is load-bearing twice over:
+    //
+    // - **Before the writes**, because tracking otherwise reads *through* the link
+    //   and copies the destination's contents into the dotfiles directory — a file
+    //   the user never named, which `selfie sync push` then commits to the remote —
+    //   and records a deploy state entry claiming a deployment that never happened.
+    // - **Before the existence check**, because `path_exists` follows the link. A
+    //   dangling one is otherwise reported as "Target file does not exist" when the
+    //   path the user actually typed plainly does exist.
+    if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    }
+
     if !filesystem.path_exists(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Target file does not exist: {}",
@@ -1741,6 +1817,19 @@ where
             environment: config.environment().to_string(),
             steps_completed: StepCount::new(1, 1),
         });
+    }
+
+    // Refuse a symlinked target, for the reasons given on `handle_track_standalone`
+    // — this handler reads through the link and copies the destination into the
+    // package directory just the same, and records the same never-happened
+    // deployment.
+    //
+    // Placed after the already-tracked short-circuit above, which stays silent: an
+    // entry that is already recorded is not improved by refusing an idempotent
+    // no-op. Nothing tells that user, and in the already-matching state drift is
+    // silent for them too. That is an acknowledged gap, not a case this covers.
+    if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
     }
 
     // Validate the target path
