@@ -42,6 +42,11 @@ When changes exist:
   → Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details
 ```
 
+This summary reports counts and target paths only. When a target keeps reappearing here and
+`selfie apply` never clears it, run `selfie dotfiles drift` — it explains why, and a
+[symlinked target](package-files.md#symlinked-targets) is the usual cause. `sync status` does not
+carry that reason itself.
+
 ### `selfie sync push`
 
 Groups changed files by package and generates conventional commit messages:

@@ -155,4 +155,13 @@ Test egress at the **boundary**, not by listing known paths:
   the people you are hiding it from on a shared machine.
 - **All package-relative source paths go through `crate::paths` containment.** This guard has been
   re-established in this repository three times — `fd494e1`, PRs #30/#34, and the dotfiles work. It
-  is lexical and does not follow symlinks; say that rather than claiming more.
+  is lexical and does not follow symlinks; say that rather than claiming more. All four call sites
+  now state the limit, `is_within` carries the reasoning, and
+  `a_symlinked_source_escapes_the_containment_guard` pins it as an executable fact — it asserts the
+  escape **succeeds**, so strengthening the guard must delete the test and the prose together.
+- **A symlinked dotfile target is refused, and every command says so the same way.** `apply` refuses
+  the write, `dotfiles drift` reports the refusal wherever `apply` would refuse — gated on
+  `deploy_decision`, the same function `apply` calls, so the parity is structural rather than
+  asserted — and `dotfiles track` refuses to create the entry at all. Track's refusal sits ahead of
+  every write it performs: tracking reads _through_ a link, so accepting one copies the destination
+  into the dotfiles repository, where `sync push` commits it. Do not relax that ordering.
