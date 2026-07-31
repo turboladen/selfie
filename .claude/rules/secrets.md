@@ -55,6 +55,25 @@ Test egress at the **boundary**, not by listing known paths:
 
 ## Specific traps, each of which has bitten
 
+- **A command whose stdout becomes content goes through `CommandRunner::execute_for_content`, never
+  `execute_in_dir`.** The shell writes to the same stdout the command does — a profile banner, a
+  background job it started, an exit trap — and `execute_in_dir` returns all of it, which on this
+  path is foreign bytes in a credentials file with the deploy reporting success. Enforced by type:
+  `execute_for_content` returns `ContentOutput`, `run_capture` accepts nothing else, and
+  `ContentOutput` neither wraps nor exposes a `CommandOutput`. Do not restate the guarantee as
+  "profile output is discarded" — the mechanism is a descriptor plus two markers, and what it cannot
+  account for is on `ContentOutput::tail_verified` and in `docs/package-files.md`.
+- **The capture descriptor is an egress: whatever holds it receives the credential.** A startup file
+  doing `exec 8>~/debug.log` is handed the content verbatim, and selfie then captures nothing and
+  fails closed — the user sees a failed apply, not a silent leak. What this defends against is an
+  **accidental** collision, and the write-up must say so: a hostile profile owns the session and can
+  read the deployed file or wrap `op` itself, so there is no boundary here to defend. Three
+  constraints on the number, all load-bearing: it must be a single digit (`dash`, `zsh` and `ksh`
+  reject 10 and above, and `dash` is `/bin/sh` on Linux); it must avoid 3, 4 and 9, which convention
+  has already claimed; and it must stay **fixed**, because a collision that happens on every run is
+  diagnosable and documentable, while one that happens on a fraction of runs gets retried instead of
+  investigated. Do not read this as new exposure: before the descriptor existed, the content
+  travelled on stdout, where `exec >somewhere` in a profile collected it every time.
 - **Never `#[derive(Debug)]` on a type holding secret bytes.** Hand-write it to print `<N bytes>`.
   No test can see this exit, because nothing formats the struct today — which is the argument for
   removing it by construction rather than testing for it. The exception is `BoundedText`

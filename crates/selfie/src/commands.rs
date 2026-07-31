@@ -4,7 +4,8 @@ pub mod runner;
 pub mod shell;
 
 pub use runner::{
-    BoundedText, CommandError, CommandOutput, CommandRunner, OutputChunk, OutputStream,
+    BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
+    OutputStream,
 };
 pub use shell::ShellCommandRunner;
 

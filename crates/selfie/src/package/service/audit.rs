@@ -1111,6 +1111,17 @@ mod tests {
             {
                 unimplemented!("not needed for audit tests")
             }
+
+            async fn execute_for_content(
+                &self,
+                _command: &str,
+                _working_dir: &std::path::Path,
+                _timeout: std::time::Duration,
+                _token: &CancellationToken,
+            ) -> Result<crate::commands::runner::ContentOutput, crate::commands::runner::CommandError>
+            {
+                unimplemented!("auditing runs no content commands")
+            }
         }
 
         let max_concurrent = 2;
