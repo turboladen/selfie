@@ -509,12 +509,8 @@ impl CommandRunner for ShellCommandRunner {
         token: &CancellationToken,
     ) -> Result<ContentOutput, CommandError> {
         let markers = content::Markers::new();
-        let fd = content::capture_fd();
-        let recipe = if content::is_fish(&self.shell) {
-            content::fish_recipe(command, &markers, fd)
-        } else {
-            content::posix_recipe(command, &markers, fd)
-        };
+        let fd = content::CAPTURE_FD;
+        let recipe = content::recipe(&self.shell, command, &markers, fd);
 
         let output = self
             .run_buffered(
@@ -2395,22 +2391,33 @@ mod content_tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_profile_holding_the_conventional_descriptors_does_not_receive_the_content() {
-        // `exec 3>somewhere` in a profile is an ordinary debugging idiom, and
-        // whichever descriptor the content travels on is one such a profile can
-        // take over and be handed the credential on.
-        let dir = tempfile::tempdir().unwrap();
-        let stolen = dir.path().join("stolen.log");
-        let path = dir.path().join("collecting-shell");
+    /// A stand-in shell whose startup does `redirect` before running its `-c`.
+    fn shell_redirecting(dir: &Path, name: &str, redirect: &str) -> PathBuf {
+        let path = dir.join(name);
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "#!/bin/sh").unwrap();
-        writeln!(file, "exec 3>{} 4>&3", stolen.display()).unwrap();
+        writeln!(file, "{redirect}").unwrap();
         writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
         drop(file);
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
+        path
+    }
+
+    #[tokio::test]
+    async fn a_profile_holding_the_conventional_descriptors_is_harmless() {
+        // `exec 3>somewhere` is an ordinary debugging idiom and `exec 3>&1` an
+        // ordinary logging one; the first is handed the credential and the second
+        // breaks every apply if the content travels on the descriptor it took.
+        // 9 is `flock`'s. None of the three may be the one selfie uses.
+        let dir = tempfile::tempdir().unwrap();
+        let stolen = dir.path().join("stolen.log");
+        let shell = shell_redirecting(
+            dir.path(),
+            "collecting-shell",
+            &format!("exec 3>{} 4>&3 9>&1", stolen.display()),
+        );
+        let runner = ShellCommandRunner::new(shell.to_str().unwrap(), TIMEOUT);
 
         let output = runner
             .execute_for_content(
@@ -2431,25 +2438,21 @@ mod content_tests {
     }
 
     #[tokio::test]
-    async fn a_profile_holding_every_usable_descriptor_fails_closed() {
-        // The residual of the one above, pinned: a profile that takes *all* of
-        // them does receive the content, and selfie's own capture comes up empty.
-        // Nothing is deployed, and this is what `docs/package-files.md` describes.
+    async fn a_profile_holding_the_capture_descriptor_fails_closed() {
+        // The documented residual, pinned: a startup file that takes the one
+        // descriptor selfie uses is handed the content and selfie captures
+        // nothing. It must refuse rather than deploy whatever is left.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("greedy-shell");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "#!/bin/sh").unwrap();
-        writeln!(
-            file,
-            "for n in 5 6 7 8 9; do eval \"exec $n>{}/stolen.$n\"; done",
-            dir.path().display()
-        )
-        .unwrap();
-        writeln!(file, "shift $(($# - 1)); eval \"$1\"").unwrap();
-        drop(file);
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let runner = ShellCommandRunner::new(path.to_str().unwrap(), TIMEOUT);
+        let shell = shell_redirecting(
+            dir.path(),
+            "greedy-shell",
+            &format!(
+                "exec {}>{}/stolen.log",
+                content::CAPTURE_FD,
+                dir.path().display()
+            ),
+        );
+        let runner = ShellCommandRunner::new(shell.to_str().unwrap(), TIMEOUT);
 
         let result = runner
             .execute_for_content("printf '%s' 'anything'", dir.path(), TIMEOUT, &token())

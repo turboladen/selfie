@@ -6,9 +6,10 @@
 //! separate by *position*, which is the only thing that catches what the shell
 //! writes after the command on the descriptor the command itself used.
 //!
-//! **A profile that redirects the capture descriptor receives the content**, and
-//! selfie's own capture then comes up empty and fails closed. Choosing the
-//! descriptor per run is what keeps a fixed profile from colliding with it. See
+//! **A startup file that redirects [`CAPTURE_FD`] receives the content**, and
+//! selfie's own capture then comes up empty and fails closed. That is a known
+//! limit against an accidental collision, not a boundary against a hostile
+//! profile — one of those already owns the session. See
 //! `.claude/rules/secrets.md`.
 
 use uuid::Uuid;
@@ -21,11 +22,18 @@ pub(super) const COMMAND_VAR: &str = "SELFIE_CONTENT_CMD";
 
 /// Descriptor the command's output is captured on.
 ///
-/// Never 3 or 4, the conventional first free descriptors; never 10 or above,
-/// which `dash`, `zsh` and `ksh` reject.
-pub(super) fn capture_fd() -> u8 {
-    5 + (Uuid::new_v4().as_bytes()[0] % 5)
-}
+/// A startup file that redirects this descriptor is handed the content, so the
+/// number is chosen to be one nothing else is likely to want: not 3 or 4, the
+/// conventional first free ones, and not 9, the `flock` lock-file convention. It
+/// cannot be 10 or above — `dash`, `zsh` and `ksh` all reject those, and `dash`
+/// is `/bin/sh` on Linux.
+///
+/// **Fixed, not chosen per run.** A single descriptor makes a collision total and
+/// therefore diagnosable — and documentable, which a varying one is not. Varying
+/// it would turn the same collision into a fraction of runs failing, which gets
+/// retried rather than investigated while the rest of the credential copies keep
+/// landing wherever the profile pointed it.
+pub(super) const CAPTURE_FD: u8 = 8;
 
 /// What the wrapping `/bin/sh` does before the user's shell exists.
 ///
@@ -94,6 +102,15 @@ pub(super) fn posix_recipe(command: &str, markers: &Markers, fd: u8) -> String {
         end = markers.end(),
         start = markers.start(),
     )
+}
+
+/// The recipe `shell` is given: fish needs the other one.
+pub(super) fn recipe(shell: &str, command: &str, markers: &Markers, fd: u8) -> String {
+    if is_fish(shell) {
+        fish_recipe(command, markers, fd)
+    } else {
+        posix_recipe(command, markers, fd)
+    }
 }
 
 /// The recipe fish is given.
@@ -245,16 +262,23 @@ mod tests {
     }
 
     #[test]
-    fn the_capture_descriptor_avoids_the_conventional_ones_and_varies() {
-        let seen: Vec<u8> = (0..64).map(|_| capture_fd()).collect();
+    fn the_capture_descriptor_is_usable_and_unconventional() {
+        // Single digit: dash, zsh and ksh reject 10 and above, and dash is
+        // `/bin/sh` on Linux. Not 3 or 4 (first free by convention) and not 9
+        // (`flock`'s).
+        assert!((5..=8).contains(&CAPTURE_FD), "{CAPTURE_FD} is not usable");
+    }
 
-        for fd in &seen {
-            assert!((5..=9).contains(fd), "descriptor {fd} is not usable");
-        }
-        assert!(
-            seen.iter().collect::<std::collections::HashSet<_>>().len() > 1,
-            "a fixed descriptor is one a profile can collide with"
-        );
+    #[test]
+    fn fish_gets_the_block_recipe_and_everything_else_the_posix_one() {
+        // The one decision no real-shell test can cover: CI has no fish, so
+        // sending it the POSIX recipe — which makes it print the exec(1) manual
+        // page into the capture — would go unnoticed here.
+        let m = markers();
+
+        assert!(recipe("/opt/homebrew/bin/fish", "cmd", &m, 8).starts_with("begin\n"));
+        assert!(recipe("/bin/sh", "cmd", &m, 8).starts_with("exec >&8"));
+        assert!(recipe("/bin/zsh", "cmd", &m, 8).starts_with("exec >&8"));
     }
 
     #[test]
