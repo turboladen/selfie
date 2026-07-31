@@ -591,12 +591,9 @@ impl CommandRunner for ShellCommandRunner {
 
 /// Read one of a child's pipes to the end, or fail.
 ///
-/// **A partial buffer is dropped, never returned.** This function existing at all
-/// is the fix for the shape it replaced, which discarded the error and returned
-/// whatever had accumulated as though the command had produced exactly that.
-///
-/// `None` is not a failure: a pipe that was never captured has no output, which
-/// is the same empty answer the previous shape gave.
+/// **A partial buffer is dropped, never returned**: what accumulated before a
+/// read failed is not the command's output. `None` is not a failure — a pipe that
+/// was never captured has no output.
 async fn read_stream<R>(reader: Option<R>) -> std::io::Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin + Send,
@@ -611,48 +608,25 @@ where
 /// Run a child to completion while both its pipes drain, or report the first
 /// thing that went wrong.
 ///
-/// Generic over the three futures rather than taking a child, so the decision it
-/// makes — *is this command's output trustworthy?* — can be driven from inputs a
-/// real child process cannot be made to produce on demand.
+/// Generic over the three futures rather than taking a child, so a read failure
+/// — which no real child can be made to produce on demand — is testable.
 ///
-/// `run_buffered` calls this, so the function under test and the function in use
-/// are the same one; the shape this replaced was assembled separately from the
-/// call site and could drift from it. **That is not the same as covering the
-/// wiring, and the difference was measured.** Discarding *every* error where
-/// `run_buffered` unwraps this fails four tests. Discarding only
-/// [`CommandError::OutputReadFailed`] there fails none — reaching that arm needs
-/// a genuine pipe failure from a real child, which no test in this repository
-/// can provoke, and the tests that exercise the consumers substitute a fake
-/// runner and never construct a `ShellCommandRunner` at all. Read the tests below
-/// as covering the decision; the last step into it rests on review.
+/// `try_join3` polls all three concurrently, which is what avoids the ~64KB
+/// pipe-buffer deadlock, and returns the first error. Returning early matters
+/// because the pipe reads are the only thing draining the child: waiting on
+/// `wait()` after a read has failed blocks until the caller's timeout and reports
+/// a read failure as a timeout.
 ///
-/// # Why all three together
+/// A failed read is an error here rather than an empty buffer beside a successful
+/// status, because a command can exit 0 while the pipe carrying its answer fails,
+/// and callers act on that output — one uses it as an executable path, one writes
+/// it to a credentials file.
 ///
-/// `try_join3` polls all three concurrently and returns the first error. Polling
-/// them concurrently is what avoids the ~64KB pipe-buffer deadlock. Returning
-/// early on error matters because the pipe reads are the only thing draining the
-/// child: waiting for `wait()` after a read has already failed would block until
-/// the caller's timeout on a child that cannot exit, and report a read failure as
-/// a timeout.
-///
-/// An exit status is not enough to report on its own — a command can exit 0 while
-/// the pipe carrying its answer failed — which is why a failed read is an error
-/// here rather than an empty buffer beside a successful status. Callers act on
-/// that output: one uses it as an executable path, one writes it to a credentials
-/// file, and two read a verdict out of it.
-///
-/// # Why there are no reader *tasks*
-///
-/// An earlier shape ran each pipe in a `tokio::spawn`, which made a
-/// [`JoinError`](tokio::task::JoinError) reachable — and a `JoinError`'s
-/// `Display` renders the panic payload. The task that panicked would be the very
-/// one holding this command's bytes, so its payload can be derived from a
-/// credential, and [`CommandError::OutputReadFailed`]'s `Display` reaches
-/// `PackageEvent::Completed`, the CLI, and the MCP server's JSON. That shape
-/// dropped the `JoinError` and substituted a fixed `&'static str` to contain it.
-/// Reading inline removes the task, and with it the payload: there is nothing
-/// left to leak rather than something guarded. **Do not reintroduce a `spawn`
-/// here without restoring that guard.**
+/// **Do not read the pipes in a `tokio::spawn`.** That makes a
+/// [`JoinError`](tokio::task::JoinError) reachable, and its `Display` renders the
+/// panic payload of the task holding this command's bytes, into
+/// [`CommandError::OutputReadFailed`] and on to `PackageEvent::Completed`, the
+/// CLI and the MCP server's JSON. Reading inline leaves nothing to leak.
 ///
 /// # Errors
 ///

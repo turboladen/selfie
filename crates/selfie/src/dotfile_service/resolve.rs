@@ -37,13 +37,9 @@ pub(crate) struct ResolvedContent {
     pub warnings: Vec<String>,
 }
 
-/// Prints the content's length, never the content.
-///
-/// Hand-written rather than derived because a derived `Debug` is a second exit
-/// for the bytes, opened silently by any future `{:?}`, `unwrap_err()`, or
-/// `expect()` on a `Result<ResolvedContent, _>`. The module header claims the
-/// bytes leave only as `ResolvedContent::bytes`; this is what makes that true
-/// rather than merely observed.
+/// Prints the content's length, never the content. **Never derive this**: a
+/// derived `Debug` is an exit for the bytes, opened by any `{:?}`,
+/// `unwrap_err()`, or `expect()` on a `Result<ResolvedContent, _>`.
 impl std::fmt::Debug for ResolvedContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedContent")
@@ -264,34 +260,19 @@ where
     }
 }
 
-/// Run a command in `base_dir`, returning stdout, or stderr on failure.
+/// Run a command in `base_dir`, returning its own stdout, or stderr on failure.
 ///
-/// stderr is returned only on failure: a command invoked with a verbose or debug
-/// flag can echo secret material there, and on the success path it has no
-/// purpose.
+/// **stderr only on failure**: a command run with a verbose flag can echo secret
+/// material there, and on the success path it has no purpose. Render a
+/// `CommandError` with `Display`, never `Debug`, which prints whatever fields a
+/// future variant adds.
 ///
-/// The error is rendered with `Display`, never `Debug`. No `CommandError`
-/// variant carries stdout today, so `Debug` would leak nothing — but `Display`
-/// is what each variant's `#[error(...)]` curates, and `Debug` prints whatever
-/// fields a future variant happens to add.
+/// **Every exit from here must call [`BoundedText::bound`]**; [`ResolveError`]'s
+/// fields are `String`, so nothing enforces it.
 ///
-/// Both exits go through [`BoundedText`] and then unwrap to a `String`, because
-/// [`ResolveError`]'s fields are `String`. The bound is therefore applied here
-/// and not enforced by the error type — unlike `CommandFailure::ExecutionFailed`,
-/// whose field *is* a `BoundedText`. A new failure exit added to this function
-/// has to call `bound` itself; nothing will stop it if it does not.
-///
-/// A command that ran fine but whose output could not be read to the end fails
-/// here too, as [`CommandError::OutputReadFailed`](crate::commands::CommandError).
-/// That matters more on this path than anywhere else in selfie, and it matters at
-/// **both** of this function's call sites:
-///
-/// - For a provider, a truncated read is a truncated credential, and the
-///   `MAX_CONTENT_BYTES` cap is a *maximum* — a short buffer sails under it.
-/// - For a var binding it is worse: a prefix of a credential is still non-empty,
-///   so the `is_empty` check passes, and truncation only makes the rendered file
-///   *smaller*, so the cap on the render passes too. Nothing downstream of here
-///   can tell a truncated binding from a short one.
+/// A command whose output could not be read to the end fails here too, and must:
+/// a truncated credential is still non-empty and still under `MAX_CONTENT_BYTES`,
+/// so nothing downstream can tell it from a short one.
 async fn run_capture<CR: CommandRunner>(
     command: &str,
     base_dir: &Path,
@@ -313,10 +294,8 @@ async fn run_capture<CR: CommandRunner>(
         let discarded_before = output.discarded_before();
         let tail_verified = output.tail_verified();
         Ok(Captured {
-            // Consumed rather than borrowed-and-copied: `stdout().to_vec()` left
-            // the provider's whole output alive twice at peak, and on this path
-            // that output is a credential. One buffer is also one thing to
-            // zeroize later rather than two.
+            // Consumed, not borrowed-and-copied: `stdout().to_vec()` would leave
+            // the whole credential alive twice at peak.
             bytes: output.into_stdout(),
             discarded_before,
             tail_verified,
@@ -380,15 +359,12 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_secs(5);
     const BASE: &str = "/pkg";
 
-    /// A runner with a fixed answer per command, recording what it was asked.
-    ///
-    /// Deliberately not `test_common::FakeCommandRunner`, which is the same thing
-    /// and is used by this crate's integration tests. `test-common` depends on
-    /// `selfie`, so inside a unit-test build of `selfie` it links a *second* copy
-    /// of the lib; its `FakeCommandRunner` then implements a different
-    /// `CommandRunner` trait than the one in scope here and will not satisfy the
-    /// bound ("multiple different versions of crate `selfie` in the dependency
-    /// graph"). Integration tests under `tests/` link the real lib and do share it.
+    // A runner with a fixed answer per command, recording what it was asked.
+    //
+    // Not `test_common::FakeCommandRunner`, which is the same thing: `test-common`
+    // depends on `selfie`, so a unit-test build links a second copy of the lib and
+    // its runner implements a different `CommandRunner`. Integration tests under
+    // `tests/` link the real lib and can use it.
     #[derive(Default, Clone)]
     struct FakeRunner {
         /// command -> (exit code, stdout, stderr)
