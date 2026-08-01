@@ -5966,3 +5966,138 @@ dotfiles:
         }
     }
 }
+
+/// `_dotfiles:` at a package's top level, and what `selfie apply` does about it.
+///
+/// Read as a YAML anchor, the key leaves the package with no dotfiles at all, so
+/// apply deployed nothing and reported success — no warning, no error, no count
+/// (selfie-g199). `selfie spec validate` reports it too, but apply never runs
+/// validation, so the refusal has to live on the apply path itself.
+mod top_level_anchor_shadowing {
+    use super::*;
+
+    fn refused_count(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count, ..
+            }) => *refused_count,
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Apply refuses the package and says why.
+    ///
+    /// The target must not exist afterwards: the entry under `_dotfiles:` is not
+    /// deployed, which is the pre-existing behavior — what changes is that
+    /// selfie now says so instead of reporting success.
+    #[tokio::test]
+    async fn apply_refuses_a_package_whose_dotfiles_key_is_shadowed() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+_dotfiles:
+  - source: "myapp/config.toml"
+    target: "{}"
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1);
+        assert!(!target.exists(), "nothing should have been deployed");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("myapp")
+                && w.contains("_dotfiles")
+                && w.contains("cannot be told apart from a misspelling")),
+            "the refusal must name the package and the key: {warnings:?}"
+        );
+    }
+
+    /// The documented top-level anchor still deploys.
+    ///
+    /// The control, and the reason the refusal is scoped to keys that shadow a
+    /// *package* field: `docs/package-files.md` documents `_target: &target …`,
+    /// and a check that refused every `_`-prefixed top-level key would pass the
+    /// test above and break every file using the documented pattern.
+    #[tokio::test]
+    async fn apply_deploys_a_package_using_the_documented_target_anchor() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"_brew: &brew "echo installed"
+_target: &target "{}"
+name: myapp
+environments:
+  test:
+    install: *brew
+dotfiles:
+  - source: "myapp/config.toml"
+    target: *target
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "the anchored target must still be deployed to"
+        );
+    }
+
+    /// A package with genuinely no dotfiles is still silent.
+    ///
+    /// Without this, an implementation that refused every package reaching the
+    /// empty-dotfiles check would pass the first test.
+    #[tokio::test]
+    async fn a_package_with_no_dotfiles_at_all_is_not_refused() {
+        let dirs = TestDirs::new();
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+"#,
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0);
+        assert_eq!(warning_messages(&events), Vec::<String>::new());
+    }
+}

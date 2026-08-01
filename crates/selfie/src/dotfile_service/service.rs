@@ -29,12 +29,13 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, Package,
+        ContentSource, DotfileEntry, Package, describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
         port::PackageRepository,
+        validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
 };
@@ -1134,6 +1135,36 @@ where
         if let Some(name) = filter_name
             && package.name() != name
         {
+            continue;
+        }
+
+        // Refuse the whole package before asking what dotfiles it has, because
+        // the answer is not trustworthy: `_dotfiles:` reads as a YAML anchor, so
+        // the list comes back empty and the `is_empty` check below would skip the
+        // package in silence — a successful run that deployed nothing
+        // (selfie-g199).
+        //
+        // Whole-package rather than per-entry, unlike the entry-level rule this
+        // mirrors: the ambiguity is in the file's top level, so there is no entry
+        // to attach it to, and the entries it does have may not be the ones its
+        // author wrote.
+        //
+        // Empty for a programmatically built package, so nothing here fires for a
+        // caller that never had raw YAML.
+        let shadowing = package.shadowing_top_level_keys();
+        if !shadowing.is_empty() {
+            let described: Vec<String> = shadowing
+                .iter()
+                .map(|key| describe_unknown_key_in(key, KNOWN_PACKAGE_FIELDS))
+                .collect();
+            sender
+                .send_warning(format!(
+                    "Skipping package '{}': {}",
+                    package.name(),
+                    described.join("; ")
+                ))
+                .await;
+            refused_count += 1;
             continue;
         }
 

@@ -973,9 +973,11 @@ anchor inside the entry whose name matches one of the entry's fields, such as `_
 
 - `selfie spec validate` reports an error naming the entry and the key, such as `dotfiles[0].var` or
   `environments.macos.dotfiles[1].var`.
-- `selfie apply` **skips that entry** with a warning naming its target, and continues with the rest
-  of the package. Only the offending entry is skipped; the package's other dotfiles and its install
-  and check commands are unaffected.
+- `selfie apply` **refuses that entry** with a warning naming its target, and continues with the
+  rest of the package. Only the offending entry is refused; the package's other dotfiles and its
+  install and check commands are unaffected. A refused entry makes the run
+  [exit non-zero](../README.md#a-refusal-is-not-a-success), so a script cannot mistake it for a
+  clean deploy.
 - Commands that rewrite the file **refuse to save** it, naming the key: `selfie spec edit`,
   `selfie package track-dotfile`, and the `selfie_spec_update` MCP tool. A rewrite is produced from
   the fields selfie understands, so saving would delete the unrecognized key and quietly turn an
@@ -991,8 +993,8 @@ anchor inside the entry whose name matches one of the entry's fields, such as `_
 Keys beginning with an underscore are ignored by selfie, so a package file can define YAML anchors
 and reuse them with aliases. This works both at the top level of the file and inside an individual
 dotfile entry, and an underscore-prefixed key is not reported as an unrecognized key — with one
-exception, described below, for an anchor inside a dotfile entry whose name matches one of that
-entry's own fields:
+exception, described below: an anchor whose name matches a real field **at its own level**, such as
+`_vars` inside an entry or `_dotfiles` at the top level.
 
 ```yaml
 _brew: &brew brew install ripgrep
@@ -1041,17 +1043,45 @@ The fix depends on which you meant, and selfie says so rather than guessing:
 ```
 
 **Rename the anchor** — `_creds: &v` works exactly as well — or, if you meant the field, drop the
-underscore. Only these four names are affected, and only inside a dotfile entry:
+underscore. Only these four names are affected inside a dotfile entry:
 
 - `_brew`, `_anchor`, `_targets` inside an entry are fine — none of them is a field name.
 - `_target: &target …` at the **top level** of the file is fine, as in the example above. Top-level
   keys are a different namespace, and `target` is not a top-level field.
 
-> **At the top level, the underscore still silences the check completely.** Selfie does not look at
-> the rest of the name there, so `_dotfiles:` is read as an anchor definition rather than as a
-> misspelling of `dotfiles:` — the package then has no dotfiles at all, `selfie apply` reports
-> success having deployed nothing, and `selfie spec validate` says nothing. Tracked as selfie-g199.
-> Reserve the underscore prefix for keys you really do intend as anchor definitions.
+### The same rule applies to a package's top-level keys
+
+An underscore-prefixed key at the top level of the file is refused when the rest of its name is a
+top-level field — `_name`, `_homepage`, `_description`, `_dotfiles`, `_post_install_note` or
+`_environments`:
+
+```yaml
+name: myapp
+# Refused: is `_dotfiles` an anchor, or a typo for `dotfiles`?
+_dotfiles:
+  - source: myapp/config.toml
+    target: ~/.config/myapp/config.toml
+```
+
+`_dotfiles:` is the case that bites. Read as an anchor, the package has **no dotfiles at all**, so
+`selfie apply` has nothing to deploy and nothing to report — a run that looks completely successful
+and did nothing.
+
+`selfie apply` therefore **refuses the whole package** and names the key:
+
+```
+⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'
+```
+
+The refusal covers the package rather than a single entry, because the ambiguity is in the file's
+top level: there is no entry to attach it to, and the entries the file does have may not be the ones
+you wrote. It counts as a refusal, so
+[the run exits non-zero](../README.md#a-refusal-is-not-a-success). `selfie spec validate` reports
+the same key in the same words.
+
+The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
+and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the
+example above depends on it — while `_target:` inside an entry is refused.
 
 ## Common Patterns
 

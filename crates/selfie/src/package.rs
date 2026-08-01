@@ -201,7 +201,7 @@ impl std::fmt::Display for InvalidEntry<'_> {
 }
 
 /// Whether `key` is an underscore-prefixed anchor definition whose name
-/// collides with a field a dotfile entry actually has.
+/// collides with one of `known`.
 ///
 /// `_`-prefixed keys are otherwise legal anywhere — that is what lets a package
 /// file define YAML anchors without `deny_unknown_fields` rejecting them
@@ -209,19 +209,46 @@ impl std::fmt::Display for InvalidEntry<'_> {
 /// from a typo for `vars:`, and reading it as an anchor deploys the template
 /// *unrendered* with the bindings silently absent (selfie-kj5y).
 ///
-/// Deliberately checks against dotfile fields only, and is applied only inside a
-/// dotfile entry. A package's top-level `_target: &target …` is an ordinary
-/// anchor — `docs/package-files.md` uses exactly that — and must stay legal.
-pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
+/// Parameterized over the field list rather than hard-coded, because the same
+/// rule applies at two levels against **different** lists, and which list is in
+/// force is the entire reason a top-level `_target:` is legal while an entry's
+/// `_target:` is not.
+fn shadows_field(key: &str, known: &[&str]) -> bool {
     key.strip_prefix('_')
-        .is_some_and(|rest| KNOWN_DOTFILE_FIELDS.contains(&rest))
+        .is_some_and(|rest| known.contains(&rest))
+}
+
+/// [`shadows_field`] against a dotfile entry's own fields.
+///
+/// Applied only inside a dotfile entry. A package's top-level `_target: &target
+/// …` is an ordinary anchor — `docs/package-files.md` uses exactly that — and is
+/// unaffected by this, because `target` is not a top-level field.
+pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
+    shadows_field(key, KNOWN_DOTFILE_FIELDS)
+}
+
+/// [`shadows_field`] against a package's top-level fields.
+///
+/// `_dotfiles:` is the case that matters: read as an anchor, the package has no
+/// dotfiles at all, so `selfie apply` deployed nothing and reported success
+/// (selfie-g199). The remedy is the same as for an entry — rename the anchor, or
+/// drop the underscore.
+///
+/// Scoped by [`KNOWN_PACKAGE_FIELDS`](crate::package::validate::KNOWN_PACKAGE_FIELDS),
+/// which deliberately **excludes** `target`. That exclusion is what keeps the
+/// documented `_target: &target …` anchor legal, and it is load-bearing: adding
+/// `target` to that list refuses every package file using the documented
+/// pattern.
+pub(crate) fn shadows_package_field(key: &str) -> bool {
+    shadows_field(key, validate::KNOWN_PACKAGE_FIELDS)
 }
 
 /// Say what is wrong with one unrecognized key, and what to do about it.
 ///
-/// Shared by [`InvalidEntry`]'s `Display` and
-/// `Package::validate_unknown_dotfile_fields`, so apply and `selfie spec
-/// validate` cannot describe the same key differently.
+/// Shared by [`InvalidEntry`]'s `Display`,
+/// `Package::validate_unknown_dotfile_fields` and
+/// `Package::validate_unknown_fields`, so apply and `selfie spec validate`
+/// cannot describe the same key differently.
 ///
 /// The collision message must hold for **both** readings of the key, because
 /// selfie cannot tell them apart — that ambiguity is the entire reason the key is
@@ -230,8 +257,11 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 /// `target: *t`, whose author would be told something untrue about their own file.
 /// So it names the ambiguity and gives the remedy for each reading: rename it if
 /// it is an anchor, spell it correctly if it is not.
-pub(crate) fn describe_unknown_key(key: &str) -> String {
-    if let Some(field) = key.strip_prefix('_').filter(|_| shadows_dotfile_field(key)) {
+///
+/// `known` is the field list in force at the key's level, and it appears in the
+/// message, so the reader is told which namespace they are in.
+pub(crate) fn describe_unknown_key_in(key: &str, known: &[&str]) -> String {
+    if let Some(field) = key.strip_prefix('_').filter(|_| shadows_field(key, known)) {
         format!(
             "'{key}' cannot be told apart from a misspelling of the '{field}' field; \
              rename it, or correct it to '{field}'"
@@ -239,9 +269,41 @@ pub(crate) fn describe_unknown_key(key: &str) -> String {
     } else {
         format!(
             "unknown field '{key}'; expected one of: {}",
-            KNOWN_DOTFILE_FIELDS.join(", ")
+            known.join(", ")
         )
     }
+}
+
+/// [`describe_unknown_key_in`] for a key inside a dotfile entry.
+pub(crate) fn describe_unknown_key(key: &str) -> String {
+    describe_unknown_key_in(key, KNOWN_DOTFILE_FIELDS)
+}
+
+/// Top-level keys of `raw_yaml` whose `_` prefix hides a real field name.
+///
+/// Returns empty for YAML that is absent or does not parse, matching
+/// `validate_unknown_fields`: a file that cannot be parsed is reported as a
+/// parse error by the loader, and guessing at its keys here would report the
+/// same problem twice in different words.
+///
+/// Sorted, because `serde_saphyr` hands back a `HashMap` and two runs over the
+/// same file must name the keys in the same order — otherwise the warning text
+/// varies between runs on Linux, where hash order is not insertion order.
+fn shadowing_top_level_keys(raw_yaml: &str) -> Vec<String> {
+    if raw_yaml.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(raw) = serde_saphyr::from_str::<HashMap<String, serde_json::Value>>(raw_yaml) else {
+        return Vec::new();
+    };
+
+    let mut keys: Vec<String> = raw
+        .into_keys()
+        .filter(|key| shadows_package_field(key))
+        .collect();
+    keys.sort();
+    keys
 }
 
 /// A dotfile mapping from a content source to a deployment target.
@@ -567,8 +629,28 @@ pub struct Package {
 
     /// Raw YAML content for validation (e.g., unknown field detection).
     /// Set after deserialization, not serialized. Same pattern as `path`.
+    ///
+    /// Private rather than `pub(crate)` so a new site cannot assign it and skip
+    /// [`set_source`](Self::set_source), which is what derives
+    /// `shadowing_top_level_keys` from it. Be precise about what that buys:
+    /// Rust private fields are visible to this module **and its descendants**,
+    /// so `package::repository::yaml` could still bypass it. It is a compile
+    /// error for anything outside `package` — which is where the second
+    /// assignment lived — not a guarantee.
     #[serde(skip)]
-    pub(crate) raw_yaml: String,
+    raw_yaml: String,
+
+    /// Top-level keys whose `_` prefix hides a misspelling of a real field.
+    ///
+    /// Derived from `raw_yaml` at load time rather than during deserialization,
+    /// which would mean hand-writing `Deserialize` for this whole struct — its
+    /// `Spanned` fields and custom environment deserializer included — for a
+    /// list two call sites read.
+    ///
+    /// Empty for a programmatically built package, which has no raw YAML. Same
+    /// limit `validate_unknown_fields` already has; see selfie-t8t2.
+    #[serde(skip)]
+    shadowing_top_level_keys: Vec<String>,
 }
 
 /// Compare only values, ignoring YAML source locations.
@@ -698,6 +780,7 @@ impl Package {
             environments: unspanned(environments),
             path,
             raw_yaml: String::new(),
+            shadowing_top_level_keys: Vec::new(),
         }
     }
 
@@ -733,7 +816,34 @@ impl Package {
             environments: unspanned(environments),
             path: PathBuf::new(), // Will be set by GetPackage::new
             raw_yaml: String::new(),
+            shadowing_top_level_keys: Vec::new(),
         }
+    }
+
+    /// Record where this package was loaded from, and what its raw YAML says.
+    ///
+    /// The one way to populate `raw_yaml`, so the derived
+    /// [`shadowing_top_level_keys`](Self::shadowing_top_level_keys) cannot fall
+    /// out of step with it. Both loaders — the YAML repository and sync's own
+    /// parse — go through here.
+    ///
+    /// Deriving the keys here rather than on demand keeps the YAML parse at load
+    /// time: `handle_apply` consults the list once per package inside its loop,
+    /// and re-parsing the file there would repeat work the loader already did.
+    pub(crate) fn set_source(&mut self, path: PathBuf, raw_yaml: String) {
+        self.shadowing_top_level_keys = shadowing_top_level_keys(&raw_yaml);
+        self.path = path;
+        self.raw_yaml = raw_yaml;
+    }
+
+    /// Top-level keys whose `_` prefix hides a misspelling of a real field.
+    ///
+    /// Non-empty means `selfie apply` refuses the whole package: the file cannot
+    /// be read unambiguously, and the keys it does carry may not be the ones its
+    /// author meant. See [`shadows_package_field`].
+    #[must_use]
+    pub fn shadowing_top_level_keys(&self) -> &[String] {
+        &self.shadowing_top_level_keys
     }
 
     /// Get the package name
@@ -1248,6 +1358,109 @@ vars: {}
     /// Two fixtures, not one: every field but `target` is `skip_serializing_if`,
     /// so a single entry can never emit all four keys and a one-fixture version
     /// would silently stop covering `command` or `vars`.
+    /// `_dotfiles` is refused at the top level; `_target` is not.
+    ///
+    /// The second half is the load-bearing one. `docs/package-files.md`
+    /// documents `_target: &target …` as the way to share a path between
+    /// entries, and it stays legal only because `target` is not a top-level
+    /// field. Adding `"target"` to `KNOWN_PACKAGE_FIELDS` breaks every file
+    /// using the documented pattern, and this is what says so.
+    #[test]
+    fn a_top_level_anchor_is_refused_only_when_it_shadows_a_package_field() {
+        assert!(shadows_package_field("_dotfiles"));
+        assert!(shadows_package_field("_environments"));
+        assert!(shadows_package_field("_name"));
+
+        assert!(
+            !shadows_package_field("_target"),
+            "the documented top-level `_target: &target` anchor must stay legal"
+        );
+        assert!(!shadows_package_field("_brew"));
+        assert!(
+            !shadows_package_field("dotfiles"),
+            "a real field is not an anchor shadowing itself"
+        );
+    }
+
+    /// The two levels have different field lists, and each says which it means.
+    ///
+    /// `_target` shadows inside an entry and does not at the top level; the same
+    /// key, opposite answers. A single shared list would make one of the two
+    /// wrong.
+    #[test]
+    fn the_two_field_levels_answer_differently_for_the_same_key() {
+        assert!(shadows_dotfile_field("_target"));
+        assert!(!shadows_package_field("_target"));
+
+        assert!(shadows_package_field("_dotfiles"));
+        assert!(!shadows_dotfile_field("_dotfiles"));
+    }
+
+    /// A shadowing key gets the ambiguity message; a plain one gets the field
+    /// list for its own level.
+    #[test]
+    fn an_unknown_key_is_described_against_the_list_in_force() {
+        let shadowed =
+            describe_unknown_key_in("_dotfiles", crate::package::validate::KNOWN_PACKAGE_FIELDS);
+        assert!(
+            shadowed.contains("cannot be told apart from a misspelling of the 'dotfiles' field"),
+            "got: {shadowed}"
+        );
+        assert!(shadowed.contains("rename it"), "got: {shadowed}");
+
+        let plain =
+            describe_unknown_key_in("configs", crate::package::validate::KNOWN_PACKAGE_FIELDS);
+        assert!(plain.contains("unknown field 'configs'"), "got: {plain}");
+        assert!(
+            plain.contains("dotfiles"),
+            "the expected-keys list belongs in the message: {plain}"
+        );
+        assert!(
+            !plain.contains("source, command"),
+            "a top-level key must not be described against the dotfile field list: {plain}"
+        );
+    }
+
+    /// Derived from raw YAML, and quiet when there is none.
+    #[test]
+    fn shadowing_keys_are_read_from_the_raw_yaml() {
+        let yaml = r#"name: myapp
+_dotfiles:
+  - source: "a"
+    target: "~/a"
+_target: &t "~/b"
+environments:
+  test:
+    install: "echo hi"
+"#;
+        assert_eq!(
+            shadowing_top_level_keys(yaml),
+            vec!["_dotfiles".to_string()],
+            "only the shadowing key, and the legal anchor left alone"
+        );
+
+        assert!(shadowing_top_level_keys("").is_empty());
+        assert!(
+            shadowing_top_level_keys("name: [unclosed").is_empty(),
+            "unparsable YAML is the loader's error to report, not this one's"
+        );
+    }
+
+    /// `set_source` keeps the derived list in step with the YAML it came from.
+    #[test]
+    fn set_source_derives_the_shadowing_keys() {
+        let mut package = Package::new_template("myapp");
+        assert!(package.shadowing_top_level_keys().is_empty());
+
+        package.set_source(
+            PathBuf::from("/packages/myapp.yml"),
+            "name: myapp\n_dotfiles: []\n".to_string(),
+        );
+
+        assert_eq!(package.shadowing_top_level_keys(), ["_dotfiles"]);
+        assert_eq!(package.path(), std::path::Path::new("/packages/myapp.yml"));
+    }
+
     #[test]
     fn test_known_dotfile_fields_matches_struct() {
         let template = entry_from_yaml("source: a.tpl\ntarget: ~/.a\nvars:\n  k: op read x\n");

@@ -5,7 +5,10 @@ use serde_saphyr::Location;
 
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
-use super::{DotfileEntry, Package, describe_unknown_key, shadows_dotfile_field};
+use super::{
+    DotfileEntry, Package, describe_unknown_key, describe_unknown_key_in, shadows_dotfile_field,
+    shadows_package_field,
+};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -229,6 +232,18 @@ impl Package {
     /// Fields starting with `_` are allowed (YAML anchor definitions like
     /// `_brew: &brew`). Anything else is an error — likely a typo or a
     /// renamed field (e.g., `configs` instead of `dotfiles`).
+    ///
+    /// The exception is an anchor whose name collides with a real top-level
+    /// field: `_dotfiles:` cannot be told apart from a misspelling of
+    /// `dotfiles:`, and reading it as an anchor leaves the package with no
+    /// dotfiles at all (selfie-g199). `target` is not a top-level field, so the
+    /// documented `_target: &target …` anchor is unaffected.
+    ///
+    /// Reporting it here is only half the fix. Apply does not run validation, so
+    /// the refusal that matters is `handle_apply`'s, which reads
+    /// `Package::shadowing_top_level_keys`. This is what `selfie spec validate`
+    /// says about the same file, worded identically through
+    /// [`describe_unknown_key_in`].
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
         if self.raw_yaml.is_empty() {
             return vec![];
@@ -242,19 +257,40 @@ impl Package {
             return vec![]; // Parse errors handled elsewhere
         };
 
-        let expected = KNOWN_PACKAGE_FIELDS.join(", ");
-
-        raw.keys()
-            .filter(|k| !k.starts_with('_') && !KNOWN_PACKAGE_FIELDS.contains(&k.as_str()))
+        let mut issues: Vec<ValidationIssue> = raw
+            .keys()
+            .filter(|k| {
+                (!k.starts_with('_') || shadows_package_field(k))
+                    && !KNOWN_PACKAGE_FIELDS.contains(&k.as_str())
+            })
             .map(|k| {
+                // A collision needs different advice from a plain misspelling,
+                // for the reason `unknown_dotfile_keys` gives: the key may have
+                // been named deliberately, and which remedy applies depends on
+                // which reading was meant.
+                let suggestion = if shadows_package_field(k) {
+                    Some(
+                        "Anchors are legal here; only a name matching a top-level field is \
+                         refused, because it cannot be told apart from a misspelling of that \
+                         field.",
+                    )
+                } else {
+                    None
+                };
+
                 ValidationIssue::error(
                     ValidationErrorCategory::InvalidValue,
                     k,
-                    &format!("unknown field '{k}'; expected one of: {expected}"),
-                    None,
+                    &describe_unknown_key_in(k, KNOWN_PACKAGE_FIELDS),
+                    suggestion,
                 )
             })
-            .collect()
+            .collect();
+
+        // `raw` is a `HashMap`, so the iteration order is not the file's. Sort by
+        // the field name to keep the report stable between runs.
+        issues.sort_by(|a, b| a.field().cmp(b.field()));
+        issues
     }
 
     /// Flag unrecognized keys inside dotfile entries, shared and per-environment.
@@ -1796,6 +1832,107 @@ dotfiles:
             .build();
         let result = package.validate("test-env");
         assert!(result.issues().has_errors());
+    }
+
+    /// A package built from raw YAML, so `raw_yaml` is populated.
+    ///
+    /// `PackageBuilder` cannot be used for these: it never sets `raw_yaml`, so
+    /// `validate_unknown_fields` returns early and the test passes without
+    /// looking at anything.
+    fn package_with_raw_yaml(yaml: &str) -> Package {
+        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+        );
+        package
+    }
+
+    /// `_dotfiles:` is reported, and the message says what to do about it.
+    #[test]
+    fn a_top_level_key_shadowing_a_field_is_reported() {
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+_dotfiles:
+  - source: "a"
+    target: "~/a"
+environments:
+  test:
+    install: "echo hi"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].field(), "_dotfiles");
+        assert!(
+            issues[0]
+                .message()
+                .contains("cannot be told apart from a misspelling of the 'dotfiles' field"),
+            "got: {}",
+            issues[0].message()
+        );
+        assert!(
+            issues[0]
+                .suggestion()
+                .is_some_and(|s| s.contains("Anchors are legal here")),
+            "a collision needs the anchors-are-legal advice: {:?}",
+            issues[0].suggestion()
+        );
+    }
+
+    /// The documented top-level anchor stays silent.
+    ///
+    /// This is the control for the test above: a check that flagged every
+    /// `_`-prefixed top-level key would satisfy that one and fail this.
+    #[test]
+    fn a_top_level_anchor_that_shadows_nothing_is_left_alone() {
+        let package = package_with_raw_yaml(
+            r#"_brew: &brew "brew install ripgrep"
+_target: &target "~/.config/bat/config"
+name: myapp
+environments:
+  test:
+    install: *brew
+dotfiles:
+  - source: "bat/config"
+    target: *target
+"#,
+        );
+
+        assert_eq!(
+            package.validate_unknown_fields(),
+            vec![],
+            "the documented `_target: &target` anchor must stay legal"
+        );
+    }
+
+    /// A plain unknown key is still reported, described against the top-level
+    /// field list rather than a dotfile entry's.
+    #[test]
+    fn a_plain_unknown_top_level_key_is_still_reported() {
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+configs:
+  - a
+environments:
+  test:
+    install: "echo hi"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].field(), "configs");
+        assert!(
+            issues[0].message().contains("post_install_note"),
+            "the expected list must be the top-level one: {}",
+            issues[0].message()
+        );
+        assert!(
+            issues[0].suggestion().is_none(),
+            "a plain misspelling gets no anchor advice"
+        );
     }
 
     /// Ensures KNOWN_FIELDS stays in sync with the Package struct.

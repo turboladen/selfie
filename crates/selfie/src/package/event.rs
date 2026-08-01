@@ -821,14 +821,20 @@ pub enum OperationSuccess {
         /// that deployed nothing (selfie-c28).
         skipped_count: usize,
         conflict_count: usize,
-        /// Entries selfie was asked to deploy and did not — refusals and
-        /// failures alike.
+        /// What selfie was asked to deploy and did not — refusals and failures
+        /// alike.
+        ///
+        /// Usually an entry, but **not always one**: a package refused whole for
+        /// a top-level key that hides a real field contributes 1 here and no
+        /// entries at all, because its `dotfiles` list was swallowed by the very
+        /// key being refused (selfie-g199). So this counts *outcomes*, matching
+        /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
         /// what every adapter reads to decide that the run did not do what was
-        /// asked. Named for the common case: most entries here were *declined*
-        /// by selfie rather than failing, and `perform_deploy` is explicit that
-        /// a refusal is not a failure.
+        /// asked. Named for the common case: most of what lands here was
+        /// *declined* by selfie rather than failing, and `perform_deploy` is
+        /// explicit that a refusal is not a failure.
         refused_count: usize,
         environment: String,
         steps_completed: StepCount,
