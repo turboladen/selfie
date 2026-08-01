@@ -177,6 +177,14 @@ state_directory: ~/.local/state/selfie
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
 
+If the file exists but cannot be read or parsed, selfie says so — naming the file and whether it was
+the read or the contents that failed — and then proceeds as though nothing had been deployed. Every
+tracked dotfile looks untracked for that run, which turns routine applies into conflict prompts.
+**Answering them writes a fresh state file over the unusable one**, so anything that was salvageable
+in it is gone; if the contents matter to you, copy the file aside before running `selfie apply` or
+`selfie dotfiles track` again. Preserving it automatically is tracked as `selfie-8qyv`, deferred
+rather than overlooked. An **absent** state file is the ordinary first-run case and is not reported.
+
 On Unix it is written readable only by its owner (mode `0600`). On Windows it inherits the parent
 directory's ACL, and on any other platform it gets default permissions — treat owner-only as a Unix
 guarantee, not a portable one. Its contents are not credentials, but they name each repository-file

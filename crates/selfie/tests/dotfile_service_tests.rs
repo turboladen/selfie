@@ -26,6 +26,7 @@ use selfie::{
     dotfile_service::{
         port::{ApplyOptions, DotfileService},
         service::DotfileServiceImpl,
+        state::DeployState,
     },
     fs::RealFileSystem,
     package::{
@@ -1242,6 +1243,10 @@ async fn test_apply_target_parent_dir_is_file() {
     }
 }
 
+/// Recovery, not reporting: a corrupt state file does not stop the deploy.
+///
+/// That it is also *reported* is `deploy_state_diagnostics`' job — the two
+/// properties are independent, and this one held while selfie was still silent.
 #[tokio::test]
 async fn test_apply_corrupt_state_file_recovers() {
     let dirs = TestDirs::new();
@@ -4147,6 +4152,57 @@ mod symlinked_targets {
         );
     }
 
+    /// An untracked, already-matching symlinked target is not recorded as deployed.
+    ///
+    /// selfie never wrote it and never will, so an entry claiming it did is a
+    /// promise the refusal guarantees it can never keep: the entry can never
+    /// advance, and `detect_drift` would answer `None` for it forever (selfie-phnh).
+    ///
+    /// Two entries, identical but for the link, because the axis under test is the
+    /// symlink and nothing else — both are already in sync, so both take the same
+    /// `Skip` branch. The plain one is the control: a fix that simply stopped
+    /// recording would fail on it.
+    #[tokio::test]
+    async fn an_untracked_matching_symlinked_target_records_no_deployment() {
+        let dirs = TestDirs::new();
+        repo_source(&dirs, "myapp/plain.toml", "SAME");
+        repo_source(&dirs, "myapp/linked.toml", "SAME");
+
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "SAME").unwrap();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SAME").unwrap();
+        let linked = dirs.target_dir.join("linked.toml");
+        std::os::unix::fs::symlink(&destination, &linked).unwrap();
+
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                ("myapp/plain.toml", plain.to_str().unwrap()),
+                ("myapp/linked.toml", linked.to_str().unwrap()),
+            ],
+        );
+
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        // Deserialized rather than matched as text: the load-bearing assertion is
+        // the negative one, and a substring of one source key can occur inside
+        // another.
+        let written =
+            std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).expect("state file");
+        let state: DeployState = serde_saphyr::from_str(&written).expect("state file parses");
+
+        assert!(
+            state.get("myapp/plain.toml").is_some(),
+            "control: an ordinary already-in-sync target is still recorded: {written}"
+        );
+        assert!(
+            state.get("myapp/linked.toml").is_none(),
+            "a target selfie never wrote to was recorded as deployed: {written}"
+        );
+    }
+
     /// The routine path, and the reason a refusal beats replacing the link.
     ///
     /// `RepoChanged` routes to `DeployDecision::Deploy` with no conflict and no
@@ -4157,19 +4213,29 @@ mod symlinked_targets {
     async fn a_symlinked_target_is_refused_on_a_routine_repo_update() {
         let dirs = TestDirs::new();
         repo_source(&dirs, "myapp/config.toml", "V1");
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "V1").unwrap();
         let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
         create_package_with_dotfiles(
             &dirs.package_dir,
             "myapp",
             &[("myapp/config.toml", target.to_str().unwrap())],
         );
 
-        // Records deploy state, so the second apply sees RepoChanged rather than
-        // an untracked entry.
-        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        // Deploy to a plain file first, then migrate it to a link — the stow-style
+        // layout a user adopts after using selfie. The first apply has to genuinely
+        // *write*, because that is what records the state the second apply needs to
+        // classify the entry `RepoChanged`. Starting from an already-symlinked
+        // matching target would record nothing (selfie-phnh), and the second apply
+        // would reach the refusal as a `Conflict` instead — passing every assertion
+        // below while testing a different branch.
+        let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(
+            deploy_counts(&first),
+            (1, 0, 0),
+            "the fixture depends on this apply really writing: {first:?}"
+        );
+        let destination = dirs.target_dir.join("destination");
+        std::fs::rename(&target, &destination).unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
         repo_source(&dirs, "myapp/config.toml", "V2");
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
@@ -4192,6 +4258,23 @@ mod symlinked_targets {
             deploy_counts(&events),
             (0, 1, 0),
             "a refusal is a skip, not a deploy"
+        );
+        // Which branch the refusal was reached from is invisible in the counts —
+        // `Deploy` and `Conflict` both land in the same bucket behind it. Drift
+        // reads the same state through the same classifier, so it is where the
+        // fixture's `RepoChanged` becomes observable rather than assumed.
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift
+                .iter()
+                .filter_map(|e| match e {
+                    PackageEvent::DotfileDriftDetected { drift_type, .. } =>
+                        Some(drift_type.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["repo changed"],
+            "the entry must reach the refusal as a repository update, not as a conflict"
         );
     }
 
@@ -4264,20 +4347,28 @@ mod symlinked_targets {
     async fn a_dry_run_reports_the_refusal_rather_than_previewing_a_deploy() {
         let dirs = TestDirs::new();
         repo_source(&dirs, "myapp/config.toml", "V1");
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "V1").unwrap();
         let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
         create_package_with_dotfiles(
             &dirs.package_dir,
             "myapp",
             &[("myapp/config.toml", target.to_str().unwrap())],
         );
 
-        // Same setup as the routine-update test, so the entry reaches the deploy
-        // decision rather than being reported as a conflict: tracked, in sync, and
-        // then the repository file changes.
-        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        // Same setup as the routine-update test, and for the same reason: the entry
+        // has to reach the *deploy* decision rather than be reported as a conflict,
+        // which means deploying to a plain file first and linking it aside
+        // afterwards. Starting from an already-symlinked matching target records
+        // nothing (selfie-phnh), leaving the second apply a `Conflict` — which
+        // satisfies every assertion below while testing a different branch.
+        let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(
+            deploy_counts(&first),
+            (1, 0, 0),
+            "the fixture depends on this apply really writing: {first:?}"
+        );
+        let destination = dirs.target_dir.join("destination");
+        std::fs::rename(&target, &destination).unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
         repo_source(&dirs, "myapp/config.toml", "V2");
 
         let options = ApplyOptions {
@@ -4298,6 +4389,26 @@ mod symlinked_targets {
             "the entry must not also be previewed as a deploy: {events:?}"
         );
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), "V1");
+        // Neither assertion above can see *which* branch reached the refusal: the
+        // check at the top of the loop precedes `match decision`, so `Deploy` and
+        // `Conflict` both warn and both skip, and a resolver-less conflict emits a
+        // conflict event rather than a "dry run" skip either way. Reverting the
+        // fixture to an already-symlinked target therefore left this test green
+        // while it tested the conflict path. Drift reads the same state through the
+        // same classifier, so it is what pins the fixture.
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift
+                .iter()
+                .filter_map(|e| match e {
+                    PackageEvent::DotfileDriftDetected { drift_type, .. } =>
+                        Some(drift_type.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["repo changed"],
+            "the dry run must preview a deploy decision, not a conflict"
+        );
     }
 
     /// The user is never asked a question whose answer cannot be honored.
@@ -4768,6 +4879,41 @@ mod symlink_consistency {
             warnings(&events),
             Vec::<String>::new(),
             "nothing is out of sync, so there is nothing to report"
+        );
+    }
+
+    /// D4. What the state file no longer claims, seen from the command that reads it.
+    ///
+    /// The fresh-machine sequence in selfie-phnh: a config already symlinked into
+    /// place by another tool, matching the repository file, and `apply` run once.
+    /// The entry stays `not tracked` because nothing was recorded — where it used to
+    /// settle to `none`, so drift reported the target as in sync on a machine selfie
+    /// had never deployed to and could not deploy to.
+    ///
+    /// Still no refusal *reason* here, which is deliberate and is the parity D5
+    /// pins: `apply` is silent about this entry, so drift is too. Making both speak
+    /// is a separate question from what the state file claims.
+    #[tokio::test]
+    async fn drift_no_longer_calls_a_never_deployed_symlinked_target_in_sync() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SAME BYTES").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        package_targeting(&dirs, "SAME BYTES", &target);
+
+        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(
+            drift_types(&events),
+            vec!["not tracked"],
+            "apply recorded a deployment for a target it never wrote to"
+        );
+        assert_eq!(
+            symlink_warnings(&events),
+            Vec::<String>::new(),
+            "control: drift stays as silent as apply about this entry"
         );
     }
 
@@ -5339,5 +5485,184 @@ mod target_rule {
         };
 
         assert_eq!(refusal(&applied), refusal(&drifted));
+    }
+}
+
+/// That an unusable deploy-state file is reported, on every command that loads one.
+///
+/// `load_deploy_state`'s own four branches are covered at the unit layer in
+/// `dotfile_service::service`. What these add is the wiring: each of the four
+/// callers forwards the message through a separate `.await`, so deleting any one
+/// leaves the other three green. One observing test per call site.
+mod deploy_state_diagnostics {
+    use super::*;
+
+    const CORRUPT: &str = "{{{{not valid yaml!!! garbage $$$";
+
+    fn warnings(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn state_warnings(events: &[PackageEvent]) -> Vec<String> {
+        warnings(events)
+            .into_iter()
+            .filter(|w| w.contains("deploy-state.yml"))
+            .collect()
+    }
+
+    fn corrupt_the_state_file(dirs: &TestDirs) {
+        std::fs::write(dirs.state_dir.join("deploy-state.yml"), CORRUPT).unwrap();
+    }
+
+    fn a_package_with_one_dotfile(dirs: &TestDirs) {
+        let source_dir = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[(
+                "myapp/config.toml",
+                dirs.target_dir.join("config.toml").to_str().unwrap(),
+            )],
+        );
+    }
+
+    #[track_caller]
+    fn assert_reports_the_corrupt_file(events: &[PackageEvent]) {
+        let named = state_warnings(events);
+        assert_eq!(
+            named.len(),
+            1,
+            "expected one report naming the state file, got {:?}",
+            warnings(events)
+        );
+        assert!(
+            named[0].contains("Cannot parse"),
+            "the report must say the file could not be parsed: {named:?}"
+        );
+    }
+
+    /// Call site 1 of 4: `handle_apply`.
+    #[tokio::test]
+    async fn apply_reports_a_corrupt_state_file() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        corrupt_the_state_file(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_reports_the_corrupt_file(&events);
+    }
+
+    /// Call site 2 of 4: `handle_check_drift`.
+    ///
+    /// The one that matters most. `drift` never saves, so it emits no "failed to
+    /// save" warning of its own — without this the command that only reads would be
+    /// the one command silent about a state file it could not read.
+    #[tokio::test]
+    async fn drift_reports_a_corrupt_state_file() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        corrupt_the_state_file(&dirs);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_reports_the_corrupt_file(&events);
+    }
+
+    /// Call site 3 of 4: `handle_track_standalone`.
+    #[tokio::test]
+    async fn track_standalone_reports_a_corrupt_state_file() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+        corrupt_the_state_file(&dirs);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert_reports_the_corrupt_file(&events);
+    }
+
+    /// Call site 4 of 4: `handle_track_for_package`.
+    #[tokio::test]
+    async fn track_for_package_reports_a_corrupt_state_file() {
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("alacritty.yml"),
+            "name: alacritty\nenvironments:\n  test:\n    install: \"echo installed\"\n",
+        )
+        .unwrap();
+        let target = dirs.target_dir.join("alacritty.toml");
+        std::fs::write(&target, "[font]\nsize = 12").unwrap();
+        corrupt_the_state_file(&dirs);
+
+        let events = collect_events(
+            dirs.service()
+                .track_for_package("alacritty", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert_reports_the_corrupt_file(&events);
+    }
+
+    /// The silence that must survive: a first run has no state file and says so
+    /// about nothing. A warning here would fire on every fresh machine.
+    #[tokio::test]
+    async fn a_first_run_reports_nothing_about_the_state_file() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            state_warnings(&events),
+            Vec::<String>::new(),
+            "a first run must not report an absent state file"
+        );
+    }
+
+    /// A state file that cannot be *read* is reported differently from one that
+    /// cannot be *parsed*, through the event stream and not just in isolation.
+    ///
+    /// The unreadable file is a directory at the state file's path: `path_exists`
+    /// answers true and the read then fails, without depending on the runner's
+    /// privileges the way a `chmod 000` file would. Unix in practice, and this
+    /// module is not gated, so the assertion tolerates either failure wording — what
+    /// it pins is that the *load* is reported and named apart from the save.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_reports_an_unreadable_state_file_apart_from_the_failed_save() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        std::fs::create_dir(dirs.state_dir.join("deploy-state.yml")).unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let all = warnings(&events);
+        assert!(
+            all.iter()
+                .any(|w| w.contains("Cannot read deploy state") && w.contains("deploy-state.yml")),
+            "the load failure must be reported and name the file: {all:?}"
+        );
+        // The same directory also defeats the save, which warns separately. Asserted
+        // so this test cannot pass off the save's warning instead of the load's.
+        assert!(
+            all.iter()
+                .any(|w| w.contains("Failed to save deploy state")),
+            "control: the save fails too, and says so in its own words: {all:?}"
+        );
     }
 }
