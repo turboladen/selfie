@@ -15,9 +15,11 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::deploy::resolve_source_path;
+use super::service::repository_read_refusal;
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::FileSystem;
+use crate::fs::target::repository_path;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
 use crate::paths::is_within;
 
@@ -199,6 +201,28 @@ where
 
         Ok(ContentSource::Template { source, vars }) => {
             let template_path = template_path(source, base_dir)?;
+
+            // The third repository read, and the one both beads missed. A
+            // `source:` + `vars:` entry is secret-bearing, but its *template* is
+            // an ordinary file in the dotfiles repository -- so a fifo committed
+            // there hangs apply on the credential path exactly as it does on the
+            // plain repository-file path (selfie-lwv5).
+            //
+            // After `template_path`, which applies the containment guard, and
+            // before the read, matching where apply and drift put theirs. Nothing
+            // secret exists in scope yet: this reports a path and a file type, and
+            // no command has run.
+            if let Some(refusal) =
+                filesystem.irregular_target_refusal(&repository_path(&template_path))
+            {
+                return Err(ResolveError::TemplateUnreadable {
+                    template: source.to_string(),
+                    message: format!(
+                        "{}. Replace it with a regular file.",
+                        repository_read_refusal(&refusal)
+                    ),
+                });
+            }
 
             let text = filesystem.read_file(&template_path).map_err(|e| {
                 ResolveError::TemplateUnreadable {
@@ -557,6 +581,11 @@ mod tests {
 
     fn fs_with_template(body: &'static str) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
+        // An ordinary regular file: the guard ahead of the read finds nothing to
+        // refuse. Stated rather than defaulted, because a mock with no
+        // expectation panics rather than answering, and because these tests are
+        // about resolution and not about the guard.
+        fs.expect_irregular_target_refusal().returning(|_| None);
         fs.expect_read_file()
             .returning(move |_| Ok(body.to_string()));
         fs
@@ -919,6 +948,9 @@ mod tests {
     async fn an_unreadable_template_names_the_template() {
         let runner = FakeRunner::default();
         let mut fs = MockFileSystem::default();
+        // Absent, not irregular: the guard passes and the *read* is what fails,
+        // which is the distinction this test is about.
+        fs.expect_irregular_target_refusal().returning(|_| None);
         fs.expect_read_file().returning(|_| {
             Err(crate::fs::filesystem::FileSystemError::IoError(
                 std::sync::Arc::new(std::io::Error::new(

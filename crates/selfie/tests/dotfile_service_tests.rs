@@ -6668,3 +6668,183 @@ mod repository_writes_do_not_follow_symlinks {
         );
     }
 }
+
+/// Sources that are neither absent nor a regular file.
+///
+/// selfie-qwj3 and the `irregular_targets` module above are about a dotfile
+/// *target* -- the path selfie writes out to. This is the identical defect on the
+/// other side of the copy: a fifo, socket or device node committed into the
+/// **repository** is read as a source, and reading a fifo blocks until a writer
+/// arrives exactly as reading one as a target does (selfie-lwv5).
+///
+/// Reachable in practice even though git cannot store a fifo: a local `mkfifo` in
+/// the dotfiles directory, a restored backup, or a filesystem-level copy all
+/// produce one.
+///
+/// Three reads, not one. The bead named `handle_apply`; `handle_check_drift`
+/// reads the source to checksum it, and `resolve_content`'s `Template` arm reads
+/// it on the **secret-bearing** path -- a `source:` + `vars:` entry resolves its
+/// template from an ordinary repository file, so a fifo there hangs apply while
+/// handling a credential.
+///
+/// `flavor = "multi_thread"` and the deadline are load-bearing for the same
+/// reason the target-side module gives: the blocking read sits in a spawned task,
+/// so on a current-thread runtime the timer never fires.
+#[cfg(unix)]
+mod irregular_sources {
+    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    fn make_fifo(path: &Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One package, one entry, whose **source** is a fifo in the repository.
+    fn package_with_fifo_source(dirs: &TestDirs, target: &Path) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        make_fifo(&dirs.package_dir.join("myapp/config.toml"));
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    /// The wording every source-side refusal shares.
+    #[track_caller]
+    fn assert_names_the_repository_file(warnings: &[String]) {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("named pipe (fifo)") && w.contains("repository file")),
+            "no warning named the repository file as a fifo: {warnings:?}"
+        );
+        // The target-side wording would send the user to inspect the wrong file:
+        // the problem is in the repository they sync, not at the deploy target.
+        assert!(
+            !warnings.iter().any(|w| w.contains("target resolves to a")),
+            "a source refusal used the target-side wording: {warnings:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_fifo_source_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_with_fifo_source(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo source");
+
+        assert_names_the_repository_file(&warning_messages(&events));
+        assert!(
+            !target.exists(),
+            "nothing may be deployed from a source selfie refused to read"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_refuses_a_fifo_source_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "whatever").unwrap();
+        package_with_fifo_source(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().check_drift().await).await
+        })
+        .await
+        .expect("drift must not block on a fifo source");
+
+        assert_names_the_repository_file(&warning_messages(&events));
+    }
+
+    /// The secret-bearing read: a `source:` + `vars:` template.
+    ///
+    /// The bead guessed this path was unaffected because a provider resolves by
+    /// running a command. That is true of `command:` entries only -- a template
+    /// entry reads a repository file like any other, and this is the read that
+    /// hangs while apply is handling a credential.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fifo_template_is_refused_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        make_fifo(&dirs.package_dir.join("creds/credentials.tpl"));
+        std::fs::write(
+            dirs.package_dir.join("creds.yml"),
+            format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"creds/credentials.tpl\"\n    target: \"{}\"\n    vars:\n      \
+                 token: \"echo secret\"\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo template");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("named pipe (fifo)") && w.contains("repository file")),
+            "no warning named the template as a fifo: {warnings:?}"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may be written from a template selfie refused to read"
+        );
+    }
+
+    /// The control for all three, and the reason none of them is vacuous: the
+    /// same fixtures with a *regular* source deploy and report drift normally. A
+    /// guard that refused every source would pass the three tests above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regular_source_is_still_deployed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "an ordinary source must still deploy: {:?}",
+            warning_messages(&events)
+        );
+    }
+}

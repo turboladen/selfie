@@ -1065,6 +1065,35 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
     )
 }
 
+// Why selfie will not read a file out of its own repository.
+//
+// Reading a fifo blocks until a writer arrives, exactly as writing one blocks
+// until a reader does -- so a fifo committed into the dotfiles directory hangs
+// `selfie apply` and `dotfiles drift` with no timeout, since `command_timeout`
+// governs provider commands rather than filesystem calls (selfie-lwv5).
+//
+// Returns the reason only. The three read sites frame it differently -- two warn
+// and skip, one fails a template resolve -- so the frame belongs to the caller
+// and only the wording is shared, the same split `TargetRejection::message` uses.
+//
+// Worded for a *source*, not a target. `IrregularTarget`'s own `Display` says
+// "target resolves to a …", which describes the path selfie deploys out to; here
+// the problem is a file in the repository the user syncs between machines, and
+// the remedy is to replace it rather than to name a different target.
+pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
+    match refusal {
+        FileSystemError::IrregularTarget { kind, .. } => {
+            format!("the repository file is a {kind} and selfie will not read it")
+        }
+        // Fails **closed**, and deliberately not a `_ => {}` that would skip the
+        // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
+        // so nothing reaches this arm; a wildcard would silently let a future
+        // variant through and un-guard the read, which is the failure this whole
+        // guard exists to prevent. Refuse on anything it reports.
+        other => format!("selfie will not read the repository file: {other}"),
+    }
+}
+
 // The three deploy-side sites that refuse a target by the rule: apply's
 // secret-bearing path, apply's repository-file path, and drift. `TargetRejection`
 // supplies the words so all three say the same thing; this supplies the frame.
@@ -1392,6 +1421,25 @@ where
             // beside the symlink check instead would leave the hang in place.
             if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
+                refused_count += 1;
+                continue;
+            }
+
+            // Immediately ahead of the read, which is what this guards: a fifo
+            // source blocks `read_file` until a writer arrives and hangs apply.
+            // Anchored to the read rather than to the containment check above,
+            // because drift runs those two in the opposite order (selfie-tl1w)
+            // and anchoring to `is_within` would put this guard on a different
+            // side of the target rule in the two commands.
+            if let Some(refusal) =
+                filesystem.irregular_target_refusal(&repository_path(&source_path))
+            {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{source}': {}. Replace it with a regular file.",
+                        repository_read_refusal(&refusal)
+                    ))
+                    .await;
                 refused_count += 1;
                 continue;
             }
@@ -1765,6 +1813,22 @@ where
                 sender
                     .send_warning(format!(
                         "Skipping '{source}': source path escapes YAML base directory"
+                    ))
+                    .await;
+                continue;
+            }
+
+            // Same guard apply applies, in the same position -- immediately ahead
+            // of the source read -- and worded identically. Drift reads the
+            // source to checksum it, so it hangs on a fifo there exactly as apply
+            // does.
+            if let Some(refusal) =
+                filesystem.irregular_target_refusal(&repository_path(&source_path))
+            {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{source}': {}. Replace it with a regular file.",
+                        repository_read_refusal(&refusal)
                     ))
                     .await;
                 continue;
