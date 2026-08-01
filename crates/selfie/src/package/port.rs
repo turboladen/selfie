@@ -273,7 +273,7 @@ pub enum PackageRepoError {
     /// [`FileSystemError`](Self::FileSystemError) passthrough.
     #[error(
         "refusing to write {path}: {reason}. \
-         Fix what is at that path in your package directory, or choose another name."
+         Remove what is at that path, or choose another name."
     )]
     UnwritablePath {
         /// The package file selfie declined to write.

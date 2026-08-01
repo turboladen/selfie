@@ -85,19 +85,11 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
     None
 }
 
-/// The directory `path` lives in, as a directory that can actually be opened.
+/// The directory `path` lives in, as one the filesystem will actually open.
 ///
-/// `Path::parent` yields `Some("")` for a bare relative name like `config.toml`,
-/// and the empty path is not something the filesystem will open: `File::open("")`
-/// is `ENOENT`. Two of the three callers get away with it by accident --
-/// `create_dir_all("")` is a no-op returning `Ok` and `tempfile_in("")` resolves
-/// to the current directory -- which is exactly why this is worth naming once
-/// rather than repeating the `filter` at each site. The third caller, the
-/// directory fsync, would turn a working write into a failure without it.
-///
-/// So this is a trap for new code rather than a bug in the old: nothing is
-/// broken today, and the shared helper is here so nothing becomes broken by
-/// adding a fourth caller that forgets.
+/// `Path::parent` gives `Some("")` for a bare name like `config.toml`, and
+/// `File::open("")` is `ENOENT`. `create_dir_all` and `tempfile_in` both cope
+/// with the empty path; the directory fsync does not.
 fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -442,17 +434,9 @@ mod tests {
     use std::fs::File;
     use tempfile::tempdir;
 
-    // A bare relative name has a parent the filesystem will accept.
-    //
-    // `Path::parent` answers `Some("")` here, and `File::open("")` is
-    // `ENOENT` -- so a directory fsync built on the raw `parent()` would fail on
-    // a bare name that writes perfectly well.
-    //
-    // Tested on the helper rather than through a write, because reaching this
-    // case through `write_file_no_follow` means writing to a relative path, and
-    // that means changing the working directory. `set_current_dir` is
-    // process-global -- it would race every other test in this binary, and no
-    // test in this repository calls it.
+    // Tested on the helper, not through a write: reaching this case through
+    // `write_file_no_follow` needs a relative path, and that needs
+    // `set_current_dir`, which is process-global and would race the suite.
     // selfie-aub
     #[test]
     fn a_bare_relative_name_gets_the_current_directory_as_its_parent() {

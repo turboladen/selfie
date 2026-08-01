@@ -6682,11 +6682,12 @@ mod repository_writes_do_not_follow_symlinks {
 // the dotfiles directory, a restored backup, or a filesystem-level copy all
 // produce one.
 //
-// Three reads, not one. The bead named `handle_apply`; `handle_check_drift`
-// reads the source to checksum it, and `resolve_content`'s `Template` arm reads
-// it on the **secret-bearing** path -- a `source:` + `vars:` entry resolves its
-// template from an ordinary repository file, so a fifo there hangs apply while
-// handling a credential.
+// Four reads, not one. `handle_apply` deploys from the source;
+// `handle_check_drift` checksums it; `resolve_content`'s `Template` arm reads it
+// on the **secret-bearing** path, since a `source:` + `vars:` entry resolves its
+// template from an ordinary repository file; and `read_referenced_file` reads
+// that same template for `selfie spec validate`. The last one is covered by
+// `a_fifo_template_is_refused_by_validate` in the repository tests.
 //
 // `flavor = "multi_thread"` and the deadline are load-bearing for the same
 // reason the target-side module gives: the blocking read sits in a spawned task,

@@ -197,11 +197,12 @@ Test egress at the **boundary**, not by listing known paths:
       exists because the writers and the refusal checks take a `TargetPath`, and selfie also writes
       to and reads from paths it composed itself — `track`'s copy into the dotfiles repository,
       `save_package`'s YAML, and the repository files `apply` and `dotfiles drift` read back — which
-      need the same no-symlink, no-fifo treatment. It is `pub(crate)`, so the **public** surface
-      still offers exactly two constructors. Never route a user-supplied target through it: that
-      drops the rule every command applies to targets, and `deploy_target` is what a deploy or track
-      _target_ must use. Its inputs are paths built from a configured directory plus already
-      validated components.
+      need the same no-symlink, no-fifo treatment. It is `pub(crate)` and not re-exported, so
+      `expand_target_path` stays the only constructor reachable outside the crate —
+      `state_file_path` is `pub(crate)` too, and `deploy_target` mints nothing. Never route a
+      user-supplied target through it: that drops the rule every command applies to targets, and
+      `deploy_target` is what a deploy or track _target_ must use. Its inputs are paths built from a
+      configured directory plus already validated components.
 - **Secret targets are written with `write_file_private`, never `write_file_no_follow` or any other
   writer** — temp file in the target's own directory at mode `0600`, then rename. Symlink-safe is
   **not** the same as owner-only: `write_file_no_follow` also refuses to follow a link, and creates

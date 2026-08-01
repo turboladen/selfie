@@ -163,8 +163,8 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
 /// - No [`TargetRejection`] rule. It does not require an absolute path and does
 ///   not refuse `~user/…`.
 /// - No expansion and no normalization. A leading `~` stays a literal `~`.
-/// - It is `pub(crate)`, so the public surface still offers exactly two
-///   constructors and no caller outside this crate can mint one this way.
+/// - It is `pub(crate)` and not re-exported, so `expand_target_path` remains the
+///   only constructor outside this crate.
 ///
 /// **Never call this on a user-supplied deploy target.** That is
 /// [`deploy_target`]'s job, and routing one through here would drop the rule

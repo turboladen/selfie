@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{
+    dotfile_service::service::repository_read_refusal,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
         GetPackage, Package,
@@ -145,6 +146,22 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             return Err(FileSystemError::IoError(Arc::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!("'{relative_path}' escapes the package directory"),
+            ))));
+        }
+
+        // `spec validate` reads templates through here, and reading a fifo blocks
+        // until a writer arrives — so a fifo template wedged `selfie spec validate`
+        // with no timeout, the same hang apply and drift have. Same guard, same
+        // position: after containment, immediately before the read.
+        if let Some(refusal) = self
+            .fs
+            .irregular_target_refusal(&repository_path(&resolved))
+        {
+            return Err(FileSystemError::IoError(Arc::new(std::io::Error::other(
+                format!(
+                    "{}. Replace it with a regular file.",
+                    repository_read_refusal(&refusal)
+                ),
             ))));
         }
 
@@ -847,6 +864,45 @@ mod tests {
             },
             _ => panic!("Expected PackageError"),
         }
+    }
+
+    // `spec validate` reads templates through `read_referenced_file`, and reading
+    // a fifo blocks until a writer arrives. Before the guard this wedged the
+    // command with no timeout, reproduced as `selfie spec validate` printing
+    // "Validating creds..." and never returning.
+    //
+    // A real filesystem and a real fifo: `MockFileSystem` cannot block, so a
+    // mocked fixture would pass against the unguarded code and prove nothing.
+    // The deadline is what turns a regression into a failure instead of a wedged
+    // suite -- the read blocks on this thread, so no async timeout would fire.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_template_is_refused_by_validate() {
+        use std::sync::mpsc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(package_dir.join("creds")).unwrap();
+        let template = package_dir.join("creds/credentials.tpl");
+        nix::unistd::mkfifo(&template, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        let package_path = package_dir.join("creds.yml");
+        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                repo.read_referenced_file(&package_path, "creds/credentials.tpl")
+                    .map_err(|e| e.to_string()),
+            );
+        });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a fifo template must not block");
+        let message = result.expect_err("a fifo template must be refused");
+        assert!(message.contains("named pipe (fifo)"), "got: {message}");
+        assert!(message.contains("repository file"), "got: {message}");
     }
 
     #[test]

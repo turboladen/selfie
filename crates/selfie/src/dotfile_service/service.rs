@@ -2527,6 +2527,21 @@ mod tests {
         }
     }
 
+    // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
+    // variant from `irregular_target_refusal` today, so this is the only thing
+    // holding the arm: hand it one directly and the read must still be refused
+    // with something a user can read. A `_ => {}` that skipped the guard would
+    // return an empty string here.
+    #[test]
+    fn a_read_refusal_that_is_not_an_irregular_file_still_refuses() {
+        let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
+            path: PathBuf::from("/pkgs/myapp/config.toml"),
+            points_to: None,
+        });
+        assert!(!message.is_empty(), "the guard fell through silently");
+        assert!(message.contains("repository file"), "got: {message}");
+    }
+
     // The control: a failure that is not a refusal keeps the filesystem's own
     // message, so the rephrasing is narrow rather than swallowing every write
     // error. Its `Display` is allowed to say whatever it says.

@@ -669,7 +669,7 @@ on the other side of the copy, in the repository selfie reads from, and are refu
 #### An irregular file in the repository is refused, not read
 
 A source that is a named pipe (fifo), a socket, or a device node is refused wherever selfie would
-read it — `selfie apply`, `selfie dotfiles drift`, and the template behind a
+read it — `selfie apply`, `selfie dotfiles drift`, `selfie spec validate`, and the template behind a
 [`vars:` entry](#provider-sourced-and-templated-dotfiles):
 
 ```
@@ -702,8 +702,9 @@ already exists before copying, and that check follows the link — so a link poi
 reports "no file here", passes the check, and a plain write would then create the file at the link's
 destination instead of in your repository.
 
-selfie has no writer that follows a symlink, so this holds for every file it writes, not only for
-the two commands named above.
+selfie's own writers never follow a symlink, so this holds wherever selfie writes a file itself, not
+only for the two commands named above. Git sync and the post-save formatter run through separate
+tools and are not covered by it.
 
 ### Provider-sourced and templated dotfiles
 
