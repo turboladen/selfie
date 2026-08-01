@@ -570,12 +570,14 @@ impl EventSender {
         &self,
         target: impl fmt::Display,
         drift_type: impl fmt::Display,
+        reason: Option<&str>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
             target: target.to_string(),
             drift_type: drift_type.to_string(),
+            reason: reason.map(ToString::to_string),
         })
         .await;
     }
@@ -2094,7 +2096,19 @@ pub enum PackageEvent {
     DotfileDriftDetected {
         operation_info: OperationInfo,
         target: String,
+        /// The drift classification, and nothing else.
+        ///
+        /// A bare label — `not tracked`, `repo changed` — which the MCP server
+        /// serializes as a typed field and the CLI prints as one. Explanations go
+        /// in `reason`; appending prose here corrupts a value callers treat as an
+        /// enum.
         drift_type: String,
+        /// Why this drift will not clear on its own, when that is knowable.
+        ///
+        /// `Some` for an entry selfie will never manage, whose drift line would
+        /// otherwise reappear on every run with nothing to explain it
+        /// (selfie-ktha).
+        reason: Option<String>,
     },
 
     /// Post-install note to display to user

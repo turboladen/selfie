@@ -976,6 +976,41 @@ where
     }
 }
 
+/// Why an entry that is already in sync will nonetheless never settle.
+///
+/// An untracked target whose contents already match is `Skip`, so apply writes
+/// nothing and refuses nothing — and records nothing either, because selfie did
+/// not write it and never will (selfie-phnh). `detect_drift` therefore keeps
+/// answering `NotTracked`, and `dotfiles drift` keeps listing it, on every run
+/// forever. The user is shown a permanent complaint with no stated cause
+/// (selfie-ktha).
+///
+/// Both commands read this one function rather than repeating the condition, so
+/// the two cannot answer differently — the same reason the refusal itself is
+/// gated on `deploy_decision`. Apply puts the reason on its skip line and drift
+/// on its drift line: each says it in the channel it already uses, and neither
+/// raises a warning it did not raise before. That is what keeps the parity
+/// `.claude/rules/secrets.md` pins structural: the *refusal* still appears
+/// exactly where apply would refuse, and nothing here changes that gate.
+///
+/// Scoped to `NotTracked`. A **tracked** entry whose target later became a
+/// symlink is a different bug with no drift line at all (selfie-v7py), and
+/// answering for it here would half-fix that one from the wrong place.
+fn unmanaged_symlink_reason<F: FileSystem>(
+    filesystem: &F,
+    drift: &DriftType,
+    decision: &DeployDecision,
+    target: &TargetPath,
+) -> Option<&'static str> {
+    (*drift == DriftType::NotTracked
+        && matches!(decision, DeployDecision::Skip(_))
+        && filesystem.symlink_refusal(target).is_some())
+    .then_some(
+        "the target is a symlink, so selfie will not manage it \
+         and records no deployment for it",
+    )
+}
+
 // Every site that words a refused deploy shares this, so apply, drift and the
 // writer cannot describe the same refusal differently. Format it here rather than
 // at a call site — no test pins this wrapper at the write site, so a copy there
@@ -1410,6 +1445,10 @@ where
                 continue;
             }
 
+            // Computed before the match, which consumes `decision`. `None` for
+            // every branch but `Skip`, so only that one reads it.
+            let unmanaged = unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path);
+
             match decision {
                 DeployDecision::Deploy => {
                     if perform_deploy(
@@ -1453,12 +1492,23 @@ where
                     // that is the same window the check above already lives with --
                     // narrower, in fact, since nothing intervenes. Do not read it as
                     // "can never manufacture one": the race is small, not absent.
-                    if drift == DriftType::NotTracked
-                        && !options.dry_run
-                        && filesystem.symlink_refusal(&target_path).is_none()
-                    {
+                    //
+                    // `unmanaged` answers the same question the record condition
+                    // used to ask inline, so this is one `symlink_refusal` call
+                    // rather than two, and drift reads the same function.
+                    if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
                         deploy_state.record_deployment(source, &source_checksum);
                     }
+
+                    // Say why it will not settle, on the line the user is already
+                    // reading. Not a warning: nothing was written and nothing was
+                    // refused, and raising one here would break the control whose
+                    // whole value is that an in-sync symlinked target is left in
+                    // silence.
+                    let reason = match unmanaged {
+                        Some(why) => format!("{reason}; {why}"),
+                        None => reason,
+                    };
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
@@ -1715,10 +1765,20 @@ where
             };
 
             let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             if drift != DriftType::None {
+                // The reason rides on the drift line rather than on a warning,
+                // because this is the line the user is already looking at and the
+                // one that keeps coming back. Apply says the same sentence on its
+                // skip line; both read `unmanaged_symlink_reason`.
                 sender
-                    .send_dotfile_drift_detected(target_path.display(), &drift)
+                    .send_dotfile_drift_detected(
+                        target_path.display(),
+                        &drift,
+                        unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path),
+                    )
                     .await;
                 drift_count += 1;
             }
@@ -1729,10 +1789,8 @@ where
             // and apply is silent for it; gating on the drift type would warn
             // exactly where apply says nothing. The drift event keeps its own gate
             // on purpose: only the refusal follows apply's decision.
-            if !matches!(
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum),
-                DeployDecision::Skip(_)
-            ) && let Some(refusal) = filesystem.symlink_refusal(&target_path)
+            if !matches!(decision, DeployDecision::Skip(_))
+                && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
             }

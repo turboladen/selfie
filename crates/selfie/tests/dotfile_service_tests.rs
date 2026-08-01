@@ -6318,3 +6318,154 @@ mod irregular_targets {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
     }
 }
+
+/// The permanent `not tracked` drift line for a target selfie will never manage.
+///
+/// An untracked dotfile whose target is a symlink and whose contents already
+/// match is `Skip`: apply writes nothing, refuses nothing, and records nothing —
+/// selfie did not write it and never will. So `detect_drift` keeps answering
+/// `NotTracked` and `dotfiles drift` keeps listing it, forever, with nothing
+/// saying why (selfie-ktha).
+///
+/// Both commands now say the same sentence in the channel each already uses:
+/// apply on its skip line, drift on its drift line. Neither raises a warning it
+/// did not raise before, which is what keeps
+/// `an_in_sync_symlinked_target_is_left_alone_and_not_reported` and
+/// `drift_says_nothing_about_an_in_sync_symlinked_target` passing unmodified.
+#[cfg(unix)]
+mod unmanageable_symlink_reason {
+    use super::*;
+    use std::path::Path;
+
+    /// An untracked entry, already in sync, whose target is `link` or a plain
+    /// file — the axis under test.
+    fn in_sync_entry(dirs: &TestDirs, target: &Path, symlinked: bool) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
+
+        if symlinked {
+            let destination = dirs.target_dir.join("destination");
+            std::fs::write(&destination, "SAME").unwrap();
+            std::os::unix::fs::symlink(&destination, target).unwrap();
+        } else {
+            std::fs::write(target, "SAME").unwrap();
+        }
+
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    fn skip_reasons(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileSkipped { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drift_reasons(events: &[PackageEvent]) -> Vec<Option<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Apply says why it is leaving the entry alone.
+    #[tokio::test]
+    async fn apply_says_why_an_in_sync_symlinked_target_will_not_settle() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let reasons = skip_reasons(&events);
+        assert!(
+            reasons.iter().any(|r| r.contains("already in sync")
+                && r.contains("symlink")
+                && r.contains("records no deployment")),
+            "the skip line must carry the reason: {reasons:?}"
+        );
+    }
+
+    /// Drift says the same thing, on the line that keeps reappearing.
+    #[tokio::test]
+    async fn drift_says_why_the_not_tracked_line_never_clears() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        // Apply first: this is the state the user is actually in, having run apply
+        // and found the drift line still there afterwards.
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let reasons = drift_reasons(&events);
+        assert_eq!(reasons.len(), 1, "expected one drift line: {reasons:?}");
+        assert!(
+            reasons[0]
+                .as_deref()
+                .is_some_and(|r| r.contains("symlink") && r.contains("will not manage")),
+            "the drift line must carry the reason: {reasons:?}"
+        );
+    }
+
+    /// The control: a plain untracked in-sync target gets no reason from either
+    /// command.
+    ///
+    /// It settles on the first apply, so there is nothing to explain. Without
+    /// this, a change that attached the reason unconditionally would satisfy both
+    /// tests above.
+    #[tokio::test]
+    async fn a_plain_in_sync_target_gets_no_reason_from_either_command() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, false);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let reasons = skip_reasons(&apply);
+        assert!(
+            reasons.iter().all(|r| !r.contains("symlink")),
+            "a plain target has nothing to explain: {reasons:?}"
+        );
+
+        // And having been recorded, it produces no drift line at all.
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift_reasons(&drift),
+            Vec::<Option<String>>::new(),
+            "a plain target settles, so there is no line to annotate"
+        );
+    }
+
+    /// The drift classification stays a bare label.
+    ///
+    /// The reason travels in its own field: the MCP server serializes
+    /// `drift_type` as a typed value and the CLI prints it as one, so appending
+    /// prose to it would corrupt what a caller matches on.
+    #[tokio::test]
+    async fn the_reason_does_not_contaminate_the_drift_type() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let types: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["not tracked".to_string()]);
+    }
+}

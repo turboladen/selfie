@@ -335,11 +335,20 @@ impl EventProcessor {
             }
 
             PackageEvent::DotfileDriftDetected {
-                target, drift_type, ..
+                target,
+                drift_type,
+                reason,
+                ..
             } => {
                 let short_target = crate::display_manager::shorten_path(&target);
-                self.display
-                    .print_warning(format!("  Drift in {short_target}: {drift_type}"));
+                // The reason follows the classification rather than replacing it,
+                // so the label stays scannable and the explanation is right there
+                // for the one drift that never clears.
+                let line = match &reason {
+                    Some(reason) => format!("  Drift in {short_target}: {drift_type} — {reason}"),
+                    None => format!("  Drift in {short_target}: {drift_type}"),
+                };
+                self.display.print_warning(line);
             }
 
             PackageEvent::PostInstallNote { note, .. } => {
