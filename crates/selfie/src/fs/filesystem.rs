@@ -131,7 +131,7 @@ pub trait FileSystem: Send + Sync {
     /// [`write_file_private`](FileSystem::write_file_private), so "selfie never writes
     /// through a symlink" is a property of the port rather than of its call sites --
     /// a writer that followed links could not be reached, because there is not one to
-    /// reach (selfie-yw7i).
+    /// reach.
     ///
     /// Intended for deploy targets and for the paths selfie composes inside its own
     /// directories. A target names a path the user asked selfie to manage; writing

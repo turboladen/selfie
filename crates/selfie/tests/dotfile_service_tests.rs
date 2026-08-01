@@ -6514,8 +6514,8 @@ mod unmanageable_symlink_reason {
     }
 }
 
-// selfie-yw7i: the copy `track` makes *into* the repository must not follow a
-// symlink at its destination either.
+// The copy `track` makes *into* the repository must not follow a symlink at its
+// destination either.
 //
 // Distinct from every refusal above, which is about the dotfile **target** --
 // the path selfie deploys out to. These are about the path selfie composes for
@@ -6528,6 +6528,7 @@ mod unmanageable_symlink_reason {
 // that check -- it follows the link and finds nothing -- so it passes the guard
 // and reaches the write. That is the case a plain `fs::write` follows, and the
 // only one these tests could fail on before the fix.
+// selfie-yw7i
 #[cfg(unix)]
 mod repository_writes_do_not_follow_symlinks {
     use super::*;
@@ -6669,27 +6670,28 @@ mod repository_writes_do_not_follow_symlinks {
     }
 }
 
-/// Sources that are neither absent nor a regular file.
-///
-/// selfie-qwj3 and the `irregular_targets` module above are about a dotfile
-/// *target* -- the path selfie writes out to. This is the identical defect on the
-/// other side of the copy: a fifo, socket or device node committed into the
-/// **repository** is read as a source, and reading a fifo blocks until a writer
-/// arrives exactly as reading one as a target does (selfie-lwv5).
-///
-/// Reachable in practice even though git cannot store a fifo: a local `mkfifo` in
-/// the dotfiles directory, a restored backup, or a filesystem-level copy all
-/// produce one.
-///
-/// Three reads, not one. The bead named `handle_apply`; `handle_check_drift`
-/// reads the source to checksum it, and `resolve_content`'s `Template` arm reads
-/// it on the **secret-bearing** path -- a `source:` + `vars:` entry resolves its
-/// template from an ordinary repository file, so a fifo there hangs apply while
-/// handling a credential.
-///
-/// `flavor = "multi_thread"` and the deadline are load-bearing for the same
-/// reason the target-side module gives: the blocking read sits in a spawned task,
-/// so on a current-thread runtime the timer never fires.
+// Sources that are neither absent nor a regular file.
+//
+// The `irregular_targets` module above is about a dotfile *target* -- the path
+// selfie writes out to. This is the identical defect on the other side of the
+// copy: a fifo, socket or device node committed into the **repository** is read
+// as a source, and reading a fifo blocks until a writer arrives exactly as
+// reading one as a target does.
+//
+// Reachable in practice even though git cannot store a fifo: a local `mkfifo` in
+// the dotfiles directory, a restored backup, or a filesystem-level copy all
+// produce one.
+//
+// Three reads, not one. The bead named `handle_apply`; `handle_check_drift`
+// reads the source to checksum it, and `resolve_content`'s `Template` arm reads
+// it on the **secret-bearing** path -- a `source:` + `vars:` entry resolves its
+// template from an ordinary repository file, so a fifo there hangs apply while
+// handling a credential.
+//
+// `flavor = "multi_thread"` and the deadline are load-bearing for the same
+// reason the target-side module gives: the blocking read sits in a spawned task,
+// so on a current-thread runtime the timer never fires.
+// selfie-lwv5, the source-side sibling of selfie-qwj3
 #[cfg(unix)]
 mod irregular_sources {
     use super::*;
@@ -6712,7 +6714,7 @@ mod irregular_sources {
             .collect()
     }
 
-    /// One package, one entry, whose **source** is a fifo in the repository.
+    // One package, one entry, whose **source** is a fifo in the repository.
     fn package_with_fifo_source(dirs: &TestDirs, target: &Path) {
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         make_fifo(&dirs.package_dir.join("myapp/config.toml"));
@@ -6723,7 +6725,7 @@ mod irregular_sources {
         );
     }
 
-    /// The wording every source-side refusal shares.
+    // The wording every source-side refusal shares.
     #[track_caller]
     fn assert_names_the_repository_file(warnings: &[String]) {
         assert!(
@@ -6775,12 +6777,12 @@ mod irregular_sources {
         assert_names_the_repository_file(&warning_messages(&events));
     }
 
-    /// The secret-bearing read: a `source:` + `vars:` template.
-    ///
-    /// The bead guessed this path was unaffected because a provider resolves by
-    /// running a command. That is true of `command:` entries only -- a template
-    /// entry reads a repository file like any other, and this is the read that
-    /// hangs while apply is handling a credential.
+    // The secret-bearing read: a `source:` + `vars:` template.
+    //
+    // The bead guessed this path was unaffected because a provider resolves by
+    // running a command. That is true of `command:` entries only -- a template
+    // entry reads a repository file like any other, and this is the read that
+    // hangs while apply is handling a credential.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_fifo_template_is_refused_without_hanging() {
         let dirs = TestDirs::new();
@@ -6818,9 +6820,9 @@ mod irregular_sources {
         );
     }
 
-    /// The control for all three, and the reason none of them is vacuous: the
-    /// same fixtures with a *regular* source deploy and report drift normally. A
-    /// guard that refused every source would pass the three tests above.
+    // The control for all three, and the reason none of them is vacuous: the
+    // same fixtures with a *regular* source deploy and report drift normally. A
+    // guard that refused every source would pass the three tests above.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_regular_source_is_still_deployed() {
         let dirs = TestDirs::new();

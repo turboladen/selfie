@@ -442,24 +442,25 @@ mod tests {
     use std::fs::File;
     use tempfile::tempdir;
 
-    /// A bare relative name has a parent the filesystem will accept.
-    ///
-    /// selfie-aub. `Path::parent` answers `Some("")` here, and `File::open("")` is
-    /// `ENOENT` -- so a directory fsync built on the raw `parent()` would fail on
-    /// a bare name that writes perfectly well.
-    ///
-    /// Tested on the helper rather than through a write, because reaching this
-    /// case through `write_file_no_follow` means writing to a relative path, and
-    /// that means changing the working directory. `set_current_dir` is
-    /// process-global -- it would race every other test in this binary, and no
-    /// test in this repository calls it.
+    // A bare relative name has a parent the filesystem will accept.
+    //
+    // `Path::parent` answers `Some("")` here, and `File::open("")` is
+    // `ENOENT` -- so a directory fsync built on the raw `parent()` would fail on
+    // a bare name that writes perfectly well.
+    //
+    // Tested on the helper rather than through a write, because reaching this
+    // case through `write_file_no_follow` means writing to a relative path, and
+    // that means changing the working directory. `set_current_dir` is
+    // process-global -- it would race every other test in this binary, and no
+    // test in this repository calls it.
+    // selfie-aub
     #[test]
     fn a_bare_relative_name_gets_the_current_directory_as_its_parent() {
         assert_eq!(parent_dir(Path::new("config.toml")), Path::new("."));
     }
 
-    /// The control: an ordinary path keeps its real parent, so the helper is not
-    /// simply answering "." for everything.
+    // The control: an ordinary path keeps its real parent, so the helper is not
+    // simply answering "." for everything.
     #[test]
     fn a_nested_path_keeps_its_own_parent() {
         assert_eq!(
@@ -1241,17 +1242,18 @@ mod no_follow_write_tests {
             assert!(real.join("config").exists());
         }
 
-        /// The directory fsync must not turn a working write into a failure.
-        ///
-        /// selfie-aub. Opening a directory needs **read** permission; creating and
-        /// writing a file in it needs write and execute. So `0o300` is a directory
-        /// selfie can write into and cannot open -- the write succeeds, the file's
-        /// own `sync_all` succeeds, and only the directory fsync fails, with
-        /// `EACCES`. Making that fatal would break deploys into any write-only
-        /// directory, which is why it is best-effort.
-        ///
-        /// The mode is the whole fixture: at `0o700` this passes against a fatal
-        /// implementation too, and proves nothing.
+        // The directory fsync must not turn a working write into a failure.
+        //
+        // Opening a directory needs **read** permission; creating and
+        // writing a file in it needs write and execute. So `0o300` is a directory
+        // selfie can write into and cannot open -- the write succeeds, the file's
+        // own `sync_all` succeeds, and only the directory fsync fails, with
+        // `EACCES`. Making that fatal would break deploys into any write-only
+        // directory, which is why it is best-effort.
+        //
+        // The mode is the whole fixture: at `0o700` this passes against a fatal
+        // implementation too, and proves nothing.
+        // selfie-aub
         #[test]
         fn a_write_only_parent_directory_still_succeeds() {
             if nix::unistd::Uid::effective().is_root() {

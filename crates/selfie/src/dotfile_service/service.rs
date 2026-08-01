@@ -325,11 +325,12 @@ fn load_deploy_state<F: FileSystem>(
 /// re-derived on the next run, an untracked source whose target already matches is
 /// recorded again, and one that differs is deployed.
 ///
-/// Making it *more* durable would be the wrong fix for selfie-aub. The record can
+/// Making it *more* durable would be the wrong fix. The record can
 /// only lie when it outlives the write it describes, so guaranteeing the state
 /// survives a crash while the target write may not would widen that window rather
 /// than close it. The ordering is established at the other end, in
 /// `write_file_no_follow`, which is durable before `record_deployment` runs.
+// selfie-aub
 fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
