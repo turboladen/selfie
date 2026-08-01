@@ -1048,7 +1048,7 @@ async fn perform_deploy<F: FileSystem>(
             _ => format!("Failed to write '{}': {e}", unit.target_path.display()),
         };
         sender.send_warning(message).await;
-        // `Err` has the caller count this as skipped and leaves the deploy state
+        // `Err` has the caller count this as refused and leaves the deploy state
         // untouched, so nothing is recorded as deployed that was not. An entry
         // already in the state keeps its previous checksums and is stale rather than
         // untracked, which is the honest record: for a refusal nothing was written,
@@ -1110,6 +1110,16 @@ where
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut conflict_count: usize = 0;
+    // Entries this run was asked to deploy and did not. Kept apart from
+    // `skipped_count` because a caller cannot act on a number that means both
+    // "nothing to do" and "selfie declined": that conflation is what let `selfie
+    // apply` exit 0 having deployed nothing (selfie-c28).
+    //
+    // The split is the one the secret-bearing path already draws between
+    // `SecretOutcome::Failed` and `SecretOutcome::Skipped` — see
+    // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
+    // never reached the repository-file path until now.
+    let mut refused_count: usize = 0;
 
     // Set when `stop_on_error` aborts the run. Held rather than returned so the
     // deploy state below is still saved.
@@ -1171,7 +1181,7 @@ where
                         SecretOutcome::Skipped => skipped_count += 1,
                         SecretOutcome::Conflicted => conflict_count += 1,
                         SecretOutcome::Failed => {
-                            skipped_count += 1;
+                            refused_count += 1;
                             // Cancellation is decided before `stop_on_error` gets
                             // to explain the failure, and outside its branch,
                             // because a cancelled run stops either way.
@@ -1214,7 +1224,7 @@ where
                     sender
                         .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1229,7 +1239,7 @@ where
                         "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
-                skipped_count += 1;
+                refused_count += 1;
                 continue;
             }
 
@@ -1248,7 +1258,7 @@ where
                     sender
                         .send_warning(target_refusal(entry.target(), rejection))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1263,7 +1273,7 @@ where
                             source_path.display()
                         ))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1333,7 +1343,7 @@ where
                 && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
-                skipped_count += 1;
+                refused_count += 1;
                 continue;
             }
 
@@ -1355,7 +1365,10 @@ where
                             deployed_count += 1;
                         }
                     } else {
-                        skipped_count += 1;
+                        // A refusal or a write failure. `perform_deploy` has
+                        // already said which in a warning; here they are the same
+                        // thing — asked to deploy, did not.
+                        refused_count += 1;
                     }
                 }
                 DeployDecision::Skip(reason) => {
@@ -1442,7 +1455,11 @@ where
                                 deployed_count += 1;
                             }
                         } else {
-                            skipped_count += 1;
+                            // The second of `perform_deploy`'s two failure sites,
+                            // easy to miss because the first one looks the same.
+                            // A conflict the user accepted and selfie then could
+                            // not write is a refusal exactly like the plain one.
+                            refused_count += 1;
                         }
                     } else {
                         sender
@@ -1486,11 +1503,20 @@ where
         return OperationResult::Failure(OperationFailure::Generic(message));
     }
 
-    let total = deployed_count + skipped_count + conflict_count;
+    // `refused_count` belongs in the total: leaving it out would shrink the step
+    // count by exactly the number of refusals, so a run that refused two of three
+    // entries would report (1/1) and the two refusals would vanish from the
+    // summary as well as from the counters.
+    //
+    // That makes this "outcomes recorded" rather than "entries seen": a package
+    // refused whole for a top-level unknown key contributes one outcome and no
+    // entries.
+    let total = deployed_count + skipped_count + conflict_count + refused_count;
     OperationResult::Success(OperationSuccess::DotfilesApplied {
         deployed_count,
         skipped_count,
         conflict_count,
+        refused_count,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total, total),
     })

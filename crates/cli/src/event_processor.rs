@@ -190,6 +190,24 @@ impl EventProcessor {
                 operation_info,
                 result: op_result,
             } => match op_result {
+                // A completed operation that refused part of its work is not a
+                // success to a script reading the exit code: `selfie apply` would
+                // otherwise report 0 having deployed nothing (selfie-c28). The
+                // library decides whether refusals happened; this only decides
+                // what that means for a terminal.
+                OperationResult::Success(success) if success.had_refusals() => {
+                    self.display.collect_error(ErrorDetail {
+                        package_name: operation_info.package_name,
+                        operation: operation_info.operation_type.to_string(),
+                        command: None,
+                        exit_code: None,
+                        stderr: None,
+                        message: success.to_string(),
+                    });
+                    self.display.print_error(success.to_string());
+                    result.exit_code = 1;
+                    result.had_errors = true;
+                }
                 OperationResult::Success(success) => {
                     self.display.print_success(success.to_string());
                 }
@@ -691,6 +709,70 @@ mod tests {
         assert_eq!(errors[0].command.as_deref(), Some("brew install fail-pkg"));
         assert_eq!(errors[0].exit_code, Some(1));
         assert_eq!(errors[0].stderr.as_deref(), Some("not found"));
+    }
+
+    /// A completed apply that refused an entry exits non-zero.
+    ///
+    /// The library counts the refusal; this asserts the adapter acts on it. A
+    /// script checking `$?` is the caller selfie-c28 is about.
+    #[tokio::test]
+    async fn a_completed_apply_that_refused_something_exits_non_zero() {
+        use selfie::package::event::{OperationResult, OperationSuccess, StepCount};
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
+            operation_info: make_operation_info("apply"),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 0,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 1,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        let result = processor.process_events(event_stream, |_event| false).await;
+
+        assert_eq!(result.exit_code, 1);
+        assert!(result.had_errors);
+        assert_eq!(
+            display_clone.collected_errors().len(),
+            1,
+            "the refusal belongs in the end-of-run summary too"
+        );
+    }
+
+    /// Control: the same event with nothing refused still exits 0.
+    ///
+    /// Without this, an implementation that failed every completed apply would
+    /// satisfy the test above.
+    #[tokio::test]
+    async fn a_completed_apply_that_refused_nothing_exits_zero() {
+        use selfie::package::event::{OperationResult, OperationSuccess, StepCount};
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
+            operation_info: make_operation_info("apply"),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 1,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        let result = processor.process_events(event_stream, |_event| false).await;
+
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.had_errors);
     }
 
     #[tokio::test]

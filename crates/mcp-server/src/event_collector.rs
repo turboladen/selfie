@@ -26,6 +26,23 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
 
     let (success, result_data) = match final_result {
+        // An operation that completed while refusing part of its work is
+        // reported as an error result, the same call the CLI answers with exit
+        // code 1. The payload's `status` moves in step with the envelope: a
+        // caller reading `"status": "success"` inside a result flagged as an
+        // error gets the same two-meanings-in-one-field problem selfie-c28 is
+        // about, one layer up.
+        // `refused` is its own field, not just a number inside `message`: the
+        // tool description promises a count, and an assistant should not have to
+        // parse one out of prose.
+        Some(OperationResult::Success(s)) if s.had_refusals() => (
+            false,
+            serde_json::json!({
+                "status": "refused",
+                "refused": s.refused_count(),
+                "message": format!("{s}"),
+            }),
+        ),
         Some(OperationResult::Success(s)) => (
             true,
             serde_json::json!({ "status": "success", "message": format!("{s}") }),
@@ -357,6 +374,70 @@ mod tests {
             context: OperationContext::default(),
             timestamp: Instant::now(),
         }
+    }
+
+    /// An apply that refused an entry comes back as an error result, and the
+    /// payload agrees with the envelope.
+    ///
+    /// `tool_result` turns `success: false` into `CallToolResult::error`, so an
+    /// assistant is told the call did not do what was asked. The payload's
+    /// `status` has to move with it: `"status": "success"` inside a result
+    /// flagged as an error is the same two-meanings-in-one-field defect as the
+    /// counter selfie-c28 is about.
+    #[tokio::test]
+    async fn an_apply_that_refused_an_entry_is_an_error_result() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 0,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 1,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "refused");
+        // The count is a field, because the tool description promises one. An
+        // assistant looking for `refused` must not have to read `message`.
+        assert_eq!(result.data["result"]["refused"], 1);
+        assert!(
+            result.data["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("1 refused"),
+            "the count belongs in the message an assistant reads: {:?}",
+            result.data["result"]["message"]
+        );
+    }
+
+    /// Control: an apply with nothing refused is still a success result.
+    #[tokio::test]
+    async fn an_apply_that_refused_nothing_is_a_success_result() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 1,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "success");
     }
 
     /// A failed command's output must not reach the JSON an assistant reads.

@@ -812,8 +812,24 @@ pub enum OperationSuccess {
     /// Dotfile apply operation completed
     DotfilesApplied {
         deployed_count: usize,
+        /// Entries there was correctly nothing to do for: already in sync, or a
+        /// dry run declining to act.
+        ///
+        /// Distinct from `refused_count`, and the distinction is the point. A
+        /// refused entry counted here is indistinguishable from one that needed
+        /// no work, which is how `selfie apply` came to report success for a run
+        /// that deployed nothing (selfie-c28).
         skipped_count: usize,
         conflict_count: usize,
+        /// Entries selfie was asked to deploy and did not — refusals and
+        /// failures alike.
+        ///
+        /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
+        /// what every adapter reads to decide that the run did not do what was
+        /// asked. Named for the common case: most entries here were *declined*
+        /// by selfie rather than failing, and `perform_deploy` is explicit that
+        /// a refusal is not a failure.
+        refused_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1150,12 +1166,13 @@ impl std::fmt::Display for OperationSuccess {
                 deployed_count,
                 skipped_count,
                 conflict_count,
+                refused_count,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
-                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s) {steps_completed}"
+                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused {steps_completed}"
                 )
             }
             OperationSuccess::DotfileDriftChecked {
@@ -1571,6 +1588,41 @@ impl OperationSuccess {
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
+        }
+    }
+
+    /// Whether this success also refused to do something it was asked to do.
+    ///
+    /// The one place that question is answered, so the CLI's exit code and the
+    /// MCP server's result envelope cannot disagree about it. An operation that
+    /// completed while declining part of its work is still a completed
+    /// operation — which is why this is a property of a success rather than a
+    /// failure — but a caller checking only the exit code has to be told
+    /// (selfie-c28).
+    ///
+    /// False for every other variant: no other operation counts refusals yet.
+    /// Add a variant here when one does, rather than teaching an adapter to
+    /// look for it.
+    #[must_use]
+    pub fn had_refusals(&self) -> bool {
+        self.refused_count().is_some_and(|count| count > 0)
+    }
+
+    /// How many refusals this success carries, for operations that count them.
+    ///
+    /// `None` where the question does not apply, which is every variant but
+    /// [`DotfilesApplied`](Self::DotfilesApplied) — distinct from `Some(0)`, a
+    /// run that could have refused something and did not.
+    ///
+    /// Exists so an adapter can report the number rather than the fact. The MCP
+    /// server puts it in its own JSON field: an assistant told only that
+    /// something was refused has to parse the count out of a prose message,
+    /// which is the failure mode structured output exists to avoid.
+    #[must_use]
+    pub fn refused_count(&self) -> Option<usize> {
+        match self {
+            OperationSuccess::DotfilesApplied { refused_count, .. } => Some(*refused_count),
+            _ => None,
         }
     }
 

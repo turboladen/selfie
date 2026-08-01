@@ -188,6 +188,30 @@ impl ConflictResolver for InteractiveConflictResolver {
     }
 }
 
+/// The completion summary apply renders itself, if it renders this one.
+///
+/// `Some` only for a clean success, which apply prints as info (blue) rather
+/// than success (green) so it does not blend with diff additions.
+///
+/// `None` sends the event to `EventProcessor`'s default handler, and that is
+/// load-bearing rather than cosmetic: `handle_event` is the only thing that
+/// writes `exit_code`, and `process_events` skips it entirely for any event a
+/// custom handler claims. A success carrying a refusal handled *here* would be
+/// printed prettily and exit 0 — which is selfie-c28. So the exit code for a
+/// refusal cannot be fixed in `event_processor.rs` alone; this function is the
+/// other half.
+fn summary_to_render(
+    result: &selfie::package::event::OperationResult,
+) -> Option<&selfie::package::event::OperationSuccess> {
+    match result {
+        selfie::package::event::OperationResult::Success(success) if !success.had_refusals() => {
+            Some(success)
+        }
+        // Failures, and successes carrying a refusal.
+        _ => None,
+    }
+}
+
 /// Handle the apply command
 ///
 /// Creates a `DotfileServiceImpl` and delegates to `apply_all` or `apply`
@@ -230,16 +254,14 @@ pub(crate) async fn handle_apply(
             selfie::package::event::PackageEvent::DotfileDeploying { .. }
             | selfie::package::event::PackageEvent::DotfileDeployed { .. } => true,
 
-            // Render the completion summary as info (blue) rather than
-            // success (green) so it doesn't blend with diff additions.
             selfie::package::event::PackageEvent::Completed { result, .. } => {
-                match result {
-                    selfie::package::event::OperationResult::Success(success) => {
+                match summary_to_render(result) {
+                    Some(success) => {
                         display_for_handler.print_info(success.to_string());
+                        true
                     }
-                    _ => return false, // let default handler deal with failures
+                    None => false,
                 }
-                true
             }
             _ => false,
         })
@@ -265,6 +287,42 @@ mod tests {
              filler_five: unchanged-five\n\
              far_away_marker: UNCHANGED-AND-DISTANT\n"
         )
+    }
+
+    use selfie::package::event::{OperationFailure, OperationResult, OperationSuccess, StepCount};
+
+    fn applied(refused_count: usize) -> OperationResult {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
+            deployed_count: 0,
+            skipped_count: 0,
+            conflict_count: 0,
+            refused_count,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        })
+    }
+
+    /// A clean success is rendered here and never reaches the default handler.
+    #[test]
+    fn a_clean_success_is_rendered_by_applies_own_handler() {
+        assert!(summary_to_render(&applied(0)).is_some());
+    }
+
+    /// A success carrying a refusal is handed on, so the exit code gets set.
+    ///
+    /// Claiming it here would print the summary and swallow the event, and
+    /// `EventProcessor::handle_event` — the only writer of `exit_code` — would
+    /// never see it. That is selfie-c28 in one line.
+    #[test]
+    fn a_success_carrying_a_refusal_falls_through_to_the_default_handler() {
+        assert!(summary_to_render(&applied(1)).is_none());
+    }
+
+    /// Control: failures were always handed on, and still are.
+    #[test]
+    fn a_failure_falls_through_to_the_default_handler() {
+        let failure = OperationResult::Failure(OperationFailure::Generic("boom".to_string()));
+        assert!(summary_to_render(&failure).is_none());
     }
 
     #[test]

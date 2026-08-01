@@ -93,6 +93,19 @@ environments:
     file_path
 }
 
+/// Write a package file from raw YAML, returning its path.
+///
+/// The escape hatch from [`create_package_with_dotfiles`], which builds the
+/// `dotfiles:` key itself and so cannot express a file whose defect is in that
+/// key's *name* or in an entry's extra keys. A `PackageBuilder` fixture cannot
+/// stand in either: the builder never populates `raw_yaml`, so a test about
+/// top-level keys built that way passes without ever exercising the check.
+fn write_package_yaml(package_dir: &std::path::Path, name: &str, yaml: &str) -> PathBuf {
+    let file_path = package_dir.join(format!("{name}.yml"));
+    std::fs::write(&file_path, yaml).unwrap();
+    file_path
+}
+
 /// Create standard test directories under a temp dir
 struct TestDirs {
     _temp: TempDir,
@@ -905,9 +918,14 @@ async fn test_apply_rejects_path_traversal() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
@@ -940,9 +958,14 @@ async fn test_apply_missing_source_warns_and_skips() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
@@ -1234,9 +1257,14 @@ async fn test_apply_target_parent_dir_is_file() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
@@ -4105,16 +4133,23 @@ mod symlinked_targets {
             .collect()
     }
 
-    /// `(deployed, skipped, conflict)` — the conflict count is part of the tuple
-    /// because a refusal deliberately lands in a different bucket from a conflict.
-    fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize) {
+    /// `(deployed, skipped, conflict, refused)` — every bucket, because the
+    /// point of each is that it is not one of the others. A refusal is not a
+    /// conflict, and since selfie-c28 it is not a skip either.
+    fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
             OperationResult::Success(OperationSuccess::DotfilesApplied {
                 deployed_count,
                 skipped_count,
                 conflict_count,
+                refused_count,
                 ..
-            }) => (*deployed_count, *skipped_count, *conflict_count),
+            }) => (
+                *deployed_count,
+                *skipped_count,
+                *conflict_count,
+                *refused_count,
+            ),
             other => panic!("expected DotfilesApplied, got {other:?}"),
         }
     }
@@ -4230,7 +4265,7 @@ mod symlinked_targets {
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
-            (1, 0, 0),
+            (1, 0, 0, 0),
             "the fixture depends on this apply really writing: {first:?}"
         );
         let destination = dirs.target_dir.join("destination");
@@ -4256,8 +4291,8 @@ mod symlinked_targets {
         );
         assert_eq!(
             deploy_counts(&events),
-            (0, 1, 0),
-            "a refusal is a skip, not a deploy"
+            (0, 0, 0, 1),
+            "a refusal is counted as refused, not as a deploy"
         );
         // Which branch the refusal was reached from is invisible in the counts —
         // `Deploy` and `Conflict` both land in the same bucket behind it. Drift
@@ -4304,7 +4339,7 @@ mod symlinked_targets {
             "the link's destination was created"
         );
         assert!(is_symlink(&target));
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
     /// `--yes` resolves a conflict; it does not authorize writing through a link.
@@ -4335,7 +4370,7 @@ mod symlinked_targets {
             "USER EDITED"
         );
         assert!(is_symlink(&target));
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
     /// A preview must report the refusal, not promise a deploy that will not happen.
@@ -4363,7 +4398,7 @@ mod symlinked_targets {
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
-            (1, 0, 0),
+            (1, 0, 0, 0),
             "the fixture depends on this apply really writing: {first:?}"
         );
         let destination = dirs.target_dir.join("destination");
@@ -4459,14 +4494,17 @@ mod symlinked_targets {
             "USER EDITED"
         );
         assert!(is_symlink(&target));
-        // Counted as skipped, NOT as a conflict, though the content differs and the
+        // Counted as refused, NOT as a conflict, though the content differs and the
         // entry would otherwise have been one. A conflict is a question for the
         // user; this one is already settled, so it is not asked. Asserted so the
         // bucket cannot move back without someone deciding to.
+        //
+        // Not `skipped` either, since selfie-c28: an entry selfie declined to write
+        // is not one there was nothing to do for.
         assert_eq!(
             deploy_counts(&events),
-            (0, 1, 0),
-            "a refused entry must be a skip, not a conflict"
+            (0, 0, 0, 1),
+            "a refused entry is counted as refused: not a conflict, and not a skip"
         );
         assert!(
             !events
@@ -4619,7 +4657,7 @@ mod symlinked_targets {
             warnings.iter().any(|w| w.contains("is a symlink")),
             "the writer's own refusal must still be reported: {warnings:?}"
         );
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
     /// An ordinary target is unaffected by any of the above.
@@ -4637,7 +4675,7 @@ mod symlinked_targets {
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
-        assert_eq!(deploy_counts(&events), (1, 0, 0));
+        assert_eq!(deploy_counts(&events), (1, 0, 0, 0));
     }
 
     /// The deploy state file names every path selfie manages here, so it must not
@@ -5418,10 +5456,12 @@ mod target_rule {
     /// though neither ran a command, and the documentation described the
     /// opposite.
     ///
-    /// Two entries, the refused one first, because `service.rs`'s `Skipped` and
-    /// `Failed` arms both increment `skipped_count` — a one-entry package cannot
-    /// tell the two outcomes apart. What distinguishes them is whether the run
-    /// reaches the second entry at all.
+    /// Two entries, the refused one first, because the counters cannot tell these
+    /// two apart on their own: `Skipped` and `Failed` differ in *which* bucket
+    /// they increment, but this test is about `stop_on_error`, and what
+    /// distinguishes an aborted run from a continued one is whether the second
+    /// entry is reached at all. A one-entry package has no second entry, so it
+    /// would pass whether the run stopped or carried on.
     #[tokio::test]
     async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
         async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
@@ -5664,5 +5704,265 @@ mod deploy_state_diagnostics {
                 .any(|w| w.contains("Failed to save deploy state")),
             "control: the save fails too, and says so in its own words: {all:?}"
         );
+    }
+}
+
+/// What `selfie apply` reports when it refuses.
+///
+/// A refusal used to land in `skipped_count` beside "already in sync", so a
+/// caller — a script reading the exit code, or an assistant reading the MCP
+/// envelope — could not tell a run that deployed nothing from a run that had
+/// nothing to deploy (selfie-c28). These pin the buckets apart.
+mod refusal_accounting {
+    use super::*;
+
+    /// `(deployed, skipped, conflict, refused)`.
+    fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                skipped_count,
+                conflict_count,
+                refused_count,
+                ..
+            }) => (
+                *deployed_count,
+                *skipped_count,
+                *conflict_count,
+                *refused_count,
+            ),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    fn steps(events: &[PackageEvent]) -> (usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                steps_completed, ..
+            }) => (steps_completed.completed, steps_completed.total),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    /// The two buckets are told apart, on a fixture that varies along that axis
+    /// and nothing else.
+    ///
+    /// Both entries are repository files with an existing target; the only
+    /// difference is that one carries an unrecognized key and is therefore
+    /// refused. A fixture with only the refused entry would pass against an
+    /// implementation that renamed `skipped_count` to `refused_count` wholesale,
+    /// which is the change this test exists to reject.
+    #[tokio::test]
+    async fn a_refused_entry_is_counted_apart_from_an_in_sync_one() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/insync.toml"), "SAME").unwrap();
+
+        let in_sync = dirs.target_dir.join("insync.toml");
+        std::fs::write(&in_sync, "SAME").unwrap();
+        let refused = dirs.target_dir.join("refused.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/insync.toml"
+    target: "{}"
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                in_sync.display(),
+                refused.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(counts(&events), (0, 1, 0, 1));
+        assert!(
+            !refused.exists(),
+            "the refused entry must not have been deployed"
+        );
+    }
+
+    /// A conflict the user accepted, which selfie then could not write.
+    ///
+    /// This is `perform_deploy`'s *second* failure site — the one inside the
+    /// conflict branch, which looks identical to the first and was missed when
+    /// this fix was planned as "six sites". A target that is a directory reaches
+    /// it: the target read fails, so the entry is a `Conflict`; `auto_accept`
+    /// settles it; and the write then fails with `EISDIR`.
+    #[tokio::test]
+    async fn a_write_that_fails_after_an_accepted_conflict_is_refused() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+
+        // A directory where the target file should be.
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::create_dir_all(&target).unwrap();
+
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            counts(&events),
+            (0, 0, 0, 1),
+            "an accepted conflict that could not be written is a refusal, not a skip"
+        );
+        assert!(target.is_dir(), "the directory must be left alone");
+    }
+
+    /// Every outcome is still a step.
+    ///
+    /// Moving refusals out of `skipped_count` shrinks the step total unless
+    /// `refused_count` is added back into it, and nothing else observes that
+    /// arithmetic. Without this, a run refusing two of three entries would
+    /// report `(1/1)`.
+    #[tokio::test]
+    async fn refused_entries_still_count_toward_the_step_total() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/deployed.toml"), "NEW").unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/insync.toml"), "SAME").unwrap();
+
+        let deployed = dirs.target_dir.join("deployed.toml");
+        let in_sync = dirs.target_dir.join("insync.toml");
+        std::fs::write(&in_sync, "SAME").unwrap();
+        let refused = dirs.target_dir.join("refused.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/deployed.toml"
+    target: "{}"
+  - source: "myapp/insync.toml"
+    target: "{}"
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                deployed.display(),
+                in_sync.display(),
+                refused.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(counts(&events), (1, 1, 0, 1));
+        assert_eq!(
+            steps(&events),
+            (3, 3),
+            "three entries were processed, so three steps happened"
+        );
+    }
+
+    /// A run with nothing to refuse says so, and a run with a refusal says so.
+    ///
+    /// The control half matters: `had_refusals` returning `true` unconditionally
+    /// would satisfy every other test here.
+    #[tokio::test]
+    async fn had_refusals_answers_both_ways() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let clean = match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => s.had_refusals(),
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert!(!clean, "a clean deploy reports no refusals");
+
+        // Same package, now with an entry that cannot be deployed.
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                dirs.target_dir.join("other.toml").display()
+            ),
+        );
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let refused = match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => s.had_refusals(),
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert!(refused, "a refusal is reported by the same predicate");
+    }
+
+    /// `--dry-run` exits non-zero for a refusal it only previewed.
+    ///
+    /// A deliberate contract decision rather than a side effect: a preview whose
+    /// job is to say what `apply` would do must not report success for a run
+    /// that would refuse. The refusal fires on the dry-run path because it is
+    /// decided from the entry alone, before anything is written.
+    #[tokio::test]
+    async fn a_dry_run_reports_a_refusal_it_only_previewed() {
+        let dirs = TestDirs::new();
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                dirs.target_dir.join("config.toml").display()
+            ),
+        );
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(counts(&events), (0, 0, 0, 1));
+        match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => assert!(s.had_refusals()),
+            other => panic!("expected success, got {other:?}"),
+        }
     }
 }
