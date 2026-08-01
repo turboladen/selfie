@@ -25,7 +25,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::{
             TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
-            state_file_path,
+            repository_path, state_file_path,
         },
     },
     package::{
@@ -1027,6 +1027,44 @@ fn track_refusal(refusal: &FileSystemError) -> String {
     format!("{refusal}. Replace the symlink with a regular file, or track the path it points to.")
 }
 
+// Both track handlers word a refused copy *into* the dotfiles repository.
+//
+// Destructures rather than rendering the `FileSystemError`, and that is the whole
+// point of the function. Every variant here says **"target"** in its `Display` --
+// they were written for a dotfile target, the path selfie deploys out to. This
+// path is the reverse: selfie is copying the user's file **in**, to a path it
+// composed itself from the dotfiles directory. Interpolating the error would
+// answer a question about the target when the problem is in the repository, and
+// send the user to inspect the wrong file. `a_refused_repository_write_does_not_
+// call_it_a_target` holds that.
+//
+// The remedy differs from `track_refusal`'s for the same reason: "track the path
+// it points to" is advice about a target, and there is no target involved here.
+// What the user can actually do is clear the repository path or pick another name.
+fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> String {
+    let what = match refusal {
+        FileSystemError::SymlinkedTarget { points_to, .. } => match points_to {
+            Some(dest) => format!("it is a symlink to '{}'", dest.display()),
+            None => "it is a symlink".to_string(),
+        },
+        FileSystemError::IrregularTarget { kind, .. } => format!("it is a {kind}"),
+        // Not a refusal: a permission problem, a full disk. Rendered as-is,
+        // because the filesystem's own message is the useful one and it makes no
+        // claim about a target.
+        other => return format!("Cannot write source file: {other}"),
+    };
+
+    // "the tracked copy at" rather than naming a directory: `handle_track_
+    // standalone` composes this under `dotfiles_directory` and
+    // `handle_track_for_package` alongside the package YAML, so any sentence
+    // naming one of the two is wrong at the other call site.
+    format!(
+        "Cannot write the tracked copy at '{}': {what}. \
+         Remove it, or track under a different name.",
+        source_path.display()
+    )
+}
+
 // The three deploy-side sites that refuse a target by the rule: apply's
 // secret-bearing path, apply's repository-file path, and drift. `TargetRejection`
 // supplies the words so all three say the same thing; this supplies the frame.
@@ -1917,9 +1955,12 @@ where
         )));
     }
 
-    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot write source file: {e}"
+    if let Err(e) =
+        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
+    {
+        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
+            &source_path,
+            &e,
         )));
     }
 
@@ -2093,9 +2134,12 @@ where
     }
 
     // Copy the file
-    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot write source file: {e}"
+    if let Err(e) =
+        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
+    {
+        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
+            &source_path,
+            &e,
         )));
     }
 
@@ -2360,5 +2404,62 @@ mod tests {
             "an error longer than the bound was forwarded whole: {} bytes",
             warning.len()
         );
+    }
+
+    // selfie-yw7i. Track copies the user's file *into* the dotfiles repository, so
+    // a refusal is about a repository path -- but every `FileSystemError` variant
+    // here says "target" in its own `Display`, having been written for a dotfile
+    // target, the path selfie deploys *out* to. Rendering one verbatim tells
+    // someone who ran `selfie dotfiles track ~/.gemrc` that their "target" is a
+    // symlink, when the symlink is the copy destination they never named.
+    //
+    // Asserted as an absence for the same reason as the `save_package` sibling:
+    // the regression to guard is a reversion to `Cannot write source file: {e}`,
+    // which puts the word straight back while still naming a path.
+    #[test]
+    fn a_refused_repository_write_does_not_call_it_a_target() {
+        let source = Path::new("/dotfiles/gemrc/.gemrc");
+
+        for refusal in [
+            FileSystemError::SymlinkedTarget {
+                path: source.to_path_buf(),
+                points_to: Some(PathBuf::from("/tmp/planted")),
+            },
+            FileSystemError::IrregularTarget {
+                path: source.to_path_buf(),
+                kind: "named pipe (fifo)",
+            },
+        ] {
+            let message = repository_write_refusal(source, &refusal);
+            assert!(
+                !message.contains("target"),
+                "refusal calls a repository path a target: {message}"
+            );
+            assert!(
+                message.contains("/dotfiles/gemrc/.gemrc"),
+                "refusal does not name the repository path: {message}"
+            );
+            // The remedy `track_refusal` gives is about a target and is wrong
+            // here: there is no target to point at.
+            assert!(
+                !message.contains("track the path it points to"),
+                "refusal offers the target-side remedy: {message}"
+            );
+        }
+    }
+
+    // The control: a failure that is not a refusal keeps the filesystem's own
+    // message, so the rephrasing is narrow rather than swallowing every write
+    // error. Its `Display` is allowed to say whatever it says.
+    #[test]
+    fn a_repository_write_failure_that_is_not_a_refusal_is_passed_through() {
+        let message = repository_write_refusal(
+            Path::new("/dotfiles/gemrc/.gemrc"),
+            &FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Permission denied",
+            ))),
+        );
+        assert!(message.contains("Permission denied"), "got: {message}");
     }
 }

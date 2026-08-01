@@ -6521,3 +6521,158 @@ mod unmanageable_symlink_reason {
         assert_eq!(types, vec!["not tracked".to_string()]);
     }
 }
+
+/// selfie-yw7i: the copy `track` makes *into* the repository must not follow a
+/// symlink at its destination either.
+///
+/// Distinct from every refusal above, which is about the dotfile **target** --
+/// the path selfie deploys out to. These are about the path selfie composes for
+/// itself from `dotfiles_directory`/`package_directory` plus a name, and writes
+/// the user's file into.
+///
+/// Every fixture here plants a **dangling** link on purpose. A link to an
+/// existing file is caught by the `path_exists` check that already guards these
+/// writes ("Source file already exists"); a dangling one returns `false` from
+/// that check -- it follows the link and finds nothing -- so it passes the guard
+/// and reaches the write. That is the case a plain `fs::write` follows, and the
+/// only one these tests could fail on before the fix.
+#[cfg(unix)]
+mod repository_writes_do_not_follow_symlinks {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Where the planted link points: outside both managed directories, so a
+    /// write landing there is unambiguous evidence the link was followed.
+    fn planted_link_to(dir: &Path, link: &Path) -> PathBuf {
+        let destination = dir.join("planted-destination");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&destination, link).unwrap();
+        assert!(
+            !destination.exists(),
+            "the link must dangle, or the existence check refuses it before the write"
+        );
+        destination
+    }
+
+    /// The refusal names the repository path and does not describe it as a target.
+    ///
+    /// Asserts the absence of the two `FileSystemError` `Display` **phrases**
+    /// rather than of the bare word "target". A tempdir path here genuinely
+    /// contains that word -- `TestDirs` names one directory `target`, and the
+    /// planted link points into it -- so a substring check on the word alone
+    /// fails on the fixture's own paths while the wording is correct. The
+    /// phrases are what a reversion to rendering the error verbatim would
+    /// reintroduce, and they cannot appear in a path.
+    fn assert_refused_without_calling_it_a_target(failure: &str, repository_path: &Path) {
+        for phrase in ["target is a symlink", "target resolves to a"] {
+            assert!(
+                !failure.contains(phrase),
+                "a repository path was described as a target: {failure}"
+            );
+        }
+        let name = repository_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            failure.contains(name.as_ref()),
+            "the refusal does not name the repository path: {failure}"
+        );
+    }
+
+    #[tokio::test]
+    async fn track_standalone_refuses_a_symlinked_source_path() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        // Exactly where `handle_track_standalone` will compose its copy.
+        let source = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        let destination = planted_link_to(&dirs.target_dir, &source);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => {
+                assert_refused_without_calling_it_a_target(&failure.to_string(), &source);
+            }
+            other => panic!("tracking through a symlinked source path must fail, got {other:?}"),
+        }
+
+        assert!(
+            !destination.exists(),
+            "the write followed the link and landed at {}",
+            destination.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn track_for_package_refuses_a_symlinked_source_path() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        std::fs::write(
+            dirs.package_dir.join("ruby.yml"),
+            "name: ruby\nversion: 1.0.0\nenvironments:\n  test:\n    install: true\n",
+        )
+        .unwrap();
+
+        // `handle_track_for_package` composes alongside the package YAML.
+        let source = dirs.package_dir.join("ruby").join("gemrc");
+        let destination = planted_link_to(&dirs.target_dir, &source);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("ruby", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => {
+                assert_refused_without_calling_it_a_target(&failure.to_string(), &source);
+            }
+            other => panic!("tracking through a symlinked source path must fail, got {other:?}"),
+        }
+
+        assert!(
+            !destination.exists(),
+            "the write followed the link and landed at {}",
+            destination.display()
+        );
+    }
+
+    /// The control, and the reason the two tests above are not vacuous: with no
+    /// link planted, the identical fixture tracks successfully and the copy lands
+    /// at the composed path. A guard that refused every track would pass both
+    /// tests above and fail here.
+    #[tokio::test]
+    async fn an_unobstructed_source_path_is_still_written() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events).expect("no Completed event"),
+                OperationResult::Success(_)
+            ),
+            "an ordinary track must still succeed: {:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dirs.dotfiles_dir.join("gemrc").join("gemrc")).unwrap(),
+            "gem: --no-document"
+        );
+    }
+}

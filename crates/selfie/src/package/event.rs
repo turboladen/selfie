@@ -1861,9 +1861,14 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             crate::package::port::PackageRepoError::FileSystemError(fs_err) => {
                 OperationFailure::Generic(format!("File system error: {fs_err}"))
             }
-            // Rendered by its own `Display`, which already names the offending
-            // field paths — the message is worth stating in exactly one place.
-            err @ crate::package::port::PackageRepoError::UnknownDotfileFields { .. } => {
+            // Both rendered by their own `Display`, and neither wrapped in a
+            // prefix. `UnknownDotfileFields` already names the offending field
+            // paths; `UnwritablePath` is worded for the direction it refuses and
+            // must not pick up the "File system error: " frame above, which is
+            // what would reintroduce the target-facing phrasing it exists to
+            // avoid. Both messages are worth stating in exactly one place.
+            err @ (crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
+            | crate::package::port::PackageRepoError::UnwritablePath { .. }) => {
                 OperationFailure::Generic(err.to_string())
             }
         }

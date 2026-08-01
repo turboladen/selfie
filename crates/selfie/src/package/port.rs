@@ -254,6 +254,33 @@ pub enum PackageRepoError {
         /// The offending field paths, e.g. `dotfiles[0].var`.
         fields: String,
     },
+
+    /// Refused to write a package file because of what is at its path.
+    ///
+    /// Carries its own wording rather than rendering the
+    /// [`FileSystemError`] that produced it, and that is the entire reason it
+    /// exists. Both refusal variants say **"target"** in their `Display` --
+    /// `SymlinkedTarget` renders "target is a symlink", `IrregularTarget`
+    /// renders "target resolves to a …" -- because both were written for a
+    /// dotfile *target*, the path selfie deploys **out** to. A package file is
+    /// the opposite direction: selfie is writing **into** its own repository,
+    /// and telling a user their "target" is a symlink when they ran
+    /// `selfie spec update` names a thing that is not in the sentence they typed.
+    ///
+    /// So this must never say "target", and the test
+    /// `a_refused_package_path_does_not_call_it_a_target` holds that.
+    /// Everything that is not a refusal keeps the plain
+    /// [`FileSystemError`](Self::FileSystemError) passthrough.
+    #[error(
+        "refusing to write {path}: {reason}. \
+         Fix what is at that path in your package directory, or choose another name."
+    )]
+    UnwritablePath {
+        /// The package file selfie declined to write.
+        path: PathBuf,
+        /// What was found there, phrased to follow a colon.
+        reason: String,
+    },
 }
 
 impl From<PackageError> for PackageRepoError {

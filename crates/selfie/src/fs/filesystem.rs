@@ -559,6 +559,27 @@ impl MockFileSystem {
             .returning(|_, _| Ok(()));
     }
 
+    /// Set up a mock for writing a file selfie owns
+    ///
+    /// Configures the mock to succeed when writing to the specified path.
+    ///
+    /// Matches on the path *inside* the [`TargetPath`] rather than on the
+    /// wrapper, because a caller has to mint one and the mint is not the thing
+    /// under test.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the write should succeed
+    pub fn mock_write_file_no_follow<P>(&mut self, path: P)
+    where
+        PathBuf: From<P>,
+    {
+        let path_buf = PathBuf::from(path);
+        self.expect_write_file_no_follow()
+            .withf(move |target, _| target.path() == path_buf)
+            .returning(|_, _| Ok(()));
+    }
+
     /// Set up a mock for removing a file
     ///
     /// Configures the mock to succeed when removing the specified file.

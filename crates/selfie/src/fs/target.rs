@@ -1,4 +1,4 @@
-//! Paths selfie writes to: the two functions that construct one, the checked
+//! Paths selfie writes to: the three functions that construct one, the checked
 //! constructor a deploy path must go through, and why the distinction between
 //! them is not cosmetic.
 //!
@@ -144,6 +144,39 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
 
     TargetPath {
         path: normalize_path(&raw),
+    }
+}
+
+/// A path *inside* a directory selfie manages, taken exactly as given.
+///
+/// The third and weakest constructor, and the only one that is not about a
+/// deploy target at all. It exists because the writers and the refusal checks
+/// take a [`TargetPath`] rather than a `&Path`, and selfie also writes to — and
+/// reads from — paths it composed itself: the copy `track` places in the dotfiles
+/// repository, the package YAML `save_package` writes, and the repository files
+/// `apply` and `dotfiles drift` read back. Those need the same no-symlink,
+/// no-fifo treatment, and there is otherwise no way to ask for it.
+///
+/// It promises **less** than the other two, and the difference is the whole
+/// reason it is a separate function rather than an argument to them:
+///
+/// - No [`TargetRejection`] rule. It does not require an absolute path and does
+///   not refuse `~user/…`.
+/// - No expansion and no normalization. A leading `~` stays a literal `~`.
+/// - It is `pub(crate)`, so the public surface still offers exactly two
+///   constructors and no caller outside this crate can mint one this way.
+///
+/// **Never call this on a user-supplied deploy target.** That is
+/// [`deploy_target`]'s job, and routing one through here would drop the rule
+/// every command applies to targets. The inputs here are paths selfie built from
+/// a configured directory plus components it has already validated.
+///
+/// Deliberately takes a `&Path` and performs no I/O, so it cannot resolve
+/// anything: what goes in is what the writer sees.
+#[must_use]
+pub(crate) fn repository_path(path: &Path) -> TargetPath {
+    TargetPath {
+        path: path.to_path_buf(),
     }
 }
 
@@ -342,10 +375,11 @@ fn collapse_home(home: &Path, expanded: &Path) -> String {
 
 // The deploy state file's path.
 //
-// The second and weaker of the two constructors: the configured branch joins
-// `state_dir` exactly as given, so what comes back is only as unresolved as what
-// the caller was configured with, and `SelfieConfigBuilder::state_directory`
-// accepts any `PathBuf`.
+// The second of the three constructors, and weaker than `expand_target_path`:
+// the configured branch joins `state_dir` exactly as given, so what comes back is
+// only as unresolved as what the caller was configured with, and
+// `SelfieConfigBuilder::state_directory` accepts any `PathBuf`. `repository_path`
+// is weaker still — it applies no rule at all.
 //
 // The fallback expands `~` alone rather than the whole path because
 // `expand_path` canonicalizes, and a canonicalized state path lets
@@ -610,6 +644,44 @@ mod tests {
             portable_target(&fs, "/Users/sloveless/.gemrc"),
             "/Users/sloveless/.gemrc"
         );
+    }
+
+    // `repository_path` must stay the identity on the path it is handed. Written
+    // as an absence test on purpose: the risk it guards is not a wrong result
+    // today but someone later "unifying" the three constructors by routing this
+    // one through `expand_target_path`. Each row below is a transformation that
+    // function performs and this one must not, so the unification fails here
+    // rather than silently rewriting a repository path.
+    //
+    // The `~` row is the one that bites hardest: a dotfiles directory literally
+    // named `~` is legal, and expanding it would send a track copy into the home
+    // directory instead.
+    #[test]
+    fn a_repository_path_is_taken_exactly_as_given() {
+        for raw in [
+            "/pkgs/fnm/config.fish",   // absolute, untouched
+            "~/pkgs/fnm/config.fish",  // no tilde expansion
+            "~alice/pkgs/config.fish", // no named-user handling
+            "pkgs/fnm/config.fish",    // relative is accepted, not refused
+            "/pkgs/./fnm/../fnm/c",    // no normalization
+            "",                        // no emptiness rule
+        ] {
+            assert_eq!(
+                repository_path(Path::new(raw)).path(),
+                Path::new(raw),
+                "repository_path transformed {raw:?}"
+            );
+        }
+    }
+
+    // A home directory is mocked here and ignored by construction: the function
+    // takes no `HomeDir`, so this asserts the *type* cannot reach one. If someone
+    // gives it a `HomeDir` parameter, this stops compiling rather than silently
+    // starting to expand.
+    #[test]
+    fn a_repository_path_needs_no_home_directory() {
+        let raw = Path::new("~/pkgs/config.fish");
+        assert_eq!(repository_path(raw).path(), raw);
     }
 
     #[test]
