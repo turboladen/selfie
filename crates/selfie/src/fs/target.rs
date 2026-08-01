@@ -1,4 +1,6 @@
-//! Paths selfie writes to, and the only two things that produce one.
+//! Paths selfie writes to: the two functions that construct one, the checked
+//! constructor a deploy path must go through, and why the distinction between
+//! them is not cosmetic.
 //!
 //! `.claude/rules/secrets.md` carries the argument for why a target must reach a
 //! writer unresolved. This module is the mechanism.
@@ -106,7 +108,11 @@ impl TargetPath {
 /// than wherever `link` points.
 ///
 /// `~user` is not supported. It falls through to the literal path, which is then
-/// relative, and every caller refuses a relative target.
+/// relative. This function does **not** refuse it: [`deploy_target`] does, by
+/// name, and every path that deploys or tracks obtains its target from there
+/// instead. Callers that only compare or display a target use this one
+/// deliberately, because a spec may hold an entry the rule refuses and a
+/// comparison still has to answer.
 #[must_use]
 pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> TargetPath {
     let raw = if target.starts_with('~') {
@@ -127,9 +133,9 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
                 None => home,
             },
             // No home directory, or a `~user` form. Falling back to the literal
-            // path leaves it relative, and the caller's absolute-path guard then
-            // refuses it -- better than writing a credential into a directory
-            // literally named `~` beneath the current directory.
+            // path leaves it relative, and `deploy_target` then refuses it --
+            // better than writing a credential into a directory literally named
+            // `~` beneath the current directory.
             None => PathBuf::from(target),
         }
     } else {
@@ -139,6 +145,141 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
     TargetPath {
         path: normalize_path(&raw),
     }
+}
+
+/// Why selfie will not deploy to a target.
+///
+/// The whole rule, and the only wording any command uses to refuse one, so
+/// `selfie spec validate`, `selfie apply`, `dotfiles drift` and the track
+/// commands cannot describe the same target differently.
+///
+/// The three causes are not all decidable at the same time, which is deliberate:
+/// [`of`](TargetRejection::of) reads the target as written and so can run
+/// offline, while [`NoHome`](TargetRejection::NoHome) depends on the machine and
+/// can only be seen after expansion. They render through the same two methods
+/// because they answer the same user question.
+///
+/// Deliberately implements neither `Display` nor `Error`, which is a departure
+/// from this repository's `thiserror` convention and is the point: a caller that
+/// could format this directly would, and each of the four sites needs the words
+/// in a different frame -- with a field path and a suggestion in the validator,
+/// after `"Skipping 'X': "` in a warning, after `"Cannot track 'X': "` in a
+/// failure. Going through [`message`](Self::message) and
+/// [`suggestion`](Self::suggestion) is what keeps those four in step. It also
+/// keeps a `{:?}` of an error out of user-facing text, which
+/// `.claude/rules/secrets.md` warns about for the failure types on this path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRejection {
+    /// `~user/...`. Selfie does not resolve another user's home directory.
+    NamedUserHome,
+    /// Neither absolute nor `~/`-relative.
+    Relative,
+    /// `~/...`, but the home directory could not be determined. Machine state
+    /// rather than a defect in the spec, and so never produced by
+    /// [`of`](TargetRejection::of).
+    NoHome,
+}
+
+impl TargetRejection {
+    /// The rule applied to the target *as written*.
+    ///
+    /// Needs no home directory, so `selfie spec validate` applies offline the
+    /// same rule apply applies at deploy time. Cannot return
+    /// [`NoHome`](Self::NoHome): that one is machine state, not spec state, and
+    /// only [`deploy_target`]'s post-expansion check can see it.
+    #[must_use]
+    pub fn of(target: &str) -> Option<Self> {
+        // A bare `~` and a `~/…` are the supported forms. Testing
+        // `starts_with('~')` alone is what let `~alice/.gemrc` through the
+        // validator and into a spec that then silently failed to deploy.
+        if target == "~" || target.starts_with("~/") {
+            return None;
+        }
+
+        if target.starts_with('~') {
+            return Some(Self::NamedUserHome);
+        }
+
+        if Path::new(target).is_absolute() {
+            return None;
+        }
+
+        Some(Self::Relative)
+    }
+
+    /// What is wrong, phrased to read after `"Dotfile "`, after
+    /// `"Skipping 'X': "` and after `"Cannot track 'X': "` alike.
+    ///
+    /// Lowercase and starting with the subject it is about for that reason: one
+    /// string serves the validator, the runtime warnings and the track failures,
+    /// which is what stops the four wordings drifting apart again. It carries no
+    /// trailing punctuation, so a caller joining it to
+    /// [`suggestion`](Self::suggestion) supplies the stop itself.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NamedUserHome => {
+                "target uses the '~user' form; selfie does not resolve another user's home directory"
+            }
+            Self::Relative => "target path is not absolute; it must be absolute or start with '~/'",
+            Self::NoHome => {
+                "target starts with '~/' but the home directory could not be determined"
+            }
+        }
+    }
+
+    /// What to write instead.
+    #[must_use]
+    pub fn suggestion(self) -> &'static str {
+        match self {
+            Self::NamedUserHome => {
+                "Use '~/…' for your own home directory, or an absolute path like '/etc/config'."
+            }
+            Self::Relative => {
+                "Use '~/.config/file' for a path under your home directory, or an absolute path \
+                 like '/etc/config'."
+            }
+            Self::NoHome => "Set HOME, or write the target as an absolute path.",
+        }
+    }
+}
+
+/// The constructor a deploy or track path must use.
+///
+/// Says *when* to call it rather than only what it does, because the question
+/// this module exists to answer is "what must I call before writing to a
+/// target?" and [`expand_target_path`] is the wrong answer to it. That one is
+/// for callers who only compare or display a target; this one is for callers who
+/// are going to act on it.
+///
+/// Applies [`TargetRejection::of`] first, then expands, then re-checks that what
+/// came back is absolute. The re-check is not redundant: a `~/…` whose home
+/// directory cannot be determined falls through to the literal relative path,
+/// which the textual rule cannot see. It is also what keeps "a [`TargetPath`]
+/// from `deploy_target` is absolute" true if the rule and the expander ever
+/// drift apart.
+///
+/// Mints nothing itself -- it delegates to [`expand_target_path`], so the set of
+/// functions that construct a [`TargetPath`] is unchanged.
+///
+/// # Errors
+///
+/// [`TargetRejection`] naming the form that was refused.
+pub fn deploy_target<H: HomeDir + ?Sized>(
+    home: &H,
+    target: &str,
+) -> Result<TargetPath, TargetRejection> {
+    if let Some(rejection) = TargetRejection::of(target) {
+        return Err(rejection);
+    }
+
+    let path = expand_target_path(home, target);
+
+    if !path.path().is_absolute() {
+        return Err(TargetRejection::NoHome);
+    }
+
+    Ok(path)
 }
 
 // The form of `target` to record in a spec: `~`-relative when it names a path
@@ -264,6 +405,133 @@ mod tests {
         let fs = MockFileSystem::default();
         let result = expand_target_path(&fs, "~alice/test-file");
         assert_eq!(result.path(), Path::new("~alice/test-file"));
+    }
+
+    /// A filesystem whose home directory cannot be determined.
+    ///
+    /// The only fixture that reaches `deploy_target`'s post-expansion re-check:
+    /// every other input is decided by `TargetRejection::of` before expansion.
+    fn no_home() -> MockFileSystem {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("no home"),
+            )))
+        });
+        fs
+    }
+
+    #[test]
+    fn a_named_user_target_is_refused_by_name() {
+        let fs = MockFileSystem::default();
+        assert_eq!(
+            deploy_target(&fs, "~alice/.gemrc"),
+            Err(TargetRejection::NamedUserHome)
+        );
+        // No slash is the other form the old validator accepted, since it tested
+        // `starts_with('~')`. It never reaches the expander -- `of` refuses it
+        // first, which is why this fixture needs no mocked home directory.
+        assert_eq!(
+            deploy_target(&fs, "~alice"),
+            Err(TargetRejection::NamedUserHome)
+        );
+    }
+
+    #[test]
+    fn a_relative_target_is_refused() {
+        let fs = MockFileSystem::default();
+        assert_eq!(
+            deploy_target(&fs, "relative/path.txt"),
+            Err(TargetRejection::Relative)
+        );
+        assert_eq!(deploy_target(&fs, ""), Err(TargetRejection::Relative));
+    }
+
+    // The reason `deploy_target` re-checks after expanding rather than trusting
+    // the textual rule: `~/…` is a supported form, so the rule passes it, and
+    // only expansion can discover there is no home directory to expand it
+    // against. Refusing it as `NoHome` rather than as `Relative` is the point --
+    // the path the user wrote does start with `~/`, so telling them it is not
+    // absolute describes a rule their input appears to satisfy.
+    #[test]
+    fn a_tilde_target_with_no_home_directory_is_refused() {
+        assert_eq!(
+            deploy_target(&no_home(), "~/.gemrc"),
+            Err(TargetRejection::NoHome)
+        );
+    }
+
+    #[test]
+    fn an_absolute_target_and_a_tilde_target_are_accepted() {
+        let fs = MockFileSystem::default();
+        assert_eq!(
+            deploy_target(&fs, "/etc/hosts").unwrap().path(),
+            Path::new("/etc/hosts")
+        );
+
+        // The control: a `deploy_target` that refused everything would pass the
+        // three tests above and fail here, and so would one that stopped
+        // expanding.
+        let mut fs = MockFileSystem::default();
+        fs.mock_expand_path("~", "/home/user");
+        assert_eq!(
+            deploy_target(&fs, "~/test-file").unwrap().path(),
+            Path::new("/home/user/test-file")
+        );
+    }
+
+    // selfie-hkhb: the refusal for `~user/…` used to be the absolute-path
+    // message, which describes a rule the input visibly satisfies -- it starts
+    // with `~`. Naming the unsupported form is the fix, so a message that
+    // reverts to restating absoluteness has to fail here.
+    #[test]
+    fn the_named_user_refusal_does_not_restate_the_absoluteness_rule() {
+        let message = TargetRejection::NamedUserHome.message();
+        assert!(message.contains("~user"), "got: {message}");
+        assert!(!message.contains("is not absolute"), "got: {message}");
+        assert!(!message.contains("must be absolute"), "got: {message}");
+    }
+
+    // The textual rule and the whole rule must agree on every target, or a spec
+    // passes `selfie spec validate` and then fails to deploy -- selfie-jlum
+    // exactly.
+    //
+    // What this can and cannot catch, measured rather than assumed. It catches
+    // `of` wrongly *accepting* a form expansion cannot make absolute: the
+    // post-expansion re-check then refuses it and the two sides disagree.
+    // Restoring the pre-fix `starts_with('~')` acceptance fails this test;
+    // deleting the `NamedUserHome` arm does **not** -- that downgrades `~alice`
+    // to `Relative`, both sides still refuse it, and they still agree.
+    // `a_named_user_target_is_refused_by_name` is what catches the downgrade, by
+    // asserting *which* rejection comes back.
+    //
+    // It does not catch `of` wrongly *rejecting* a good form either, because the
+    // early return makes both sides say "refused" in agreement; the accept
+    // assertions in `an_absolute_target_and_a_tilde_target_are_accepted` cover
+    // that. Nor `deploy_target` dropping the `of` call entirely -- for every row
+    // here the re-check alone reproduces the same split.
+    //
+    // `NoHome` is excluded by construction: a home directory is mocked here, and
+    // it is machine state rather than something a spec can be wrong about.
+    //
+    // `../x` is here to pin the agreement, not to describe what normalization
+    // does with a leading `..` -- see selfie-girj, which is why this comment does
+    // not say.
+    #[test]
+    fn the_textual_rule_and_the_deploy_rule_agree() {
+        // `KnownHome` rather than a mock: `mock_expand_path` is `return_once`, and
+        // this table expands `~` more than once.
+        let fs = KnownHome(PathBuf::from("/home/user"));
+
+        for target in [
+            "~", "~/", "~/x", "~alice", "~alice/x", "/x", "x", "", "./x", "../x", "~/../..",
+        ] {
+            assert_eq!(
+                TargetRejection::of(target).is_none(),
+                deploy_target(&fs, target).is_ok(),
+                "the two rules disagree about {target:?}"
+            );
+        }
     }
 
     fn collapsed(home: &str, expanded: &str) -> String {

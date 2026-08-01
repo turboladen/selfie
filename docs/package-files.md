@@ -92,6 +92,10 @@ Prefer `~/` for anything under your home directory. `~/.gemrc` names the same fi
 same everywhere, such as `/etc/nginx.conf`. selfie deploys as whoever runs it and never elevates, so
 a target like that one needs write access you may not have.
 
+The `~user/…` form — another user's home directory — is **not** supported. selfie expands `~/` for
+whoever is running it and nothing else. `selfie spec validate` reports a `~alice/.gemrc` target as
+an error, and `selfie apply` refuses it rather than deploying it somewhere.
+
 ```yaml
 dotfiles:
   # 1. A repository file, copied as-is.
@@ -858,12 +862,13 @@ commands. It reports the entry and how many commands it is declining to run. The
 preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
 executing operation.
 
-A dry run does still apply every check that can be made without running anything — a target that is
-not absolute, a template escaping the package directory — and reports the same refusal a real apply
-would. Because those refusals are failures, `stop_on_error` (default `true`) ends the preview at the
-first one rather than listing every remaining problem entry. That is deliberate: a preview that
-continued past an error a real apply would stop on would be describing a different run from the one
-you are about to perform. Set `stop_on_error: false` to see them all.
+A dry run does still apply every check that can be made without running anything — a target selfie
+will not deploy to, whether it is not absolute or names another user's home with `~user/`; a
+template escaping the package directory — and reports the same refusal a real apply would. Because
+those refusals are failures for a secret-bearing entry, `stop_on_error` (default `true`) ends the
+preview at the first one rather than listing every remaining problem entry. That is deliberate: a
+preview that continued past an error a real apply would stop on would be describing a different run
+from the one you are about to perform. Set `stop_on_error: false` to see them all.
 
 #### Diagnostics do not carry line numbers
 
@@ -927,11 +932,16 @@ The recorded `target` is `~/…` whenever the file lives under your home directo
 passed on the command line — so a spec tracked on one machine works on the next. A file elsewhere is
 recorded absolute. The path is also normalized, so `~/.config/../.gemrc` is recorded as `~/.gemrc`.
 
+A target selfie could not deploy to is never recorded: a relative path, or one naming another user's
+home with `~user/`, fails with the reason instead of becoming an entry every later `selfie apply`
+refuses.
+
 ### Validation Rules for Dotfiles
 
 - `source` must not be empty
 - `source` must not contain path traversal sequences (`../`)
-- `target` must be an absolute path (or start with `~`) — see [Dotfiles](#dotfiles) for which to use
+- `target` must be an absolute path or start with `~/` — see [Dotfiles](#dotfiles) for which to use
+- `target` must not use the `~user/…` form; selfie does not resolve another user's home directory
 - A dotfile entry accepts only `source`, `command`, `vars` and `target`
 
 Selfie validates these rules when you run `selfie spec validate`.

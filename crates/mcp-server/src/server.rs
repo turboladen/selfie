@@ -189,8 +189,9 @@ pub struct TrackDotfileParam {
     /// Name for the new standalone dotfile spec
     pub name: String,
     /// Path to the file to track (the deploy target). Either `~/…` or absolute;
-    /// a path under the home directory is recorded as `~/…` either way, so the
-    /// spec means the same file on every machine.
+    /// the `~user/…` form is not supported. A path under the home directory is
+    /// recorded as `~/…` either way, so the spec means the same file on every
+    /// machine.
     pub file: String,
 }
 
@@ -199,8 +200,9 @@ pub struct PackageTrackDotfileParam {
     /// Name of the existing package to add the dotfile to
     pub package: String,
     /// Path to the file to track (the deploy target). Either `~/…` or absolute;
-    /// a path under the home directory is recorded as `~/…` either way, so the
-    /// spec means the same file on every machine.
+    /// the `~user/…` form is not supported. A path under the home directory is
+    /// recorded as `~/…` either way, so the spec means the same file on every
+    /// machine.
     pub file: String,
 }
 

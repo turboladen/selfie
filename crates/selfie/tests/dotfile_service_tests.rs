@@ -47,6 +47,25 @@ fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     })
 }
 
+/// The message of a run that failed, for the operations that report one.
+fn failure_message(events: &[PackageEvent]) -> String {
+    match get_operation_result(events).expect("no Completed event") {
+        OperationResult::Failure(failure) => failure.to_string(),
+        other => panic!("expected a Failure, got {other:?}"),
+    }
+}
+
+/// Every warning a run emitted.
+fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::Warning { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Helper to create a package YAML file with a dotfiles section
 fn create_package_with_dotfiles(
     package_dir: &std::path::Path,
@@ -142,6 +161,28 @@ impl TestDirs {
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
         DotfileServiceImpl::new(repo, fs, runner, config, token)
+    }
+
+    /// A packages-only service whose `stop_on_error` is set explicitly.
+    ///
+    /// The flag decides whether a refused entry ends the run, so a test about
+    /// that has to set both sides rather than rely on the default.
+    fn service_with_runner_and_stop_on_error(
+        &self,
+        runner: FakeCommandRunner,
+        stop_on_error: bool,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
+    {
+        let fs = RealFileSystem;
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .stop_on_error(stop_on_error)
+            .build();
+        let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+        DotfileServiceImpl::new(repo, fs, runner, config, CancellationToken::new())
     }
 
     /// Create a service backed by both `packages/` and `dotfiles/` directories.
@@ -2798,6 +2839,16 @@ mod secret_bearing {
             format!("{events:?}").contains("is not absolute"),
             "a dry run should report the same refusal a real apply would, got: {events:?}"
         );
+        // The refusal is a failure, not a skip, so `stop_on_error` (default true)
+        // ends the preview here — which is what `docs/package-files.md` promises
+        // and what nothing asserted before (selfie-m5dv).
+        assert!(
+            matches!(
+                get_operation_result(&events).expect("no Completed event"),
+                OperationResult::Failure(_)
+            ),
+            "got: {events:?}"
+        );
         assert!(
             !format!("{events:?}").contains("would run"),
             "must not claim it would run commands for an entry that can never deploy"
@@ -4649,13 +4700,6 @@ mod symlink_consistency {
             .collect()
     }
 
-    fn failure_message(events: &[PackageEvent]) -> String {
-        match get_operation_result(events).expect("no Completed event") {
-            OperationResult::Failure(failure) => failure.to_string(),
-            other => panic!("expected a Failure, got {other:?}"),
-        }
-    }
-
     /// A package whose one entry targets `target`, with `content` in the repository.
     fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
         repo_source(dirs, "myapp/config.toml", content);
@@ -5037,5 +5081,263 @@ mod symlink_consistency {
                 "OUTSIDE VIA A LINKED DIRECTORY"
             );
         }
+    }
+}
+
+/// The one target rule, as each command applies it.
+///
+/// Four beads, two of them disagreements between enforcement sites and two of
+/// them defects within one: `selfie spec validate` accepting what apply refuses
+/// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
+/// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
+/// entry-level refusals returning different outcomes (selfie-m5dv).
+/// `deploy_target` is the reconciled rule and these are the commands' side of it.
+///
+/// Unix-only for the same reason `symlink_consistency` is: everything here runs
+/// against a real filesystem inside a `TempDir`. Nothing creates a
+/// CWD-relative fixture — a relative target is refused before anything stats it,
+/// which is the property under test.
+#[cfg(unix)]
+mod target_rule {
+    use super::*;
+
+    /// A package with one entry whose source exists, so an error can only come
+    /// from the target.
+    fn package_targeting(dirs: &TestDirs, target: &str) {
+        let source = dirs.package_dir.join("myapp/config.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, "content").unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, "myapp", &[("myapp/config.toml", target)]);
+    }
+
+    /// selfie-q9t3: track had no absoluteness guard at all, so a relative target
+    /// resolved against the process working directory, was recorded, and was then
+    /// refused by every later apply.
+    ///
+    /// Deleting the guard makes this fail: `path_exists` is then reached, finds
+    /// nothing CWD-relative, and the failure becomes "Target file does not exist:
+    /// …". The negative assertion discriminates rather than passing vacuously.
+    ///
+    /// It does **not** prove the guard's position relative to `symlink_refusal`.
+    /// That returns `None` for any path that does not exist, so only a
+    /// CWD-relative symlink fixture could observe the difference, and no test
+    /// here may create one. Against that check the guard sits ahead on argument —
+    /// it touches no filesystem, and both `symlink_refusal` and `path_exists`
+    /// stat a relative path against the process working directory — not because a
+    /// test holds it there.
+    #[tokio::test]
+    async fn tracking_a_relative_target_is_refused() {
+        let dirs = TestDirs::new();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", "relative/config.toml")
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("is not absolute"),
+            "the refusal must name the rule: {message}"
+        );
+        assert!(
+            !message.contains("does not exist"),
+            "reporting a missing file sends the user looking for the wrong problem: {message}"
+        );
+    }
+
+    /// The refusal lands before every write, as the symlink refusal does.
+    ///
+    /// **This test did not fail under any mutation run against it** — moving the
+    /// guard below the three writes, deleting it outright, and moving it below
+    /// `symlink_refusal` all left it green, while the test above caught the first
+    /// two. The reason is the fixture: a relative target does not exist, so
+    /// `path_exists` returns early and nothing is written whether the guard ran or
+    /// not, and a fixture that did exist would have to be created relative to the
+    /// process working directory, which no test here may do.
+    ///
+    /// Kept deliberately, as documentation rather than enforcement: it names the
+    /// spec, source copy and deploy-state record that a refusal must not leave
+    /// behind. Do not read it as proof that it does not.
+    #[tokio::test]
+    async fn a_refused_relative_track_writes_nothing() {
+        let dirs = TestDirs::new();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", "relative/config.toml")
+                .await,
+        )
+        .await;
+
+        assert!(matches!(
+            get_operation_result(&events).expect("no Completed event"),
+            OperationResult::Failure(_)
+        ));
+        assert!(
+            !dirs.dotfiles_dir.join("myapp/config.toml").exists(),
+            "a source file was copied for an entry that cannot deploy"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("myapp.yml").exists(),
+            "a spec was written for an entry that cannot deploy"
+        );
+        assert!(
+            !dirs.state_dir.join("deploy-state.yml").exists(),
+            "deploy state was recorded for a deployment that never happened"
+        );
+    }
+
+    /// selfie-hkhb: the diagnostic for `~user/…` used to restate the absoluteness
+    /// rule, for a path that visibly starts with `~`.
+    #[tokio::test]
+    async fn tracking_a_named_user_target_is_refused() {
+        let dirs = TestDirs::new();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("myapp", "~alice/config.toml")
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("~user"),
+            "the refusal must name the unsupported form: {message}"
+        );
+        assert!(
+            !message.contains("does not exist"),
+            "the path the user typed is not the problem: {message}"
+        );
+    }
+
+    /// The other track handler is a separate copy of the read, the write and the
+    /// state record, so a fix applied to one leaves the other recording entries
+    /// that can never deploy.
+    #[tokio::test]
+    async fn tracking_a_relative_target_for_a_package_is_refused() {
+        let dirs = TestDirs::new();
+        std::fs::write(
+            dirs.package_dir.join("myapp.yml"),
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo installed\"\n",
+        )
+        .unwrap();
+
+        let events = collect_events(
+            dirs.service()
+                .track_for_package("myapp", "relative/config.toml")
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("is not absolute"),
+            "track_for_package accepted a relative target: {message}"
+        );
+    }
+
+    /// The target guard sits ahead of the already-tracked short-circuit, so an
+    /// entry the rule refuses is not reported as tracked.
+    ///
+    /// Without this the short-circuit answers first and the command succeeds,
+    /// telling the user selfie is managing a target no apply will ever deploy.
+    #[tokio::test]
+    async fn tracking_an_already_recorded_bad_target_is_still_refused() {
+        let dirs = TestDirs::new();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", "~alice/config.toml")],
+        );
+
+        let events = collect_events(
+            dirs.service()
+                .track_for_package("myapp", "~alice/config.toml")
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("~user"),
+            "an already-recorded entry that cannot deploy must not be reported as tracked: \
+             {message}"
+        );
+    }
+
+    /// selfie-m5dv: a relative target skipped while an escaping template aborted,
+    /// though neither ran a command, and the documentation described the
+    /// opposite.
+    ///
+    /// Two entries, the refused one first, because `service.rs`'s `Skipped` and
+    /// `Failed` arms both increment `skipped_count` — a one-entry package cannot
+    /// tell the two outcomes apart. What distinguishes them is whether the run
+    /// reaches the second entry at all.
+    #[tokio::test]
+    async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
+        async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
+            let dirs = TestDirs::new();
+            let second = dirs.target_dir.join("second-credentials");
+            let yaml = format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - command: \"op read first\"\n    target: \"relative/credentials\"\n  \
+                 - command: \"op read second\"\n    target: \"{}\"\n",
+                second.display()
+            );
+            std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+            let runner = FakeCommandRunner::new()
+                .succeeding("op read first", b"FIRST")
+                .succeeding("op read second", b"SECOND");
+            let service = dirs.service_with_runner_and_stop_on_error(runner, stop_on_error);
+            let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+            (events, second, dirs)
+        }
+
+        let (events, second, _dirs) = run(true).await;
+        assert!(
+            matches!(
+                get_operation_result(&events).expect("no Completed event"),
+                OperationResult::Failure(_)
+            ),
+            "a refused entry must end the run under stop_on_error, got: {:?}",
+            get_operation_result(&events)
+        );
+        assert!(
+            !second.exists(),
+            "the run continued past a refusal it should have stopped on"
+        );
+
+        // The control. Without a second, deployable entry this asserts nothing:
+        // "the run did not stop" reads identically whether the first entry was
+        // Skipped or Failed.
+        let (events, second, _dirs) = run(false).await;
+        assert!(
+            second.exists(),
+            "stop_on_error: false must still reach the second entry, got: {events:?}"
+        );
+    }
+
+    /// Drift refuses in apply's words. The two used to differ, so the same spec
+    /// defect read as two problems depending on which command found it.
+    #[tokio::test]
+    async fn drift_refuses_a_target_in_applies_words() {
+        let dirs = TestDirs::new();
+        package_targeting(&dirs, "~alice/config.toml");
+
+        let applied = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(dirs.service().check_drift().await).await;
+
+        let refusal = |events: &[PackageEvent]| {
+            warning_messages(events)
+                .into_iter()
+                .find(|w| w.contains("~user"))
+                .unwrap_or_else(|| panic!("no target refusal in {events:?}"))
+        };
+
+        assert_eq!(refusal(&applied), refusal(&drifted));
     }
 }

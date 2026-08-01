@@ -5,7 +5,7 @@ pub mod target;
 pub use self::filesystem::FileSystem;
 pub use self::filesystem::FileSystemError;
 pub use self::real::RealFileSystem;
-pub use self::target::{HomeDir, TargetPath, expand_target_path};
+pub use self::target::{HomeDir, TargetPath, TargetRejection, deploy_target, expand_target_path};
 
 #[cfg(feature = "with_mocks")]
 pub use self::filesystem::MockFileSystem;

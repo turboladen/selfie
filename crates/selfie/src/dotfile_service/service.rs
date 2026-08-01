@@ -23,7 +23,10 @@ use crate::{
     },
     fs::{
         filesystem::{FileSystem, FileSystemError},
-        target::{TargetPath, expand_target_path, portable_target, state_file_path},
+        target::{
+            TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
+            state_file_path,
+        },
     },
     package::{
         ContentSource, DotfileEntry, Package,
@@ -573,27 +576,32 @@ where
         Ok(self.write(&target, &resolved).await)
     }
 
-    /// Expand the target and refuse it if it is not absolute.
+    /// Expand the target, or refuse the entry naming the form that was refused.
     ///
     /// A relative target would write relative to the current directory, which is
-    /// both surprising and dangerous for a credential.
+    /// both surprising and dangerous for a credential; a `~user/…` one names a
+    /// home directory selfie does not resolve.
+    ///
+    /// `Failed` rather than `Skipped`, and the same outcome
+    /// [`refuse_unresolvable`](Self::refuse_unresolvable) returns: both are
+    /// decided from the entry alone before anything runs, so returning different
+    /// outcomes made `stop_on_error` end the run for one and not the other, and
+    /// the documentation described the opposite (selfie-m5dv). A refused entry is
+    /// not a skipped one.
     async fn usable_target<'e>(
         &self,
         entry: &'e DotfileEntry,
         origin: String,
     ) -> Phase<SecretTarget<'e>> {
-        let path = expand_target_path(self.filesystem, entry.target());
-
-        if !path.path().is_absolute() {
-            self.sender
-                .send_warning(format!(
-                    "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
-                    entry.target(),
-                    path.display()
-                ))
-                .await;
-            return Err(SecretOutcome::Skipped);
-        }
+        let path = match deploy_target(self.filesystem, entry.target()) {
+            Ok(path) => path,
+            Err(rejection) => {
+                self.sender
+                    .send_warning(target_refusal(entry.target(), rejection))
+                    .await;
+                return Err(SecretOutcome::Failed);
+            }
+        };
 
         Ok(SecretTarget {
             entry,
@@ -883,6 +891,27 @@ fn track_refusal(refusal: &FileSystemError) -> String {
     format!("{refusal}. Replace the symlink with a regular file, or track the path it points to.")
 }
 
+// The three deploy-side sites that refuse a target by the rule: apply's
+// secret-bearing path, apply's repository-file path, and drift. `TargetRejection`
+// supplies the words so all three say the same thing; this supplies the frame.
+fn target_refusal(target: &str, rejection: TargetRejection) -> String {
+    format!("Skipping '{target}': {}", rejection.message())
+}
+
+// The same rule refused at track time, where it is a failure rather than a
+// skipped entry and the remedy is worth stating -- the user is standing at the
+// path they named and can retype it. Sibling of `track_refusal` above.
+fn track_target_refusal(target: &str, rejection: TargetRejection) -> String {
+    // The stop between the two belongs here rather than on `message()`: that one
+    // also reads mid-sentence after "Dotfile " and "Skipping 'X': ", where a
+    // trailing period would be wrong.
+    format!(
+        "Cannot track '{target}': {}. {}",
+        rejection.message(),
+        rejection.suggestion()
+    )
+}
+
 /// Describes a single config file deployment operation
 struct DeployUnit<'a> {
     source_path: &'a Path,
@@ -1118,22 +1147,25 @@ where
                 continue;
             }
 
-            let target_path = expand_target_path(filesystem, entry.target());
-
-            // Enforce documented rule: target must be absolute after expansion.
-            // A relative target would write relative to CWD, which is surprising
-            // and potentially dangerous.
-            if !target_path.path().is_absolute() {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{}': target path '{}' is not absolute; targets must be absolute or start with '~/'",
-                        entry.target(),
-                        target_path.display()
-                    ))
-                    .await;
-                skipped_count += 1;
-                continue;
-            }
+            // The one target rule. A relative target would write relative to CWD,
+            // which is surprising and potentially dangerous; a `~user/…` one names
+            // a home directory selfie does not resolve.
+            //
+            // Still a skip rather than a failure, unlike the secret-bearing path
+            // above: every repository-file refusal in this loop continues, and
+            // `stop_on_error` governs secret-resolution failures only (see the
+            // comment on `stopped`). Changing that is a behavior change beyond
+            // this rule.
+            let target_path = match deploy_target(filesystem, entry.target()) {
+                Ok(path) => path,
+                Err(rejection) => {
+                    sender
+                        .send_warning(target_refusal(entry.target(), rejection))
+                        .await;
+                    skipped_count += 1;
+                    continue;
+                }
+            };
 
             // Read source file
             let source_content = match filesystem.read_file(&source_path) {
@@ -1413,19 +1445,20 @@ where
             };
 
             let source_path = resolve_source_path(&base_dir, source);
-            let target_path = expand_target_path(filesystem, entry.target());
 
-            // Reject relative targets (same guard as handle_apply)
-            if !target_path.path().is_absolute() {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{}': target path '{}' is not absolute",
-                        entry.target(),
-                        target_path.display()
-                    ))
-                    .await;
-                continue;
-            }
+            // The same rule apply applies, worded the same way through
+            // `target_refusal` -- a drift check that described an undeployable
+            // entry differently would send the user looking for a different
+            // problem from the one apply reports.
+            let target_path = match deploy_target(filesystem, entry.target()) {
+                Ok(path) => path,
+                Err(rejection) => {
+                    sender
+                        .send_warning(target_refusal(entry.target(), rejection))
+                        .await;
+                    continue;
+                }
+            };
 
             // Same lexical guard as handle_apply — see `crate::paths::is_within`.
             if !is_within(&source_path, &base_dir) {
@@ -1527,8 +1560,22 @@ where
 
     let dotfiles_dir = config.dotfiles_directory();
 
-    // Expand and validate the target path
-    let expanded_target = expand_target_path(filesystem, target_path);
+    // Expand the target, or refuse it if selfie could never deploy to it.
+    //
+    // First of the three refusals, and ahead of `symlink_refusal` for a reason of
+    // its own: this one touches no filesystem at all, while `symlink_refusal` and
+    // `path_exists` both stat a relative path against the *process working
+    // directory* -- which is what made track record entries every later apply
+    // refuses (selfie-q9t3). It therefore also sits ahead of all three writes.
+    let expanded_target = match deploy_target(filesystem, target_path) {
+        Ok(path) => path,
+        Err(rejection) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_target_refusal(
+                target_path,
+                rejection,
+            )));
+        }
+    };
 
     // Position is load-bearing at both ends. Before the writes: tracking reads
     // *through* a link, so accepting one copies the destination into the dotfiles
@@ -1653,8 +1700,23 @@ where
         }
     };
 
-    // Check if this target is already tracked in the package
-    let expanded_target = expand_target_path(filesystem, target_path);
+    // Same rule and same wording as `handle_track_standalone`, and ahead of the
+    // already-tracked lookup below rather than after it: an entry recording a
+    // target that can never deploy is not a reason to report it as tracked.
+    let expanded_target = match deploy_target(filesystem, target_path) {
+        Ok(path) => path,
+        Err(rejection) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_target_refusal(
+                target_path,
+                rejection,
+            )));
+        }
+    };
+
+    // Check if this target is already tracked in the package. Each entry's own
+    // target goes through `expand_target_path`, not the rule: this compares a
+    // recorded entry rather than writing to it, and a spec may hold one the rule
+    // refuses.
     let already_tracked = package_blob
         .package()
         .dotfiles()
@@ -1674,9 +1736,11 @@ where
         });
     }
 
-    // Same ordering constraint as `handle_track_standalone`. After the
-    // already-tracked short-circuit, which stays silent by design: refusing an
-    // idempotent no-op helps nobody.
+    // Same ordering constraint as `handle_track_standalone`, and it applies to
+    // this guard only. The target-rule check above deliberately sits *before* the
+    // already-tracked short-circuit, because an entry recording a target that can
+    // never deploy must not be reported as tracked. This one sits after it,
+    // because refusing an idempotent no-op helps nobody.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
     }
