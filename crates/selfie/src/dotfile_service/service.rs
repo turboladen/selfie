@@ -316,6 +316,20 @@ fn load_deploy_state<F: FileSystem>(
 /// Owner-only comes from `write_file_private`, the same method the secret-bearing
 /// targets use, so the two cannot drift apart again. See its documentation for what
 /// that does and does not guarantee away from Unix.
+///
+/// # Durability, and why this file deliberately has less of it
+///
+/// `write_file_private` syncs the temporary file's **data** before renaming, so
+/// what is missing here is the directory fsync on the rename — and that omission
+/// is the safe direction. Losing the state file costs nothing: the entries are
+/// re-derived on the next run, an untracked source whose target already matches is
+/// recorded again, and one that differs is deployed.
+///
+/// Making it *more* durable would be the wrong fix for selfie-aub. The record can
+/// only lie when it outlives the write it describes, so guaranteeing the state
+/// survives a crash while the target write may not would widen that window rather
+/// than close it. The ordering is established at the other end, in
+/// `write_file_no_follow`, which is durable before `record_deployment` runs.
 fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,

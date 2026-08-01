@@ -144,6 +144,21 @@ pub trait FileSystem: Send + Sync {
     /// returns an error the caller has to handle. It also makes the file owner-only,
     /// which is right for a credential and wrong for an ordinary dotfile.
     ///
+    /// # Durability
+    ///
+    /// Returns only once the file's data has been flushed to disk, and makes a
+    /// best-effort attempt at the parent directory too. Callers record a successful
+    /// write as a deployment, and a record that outlives the write it describes turns
+    /// a lost deploy into a conflict blamed on the user -- so the flush is ordered
+    /// before the record rather than left to the state layer.
+    ///
+    /// What that is worth depends on the platform. On macOS this is `fsync(2)`, which
+    /// APFS does not treat as a write barrier; `F_FULLFSYNC` is the one that is, at a
+    /// cost of hundreds of milliseconds per call. So the guarantee is ordering against
+    /// a process or kernel crash everywhere, and against power loss only where the
+    /// filesystem honors `fsync`. The directory sync is skipped rather than failed when
+    /// the directory cannot be opened for reading, and covers only the immediate parent.
+    ///
     /// # Symlinks
     ///
     /// The refusal applies to `path` **as given**. A resolved path names the link's
