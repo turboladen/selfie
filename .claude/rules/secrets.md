@@ -202,11 +202,14 @@ Test egress at the **boundary**, not by listing known paths:
       drops the rule every command applies to targets, and `deploy_target` is what a deploy or track
       _target_ must use. Its inputs are paths built from a configured directory plus already
       validated components.
-- **Secret targets are written with `write_file_private`, never `write_file`,
-  `write_file_no_follow`, or any other writer** — temp file in the target's own directory at mode
-  `0600`, then rename. Symlink-safe is **not** the same as owner-only: `write_file_no_follow` also
-  refuses to follow a link, and creates at `0666 & ~umask`. Refusing to follow a link is the weaker
-  of the two properties a credential needs.
+- **Secret targets are written with `write_file_private`, never `write_file_no_follow` or any other
+  writer** — temp file in the target's own directory at mode `0600`, then rename. Symlink-safe is
+  **not** the same as owner-only: `write_file_no_follow` also refuses to follow a link, and creates
+  at `0666 & ~umask`. Refusing to follow a link is the weaker of the two properties a credential
+  needs. The port offers **exactly these two writers** and no plain following one — `write_file` was
+  removed once its last three call sites moved, so "selfie never writes through a symlink" holds by
+  construction rather than by review of the call sites (selfie-yw7i). Adding a following writer back
+  reopens every site at once.
 - **Owner-only means `& 0o077 == 0`, not `& 0o007`.** Group-readable leaks a credential to exactly
   the people you are hiding it from on a shared machine.
 - **All package-relative source paths go through `crate::paths` containment.** This guard has been

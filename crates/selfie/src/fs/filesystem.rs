@@ -60,32 +60,13 @@ pub trait FileSystem: Send + Sync {
     /// - Any other IO error occurs during reading
     fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
 
-    /// Write data to a file
-    ///
-    /// Writes the provided data to the specified file path, creating the file
-    /// if it doesn't exist or overwriting it if it does. Creates any necessary
-    /// parent directories.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the file should be written
-    /// * `data` - Data to write to the file
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FileSystemError`] if:
-    /// - Permission is denied to write to the file or directory
-    /// - The parent directory cannot be created
-    /// - Any other IO error occurs during writing
-    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError>;
-
     /// Write data to a file readable only by its owner, replacing it atomically
     ///
-    /// Unlike [`write_file`](FileSystem::write_file), this creates the file with
-    /// owner-only permissions from the outset (on Unix -- see the platform notes
-    /// below) and puts it in place with a rename, so there is no window in which the
-    /// content is world-readable, no partial write if interrupted, and no inheriting
-    /// of a laxer mode from an existing file.
+    /// Unlike [`write_file_no_follow`](FileSystem::write_file_no_follow), this creates
+    /// the file with owner-only permissions from the outset (on Unix -- see the
+    /// platform notes below) and puts it in place with a rename, so there is no window
+    /// in which the content is world-readable, no partial write if interrupted, and no
+    /// inheriting of a laxer mode from an existing file.
     ///
     /// Intended for secret-bearing content.
     ///
@@ -131,23 +112,31 @@ pub trait FileSystem: Send + Sync {
     ///   itself succeeded (for example `ENOSPC` surfacing only at flush time)
     /// - The rename into place fails
     ///
-    /// Note this differs from [`write_file`](FileSystem::write_file), which can still
-    /// succeed on an existing file inside a read-only directory; an atomic replace
-    /// cannot, because it must create a sibling first.
+    /// Note this differs from [`write_file_no_follow`](FileSystem::write_file_no_follow),
+    /// which can still succeed on an existing file inside a read-only directory; an
+    /// atomic replace cannot, because it must create a sibling first.
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// Write data to a file, refusing a symlink at the final component
     ///
-    /// Behaves like [`write_file`](FileSystem::write_file) for an ordinary target --
-    /// parent directories are created, an existing file is truncated and overwritten,
+    /// The ordinary writer, and the only one for content that is not a credential.
+    /// Parent directories are created, an existing file is truncated and overwritten,
     /// and its mode is left alone -- except that a symlink at the **final component**
     /// of `path` is refused with [`FileSystemError::SymlinkedTarget`] rather than
     /// written through. Nothing is written in that case: neither the link nor what it
     /// points at is modified, and a dangling link's destination is not created.
     ///
-    /// Intended for deploy targets. A target names a path the user asked selfie to
-    /// manage; writing through a link there sends the content wherever the link
-    /// points, which may be somewhere chosen by whoever planted it.
+    /// There is deliberately no plain `write_file` beside this one. Every write selfie
+    /// performs goes either here or to
+    /// [`write_file_private`](FileSystem::write_file_private), so "selfie never writes
+    /// through a symlink" is a property of the port rather than of its call sites --
+    /// a writer that followed links could not be reached, because there is not one to
+    /// reach (selfie-yw7i).
+    ///
+    /// Intended for deploy targets and for the paths selfie composes inside its own
+    /// directories. A target names a path the user asked selfie to manage; writing
+    /// through a link there sends the content wherever the link points, which may be
+    /// somewhere chosen by whoever planted it.
     ///
     /// This is deliberately **not** [`write_file_private`](FileSystem::write_file_private),
     /// and the two differ in more than one way. Neither writes *through* a link, but
@@ -430,7 +419,7 @@ impl MockFileSystem {
     /// let package_path = PathBuf::from("/test/packages/test-package.yml");
     ///
     /// // Mock successful save operation
-    /// fs.mock_write_file(&package_path);
+    /// fs.mock_write_file_no_follow(&package_path);
     ///
     /// // Mock successful remove operation
     /// fs.mock_remove_file(&package_path);
@@ -536,27 +525,6 @@ impl MockFileSystem {
         self.mock_read_file(&config_path, config_yaml);
 
         self.mock_path_exists(&config_dir.join("config.yml"), false);
-    }
-
-    /// Set up a mock for writing a file
-    ///
-    /// Configures the mock to succeed when writing to the specified path.
-    /// This is useful for testing package saving operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the write should succeed
-    pub fn mock_write_file<P>(&mut self, path: P)
-    where
-        PathBuf: From<P>,
-    {
-        let path_buf = PathBuf::from(path);
-        self.expect_write_file()
-            .with(
-                mockall::predicate::eq(path_buf),
-                mockall::predicate::always(),
-            )
-            .returning(|_, _| Ok(()));
     }
 
     /// Set up a mock for writing a file selfie owns

@@ -105,15 +105,6 @@ impl FileSystem for RealFileSystem {
         fs::read(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
-    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
-        // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
-        }
-        fs::write(path, data).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
-        Ok(())
-    }
-
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
         use std::io::Write as _;
 
@@ -193,8 +184,8 @@ impl FileSystem for RealFileSystem {
         let path = path.path();
         let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
 
-        // Matches `write_file`: a target whose directory does not exist yet is
-        // created rather than refused.
+        // A target whose directory does not exist yet is created rather than
+        // refused, matching `write_file_private`.
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(io_err)?;
         }
@@ -458,31 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn test_write_file() {
-        let fs = RealFileSystem;
-
-        // Create a temporary directory
-        let temp_dir = tempdir().unwrap();
-        let file_path = temp_dir.path().join("test_write.txt");
-
-        // Test writing to a file
-        let test_content = b"Hello, world!";
-        fs.write_file(&file_path, test_content).unwrap();
-
-        // Verify the file was written correctly
-        let content = std::fs::read(&file_path).unwrap();
-        assert_eq!(content, test_content);
-
-        // Test writing to a file in a nested directory that doesn't exist
-        let nested_path = temp_dir.path().join("nested").join("dir").join("test.txt");
-        fs.write_file(&nested_path, test_content).unwrap();
-
-        // Verify the file was written and directories were created
-        let nested_content = std::fs::read(&nested_path).unwrap();
-        assert_eq!(nested_content, test_content);
-    }
-
-    #[test]
     fn test_remove_file() {
         let fs = RealFileSystem;
 
@@ -681,9 +647,11 @@ fn tp(path: &Path) -> TargetPath {
 ///
 /// Grouped by what each test actually proves.
 ///
-/// The six tests directly below all still pass against [`FileSystem::write_file`]'s
-/// `create_dir_all` + `fs::write`, so they guard against gross breakage rather than
-/// against the defects this method exists to fix.
+/// The six tests directly below all still pass against a naive `create_dir_all` +
+/// `fs::write`, so they guard against gross breakage rather than against the defects
+/// this method exists to fix. Named as that pair rather than as a method: the port
+/// no longer has a following writer to compare against, and the comparison is with
+/// the implementation someone might reach for, not with an API that exists.
 ///
 /// Everything in `unix` is load-bearing: temporarily swapping this implementation
 /// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
@@ -908,8 +876,8 @@ mod private_write_tests {
             let target = parent.join("creds");
             // The target must already exist for this to discriminate. Rewriting an
             // existing file needs write permission on the *file*, not on its
-            // directory, so `write_file` succeeds here; an atomic replace still has to
-            // create a sibling, so it cannot.
+            // directory, so a plain `fs::write` succeeds here; an atomic replace
+            // still has to create a sibling, so it cannot.
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -966,11 +934,11 @@ mod private_write_tests {
 
 /// Tests for [`FileSystem::write_file_no_follow`].
 ///
-/// The plain-file tests below hold equally for [`FileSystem::write_file`], so they
-/// guard against gross breakage rather than against the defect this method exists
-/// to fix.
+/// The plain-file tests below hold equally for a naive `create_dir_all` + `fs::write`,
+/// so they guard against gross breakage rather than against the defect this method
+/// exists to fix.
 ///
-/// In `unix`, the three refusal tests are the ones that fail against `write_file`;
+/// In `unix`, the three refusal tests are the ones that fail against that naive pair;
 /// the two mode tests are the ones that fail against
 /// [`FileSystem::write_file_private`], which would tighten a dotfile nobody asked to
 /// have tightened. Neither group covers both neighbors, which is why both are here.
@@ -1148,7 +1116,10 @@ mod no_follow_write_tests {
             // against -- an ordinary dotfile is not a credential and this method
             // must not quietly tighten one.
             let control = dir.path().join("control");
-            RealFileSystem.write_file(&control, b"x").unwrap();
+            // `fs::write` rather than a port method: the control has to be an
+            // *ordinary* write, and every writer the port still offers has a
+            // property under test here.
+            fs::write(&control, b"x").unwrap();
             if mode_of(&control) & 0o077 == 0 {
                 let message = "the ambient umask makes ordinary writes owner-only, \
                                so this cannot tell the two apart";

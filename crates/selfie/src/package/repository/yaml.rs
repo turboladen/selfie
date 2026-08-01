@@ -1323,8 +1323,8 @@ environments:
         ));
     }
 
-    /// Builds a repository whose write fails with `refusal`, and returns the
-    /// rendered error from `save_package`.
+    // Builds a repository whose write fails with `refusal`, and returns the
+    // rendered error from `save_package`.
     fn save_package_refused_with(refusal: FileSystemError) -> String {
         let mut fs = MockFileSystem::default();
         let package_dir = PathBuf::from("/test/packages");
