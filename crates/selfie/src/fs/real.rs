@@ -30,6 +30,72 @@ fn symlink_refusal(path: &Path) -> Option<FileSystemError> {
         })
 }
 
+/// What `path` is, if it is something selfie must not read from or write to.
+///
+/// `fs::metadata` **follows**, unlike `symlink_refusal`'s `symlink_metadata`, and
+/// the difference is the point: the hazard is what an `open` would land on, so a
+/// symlink pointing at a fifo has to answer the same as a bare fifo. A dangling
+/// link fails the stat and is `None` — nothing to open, and `symlink_refusal`
+/// covers it.
+///
+/// `stat` never blocks, including on a fifo. Only `open` does, which is what makes
+/// it safe to ask this question about the very targets that would hang.
+fn irregular_kind(path: &Path) -> Option<&'static str> {
+    let metadata = fs::metadata(path).ok()?;
+    let file_type = metadata.file_type();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        if file_type.is_fifo() {
+            // The blocking one: `open` waits for the other end.
+            return Some("named pipe (fifo)");
+        }
+        if file_type.is_socket() {
+            return Some("socket");
+        }
+        if file_type.is_char_device() {
+            return Some("character device");
+        }
+        if file_type.is_block_device() {
+            return Some("block device");
+        }
+    }
+
+    // A **directory** is deliberately not one of these, though it is not a regular
+    // file either. It cannot produce either hazard this guard exists for: opening
+    // one never blocks, and writing to one fails `EISDIR` without touching
+    // anything. Classifying it here would only relabel an error that is already
+    // loud and already accurate.
+    //
+    // Two tests hold that, and the second is the surprising one:
+    // `a_directory_at_the_target_is_an_ordinary_error` pins that it stays an
+    // `IoError`, and `a_write_that_fails_after_an_accepted_conflict_is_refused`
+    // reaches `perform_deploy`'s *second* `Err` arm **by putting a directory at
+    // the target**. Folding directories in here refuses that entry earlier, and
+    // the only test covering that arm stops covering it -- silently, because it
+    // would still pass. Anyone tidying this up would see the first failure and
+    // never learn about the second.
+    //
+    // Not dead on unix -- `file_type` is unused there once the `cfg(unix)` block
+    // above has returned, and this consumes it so the non-unix build has no
+    // unused-variable warning. Deleting it breaks that build only.
+    let _ = file_type;
+    None
+}
+
+/// [`FileSystemError::IrregularTarget`] for anything `irregular_kind` names.
+///
+/// Free function taking a `&Path` so `write_file_no_follow` can classify a failed
+/// `open` with it, the same shape `symlink_refusal` has and for the same reason.
+fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
+    irregular_kind(path).map(|kind| FileSystemError::IrregularTarget {
+        path: path.to_path_buf(),
+        kind,
+    })
+}
+
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
@@ -134,7 +200,17 @@ impl FileSystem for RealFileSystem {
             // The kernel refuses the open when the final component is a symlink, so
             // there is no interval between deciding and writing for a planter to
             // win. Checking first and then writing would be exactly that race.
-            options.custom_flags(libc::O_NOFOLLOW);
+            //
+            // `O_NONBLOCK` is here for a second kind of target: opening a fifo for
+            // writing blocks until a reader arrives, so without it this call hangs
+            // forever on one and no timeout in selfie bounds it. With it the open
+            // fails `ENXIO` instead, and the classifier below names the fifo.
+            //
+            // It does not make the guarantee on its own — with a reader attached
+            // the open succeeds — which is what the descriptor check after it is
+            // for. On a regular file the flag has no effect, here or on the writes
+            // that follow.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         #[cfg(not(unix))]
         {
@@ -164,17 +240,67 @@ impl FileSystem for RealFileSystem {
             Ok(file) => file,
             // Classified by asking what is at the path rather than by matching an
             // errno. What a caller has to tell apart is a refusal from a failure,
-            // and `symlink_metadata` answers that directly -- so this needs no
-            // errno constant, and therefore makes no claim about which one any
-            // platform returns for `O_NOFOLLOW`.
-            Err(e) => return Err(symlink_refusal(path).unwrap_or_else(|| io_err(e))),
+            // and the two stats answer that directly -- so this needs no errno
+            // constant, and therefore makes no claim about which one any platform
+            // returns for `O_NOFOLLOW` or for a readerless fifo under
+            // `O_NONBLOCK`.
+            //
+            // Symlink first: a link to a fifo fails the open with `ELOOP` before
+            // the fifo is ever reached, so reporting it as a fifo would name the
+            // wrong problem and suggest the wrong fix.
+            Err(e) => {
+                return Err(symlink_refusal(path)
+                    .or_else(|| irregular_refusal(path))
+                    .unwrap_or_else(|| io_err(e)));
+            }
         };
+
+        // Ask the descriptor, not the path. Everything above this line is a
+        // question about a name, and a name can be replaced between the asking and
+        // the answering; this inspects the object actually opened, so a fifo or
+        // device planted mid-apply is refused rather than written to. It is the
+        // only check here that is not a race.
+        //
+        // Reached when the open succeeded, which for a fifo means a reader was
+        // already attached. Nothing has been written yet: `O_TRUNC` on a
+        // non-regular file is ignored for a fifo or terminal and unspecified
+        // elsewhere, so this must run before `write_all` rather than rely on the
+        // open being harmless.
+        match file.metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(irregular_refusal(path).unwrap_or_else(|| {
+                    // The descriptor says it is not a regular file and the path no
+                    // longer agrees -- it was replaced in between. Refuse anyway,
+                    // naming what was opened rather than what is there now.
+                    FileSystemError::IrregularTarget {
+                        path: path.to_path_buf(),
+                        kind: "non-regular file",
+                    }
+                }));
+            }
+            // Fails **closed**, and matched explicitly rather than folded into the
+            // arm above: a descriptor selfie cannot classify is one it must not
+            // write to, for the reason the non-unix symlink branch gives -- being
+            // unable to tell is not permission to proceed.
+            //
+            // The error is propagated rather than turned into a refusal. Reporting
+            // `IrregularTarget` here would name a file type nothing observed; this
+            // is a stat that failed, and it says so. `fstat` on a live descriptor
+            // is close to infallible, so this is a matter of not encoding the
+            // wrong precedent rather than a path anyone is expected to hit.
+            Err(e) => return Err(io_err(e)),
+        }
 
         file.write_all(data).map_err(io_err)
     }
 
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         symlink_refusal(path.path())
+    }
+
+    fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
+        irregular_refusal(path.path())
     }
 
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
@@ -1040,6 +1166,238 @@ mod no_follow_write_tests {
             // quietly overstated later: `O_NOFOLLOW` covers the final component
             // only.
             assert!(real.join("config").exists());
+        }
+    }
+}
+
+/// Targets that are neither absent nor a regular file.
+///
+/// Unix-only: fifos, sockets and device nodes are Unix file types, and
+/// `irregular_target_refusal` answers `None` everywhere else by construction.
+///
+/// A fifo is the reason this exists. Opening one blocks until the other end is
+/// opened — for reading *and* for writing — so a test that reaches the unguarded
+/// path does not fail, it **hangs**, and a hang is scored as neither pass nor
+/// fail. Every test here that could reach an open runs the call on a blocking
+/// thread and times out the handle, so the failure mode is a failed assertion
+/// rather than a wedged run. `tokio::time::timeout` around the call itself would
+/// not do: these are synchronous, so the future polls the blocking call inline
+/// and the timer never gets to run.
+#[cfg(all(test, unix))]
+mod irregular_targets {
+    use super::*;
+    use std::io::Read as _;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    /// A `TargetPath` for `path`, unresolved as the type requires.
+    fn tp(path: &Path) -> TargetPath {
+        crate::fs::target::expand_target_path(&RealFileSystem, path.to_str().unwrap())
+    }
+
+    /// A fifo, and a scoped temp dir to keep it in.
+    fn fifo_in(dir: &Path) -> PathBuf {
+        let path = dir.join("target");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        path
+    }
+
+    /// Run a blocking filesystem call with a deadline.
+    ///
+    /// Returns `None` if it did not finish, which is how a regression that
+    /// reintroduces the hang reports itself as a test failure. The blocked thread
+    /// is left behind deliberately: it cannot be cancelled, and the process is
+    /// about to end.
+    fn with_deadline<T, F>(f: F) -> Option<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    #[test]
+    fn a_fifo_is_named_as_one() {
+        let dir = tempdir().unwrap();
+        let fifo = fifo_in(dir.path());
+
+        match irregular_refusal(&fifo) {
+            Some(FileSystemError::IrregularTarget { kind, path }) => {
+                assert_eq!(kind, "named pipe (fifo)");
+                assert_eq!(path, fifo);
+            }
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_socket_is_named_as_one() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("target");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        match irregular_refusal(&path) {
+            Some(FileSystemError::IrregularTarget { kind, .. }) => assert_eq!(kind, "socket"),
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_character_device_is_named_as_one() {
+        match irregular_refusal(Path::new("/dev/null")) {
+            Some(FileSystemError::IrregularTarget { kind, .. }) => {
+                assert_eq!(kind, "character device");
+            }
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+    }
+
+    /// The controls: an ordinary target, and one that is not there yet.
+    #[test]
+    fn a_regular_file_and_an_absent_path_are_not_refused() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("regular");
+        fs::write(&file, b"content").unwrap();
+
+        assert!(irregular_refusal(&file).is_none());
+        assert!(irregular_refusal(&dir.path().join("absent")).is_none());
+    }
+
+    /// A symlink to a fifo is refused, because the read that follows would follow
+    /// the link and block on the fifo.
+    ///
+    /// The whole reason this question is asked with a *following* stat. With
+    /// `symlink_metadata` — the syscall `symlink_refusal` uses — this answers
+    /// `None`, the target read follows the link, and apply hangs exactly as it
+    /// did before the guard existed. The guard would have looked present and
+    /// done nothing.
+    #[test]
+    fn a_symlink_to_a_fifo_is_refused() {
+        let dir = tempdir().unwrap();
+        let fifo = fifo_in(dir.path());
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        match irregular_refusal(&link) {
+            Some(FileSystemError::IrregularTarget { kind, .. }) => {
+                assert_eq!(kind, "named pipe (fifo)");
+            }
+            other => panic!("a link to a fifo must be refused, got {other:?}"),
+        }
+    }
+
+    /// A symlink to a regular file is not this check's business.
+    ///
+    /// It is `symlink_refusal`'s, and answering here too would report one problem
+    /// in two voices.
+    #[test]
+    fn a_symlink_to_a_regular_file_is_left_to_the_symlink_check() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("regular");
+        fs::write(&file, b"content").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        assert!(irregular_refusal(&link).is_none());
+        assert!(symlink_refusal(&link).is_some(), "control: it is a symlink");
+    }
+
+    /// A dangling link has nothing to open, so it is not irregular.
+    #[test]
+    fn a_dangling_symlink_is_not_irregular() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+
+        assert!(irregular_refusal(&link).is_none());
+        assert!(symlink_refusal(&link).is_some(), "control: it is a symlink");
+    }
+
+    /// The writer refuses a fifo with no reader, and does not block doing it.
+    ///
+    /// Without `O_NONBLOCK` the `open` itself blocks here and never reaches the
+    /// descriptor check, so this is the test that observes the flag.
+    #[test]
+    fn the_writer_refuses_a_readerless_fifo_without_blocking() {
+        let dir = tempdir().unwrap();
+        let fifo = fifo_in(dir.path());
+
+        let result =
+            with_deadline(move || RealFileSystem.write_file_no_follow(&tp(&fifo), b"data"))
+                .expect("writing a readerless fifo must not block");
+
+        match result {
+            Err(FileSystemError::IrregularTarget { kind, .. }) => {
+                assert_eq!(kind, "named pipe (fifo)");
+            }
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+    }
+
+    /// With a reader attached the open succeeds, and the descriptor check is what
+    /// refuses.
+    ///
+    /// The route is pinned by construction rather than asserted: POSIX guarantees
+    /// `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds
+    /// the fifo open, so the failed-open path is unreachable here and only the
+    /// `fstat` after the open can produce the refusal. The reader is opened by
+    /// this thread with `O_NONBLOCK`, which POSIX guarantees returns immediately
+    /// with no writer — a reader thread could not signal readiness, because its
+    /// own open would block until the writer arrived, and the test would silently
+    /// fall back to the readerless route it is written to exclude.
+    ///
+    /// That the `fstat` fired, rather than the write proceeding, is observable:
+    /// the reader receives nothing.
+    #[test]
+    fn the_writer_refuses_a_fifo_that_has_a_reader() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let dir = tempdir().unwrap();
+        let fifo = fifo_in(dir.path());
+
+        let mut reader = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .expect("a reader may open a fifo with O_NONBLOCK before any writer");
+
+        let target = fifo.clone();
+        let result =
+            with_deadline(move || RealFileSystem.write_file_no_follow(&tp(&target), b"data"))
+                .expect("the open cannot block while a reader is attached");
+
+        match result {
+            Err(FileSystemError::IrregularTarget { kind, .. }) => {
+                assert_eq!(kind, "named pipe (fifo)");
+            }
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+
+        let mut buf = [0u8; 16];
+        let read = reader.read(&mut buf);
+        assert!(
+            matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+                || matches!(&read, Ok(0)),
+            "nothing may reach the reader: the refusal must precede the write, got {read:?}"
+        );
+    }
+
+    /// The writer refuses a character device rather than writing to it.
+    #[test]
+    fn the_writer_refuses_a_character_device() {
+        let err = RealFileSystem
+            .write_file_no_follow(&tp(Path::new("/dev/null")), b"data")
+            .unwrap_err();
+
+        match err {
+            FileSystemError::IrregularTarget { kind, .. } => {
+                assert_eq!(kind, "character device");
+            }
+            other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
     }
 }

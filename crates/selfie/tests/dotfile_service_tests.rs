@@ -254,6 +254,13 @@ impl TestDirs {
 struct HomeAt(RealFileSystem, PathBuf);
 
 impl selfie::fs::FileSystem for HomeAt {
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.irregular_target_refusal(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         // Only a bare `~`. Anything else keeps the real behavior, so the
         // decorator cannot quietly change what the rest of track resolves.
@@ -4557,6 +4564,14 @@ mod symlinked_targets {
                 None
             }
 
+            /// Deliberately **not** blinded: this decorator blinds one check, the
+            /// symlink one, so that the writer's `O_NOFOLLOW` is the only thing
+            /// left to refuse. Blinding the irregular check too would widen what
+            /// this test claims to cover and hide a real regression in it.
+            fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
+                self.0.irregular_target_refusal(path)
+            }
+
             fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
                 self.0.read_file(path)
             }
@@ -6099,5 +6114,207 @@ environments:
 
         assert_eq!(refused_count(&events), 0);
         assert_eq!(warning_messages(&events), Vec::<String>::new());
+    }
+}
+
+/// Targets that are neither absent nor a regular file.
+///
+/// A fifo target hung `selfie apply` forever and a device node was written to
+/// (selfie-qwj3). The hang is the reason every test here has a deadline: reaching
+/// the unguarded path does not fail a test, it wedges it, and a wedged test is
+/// scored as neither pass nor fail.
+///
+/// `flavor = "multi_thread"` is load-bearing. The service does its work in a
+/// `tokio::spawn`ed task, so on the default current-thread runtime a blocking
+/// `read` inside that task stalls the whole runtime — including the timer, which
+/// then never fires and the timeout never returns.
+#[cfg(unix)]
+mod irregular_targets {
+    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Long enough that a slow machine does not trip it, short enough that a real
+    /// hang is caught quickly.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    fn make_fifo(path: &Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn refused_count(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count, ..
+            }) => *refused_count,
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    /// One package, one entry, whose target is `target`.
+    fn package_targeting(dirs: &TestDirs, target: &Path) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    /// Apply refuses a fifo target instead of hanging on it.
+    ///
+    /// Before the guard, the *checksum read* blocked — not the write. Opening a
+    /// fifo for reading waits for a writer exactly as opening it for writing waits
+    /// for a reader, and that read happens well before any write is attempted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo target");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "the refusal must name what it found: {warnings:?}"
+        );
+    }
+
+    /// A symlink pointing at a fifo is refused too.
+    ///
+    /// The case a non-following stat misses. `symlink_refusal` answers "it is a
+    /// symlink" and returns before the fifo is ever considered, and the target
+    /// read then follows the link and blocks — the guard present, the hang intact.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_symlink_to_a_fifo_without_hanging() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("real-fifo");
+        make_fifo(&fifo);
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&fifo, &target).unwrap();
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a symlink to a fifo");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "a link to a fifo must be refused as a fifo: {warnings:?}"
+        );
+    }
+
+    /// Apply refuses a character device rather than writing to it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_character_device_target() {
+        let dirs = TestDirs::new();
+        package_targeting(&dirs, Path::new("/dev/null"));
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a device target");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("character device")),
+            "the refusal must name what it found: {warnings:?}"
+        );
+    }
+
+    /// Drift refuses a fifo target instead of hanging on it.
+    ///
+    /// Drift checksums the target exactly as apply does, so it hung on the same
+    /// open — which selfie-qwj3 does not mention and which the fix has to cover
+    /// for the two commands to keep agreeing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().check_drift().await).await
+        })
+        .await
+        .expect("drift must not block on a fifo target");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "drift must refuse it the same way apply does: {warnings:?}"
+        );
+    }
+
+    /// Track refuses a fifo target instead of copying it into the repository.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn track_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("myapp", target.to_str().unwrap())
+                    .await,
+            )
+            .await
+        })
+        .await
+        .expect("track must not block on a fifo target");
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => assert!(
+                failure.to_string().contains("named pipe (fifo)"),
+                "got: {failure}"
+            ),
+            other => panic!("tracking a fifo must fail, got {other:?}"),
+        }
+    }
+
+    /// Control: an ordinary target still deploys.
+    ///
+    /// Without this, a guard that refused every target would pass every test
+    /// above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regular_target_is_still_deployed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("a regular target must not block");
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
     }
 }

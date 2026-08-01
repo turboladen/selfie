@@ -217,6 +217,53 @@ pub trait FileSystem: Send + Sync {
     /// through a link planted inside the window between the check and the record.
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
+    /// [`FileSystemError::IrregularTarget`] if `path` resolves to something that
+    /// is neither absent nor a regular file
+    ///
+    /// A fifo, socket, device node or directory. `None` for a regular file, for a
+    /// path that does not exist, and for a **symlink to a regular file** — a
+    /// symlink is [`symlink_refusal`](FileSystem::symlink_refusal)'s question, and
+    /// answering it here too would report one thing two ways.
+    ///
+    /// # Why this is asked with a *following* stat
+    ///
+    /// The question is "what will the next `read_file` or `write_file_no_follow`
+    /// open", and both of those resolve the path. A non-following stat sees a
+    /// symlink and answers `None`, and the fifo it points at then blocks the read
+    /// — which is exactly the hang this exists to prevent, arriving through a link
+    /// instead of directly. A dangling link fails the stat and is `None`, which is
+    /// correct: there is nothing to open, and `symlink_refusal` reports it.
+    ///
+    /// This is why it does not mirror `symlink_refusal`'s implementation. The two
+    /// answer different questions and need different syscalls.
+    ///
+    /// # For reads, this is the enforcement — there is no second layer
+    ///
+    /// [`write_file_no_follow`](FileSystem::write_file_no_follow) re-checks the
+    /// descriptor it opened, so a *write* is safe whether or not this was
+    /// consulted. **Nothing does that for a read.** Apply checksums the target,
+    /// drift checksums it, and track copies it, all through
+    /// [`read_file`](FileSystem::read_file), which has no equivalent check — and
+    /// opening a fifo for reading blocks exactly as opening it for writing does.
+    /// Removing this call from a read path restores the hang.
+    ///
+    /// So: deleting this is not "losing a nicety", it is removing the only thing
+    /// standing between `selfie apply` and an indefinite block.
+    ///
+    /// # What it does not do
+    ///
+    /// Stat-then-act is inherently racy: a fifo swapped in after this returns is
+    /// not caught by it, and for a *write* the guarantee lives in
+    /// `write_file_no_follow` rather than here. That is the limit of the claim —
+    /// it bounds what this promises, and does not make it optional.
+    ///
+    /// # Platform notes
+    ///
+    /// Unix only. Everywhere else this returns `None`: the file types it
+    /// distinguishes are Unix ones, and there is nothing it could meaningfully
+    /// report.
+    fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
+
     /// Whether a file is readable only by its owner
     ///
     /// Companion to [`write_file_private`](FileSystem::write_file_private), for
@@ -382,6 +429,25 @@ pub enum FileSystemError {
         path: PathBuf,
         points_to: Option<PathBuf>,
     },
+
+    /// A target that is neither absent nor a regular file
+    ///
+    /// A fifo, socket, device node or directory. Refused rather than written to,
+    /// and refused before it is *read*: opening a fifo blocks until the other end
+    /// is opened, so `selfie apply` hung indefinitely on one and `command_timeout`
+    /// did not bound it — that governs provider commands, not filesystem calls
+    /// (selfie-qwj3).
+    ///
+    /// `kind` names what was found, because the remedy differs: a leftover socket
+    /// is deleted, a device node in `/dev` means the target path is wrong.
+    ///
+    /// Says "resolves to" rather than "is": this is answered with a *following*
+    /// stat, so it covers a symlink pointing at a fifo as well as a bare one. A
+    /// plain symlink is reported as [`SymlinkedTarget`](Self::SymlinkedTarget)
+    /// instead — that question is asked with a non-following stat, and the two
+    /// must not be conflated.
+    #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
+    IrregularTarget { path: PathBuf, kind: &'static str },
 }
 
 #[cfg(feature = "with_mocks")]

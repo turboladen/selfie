@@ -687,6 +687,20 @@ where
             }
         };
 
+        // Same guard the repository-file path applies, in the same position:
+        // before anything reads the target. `read_target` below opens it, and a
+        // fifo blocks that open indefinitely.
+        //
+        // `Failed` rather than `Skipped`, for the reason given above: this is
+        // decided from the target alone before anything runs, and a refused entry
+        // is not a skipped one.
+        if let Some(refusal) = self.filesystem.irregular_target_refusal(&path) {
+            self.sender
+                .send_warning(refusal_warning(entry.target(), &refusal))
+                .await;
+            return Err(SecretOutcome::Failed);
+        }
+
         Ok(SecretTarget {
             entry,
             origin,
@@ -962,9 +976,15 @@ where
     }
 }
 
-// Three sites word a refused deploy: `handle_apply`'s check, the write itself, and
-// `handle_check_drift`. Format it here rather than at a call site — no test pins
-// this wrapper at the write site, so a copy there could drift unnoticed.
+// Every site that words a refused deploy shares this, so apply, drift and the
+// writer cannot describe the same refusal differently. Format it here rather than
+// at a call site — no test pins this wrapper at the write site, so a copy there
+// could drift unnoticed.
+//
+// Named as a property rather than counted. The count was "three", and was correct
+// until the same change that wrote it added three more call sites — a number in a
+// comment is a claim that goes stale on the next edit, in a file whose whole
+// subject is claims going stale.
 fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
 }
@@ -1293,6 +1313,18 @@ where
                     continue;
                 }
             };
+
+            // Ahead of every read of the target below, not merely ahead of the
+            // write. Reading a fifo blocks until a writer opens it, exactly as
+            // writing one blocks until a reader does, so the checksum read further
+            // down hangs `selfie apply` before the write is ever reached — and a
+            // character device would be read from, then written to. Placing this
+            // beside the symlink check instead would leave the hang in place.
+            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                refused_count += 1;
+                continue;
+            }
 
             // Read source file
             let source_content = match filesystem.read_file(&source_path) {
@@ -1635,6 +1667,14 @@ where
                 }
             };
 
+            // Drift reads the target to checksum it, so it hangs on a fifo exactly
+            // as apply does. Same guard, same position — ahead of the read — and
+            // worded identically through `refusal_warning`.
+            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                continue;
+            }
+
             // Same lexical guard as handle_apply — see `crate::paths::is_within`.
             if !is_within(&source_path, &base_dir) {
                 sender
@@ -1760,6 +1800,21 @@ where
     // dangling one would be reported as a missing file.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    }
+
+    // Also ahead of the read: tracking copies the target into the dotfiles
+    // repository, and reading a fifo blocks until a writer arrives. There is
+    // nothing to track in a fifo or a device node in any case.
+    //
+    // Deliberately not `track_refusal`, which the symlink case above uses: that
+    // one appends "replace the symlink with a regular file, or track the path it
+    // points to", and neither half applies here -- a fifo points at nothing, and
+    // "replace it with a regular file" describes deleting the user's pipe. The
+    // remedy that does apply is naming a different target, so this says that.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "{refusal}. Point the entry at a regular file instead."
+        )));
     }
 
     if !filesystem.path_exists(expanded_target.path()) {
@@ -1923,6 +1978,21 @@ where
     // because refusing an idempotent no-op helps nobody.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    }
+
+    // Also ahead of the read: tracking copies the target into the dotfiles
+    // repository, and reading a fifo blocks until a writer arrives. There is
+    // nothing to track in a fifo or a device node in any case.
+    //
+    // Deliberately not `track_refusal`, which the symlink case above uses: that
+    // one appends "replace the symlink with a regular file, or track the path it
+    // points to", and neither half applies here -- a fifo points at nothing, and
+    // "replace it with a regular file" describes deleting the user's pipe. The
+    // remedy that does apply is naming a different target, so this says that.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "{refusal}. Point the entry at a regular file instead."
+        )));
     }
 
     // Validate the target path
