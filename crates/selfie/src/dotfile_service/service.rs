@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::CommandRunner,
+    commands::{BoundedText, CommandRunner},
     config::SelfieConfig,
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
@@ -211,18 +211,92 @@ fn deploy_state_path<F: FileSystem>(
     )
 }
 
-/// Load the deploy state from disk, or return an empty state
-fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> DeployState {
+/// Load the deploy state from disk, or return an empty state.
+///
+/// Returns the state and, when a state file could not be *used*, a message saying
+/// which file and what went wrong — the path where there is one to name, and the
+/// kind of file where the path itself is what could not be worked out. An absent
+/// file is the ordinary first-run case and produces no message: on a machine
+/// selfie has never deployed to, an empty state is the right answer rather than a
+/// condition to report.
+///
+/// The other three outcomes each report, and a corrupt file and an unreadable one
+/// say different things on purpose — repairing malformed YAML and fixing
+/// permissions are different jobs, and one message for both sends the reader to
+/// the wrong one. Every caller proceeds afterwards: an empty state costs a round
+/// of conflict prompts, while refusing to run would block every apply until the
+/// file is repaired by hand. What it must not do is proceed *silently*.
+///
+/// Note the state this returns is later saved over the file it could not read.
+/// That is `selfie-8qyv`, deferred deliberately rather than overlooked.
+fn load_deploy_state<F: FileSystem>(
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> (DeployState, Option<String>) {
+    /// What each message says happens next, so the part that differs between them
+    /// is the condition and the path rather than the consequence.
+    const IGNORED: &str = "continuing as though nothing had been deployed";
+
     let path = match deploy_state_path(filesystem, config) {
         Ok(p) => p,
-        Err(_) => return DeployState::empty(),
+        Err(e) => {
+            return (
+                DeployState::empty(),
+                Some(format!(
+                    "Cannot locate the deploy state file: {e}; {IGNORED}"
+                )),
+            );
+        }
     };
     if !filesystem.path_exists(path.path()) {
-        return DeployState::empty();
+        return (DeployState::empty(), None);
     }
-    match filesystem.read_file(path.path()) {
-        Ok(content) => serde_saphyr::from_str(&content).unwrap_or_else(|_| DeployState::empty()),
-        Err(_) => DeployState::empty(),
+    let content = match filesystem.read_file(path.path()) {
+        Ok(content) => content,
+        Err(e) => {
+            return (
+                DeployState::empty(),
+                Some(format!(
+                    "Cannot read deploy state '{}': {e}; {IGNORED}",
+                    path.display()
+                )),
+            );
+        }
+    };
+
+    // `from_str` would attach a source snippet to a parse error, which `Display`
+    // then renders: serde-saphyr 0.0.29's `Options::default()` is
+    // `with_snippet: true`, and its horizontal crop only engages above a 16 KiB
+    // window or a 4 KiB line, so an ordinary state file is quoted verbatim.
+    //
+    // This message reaches an `EventSender` and from there the MCP server's JSON.
+    // No credential can be in it -- secret-bearing entries record nothing at all
+    // (ADR-0003) -- but the file names every repository-file dotfile selfie
+    // manages on this machine, with a checksum behind each, which is why
+    // `save_deploy_state` writes it owner-only. That is a reconnaissance aid, and
+    // reporting a parse failure is no reason to read it back out.
+    //
+    // What this suppresses is the *snippet*, and only that. It is not a guarantee
+    // that no file content reaches the message, and do not restate it as one: an
+    // error whose own text interpolates a scalar still carries it, and the
+    // duplicate-key error interpolates the **key**, which in this file is a
+    // dotfile source path. `a_duplicate_key_still_reaches_the_message` pins that
+    // residual as a fact rather than leaving it to be rediscovered. Closing it
+    // means scrubbing the rendered error rather than choosing options, which is
+    // selfie-flka.
+    //
+    // `bound` then caps whatever survives. Its length is not selfie's to choose.
+    let options = serde_saphyr::options! { with_snippet: false };
+    match serde_saphyr::from_str_with_options(&content, options) {
+        Ok(state) => (state, None),
+        Err(e) => (
+            DeployState::empty(),
+            Some(format!(
+                "Cannot parse deploy state '{}': {}; {IGNORED}",
+                path.display(),
+                BoundedText::bound(e.to_string().as_bytes())
+            )),
+        ),
     }
 }
 
@@ -409,8 +483,15 @@ where
             );
             sender.send_started().await;
 
-            let result =
-                handle_track_standalone(&name, &target_path, dotfiles_repo.as_ref(), &fs, &config);
+            let result = handle_track_standalone(
+                &name,
+                &target_path,
+                dotfiles_repo.as_ref(),
+                &fs,
+                &config,
+                &sender,
+            )
+            .await;
 
             sender.send_completed(result).await;
         })
@@ -433,7 +514,9 @@ where
             );
             sender.send_started().await;
 
-            let result = handle_track_for_package(&package_name, &target_path, &repo, &fs, &config);
+            let result =
+                handle_track_for_package(&package_name, &target_path, &repo, &fs, &config, &sender)
+                    .await;
 
             sender.send_completed(result).await;
         })
@@ -1019,7 +1102,10 @@ where
         token,
     } = *ctx;
 
-    let mut deploy_state = load_deploy_state(filesystem, config);
+    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
+    if let Some(warning) = state_warning {
+        sender.send_warning(&warning).await;
+    }
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
@@ -1214,12 +1300,22 @@ where
             // This also lands ahead of the conflict branch's diff, so the link
             // destination's content is never rendered for display.
             //
-            // `Skip` is excluded because an in-sync target is not written to. Note
-            // that branch is not inert: an untracked one is recorded as deployed
-            // below, the same as any other already-matching target. That record is
-            // about content, not about who wrote it — selfie did not write any
-            // already-in-sync target — and it costs nothing here, because the next
-            // repository edit makes the entry differ and the refusal fires then.
+            // `Skip` is excluded because an in-sync target is not written to, and
+            // what is not written cannot be refused. That branch is not inert: an
+            // untracked entry is recorded as deployed below — but no longer for a
+            // symlinked target.
+            //
+            // The record is about content, not about who wrote it — selfie did not
+            // write any already-in-sync target — and for an ordinary target it costs
+            // nothing: the next repository edit makes the entry differ,
+            // `deploy_decision` answers `Deploy`, the write succeeds, and
+            // `perform_deploy` advances the entry. For a symlinked target the refusal
+            // fires on that same edit — which was always true, and is why this record
+            // looked free — but the entry never advances past it. `detect_drift` then
+            // answers `None` forever for a path selfie will never write, and `dotfiles
+            // drift` calls it in sync (selfie-phnh). That asymmetry is why the
+            // suppression below is narrow: only the symlinked case is a claim selfie
+            // cannot make good on.
             //
             // What this check uniquely provides is the *preview* and the *un-asked
             // prompt*: deleting it fails those two tests and no others. Not the
@@ -1263,9 +1359,28 @@ where
                     }
                 }
                 DeployDecision::Skip(reason) => {
-                    // If this was an untracked file that's already in sync,
-                    // record the state so future runs see DriftType::None.
-                    if drift == DriftType::NotTracked && !options.dry_run {
+                    // If this was an untracked file that's already in sync, record
+                    // the state so future runs see DriftType::None — unless the
+                    // target is a symlink. See the refusal check above for why that
+                    // one case is excluded.
+                    //
+                    // Deciding a state mutation on `symlink_refusal` reads against
+                    // its own documentation, which calls it advisory and racy and
+                    // says never to gate a write on it. It is not gating a write:
+                    // nothing is written on this path at all, and where this path
+                    // does write -- `perform_deploy` -- the refusal is
+                    // `write_file_no_follow`'s, in the kernel, and stays there.
+                    //
+                    // A stale answer here omits an entry the next run re-evaluates
+                    // from scratch. It can manufacture one only through a link
+                    // planted in the window between this check and the record, and
+                    // that is the same window the check above already lives with --
+                    // narrower, in fact, since nothing intervenes. Do not read it as
+                    // "can never manufacture one": the race is small, not absent.
+                    if drift == DriftType::NotTracked
+                        && !options.dry_run
+                        && filesystem.symlink_refusal(&target_path).is_none()
+                    {
                         deploy_state.record_deployment(source, &source_checksum);
                     }
                     sender
@@ -1391,7 +1506,10 @@ async fn handle_check_drift<F>(
 where
     F: FileSystem,
 {
-    let deploy_state = load_deploy_state(filesystem, config);
+    let (deploy_state, state_warning) = load_deploy_state(filesystem, config);
+    if let Some(warning) = state_warning {
+        sender.send_warning(&warning).await;
+    }
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
@@ -1534,12 +1652,13 @@ where
 
 /// Handle `track_standalone`: copy target file into dotfiles dir, create a new
 /// YAML spec, and record initial deploy state.
-fn handle_track_standalone<R, F>(
+async fn handle_track_standalone<R, F>(
     name: &str,
     target_path: &str,
     dotfiles_repo: Option<&R>,
     filesystem: &F,
     config: &SelfieConfig,
+    sender: &EventSender,
 ) -> OperationResult
 where
     R: PackageRepository,
@@ -1656,7 +1775,10 @@ where
 
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
-    let mut deploy_state = load_deploy_state(filesystem, config);
+    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
+    if let Some(warning) = state_warning {
+        sender.send_warning(&warning).await;
+    }
     let source_key = format!("{name}/{filename}");
     deploy_state.record_deployment(&source_key, &checksum);
     if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
@@ -1679,12 +1801,13 @@ where
 
 /// Handle `track_for_package`: load an existing package, copy the target file
 /// alongside the YAML, add a dotfiles entry, save, and record deploy state.
-fn handle_track_for_package<R, F>(
+async fn handle_track_for_package<R, F>(
     package_name: &str,
     target_path: &str,
     repo: &R,
     filesystem: &F,
     config: &SelfieConfig,
+    sender: &EventSender,
 ) -> OperationResult
 where
     R: PackageRepository,
@@ -1809,7 +1932,10 @@ where
 
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
-    let mut deploy_state = load_deploy_state(filesystem, config);
+    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
+    if let Some(warning) = state_warning {
+        sender.send_warning(&warning).await;
+    }
     deploy_state.record_deployment(&relative_source, &checksum);
     if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -1825,4 +1951,232 @@ where
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(1, 1),
     })
+}
+
+/// What [`load_deploy_state`] reports, and what it stays quiet about.
+///
+/// At this layer rather than through a service, because the path-resolution branch
+/// is unreachable from an integration test: those always configure a
+/// `state_directory`, and only an unset one with no determinable home reaches it.
+/// The wiring — that these messages actually leave the library as events — is
+/// covered per command in `tests/dotfile_service_tests.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SelfieConfigBuilder;
+    use crate::fs::MockFileSystem;
+
+    const STATE_DIR: &str = "/state";
+    const STATE_FILE: &str = "/state/deploy-state.yml";
+
+    fn config_with_state_dir() -> SelfieConfig {
+        SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .state_directory(PathBuf::from(STATE_DIR))
+            .build()
+    }
+
+    /// A state file that exists and reads back as `content`.
+    fn filesystem_holding(content: &str) -> MockFileSystem {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
+        fs.mock_read_file(PathBuf::from(STATE_FILE), content);
+        fs
+    }
+
+    const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
+         deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
+
+    /// The positive control for every test below.
+    ///
+    /// Without it they would all pass against a `load_deploy_state` that returned an
+    /// empty state and a message unconditionally.
+    #[test]
+    fn a_valid_state_file_loads_its_entries_with_no_message() {
+        let fs = filesystem_holding(VALID_STATE_YAML);
+
+        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        assert!(state.get("myapp/config.toml").is_some());
+        assert_eq!(warning, None);
+    }
+
+    /// The first-run case, and the one branch that must stay silent.
+    ///
+    /// A warning here would fire on every fresh machine, for the ordinary condition
+    /// of never having deployed anything.
+    #[test]
+    fn an_absent_state_file_loads_empty_and_says_nothing() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
+
+        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        assert!(state.entries().is_empty());
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn an_unparsable_state_file_is_named_in_the_message() {
+        let fs = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
+
+        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        assert!(state.entries().is_empty());
+        let warning = warning.expect("a corrupt state file must be reported");
+        assert!(
+            warning.contains(STATE_FILE),
+            "the message must name the file: {warning}"
+        );
+    }
+
+    /// The two conditions are distinguished, not merely both reported.
+    ///
+    /// Repairing malformed YAML and fixing permissions are different jobs, so one
+    /// message for both sends the reader to the wrong one. Asserted in a single test
+    /// because the property is that the two *differ*, which neither alone can see.
+    #[test]
+    fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
+        let mut unreadable = MockFileSystem::default();
+        unreadable.mock_path_exists(PathBuf::from(STATE_FILE), true);
+        unreadable.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("permission denied"),
+            )))
+        });
+
+        let (state, unreadable_warning) = load_deploy_state(&unreadable, &config_with_state_dir());
+        assert!(state.entries().is_empty());
+        let unreadable_warning = unreadable_warning.expect("an unreadable state file is reported");
+
+        let corrupt = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
+        let (_, corrupt_warning) = load_deploy_state(&corrupt, &config_with_state_dir());
+        let corrupt_warning = corrupt_warning.expect("a corrupt state file is reported");
+
+        assert!(
+            unreadable_warning.contains("Cannot read"),
+            "an I/O failure must say so: {unreadable_warning}"
+        );
+        assert!(
+            corrupt_warning.contains("Cannot parse"),
+            "a malformed file must say so: {corrupt_warning}"
+        );
+        assert_ne!(
+            unreadable_warning, corrupt_warning,
+            "two different conditions reported identically"
+        );
+    }
+
+    /// Reachable only with no configured `state_directory` and no determinable home.
+    ///
+    /// `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
+    /// whose body is `expand_path("~")` — so this stubs the method that one calls.
+    /// `MockFileSystem` has no `expect_home` to stub.
+    #[test]
+    fn a_state_file_whose_location_cannot_be_resolved_is_reported() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("no home"),
+            )))
+        });
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .build();
+
+        let (state, warning) = load_deploy_state(&fs, &config);
+
+        assert!(state.entries().is_empty());
+        let warning = warning.expect("an unresolvable state path must be reported");
+        assert!(
+            warning.contains("Cannot locate"),
+            "the message must say the file could not be located: {warning}"
+        );
+    }
+
+    /// A parse failure does not render a source snippet.
+    ///
+    /// serde-saphyr renders one in a parse error's `Display` by default, and this
+    /// message reaches an event stream and the MCP server's JSON. The file holds no
+    /// credentials, but it names every repository-file dotfile on the machine —
+    /// which is why `save_deploy_state` writes it owner-only.
+    ///
+    /// The marker sits on the line the parse fails at, so a rendered snippet would
+    /// certainly contain it. This is a *scanner* error, which is the class the
+    /// snippet suppression fully covers — see the test below for the class it does
+    /// not.
+    #[test]
+    fn a_parse_failure_does_not_render_a_source_snippet() {
+        const MARKER: &str = "zzz-recon-marker/config.conf";
+        let fs = filesystem_holding(&format!("{MARKER}: [unclosed\n"));
+
+        let (_, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        let warning = warning.expect("a corrupt state file must be reported");
+        assert!(
+            !warning.contains(MARKER),
+            "the state file's contents were quoted into the message: {warning}"
+        );
+        // Controls: the report still happened, and still names the file, so this
+        // cannot pass by the message being empty or the branch not being reached.
+        assert!(
+            warning.contains(STATE_FILE) && warning.contains("Cannot parse"),
+            "the message must still identify the file and the condition: {warning}"
+        );
+    }
+
+    /// The residual the snippet suppression does **not** cover, pinned as a fact.
+    ///
+    /// `DuplicateMappingKey`'s text interpolates the key itself
+    /// (`message_formatters.rs`), so no option suppresses it — and in this file the
+    /// keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
+    /// this is reachable in production, not a contrived shape.
+    ///
+    /// Asserted in the direction it actually behaves rather than aspirationally: the
+    /// key **is** in the message today. Closing that means scrubbing the rendered
+    /// error, which is selfie-flka. If this test ever fails because the key stopped
+    /// appearing, selfie-flka was fixed and this should become its regression test
+    /// rather than being deleted.
+    #[test]
+    fn a_duplicate_key_still_reaches_the_message() {
+        const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
+        let fs = filesystem_holding(&format!(
+            "deployed:\n  {MARKER}:\n    source_checksum: a\n    deployed_checksum: a\n    \
+             deployed_at: \"x\"\n  {MARKER}:\n    source_checksum: b\n    deployed_checksum: b\n    \
+             deployed_at: \"y\"\n"
+        ));
+
+        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        assert!(state.entries().is_empty());
+        let warning = warning.expect("a duplicated key must still be reported");
+        assert!(
+            warning.contains(MARKER),
+            "if the key no longer appears, selfie-flka is fixed -- see this test's \
+             documentation before changing it: {warning}"
+        );
+    }
+
+    /// The bound engages on an error selfie does not control the length of.
+    ///
+    /// A duplicated **explicit** key (`? <key>`) carries the whole key into the
+    /// message, and an explicit key is not subject to YAML's 1024-byte simple-key
+    /// limit — which is why the plain `key:` form cannot reach the bound and why an
+    /// earlier version of this work recorded the bound as untestable.
+    #[test]
+    fn an_unbounded_parse_error_is_cut_to_the_bound() {
+        let key = "k".repeat(2500);
+        let fs = filesystem_holding(&format!("? {key}\n: 1\n? {key}\n: 2\n"));
+
+        let (_, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+        let warning = warning.expect("a duplicated key must be reported");
+        assert!(
+            warning.contains("bytes elided"),
+            "an error longer than the bound was forwarded whole: {} bytes",
+            warning.len()
+        );
+    }
 }

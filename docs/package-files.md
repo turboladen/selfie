@@ -581,6 +581,14 @@ refusal, and neither does answering an interactive conflict prompt — in fact y
 since a refused entry is settled before the prompt. Overwriting a conflict and writing through a
 link are separate questions, and `--yes` speaks only to the first.
 
+**No deployment is recorded for a symlinked target**, including one that already matches. selfie did
+not write it and never will, so an entry claiming otherwise would be a promise the refusal
+guarantees it cannot keep. The visible consequence is in `selfie dotfiles drift`: the entry stays
+[`not tracked`](#selfie-dotfiles-drift-reports-the-symlink-refusal) on every run rather than
+settling to in sync, and `selfie sync status` keeps counting it. That is the honest report of a
+config file selfie does not manage — and it is what replacing the link, or retargeting the entry at
+the path the link points to, clears.
+
 To put a target under selfie's management, replace the symlink with a regular file
 (`rm ~/.gitconfig` before the next `selfie apply`, which then writes it), or point the entry's
 `target` at the path the link points to.
@@ -625,6 +633,11 @@ The **refusal** follows `apply`'s own decision, so it appears only where `apply`
 write. The **drift line** does not: an untracked target whose contents already match the repository
 file is still listed as drifted, even though `apply` skips it silently. In that case you get the
 drift line without the symlink reason.
+
+That combination — `not tracked`, on every run, with no reason beside it — is what a symlinked
+target already in sync looks like, and running `selfie apply` does not clear it: nothing is recorded
+for a target selfie will not write to, so there is no state for the entry to advance to.
+[Symlinked targets](#symlinked-targets) explains why, and what clears it.
 
 Note that `selfie sync status` summarizes drift counts and does not carry this reason; it points at
 `selfie dotfiles drift`, which does.

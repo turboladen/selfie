@@ -208,7 +208,13 @@ pub trait FileSystem: Send + Sync {
     /// [`write_file_no_follow`](FileSystem::write_file_no_follow) refuses on its own,
     /// on Unix in the kernel. Checking here and writing there would reintroduce
     /// exactly the race that method avoids; this only ever moves *when the user is
-    /// told*, never whether the write happens.
+    /// told* and *whether a deployment is recorded*, never whether the write happens.
+    ///
+    /// That second one is `handle_apply`'s already-in-sync branch, which declines to
+    /// record a deployment for a symlinked target it will never write to. It is safe
+    /// for the same reason the first is, and with the same limit: a stale answer
+    /// omits an entry the next run re-evaluates, and can manufacture one only
+    /// through a link planted inside the window between the check and the record.
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
