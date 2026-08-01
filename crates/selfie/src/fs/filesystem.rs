@@ -436,7 +436,6 @@ pub enum FileSystemError {
     /// and refused before it is *read*: opening a fifo blocks until the other end
     /// is opened, so `selfie apply` hung indefinitely on one and `command_timeout`
     /// did not bound it — that governs provider commands, not filesystem calls
-    /// (selfie-qwj3).
     ///
     /// `kind` names what was found, because the remedy differs: a leftover socket
     /// is deleted, a device node in `/dev` means the target path is wrong.

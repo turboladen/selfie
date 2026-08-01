@@ -990,11 +990,11 @@ where
 /// gated on `deploy_decision`. Apply puts the reason on its skip line and drift
 /// on its drift line: each says it in the channel it already uses, and neither
 /// raises a warning it did not raise before. That is what keeps the parity
-/// `.claude/rules/secrets.md` pins structural: the *refusal* still appears
+/// pins structural: the *refusal* still appears
 /// exactly where apply would refuse, and nothing here changes that gate.
 ///
 /// Scoped to `NotTracked`. A **tracked** entry whose target later became a
-/// symlink is a different bug with no drift line at all (selfie-v7py), and
+/// symlink is a different bug with no drift line at all, and
 /// answering for it here would half-fix that one from the wrong place.
 fn unmanaged_symlink_reason<F: FileSystem>(
     filesystem: &F,

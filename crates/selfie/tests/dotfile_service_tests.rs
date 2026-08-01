@@ -6117,17 +6117,17 @@ environments:
     }
 }
 
-/// Targets that are neither absent nor a regular file.
-///
-/// A fifo target hung `selfie apply` forever and a device node was written to
-/// (selfie-qwj3). The hang is the reason every test here has a deadline: reaching
-/// the unguarded path does not fail a test, it wedges it, and a wedged test is
-/// scored as neither pass nor fail.
-///
-/// `flavor = "multi_thread"` is load-bearing. The service does its work in a
-/// `tokio::spawn`ed task, so on the default current-thread runtime a blocking
-/// `read` inside that task stalls the whole runtime — including the timer, which
-/// then never fires and the timeout never returns.
+// Targets that are neither absent nor a regular file.
+//
+// A fifo target hung `selfie apply` forever and a device node was written to
+// (selfie-qwj3). The hang is the reason every test here has a deadline: reaching
+// the unguarded path does not fail a test, it wedges it, and a wedged test is
+// scored as neither pass nor fail.
+//
+// `flavor = "multi_thread"` is load-bearing. The service does its work in a
+// `tokio::spawn`ed task, so on the default current-thread runtime a blocking
+// `read` inside that task stalls the whole runtime — including the timer, which
+// then never fires and the timeout never returns.
 #[cfg(unix)]
 mod irregular_targets {
     use super::*;
@@ -6246,11 +6246,11 @@ mod irregular_targets {
         );
     }
 
-    /// Drift refuses a fifo target instead of hanging on it.
-    ///
-    /// Drift checksums the target exactly as apply does, so it hung on the same
-    /// open — which selfie-qwj3 does not mention and which the fix has to cover
-    /// for the two commands to keep agreeing.
+    // Drift refuses a fifo target instead of hanging on it.
+    //
+    // Drift checksums the target exactly as apply does, so it hung on the same
+    // open — which selfie-qwj3 does not mention and which the fix has to cover
+    // for the two commands to keep agreeing.
     #[tokio::test(flavor = "multi_thread")]
     async fn drift_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
@@ -6446,19 +6446,19 @@ mod unmanageable_symlink_reason {
         );
     }
 
-    /// A *tracked* symlinked target gets no reason, and that boundary is
-    /// deliberate.
-    ///
-    /// Found by mutation: widening the condition from `NotTracked` to include
-    /// `None` failed nothing, because every other fixture here varies the
-    /// symlink axis — plain file versus link — and none varies the drift type.
-    /// So the scoping this function documents was not enforced by anything.
-    ///
-    /// An entry that was deployed and whose target later became a symlink is
-    /// selfie-v7py: it produces **no drift line at all**, so there is no
-    /// permanent complaint to explain and nothing here should speak. Whoever
-    /// fixes v7py will have to change this test on purpose, which is the point
-    /// of it.
+    // A *tracked* symlinked target gets no reason, and that boundary is
+    // deliberate.
+    //
+    // Found by mutation: widening the condition from `NotTracked` to include
+    // `None` failed nothing, because every other fixture here varies the
+    // symlink axis — plain file versus link — and none varies the drift type.
+    // So the scoping this function documents was not enforced by anything.
+    //
+    // An entry that was deployed and whose target later became a symlink is
+    // selfie-v7py: it produces **no drift line at all**, so there is no
+    // permanent complaint to explain and nothing here should speak. Whoever
+    // fixes v7py will have to change this test on purpose, which is the point
+    // of it.
     #[tokio::test]
     async fn a_tracked_symlinked_target_is_outside_this_reason() {
         let dirs = TestDirs::new();
