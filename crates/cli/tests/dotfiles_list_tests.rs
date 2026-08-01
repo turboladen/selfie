@@ -84,7 +84,7 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
 // test cannot fail for the reason its name would promise, and the only proxy
 // available from outside the process — grepping stdout for a shell error — passes
 // on any machine where `op` happens to be installed. A test that cannot observe
-// the invariant it names is the failure mode `.claude/rules/testing.md` records.
+// the invariant it names is the failure mode records.
 // The real guard is `a_var_name_that_cannot_be_substituted_runs_no_command` in
 // `crates/selfie/tests/dotfile_service_tests.rs`, which asserts `call_count() == 0`
 // against an injected runner and has a positive control proving that runner

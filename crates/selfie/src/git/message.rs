@@ -38,7 +38,7 @@ const REDACTION: &str = "***";
 /// struct-variant literal — library, adapter, or test — can put raw git output
 /// into [`GitSyncError`](super::GitSyncError) or
 /// [`GitStatusError`](super::GitStatusError). That is the whole point of the
-/// type: `.claude/rules/verification.md` asks for invariants the compiler
+/// type: asks for invariants the compiler
 /// holds rather than ones a doc comment states.
 ///
 /// What it covers, and what it deliberately does not, is on
@@ -49,7 +49,7 @@ const REDACTION: &str = "***";
 /// Deliberately, and for the same reason as
 /// [`BoundedText`](crate::commands::BoundedText): this is text selfie
 /// *forwards* rather than content it holds back, and it has already been
-/// redacted. `.claude/rules/secrets.md` prescribes scanning an event's `Debug`
+/// redacted. prescribes scanning an event's `Debug`
 /// output for a secret, so a hand-written `Debug` printing `<N bytes>` would
 /// hide forwarded git output from that scan — a credential arriving in a shape
 /// this does not cover would go unseen instead of caught.
@@ -379,7 +379,7 @@ mod tests {
     use test_common::assert_secret_free;
 
     /// High-entropy, 24 characters, and shaped like nothing else in a fixture —
-    /// `.claude/rules/secrets.md` refuses a secret that reads like a path, a
+    /// refuses a secret that reads like a path, a
     /// package name, or an environment name.
     const TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 

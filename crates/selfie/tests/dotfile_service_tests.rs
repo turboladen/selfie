@@ -3979,15 +3979,15 @@ mod secret_bearing {
         }
     }
 
-    /// What a noisy login shell puts in a credentials file (selfie-evf9).
-    ///
-    /// The unit tests in `commands::shell` assert what the runner returns. These
-    /// assert the thing that actually matters: the bytes on disk, through the
-    /// whole service, with a real shell process in the middle.
-    ///
-    /// The shell is a script standing in for the user's, so nothing here reads or
-    /// writes the developer's own configuration. See `commands::shell`'s
-    /// `content_tests` for why that is a faithful stand-in.
+    // What a noisy login shell puts in a credentials file (selfie-evf9).
+    //
+    // The unit tests in `commands::shell` assert what the runner returns. These
+    // assert the thing that actually matters: the bytes on disk, through the
+    // whole service, with a real shell process in the middle.
+    //
+    // The shell is a script standing in for the user's, so nothing here reads or
+    // writes the developer's own configuration. See `commands::shell`'s
+    // `content_tests` for why that is a faithful stand-in.
     #[cfg(unix)]
     mod noisy_shell {
         use super::*;
@@ -4133,9 +4133,9 @@ mod symlinked_targets {
             .collect()
     }
 
-    /// `(deployed, skipped, conflict, refused)` — every bucket, because the
-    /// point of each is that it is not one of the others. A refusal is not a
-    /// conflict, and since selfie-c28 it is not a skip either.
+    // `(deployed, skipped, conflict, refused)` — every bucket, because the
+    // point of each is that it is not one of the others. A refusal is not a
+    // conflict, and since selfie-c28 it is not a skip either.
     fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
             OperationResult::Success(OperationSuccess::DotfilesApplied {
@@ -4780,14 +4780,14 @@ mod target_expansion {
         );
     }
 
-    /// Two spellings of one file that differ through a symlinked directory no
-    /// longer compare equal.
-    ///
-    /// Duplicate detection in `dotfiles track` compares expanded paths, so it now
-    /// misses this case where canonicalizing used to catch it. Recorded because it
-    /// is the regression most likely to tempt someone into putting `expand_path`
-    /// back — which would reopen selfie-4m9. Fix it by comparing differently, not
-    /// by resolving here.
+    // Two spellings of one file that differ through a symlinked directory no
+    // longer compare equal.
+    //
+    // Duplicate detection in `dotfiles track` compares expanded paths, so it now
+    // misses this case where canonicalizing used to catch it. Recorded because it
+    // is the regression most likely to tempt someone into putting `expand_path`
+    // back — which would reopen selfie-4m9. Fix it by comparing differently, not
+    // by resolving here.
     #[test]
     fn paths_differing_through_a_symlinked_directory_no_longer_match() {
         let temp = TempDir::new().unwrap();
@@ -4804,13 +4804,13 @@ mod target_expansion {
     }
 }
 
-/// What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
-/// what the lexical containment guard does not say about a symlinked source.
-///
-/// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
-/// two commands that used to be silent about it and the guard that documents a limit
-/// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
-/// of this is observable through it. Everything runs inside a `TempDir`.
+// What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
+// what the lexical containment guard does not say about a symlinked source.
+//
+// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
+// two commands that used to be silent about it and the guard that documents a limit
+// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
+// of this is observable through it. Everything runs inside a `TempDir`.
 #[cfg(unix)]
 mod symlink_consistency {
     use super::*;
@@ -5268,19 +5268,19 @@ mod symlink_consistency {
     }
 }
 
-/// The one target rule, as each command applies it.
-///
-/// Four beads, two of them disagreements between enforcement sites and two of
-/// them defects within one: `selfie spec validate` accepting what apply refuses
-/// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
-/// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
-/// entry-level refusals returning different outcomes (selfie-m5dv).
-/// `deploy_target` is the reconciled rule and these are the commands' side of it.
-///
-/// Unix-only for the same reason `symlink_consistency` is: everything here runs
-/// against a real filesystem inside a `TempDir`. Nothing creates a
-/// CWD-relative fixture — a relative target is refused before anything stats it,
-/// which is the property under test.
+// The one target rule, as each command applies it.
+//
+// Four beads, two of them disagreements between enforcement sites and two of
+// them defects within one: `selfie spec validate` accepting what apply refuses
+// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
+// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
+// entry-level refusals returning different outcomes (selfie-m5dv).
+// `deploy_target` is the reconciled rule and these are the commands' side of it.
+//
+// Unix-only for the same reason `symlink_consistency` is: everything here runs
+// against a real filesystem inside a `TempDir`. Nothing creates a
+// CWD-relative fixture — a relative target is refused before anything stats it,
+// which is the property under test.
 #[cfg(unix)]
 mod target_rule {
     use super::*;
@@ -5294,21 +5294,21 @@ mod target_rule {
         create_package_with_dotfiles(&dirs.package_dir, "myapp", &[("myapp/config.toml", target)]);
     }
 
-    /// selfie-q9t3: track had no absoluteness guard at all, so a relative target
-    /// resolved against the process working directory, was recorded, and was then
-    /// refused by every later apply.
-    ///
-    /// Deleting the guard makes this fail: `path_exists` is then reached, finds
-    /// nothing CWD-relative, and the failure becomes "Target file does not exist:
-    /// …". The negative assertion discriminates rather than passing vacuously.
-    ///
-    /// It does **not** prove the guard's position relative to `symlink_refusal`.
-    /// That returns `None` for any path that does not exist, so only a
-    /// CWD-relative symlink fixture could observe the difference, and no test
-    /// here may create one. Against that check the guard sits ahead on argument —
-    /// it touches no filesystem, and both `symlink_refusal` and `path_exists`
-    /// stat a relative path against the process working directory — not because a
-    /// test holds it there.
+    // selfie-q9t3: track had no absoluteness guard at all, so a relative target
+    // resolved against the process working directory, was recorded, and was then
+    // refused by every later apply.
+    //
+    // Deleting the guard makes this fail: `path_exists` is then reached, finds
+    // nothing CWD-relative, and the failure becomes "Target file does not exist:
+    // …". The negative assertion discriminates rather than passing vacuously.
+    //
+    // It does **not** prove the guard's position relative to `symlink_refusal`.
+    // That returns `None` for any path that does not exist, so only a
+    // CWD-relative symlink fixture could observe the difference, and no test
+    // here may create one. Against that check the guard sits ahead on argument —
+    // it touches no filesystem, and both `symlink_refusal` and `path_exists`
+    // stat a relative path against the process working directory — not because a
+    // test holds it there.
     #[tokio::test]
     async fn tracking_a_relative_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5452,16 +5452,16 @@ mod target_rule {
         );
     }
 
-    /// selfie-m5dv: a relative target skipped while an escaping template aborted,
-    /// though neither ran a command, and the documentation described the
-    /// opposite.
-    ///
-    /// Two entries, the refused one first, because the counters cannot tell these
-    /// two apart on their own: `Skipped` and `Failed` differ in *which* bucket
-    /// they increment, but this test is about `stop_on_error`, and what
-    /// distinguishes an aborted run from a continued one is whether the second
-    /// entry is reached at all. A one-entry package has no second entry, so it
-    /// would pass whether the run stopped or carried on.
+    // selfie-m5dv: a relative target skipped while an escaping template aborted,
+    // though neither ran a command, and the documentation described the
+    // opposite.
+    //
+    // Two entries, the refused one first, because the counters cannot tell these
+    // two apart on their own: `Skipped` and `Failed` differ in *which* bucket
+    // they increment, but this test is about `stop_on_error`, and what
+    // distinguishes an aborted run from a continued one is whether the second
+    // entry is reached at all. A one-entry package has no second entry, so it
+    // would pass whether the run stopped or carried on.
     #[tokio::test]
     async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
         async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
@@ -5707,12 +5707,12 @@ mod deploy_state_diagnostics {
     }
 }
 
-/// What `selfie apply` reports when it refuses.
-///
-/// A refusal used to land in `skipped_count` beside "already in sync", so a
-/// caller — a script reading the exit code, or an assistant reading the MCP
-/// envelope — could not tell a run that deployed nothing from a run that had
-/// nothing to deploy (selfie-c28). These pin the buckets apart.
+// What `selfie apply` reports when it refuses.
+//
+// A refusal used to land in `skipped_count` beside "already in sync", so a
+// caller — a script reading the exit code, or an assistant reading the MCP
+// envelope — could not tell a run that deployed nothing from a run that had
+// nothing to deploy (selfie-c28). These pin the buckets apart.
 mod refusal_accounting {
     use super::*;
 
@@ -5967,12 +5967,12 @@ dotfiles:
     }
 }
 
-/// `_dotfiles:` at a package's top level, and what `selfie apply` does about it.
-///
-/// Read as a YAML anchor, the key leaves the package with no dotfiles at all, so
-/// apply deployed nothing and reported success — no warning, no error, no count
-/// (selfie-g199). `selfie spec validate` reports it too, but apply never runs
-/// validation, so the refusal has to live on the apply path itself.
+// `_dotfiles:` at a package's top level, and what `selfie apply` does about it.
+//
+// Read as a YAML anchor, the key leaves the package with no dotfiles at all, so
+// apply deployed nothing and reported success — no warning, no error, no count
+// (selfie-g199). `selfie spec validate` reports it too, but apply never runs
+// validation, so the refusal has to live on the apply path itself.
 mod top_level_anchor_shadowing {
     use super::*;
 

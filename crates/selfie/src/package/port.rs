@@ -239,7 +239,7 @@ pub enum PackageRepoError {
     /// is dropped. For a dotfile entry that key is exactly what makes
     /// [`content_source`](crate::package::DotfileEntry::content_source) refuse
     /// the entry, so the rewrite would turn an entry `selfie apply` skips into
-    /// one it deploys. See selfie-6lz4.
+    /// one it deploys.
     // The remedy names editing the file rather than a selfie command on purpose:
     // every command that could rewrite the file is refused by this same guard, so
     // pointing at one would send the user back to a tool that just refused them.

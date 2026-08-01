@@ -236,7 +236,7 @@ impl Package {
     /// The exception is an anchor whose name collides with a real top-level
     /// field: `_dotfiles:` cannot be told apart from a misspelling of
     /// `dotfiles:`, and reading it as an anchor leaves the package with no
-    /// dotfiles at all (selfie-g199). `target` is not a top-level field, so the
+    /// dotfiles at all. `target` is not a top-level field, so the
     /// documented `_target: &target …` anchor is unaffected.
     ///
     /// Reporting it here is only half the fix. Apply does not run validation, so

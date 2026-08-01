@@ -191,7 +191,7 @@ fn excerpt(text: &str, at: usize, len: usize) -> String {
 ///
 /// # What this cannot see
 ///
-/// So that it is not over-trusted — `.claude/rules/secrets.md` says to assume
+/// So that it is not over-trusted — says to assume
 /// there is a fourth leak path, and this closes one rendering, not the class.
 ///
 /// - **`String::from_utf8_lossy` of non-UTF-8 content — treat it as uncovered.**

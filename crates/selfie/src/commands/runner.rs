@@ -587,7 +587,7 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 /// Deliberately, and unlike `ResolvedContent`. That is never forwarded, so its
 /// `Debug` is a pure exit worth closing by hand. This value is text selfie
 /// forwards on purpose, and
-/// `.claude/rules/secrets.md` prescribes scanning an event's `Debug` output for
+/// prescribes scanning an event's `Debug` output for
 /// a secret literal. A hand-written `Debug` printing `<N bytes>` would hide
 /// forwarded stderr from that scan, so a secret that reaches stderr later would
 /// go unseen rather than caught. Blinding it would contain nothing: the text is

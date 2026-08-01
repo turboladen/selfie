@@ -818,7 +818,7 @@ pub enum OperationSuccess {
         /// Distinct from `refused_count`, and the distinction is the point. A
         /// refused entry counted here is indistinguishable from one that needed
         /// no work, which is how `selfie apply` came to report success for a run
-        /// that deployed nothing (selfie-c28).
+        /// that deployed nothing.
         skipped_count: usize,
         conflict_count: usize,
         /// What selfie was asked to deploy and did not — refusals and failures
@@ -827,7 +827,7 @@ pub enum OperationSuccess {
         /// Usually an entry, but **not always one**: a package refused whole for
         /// a top-level key that hides a real field contributes 1 here and no
         /// entries at all, because its `dotfiles` list was swallowed by the very
-        /// key being refused (selfie-g199). So this counts *outcomes*, matching
+        /// key being refused. So this counts *outcomes*, matching
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
@@ -1604,7 +1604,6 @@ impl OperationSuccess {
     /// completed while declining part of its work is still a completed
     /// operation — which is why this is a property of a success rather than a
     /// failure — but a caller checking only the exit code has to be told
-    /// (selfie-c28).
     ///
     /// False for every other variant: no other operation counts refusals yet.
     /// Add a variant here when one does, rather than teaching an adapter to

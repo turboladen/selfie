@@ -1,14 +1,14 @@
-//! What the package operations do when a command's output could not be read.
-//!
-//! `selfie-ql8m`: `run_buffered` used to discard a mid-read IO error and return
-//! whatever had been buffered as though it were the command's whole output.
-//! Nothing downstream could tell the two apart, and every non-streaming path
-//! goes through it.
-//!
-//! These assert the consumers' side of the fix — that a command whose output
-//! selfie could not read does not become a *verdict*. The dotfile path's own
-//! consequence (a truncated credential reaching a file) is asserted in
-//! `dotfile_service_tests.rs`, where a write actually happens.
+// What the package operations do when a command's output could not be read.
+//
+// `selfie-ql8m`: `run_buffered` used to discard a mid-read IO error and return
+// whatever had been buffered as though it were the command's whole output.
+// Nothing downstream could tell the two apart, and every non-streaming path
+// goes through it.
+//
+// These assert the consumers' side of the fix — that a command whose output
+// selfie could not read does not become a *verdict*. The dotfile path's own
+// consequence (a truncated credential reaching a file) is asserted in
+// `dotfile_service_tests.rs`, where a write actually happens.
 
 use futures::StreamExt;
 use tempfile::TempDir;

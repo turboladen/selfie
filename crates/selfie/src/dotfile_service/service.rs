@@ -229,7 +229,7 @@ fn deploy_state_path<F: FileSystem>(
 /// file is repaired by hand. What it must not do is proceed *silently*.
 ///
 /// Note the state this returns is later saved over the file it could not read.
-/// That is `selfie-8qyv`, deferred deliberately rather than overlooked.
+/// That is deferred deliberately rather than overlooked.
 fn load_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
@@ -670,7 +670,7 @@ where
     /// [`refuse_unresolvable`](Self::refuse_unresolvable) returns: both are
     /// decided from the entry alone before anything runs, so returning different
     /// outcomes made `stop_on_error` end the run for one and not the other, and
-    /// the documentation described the opposite (selfie-m5dv). A refused entry is
+    /// the documentation described the opposite. A refused entry is
     /// not a skipped one.
     async fn usable_target<'e>(
         &self,

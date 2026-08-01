@@ -73,7 +73,7 @@ impl FakeCommandRunner {
 
     /// Script a command whose stdout pipe dies part-way through being read.
     ///
-    /// The shape of `selfie-ql8m`: the command itself is fine, and what selfie
+    /// The command itself is fine, and what selfie
     /// buffered is a prefix of its output rather than the whole of it.
     #[must_use]
     pub fn stdout_read_failing(self, command: &str) -> Self {

@@ -205,9 +205,9 @@ impl std::fmt::Display for InvalidEntry<'_> {
 ///
 /// `_`-prefixed keys are otherwise legal anywhere — that is what lets a package
 /// file define YAML anchors without `deny_unknown_fields` rejecting them
-/// (selfie-6lz4). The collision is the exception: `_vars:` is indistinguishable
+/// The collision is the exception: `_vars:` is indistinguishable
 /// from a typo for `vars:`, and reading it as an anchor deploys the template
-/// *unrendered* with the bindings silently absent (selfie-kj5y).
+/// *unrendered* with the bindings silently absent.
 ///
 /// Parameterized over the field list rather than hard-coded, because the same
 /// rule applies at two levels against **different** lists, and which list is in
@@ -231,7 +231,7 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 ///
 /// `_dotfiles:` is the case that matters: read as an anchor, the package has no
 /// dotfiles at all, so `selfie apply` deployed nothing and reported success
-/// (selfie-g199). The remedy is the same as for an entry — rename the anchor, or
+/// The remedy is the same as for an entry — rename the anchor, or
 /// drop the underscore.
 ///
 /// Scoped by [`KNOWN_PACKAGE_FIELDS`](crate::package::validate::KNOWN_PACKAGE_FIELDS),
@@ -326,7 +326,7 @@ fn shadowing_top_level_keys(raw_yaml: &str) -> Vec<String> {
 /// report [`InvalidEntry::UnknownKeys`] so apply refuses the entry, and lets
 /// `Package::validate_unknown_dotfile_fields` name the key. `#[serde(deny_unknown_fields)]`
 /// cannot be used for this: it rejects `_`-prefixed YAML anchor definitions
-/// (selfie-6lz4), and a rejected key fails the *whole package file* to parse,
+///, and a rejected key fails the *whole package file* to parse,
 /// taking every other dotfile and command in it down with the typo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DotfileEntry {
@@ -362,7 +362,7 @@ pub(crate) const KNOWN_DOTFILE_FIELDS: &[&str] = &["source", "command", "vars", 
 /// both are wrong here — see the type's documentation. Written as a visitor
 /// rather than `#[serde(flatten)]` into a catch-all map because flatten forces
 /// serde's buffering path, which would foreclose putting `Spanned<T>` on these
-/// fields to give dotfile diagnostics source locations (selfie-2wb); flatten on
+/// fields to give dotfile diagnostics source locations; flatten on
 /// `Package` had to be backed out for that exact reason in d96b82c.
 impl<'de> Deserialize<'de> for DotfileEntry {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -648,7 +648,7 @@ pub struct Package {
     /// list two call sites read.
     ///
     /// Empty for a programmatically built package, which has no raw YAML. Same
-    /// limit `validate_unknown_fields` already has; see selfie-t8t2.
+    /// limit `validate_unknown_fields` already has.
     #[serde(skip)]
     shadowing_top_level_keys: Vec<String>,
 }

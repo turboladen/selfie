@@ -197,7 +197,7 @@ impl ConflictResolver for InteractiveConflictResolver {
 /// load-bearing rather than cosmetic: `handle_event` is the only thing that
 /// writes `exit_code`, and `process_events` skips it entirely for any event a
 /// custom handler claims. A success carrying a refusal handled *here* would be
-/// printed prettily and exit 0 — which is selfie-c28. So the exit code for a
+/// printed prettily and exit 0. So the exit code for a
 /// refusal cannot be fixed in `event_processor.rs` alone; this function is the
 /// other half.
 fn summary_to_render(
@@ -312,7 +312,7 @@ mod tests {
     ///
     /// Claiming it here would print the summary and swallow the event, and
     /// `EventProcessor::handle_event` — the only writer of `exit_code` — would
-    /// never see it. That is selfie-c28 in one line.
+    /// never see it.
     #[test]
     fn a_success_carrying_a_refusal_falls_through_to_the_default_handler() {
         assert!(summary_to_render(&applied(1)).is_none());

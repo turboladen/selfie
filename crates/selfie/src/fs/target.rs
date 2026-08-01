@@ -2,7 +2,7 @@
 //! constructor a deploy path must go through, and why the distinction between
 //! them is not cosmetic.
 //!
-//! `.claude/rules/secrets.md` carries the argument for why a target must reach a
+//! carries the argument for why a target must reach a
 //! writer unresolved. This module is the mechanism.
 
 use std::path::{Path, PathBuf};
@@ -167,7 +167,7 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
 /// failure. Going through [`message`](Self::message) and
 /// [`suggestion`](Self::suggestion) is what keeps those four in step. It also
 /// keeps a `{:?}` of an error out of user-facing text, which
-/// `.claude/rules/secrets.md` warns about for the failure types on this path.
+/// warns about for the failure types on this path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetRejection {
     /// `~user/...`. Selfie does not resolve another user's home directory.

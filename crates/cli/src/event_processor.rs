@@ -714,7 +714,7 @@ mod tests {
     /// A completed apply that refused an entry exits non-zero.
     ///
     /// The library counts the refusal; this asserts the adapter acts on it. A
-    /// script checking `$?` is the caller selfie-c28 is about.
+    /// script checking `$?` is the caller this matters for.
     #[tokio::test]
     async fn a_completed_apply_that_refused_something_exits_non_zero() {
         use selfie::package::event::{OperationResult, OperationSuccess, StepCount};

@@ -10,7 +10,7 @@
 //! selfie's own capture then comes up empty and fails closed. That is a known
 //! limit against an accidental collision, not a boundary against a hostile
 //! profile — one of those already owns the session. See
-//! `.claude/rules/secrets.md`.
+//! .
 
 use uuid::Uuid;
 

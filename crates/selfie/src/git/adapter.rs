@@ -8,7 +8,7 @@
 //! - **Fast-forward merge** — because it updates both the ref and the working
 //!   tree, requiring checkout logic (`gix-worktree-state`) we don't pull in.
 //! - **Ancillary queries** (branch name, remote, ahead/behind, deleted files,
-//!   diff) — tracked in selfie-y9n for conversion to native gix.
+//!   diff) — tracked for conversion to native gix.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -744,7 +744,7 @@ mod tests {
     // `GitMessage` on strings a test wrote.
 
     /// High-entropy and shaped like nothing else in a fixture, per
-    /// `.claude/rules/secrets.md`. A fixture value, never a real credential:
+    /// . A fixture value, never a real credential:
     /// `assert_secret_free` prints an excerpt of whatever matched.
     const FIXTURE_TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 

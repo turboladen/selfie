@@ -383,7 +383,7 @@ mod tests {
     /// assistant is told the call did not do what was asked. The payload's
     /// `status` has to move with it: `"status": "success"` inside a result
     /// flagged as an error is the same two-meanings-in-one-field defect as the
-    /// counter selfie-c28 is about.
+    /// counter this distinguishes.
     #[tokio::test]
     async fn an_apply_that_refused_an_entry_is_an_error_result() {
         use selfie::package::event::{OperationSuccess, StepCount};
