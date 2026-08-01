@@ -6446,6 +6446,58 @@ mod unmanageable_symlink_reason {
         );
     }
 
+    /// A *tracked* symlinked target gets no reason, and that boundary is
+    /// deliberate.
+    ///
+    /// Found by mutation: widening the condition from `NotTracked` to include
+    /// `None` failed nothing, because every other fixture here varies the
+    /// symlink axis — plain file versus link — and none varies the drift type.
+    /// So the scoping this function documents was not enforced by anything.
+    ///
+    /// An entry that was deployed and whose target later became a symlink is
+    /// selfie-v7py: it produces **no drift line at all**, so there is no
+    /// permanent complaint to explain and nothing here should speak. Whoever
+    /// fixes v7py will have to change this test on purpose, which is the point
+    /// of it.
+    #[tokio::test]
+    async fn a_tracked_symlinked_target_is_outside_this_reason() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+
+        // Deploy to a plain file first, so the entry is tracked.
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            skip_reasons(&first).is_empty(),
+            "control: the first apply deploys rather than skipping"
+        );
+
+        // Now move it aside and link to it: same content, still tracked.
+        let destination = dirs.target_dir.join("destination");
+        std::fs::rename(&target, &destination).unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let reasons = skip_reasons(&apply);
+        assert!(
+            reasons.iter().all(|r| !r.contains("symlink")),
+            "a tracked entry is not what this reason is about: {reasons:?}"
+        );
+
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift_reasons(&drift),
+            Vec::<Option<String>>::new(),
+            "selfie-v7py: no drift line at all, so nothing to annotate"
+        );
+    }
+
     /// The drift classification stays a bare label.
     ///
     /// The reason travels in its own field: the MCP server serializes
