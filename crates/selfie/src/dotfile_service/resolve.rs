@@ -1,7 +1,7 @@
 //! Resolving a dotfile's content at apply time.
 //!
 //! Secret-bearing content is produced here and held only in memory: it is
-//! compared against the target directly and never recorded. See ADR-0003.
+//! compared against the target directly and never recorded.
 //!
 //! Nothing in this module puts resolved content into an error, a warning, or any
 //! other value that reaches the event stream. The bytes leave only as

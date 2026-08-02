@@ -4,7 +4,7 @@
 //! expressions. This is a direct scan rather than an embedded template engine, so
 //! the restriction holds by construction — there is no parser in which control
 //! flow could be written, and no engine features (file includes, environment
-//! access) reachable by default. See ADR-0004.
+//! access) reachable by default.
 
 use std::collections::{BTreeMap, BTreeSet};
 

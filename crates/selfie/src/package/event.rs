@@ -659,64 +659,29 @@ pub struct OperationContext {
     pub target_environment: Option<String>,
 }
 
-/// Result of an operation
+/// Result of an operation.
 ///
-/// Example usage for clients handling typed success results
+/// Each [`OperationSuccess`] variant carries the fields a caller needs to render
+/// it, so match on the variant rather than parsing a message:
 ///
 /// ```rust
 /// use selfie::package::event::{OperationResult, OperationSuccess};
 ///
-/// fn handle_operation_result(result: OperationResult) {
+/// fn render(result: OperationResult) -> String {
 ///     match result {
-///         OperationResult::Success(success) => {
-///             match success {
-///                 OperationSuccess::PackageInstalled {
-///                     package_name,
-///                     was_already_installed: true,
-///                     executable_path: Some(path),
-///                     ..
-///                 } => {
-///                     println!("✅ {} was already installed at {}", package_name, path);
-///                 }
-///                 OperationSuccess::PackageInstalled {
-///                     package_name,
-///                     was_already_installed: false,
-///                     steps_completed,
-///                     ..
-///                 } => {
-///                     println!("✅ {} installed successfully ({}/{} steps)",
-///                             package_name, steps_completed.completed, steps_completed.total);
-///                 }
-///                 OperationSuccess::PackageValidated {
-///                     package_name,
-///                     warning_count: Some(warnings),
-///                     ..
-///                 } => {
-///                     println!("✅ {} validated with {} warnings", package_name, warnings);
-///                 }
-///                 OperationSuccess::PackageListGenerated {
-///                     valid_count,
-///                     invalid_count,
-///                     environment,
-///                     ..
-///                 } => {
-///                     if invalid_count > 0 {
-///                         println!("📦 Found {} valid and {} invalid packages in {}",
-///                                 valid_count, invalid_count, environment);
-///                     } else {
-///                         println!("📦 Found {} packages in {}", valid_count, environment);
-///                     }
-///                 }
-///                 _ => println!("✅ Operation completed successfully"),
-///             }
-///         }
-///         OperationResult::Failure(failure) => {
-///             eprintln!("❌ Operation failed: {}", failure);
-///         }
+///         OperationResult::Success(OperationSuccess::PackageInstalled {
+///             package_name,
+///             steps_completed,
+///             ..
+///         }) => format!(
+///             "{package_name} installed ({}/{} steps)",
+///             steps_completed.completed, steps_completed.total
+///         ),
+///         OperationResult::Success(_) => "done".to_string(),
+///         OperationResult::Failure(failure) => format!("failed: {failure}"),
 ///     }
 /// }
 /// ```
-///
 #[derive(Debug, Clone)]
 pub enum OperationResult {
     Success(OperationSuccess),

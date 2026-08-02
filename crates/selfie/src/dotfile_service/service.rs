@@ -310,10 +310,8 @@ fn load_deploy_state<F: FileSystem>(
 /// shared host, readable by people who cannot read several of the files it
 /// describes.
 ///
-/// Secret-bearing entries are *not* in here: they record nothing at all, per
-/// ADR-0003. So this is not a complete list of what selfie manages, and tightening
-/// it does not make ADR-0003's argument moot — that turns on what a stored checksum
-/// of a credential would be, and there still is none.
+/// Secret-bearing entries are *not* in here — they record nothing at all — so this
+/// is not a complete list of what selfie manages.
 ///
 /// Owner-only comes from `write_file_private`, the same method the secret-bearing
 /// targets use, so the two cannot drift apart again. See its documentation for what
@@ -611,7 +609,7 @@ struct SecretTarget<'a> {
 ///
 /// Holds resolved content in memory only: it is compared against the target
 /// directly, written with owner-only permissions, and never recorded in deploy
-/// state. Nothing derived from it reaches an event. See ADR-0003.
+/// state. Nothing derived from it reaches an event.
 struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
@@ -807,9 +805,8 @@ where
     /// only thing that establishes owner-only permissions, so returning here
     /// without it would leave a pre-existing world-readable target
     /// world-readable while reporting it as managed. That is exactly the
-    /// adoption case ADR-0003 cites as the reason this design is safe, and the
-    /// docs promise mode `0600` with no "unless the content already matched"
-    /// attached.
+    /// adoption case this design's safety rests on, and the docs promise mode
+    /// `0600` with no "unless the content already matched" attached.
     ///
     /// Tightening is conditional: rewriting a correct file on every apply would
     /// churn its inode and mtime and make "already in sync" a lie. A failure to

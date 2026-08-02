@@ -27,7 +27,7 @@ pub enum ConflictResolution {
 /// dependency the calling adapter injects, so an adapter that supplies none —
 /// the MCP server, for instance — cannot receive secret content at all. That is
 /// what makes an opt-in reveal safe to offer without it becoming a leak into
-/// structured output. See ADR-0003.
+/// structured output.
 pub enum ConflictDetail<'a> {
     /// A rendered unified diff, and the repository path it came from.
     ///
@@ -71,7 +71,7 @@ pub struct ApplyOptions {
     /// `auto_accept` is true. For a secret-bearing entry it is the **only** way
     /// to accept an overwrite: `auto_accept` is not consulted there at all, so a
     /// caller that supplies no resolver always gets the conflict reported and
-    /// skipped. See ADR-0003.
+    /// skipped.
     pub conflict_resolver: Option<Arc<dyn ConflictResolver>>,
 }
 
