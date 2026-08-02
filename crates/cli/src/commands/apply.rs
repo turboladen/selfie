@@ -302,23 +302,23 @@ mod tests {
         })
     }
 
-    /// A clean success is rendered here and never reaches the default handler.
+    // A clean success is rendered here and never reaches the default handler.
     #[test]
     fn a_clean_success_is_rendered_by_applies_own_handler() {
         assert!(summary_to_render(&applied(0)).is_some());
     }
 
-    /// A success carrying a refusal is handed on, so the exit code gets set.
-    ///
-    /// Claiming it here would print the summary and swallow the event, and
-    /// `EventProcessor::handle_event` — the only writer of `exit_code` — would
-    /// never see it.
+    // A success carrying a refusal is handed on, so the exit code gets set.
+    //
+    // Claiming it here would print the summary and swallow the event, and
+    // `EventProcessor::handle_event` — the only writer of `exit_code` — would
+    // never see it.
     #[test]
     fn a_success_carrying_a_refusal_falls_through_to_the_default_handler() {
         assert!(summary_to_render(&applied(1)).is_none());
     }
 
-    /// Control: failures were always handed on, and still are.
+    // Control: failures were always handed on, and still are.
     #[test]
     fn a_failure_falls_through_to_the_default_handler() {
         let failure = OperationResult::Failure(OperationFailure::Generic("boom".to_string()));

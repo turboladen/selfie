@@ -711,10 +711,10 @@ mod tests {
         assert_eq!(errors[0].stderr.as_deref(), Some("not found"));
     }
 
-    /// A completed apply that refused an entry exits non-zero.
-    ///
-    /// The library counts the refusal; this asserts the adapter acts on it. A
-    /// script checking `$?` is the caller this matters for.
+    // A completed apply that refused an entry exits non-zero.
+    //
+    // The library counts the refusal; this asserts the adapter acts on it. A
+    // script checking `$?` is the caller this matters for.
     #[tokio::test]
     async fn a_completed_apply_that_refused_something_exits_non_zero() {
         use selfie::package::event::{OperationResult, OperationSuccess, StepCount};
@@ -746,10 +746,10 @@ mod tests {
         );
     }
 
-    /// Control: the same event with nothing refused still exits 0.
-    ///
-    /// Without this, an implementation that failed every completed apply would
-    /// satisfy the test above.
+    // Control: the same event with nothing refused still exits 0.
+    //
+    // Without this, an implementation that failed every completed apply would
+    // satisfy the test above.
     #[tokio::test]
     async fn a_completed_apply_that_refused_nothing_exits_zero() {
         use selfie::package::event::{OperationResult, OperationSuccess, StepCount};

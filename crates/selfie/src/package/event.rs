@@ -2479,9 +2479,9 @@ mod tests {
         );
     }
 
-    /// Compile-time exhaustiveness guard: if a new `PackageError` variant is added,
-    /// this match will fail to compile, reminding you to update
-    /// `OperationFailure::is_environment_error()` and `is_package_error()`.
+    // Compile-time exhaustiveness guard: if a new `PackageError` variant is added,
+    // this match will fail to compile, reminding you to update
+    // `OperationFailure::is_environment_error()` and `is_package_error()`.
     #[test]
     fn all_package_error_variants_are_categorized() {
         use crate::package::port::PackageError;

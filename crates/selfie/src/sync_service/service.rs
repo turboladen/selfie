@@ -1706,10 +1706,10 @@ mod credential_egress_tests {
         )
     }
 
-    /// The event-stream exit: `OperationFailure::Generic` reaches
-    /// `PackageEvent::Completed`, which the CLI prints and which
-    /// `event_collector` serializes into the MCP tool result as
-    /// `{"status":"failure","error": <this>}`.
+    // The event-stream exit: `OperationFailure::Generic` reaches
+    // `PackageEvent::Completed`, which the CLI prints and which
+    // `event_collector` serializes into the MCP tool result as
+    // `{"status":"failure","error": <this>}`.
     #[tokio::test]
     async fn a_failed_push_keeps_the_credential_out_of_every_event() {
         let stream = service(FailAt::Push)
@@ -1749,9 +1749,9 @@ mod credential_egress_tests {
         );
     }
 
-    /// The other MCP exit. `prepare_push` returns `SyncError` directly, and
-    /// `selfie_sync_push` renders it into its own error JSON without ever
-    /// touching the event stream — so the event scan above cannot cover it.
+    // The other MCP exit. `prepare_push` returns `SyncError` directly, and
+    // `selfie_sync_push` renders it into its own error JSON without ever
+    // touching the event stream — so the event scan above cannot cover it.
     #[tokio::test]
     async fn a_failed_prepare_keeps_the_credential_out_of_the_returned_error() {
         let error = service(FailAt::RepoStatus)

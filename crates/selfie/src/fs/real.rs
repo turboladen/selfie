@@ -778,14 +778,14 @@ mod private_write_tests {
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
         }
 
-        /// Pins the temporary file to the target's own directory.
-        ///
-        /// This is only observable where the target and `$TMPDIR` are on different
-        /// filesystems: a temporary file created anywhere else would then fail to
-        /// rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
-        /// `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
-        /// so it skips rather than asserting something vacuous — each skip path says
-        /// so, since an early return is otherwise indistinguishable from a pass.
+        // Pins the temporary file to the target's own directory.
+        //
+        // This is only observable where the target and `$TMPDIR` are on different
+        // filesystems: a temporary file created anywhere else would then fail to
+        // rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
+        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
+        // so it skips rather than asserting something vacuous — each skip path says
+        // so, since an early return is otherwise indistinguishable from a pass.
         #[cfg(target_os = "linux")]
         #[test]
         fn creates_the_temporary_file_in_the_targets_own_directory() {

@@ -290,21 +290,21 @@ mod tests {
         );
     }
 
-    /// The blocking bug: this reported a `Started` event as a credential leak.
+    // The blocking bug: this reported a `Started` event as a credential leak.
     #[test]
     fn a_whitespace_leading_secret_does_not_match_a_content_free_event() {
         assert_secret_free(CONTENT_FREE_EVENT, LEADING_WHITESPACE, "an event");
     }
 
-    /// A space between `\` and `n` becomes an escape pair once the space is
-    /// dropped. Normalizing twice deleted the pair and left an *empty* needle,
-    /// which `find` reports at offset 0 of anything — this haystack included.
+    // A space between `\` and `n` becomes an escape pair once the space is
+    // dropped. Normalizing twice deleted the pair and left an *empty* needle,
+    // which `find` reports at offset 0 of anything — this haystack included.
     #[test]
     fn a_secret_whose_normalization_cascades_does_not_match_an_empty_haystack() {
         assert_secret_free("", "\\ n\\ n\\ n\\ n\\ n\\ n_tail_long_enough", "an event");
     }
 
-    /// The same cascade left a two-character needle that matched fixture prose.
+    // The same cascade left a two-character needle that matched fixture prose.
     #[test]
     fn a_secret_whose_normalization_cascades_does_not_match_ordinary_prose() {
         assert_secret_free(
@@ -314,10 +314,10 @@ mod tests {
         );
     }
 
-    /// The same mismatch **missed a leak**, which is the worse half of it: the
-    /// whole credential sat verbatim in an event `Debug` and the scan stayed
-    /// silent, because the needle had been normalized one pass deeper than the
-    /// haystack it was searched in. This is the case the module exists to catch.
+    // The same mismatch **missed a leak**, which is the worse half of it: the
+    // whole credential sat verbatim in an event `Debug` and the scan stayed
+    // silent, because the needle had been normalized one pass deeper than the
+    // haystack it was searched in. This is the case the module exists to catch.
     #[test]
     #[should_panic(expected = "as text")]
     fn catches_a_verbatim_leak_of_a_secret_whose_normalization_cascades() {
@@ -329,8 +329,8 @@ mod tests {
         );
     }
 
-    /// The guard has to measure the string the search uses, so [`squeeze`] must
-    /// reach a fixpoint. One pass does not.
+    // The guard has to measure the string the search uses, so [`squeeze`] must
+    // reach a fixpoint. One pass does not.
     #[test]
     fn squeeze_is_idempotent() {
         for input in [
@@ -350,7 +350,7 @@ mod tests {
         }
     }
 
-    /// Collides at a window of 8 (`test-env` is in `test-env-pkg`), not at 12.
+    // Collides at a window of 8 (`test-env` is in `test-env-pkg`), not at 12.
     #[test]
     fn a_secret_prefixed_like_an_environment_name_does_not_collide() {
         assert_secret_free(
@@ -360,7 +360,7 @@ mod tests {
         );
     }
 
-    /// Collides at a window of 8 (`~/.confi`), not at 12.
+    // Collides at a window of 8 (`~/.confi`), not at 12.
     #[test]
     fn a_secret_shaped_like_a_config_path_does_not_collide() {
         assert_secret_free(
@@ -398,7 +398,7 @@ mod tests {
         );
     }
 
-    /// A truncating leak. Shorter than [`WINDOW`] would pass — a documented bound.
+    // A truncating leak. Shorter than [`WINDOW`] would pass — a documented bound.
     #[test]
     #[should_panic(expected = "as a Debug of the bytes")]
     fn catches_a_truncated_debug_of_the_bytes() {
@@ -425,8 +425,8 @@ mod tests {
         );
     }
 
-    /// A pretty rendering formatted into a string field, then `Debug`ged again:
-    /// the newlines arrive escaped.
+    // A pretty rendering formatted into a string field, then `Debug`ged again:
+    // the newlines arrive escaped.
     #[test]
     #[should_panic(expected = "as a Debug of the bytes")]
     fn catches_an_escaped_pretty_debug_of_the_bytes() {
@@ -438,9 +438,9 @@ mod tests {
         );
     }
 
-    /// A template renders the credential into a larger file, so the leaked array
-    /// holds the secret's bytes in the middle. A needle anchored to the start of
-    /// the array misses this — it did, before this test existed.
+    // A template renders the credential into a larger file, so the leaked array
+    // holds the secret's bytes in the middle. A needle anchored to the start of
+    // the array misses this — it did, before this test existed.
     #[test]
     #[should_panic(expected = "as a Debug of the bytes")]
     fn catches_a_debug_of_bytes_holding_the_secret_in_the_middle() {
@@ -452,8 +452,8 @@ mod tests {
         );
     }
 
-    /// A non-UTF-8 credential has no text rendering, so the byte form is the only
-    /// one — the case a text-only scan could never have caught.
+    // A non-UTF-8 credential has no text rendering, so the byte form is the only
+    // one — the case a text-only scan could never have caught.
     #[test]
     #[should_panic(expected = "as a Debug of the bytes")]
     fn catches_a_debug_of_binary_secret_bytes() {
@@ -463,8 +463,8 @@ mod tests {
         assert_secret_free(&format!("wrote {secret:?}"), &secret, "an event");
     }
 
-    /// Binary content behind an ASCII prefix still has a text rendering. Deciding
-    /// the text form from `from_utf8` on the *whole* secret would drop it.
+    // Binary content behind an ASCII prefix still has a text rendering. Deciding
+    // the text form from `from_utf8` on the *whole* secret would drop it.
     #[test]
     #[should_panic(expected = "as text")]
     fn catches_a_text_leak_of_an_ascii_prefixed_binary_secret() {
@@ -477,13 +477,13 @@ mod tests {
         );
     }
 
-    /// The other side of that boundary, and a documented hole rather than a bug.
-    ///
-    /// This prefix is 14 bytes — longer than [`WINDOW`] — but squeezes to seven
-    /// non-whitespace characters, so no text needle is built, and a lossy
-    /// rendering reproduces neither the bytes nor a needle. The bound is on
-    /// non-whitespace characters, not bytes; asserting the escape here is what
-    /// keeps the doc comment honest about which one.
+    // The other side of that boundary, and a documented hole rather than a bug.
+    //
+    // This prefix is 14 bytes — longer than [`WINDOW`] — but squeezes to seven
+    // non-whitespace characters, so no text needle is built, and a lossy
+    // rendering reproduces neither the bytes nor a needle. The bound is on
+    // non-whitespace characters, not bytes; asserting the escape here is what
+    // keeps the doc comment honest about which one.
     #[test]
     fn a_lossy_rendering_escapes_a_whitespace_heavy_readable_prefix() {
         let mut secret = b"a b c d e f g ".to_vec();
@@ -523,8 +523,8 @@ mod tests {
         assert_secret_free("some output", "test", "an event");
     }
 
-    /// Twelve bytes, four characters, no whitespace at all. The refusal is right;
-    /// the message has to explain the count that actually applies.
+    // Twelve bytes, four characters, no whitespace at all. The refusal is right;
+    // the message has to explain the count that actually applies.
     #[test]
     #[should_panic(expected = "a multi-byte character counts once, not once per byte")]
     fn refuses_a_multibyte_secret_of_too_few_characters() {
@@ -545,7 +545,7 @@ mod tests {
 
     // ─── The message ────────────────────────────────────────────────────────
 
-    /// A haystack is a whole event stream; the failure must not be one.
+    // A haystack is a whole event stream; the failure must not be one.
     #[test]
     fn the_failure_message_is_bounded() {
         let haystack = format!("{}{SECRET}{}", "x".repeat(5_000), "y".repeat(5_000));

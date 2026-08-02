@@ -1668,14 +1668,14 @@ dotfiles:
         assert!(result.issues().has_errors());
     }
 
-    /// selfie-jlum: `~alice/.gemrc` passed `selfie spec validate` and was then
-    /// silently skipped by apply, because the validator tested `starts_with('~')`
-    /// and `shellexpand` leaves `~user` alone.
-    ///
-    /// Asserts the message names the unsupported form rather than merely that
-    /// some error exists: this entry has a valid source, so an error here can
-    /// only come from the target rule, but a future fixture might not be so
-    /// clean and "has_errors" would then pass for the wrong reason.
+    // selfie-jlum: `~alice/.gemrc` passed `selfie spec validate` and was then
+    // silently skipped by apply, because the validator tested `starts_with('~')`
+    // and `shellexpand` leaves `~user` alone.
+    //
+    // Asserts the message names the unsupported form rather than merely that
+    // some error exists: this entry has a valid source, so an error here can
+    // only come from the target rule, but a future fixture might not be so
+    // clean and "has_errors" would then pass for the wrong reason.
     #[test]
     fn a_named_user_target_is_a_validation_error() {
         for target in ["~alice/.gemrc", "~alice"] {
@@ -1696,23 +1696,23 @@ dotfiles:
         }
     }
 
-    /// The validator's decision must be the one `TargetRejection::of` gives, or a
-    /// spec passes validation and then cannot deploy.
-    ///
-    /// Named for the *textual* rule on purpose: `TargetRejection::NoHome` is
-    /// machine state rather than spec state, so the validator can never match the
-    /// whole deploy rule -- only this half of it.
-    ///
-    /// What it catches is a call site that stops delegating and reimplements the
-    /// rule inline, which is the regression that produced selfie-jlum. It cannot
-    /// catch a bug *inside* `of`, because both sides here call it -- the same
-    /// property its model `var_name_rule_matches_the_content_source_refusal`
-    /// (`package.rs`) has, for the same reason. `of`'s own content is held by
-    /// `a_named_user_target_is_a_validation_error` above and by the unit tests in
-    /// `fs::target`, which assert specific rejections rather than agreement.
-    ///
-    /// Checks the *decision* rather than the predicate, and carries agree-accept
-    /// rows as well as agree-reject rows.
+    // The validator's decision must be the one `TargetRejection::of` gives, or a
+    // spec passes validation and then cannot deploy.
+    //
+    // Named for the *textual* rule on purpose: `TargetRejection::NoHome` is
+    // machine state rather than spec state, so the validator can never match the
+    // whole deploy rule -- only this half of it.
+    //
+    // What it catches is a call site that stops delegating and reimplements the
+    // rule inline, which is the regression that produced selfie-jlum. It cannot
+    // catch a bug *inside* `of`, because both sides here call it -- the same
+    // property its model `var_name_rule_matches_the_content_source_refusal`
+    // (`package.rs`) has, for the same reason. `of`'s own content is held by
+    // `a_named_user_target_is_a_validation_error` above and by the unit tests in
+    // `fs::target`, which assert specific rejections rather than agreement.
+    //
+    // Checks the *decision* rather than the predicate, and carries agree-accept
+    // rows as well as agree-reject rows.
     #[test]
     fn the_validator_matches_the_textual_rule() {
         for target in [
@@ -1848,7 +1848,7 @@ dotfiles:
         package
     }
 
-    /// `_dotfiles:` is reported, and the message says what to do about it.
+    // `_dotfiles:` is reported, and the message says what to do about it.
     #[test]
     fn a_top_level_key_shadowing_a_field_is_reported() {
         let package = package_with_raw_yaml(
@@ -1881,10 +1881,10 @@ environments:
         );
     }
 
-    /// The documented top-level anchor stays silent.
-    ///
-    /// This is the control for the test above: a check that flagged every
-    /// `_`-prefixed top-level key would satisfy that one and fail this.
+    // The documented top-level anchor stays silent.
+    //
+    // This is the control for the test above: a check that flagged every
+    // `_`-prefixed top-level key would satisfy that one and fail this.
     #[test]
     fn a_top_level_anchor_that_shadows_nothing_is_left_alone() {
         let package = package_with_raw_yaml(
@@ -1907,8 +1907,8 @@ dotfiles:
         );
     }
 
-    /// A plain unknown key is still reported, described against the top-level
-    /// field list rather than a dotfile entry's.
+    // A plain unknown key is still reported, described against the top-level
+    // field list rather than a dotfile entry's.
     #[test]
     fn a_plain_unknown_top_level_key_is_still_reported() {
         let package = package_with_raw_yaml(
@@ -1935,11 +1935,11 @@ environments:
         );
     }
 
-    /// Ensures KNOWN_FIELDS stays in sync with the Package struct.
-    ///
-    /// Serializes a fully populated Package to YAML, re-parses as a raw map,
-    /// and asserts every key is present in KNOWN_FIELDS. If this test fails,
-    /// a field was added to Package without updating KNOWN_FIELDS.
+    // Ensures KNOWN_FIELDS stays in sync with the Package struct.
+    //
+    // Serializes a fully populated Package to YAML, re-parses as a raw map,
+    // and asserts every key is present in KNOWN_FIELDS. If this test fails,
+    // a field was added to Package without updating KNOWN_FIELDS.
     #[test]
     fn test_known_fields_matches_package_struct() {
         let package = PackageBuilder::default()

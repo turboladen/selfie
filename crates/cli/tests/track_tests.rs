@@ -7,9 +7,9 @@ pub mod common;
 
 use common::{SELFIE_ENV, get_command_with_test_config, setup_default_test_config};
 
-/// Reported from the spec, not from the argument. The two differ exactly here:
-/// the spec holds `~/…` and the caller names the same file absolutely, which is
-/// what `selfie track <tab-completed path>` produces.
+// Reported from the spec, not from the argument. The two differ exactly here:
+// the spec holds `~/…` and the caller names the same file absolutely, which is
+// what `selfie track <tab-completed path>` produces.
 #[test]
 fn already_tracking_names_the_target_the_spec_holds() {
     let temp = setup_default_test_config();

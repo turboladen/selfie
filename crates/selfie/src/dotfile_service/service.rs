@@ -2045,10 +2045,10 @@ mod tests {
     const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
          deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
 
-    /// The positive control for every test below.
-    ///
-    /// Without it they would all pass against a `load_deploy_state` that returned an
-    /// empty state and a message unconditionally.
+    // The positive control for every test below.
+    //
+    // Without it they would all pass against a `load_deploy_state` that returned an
+    // empty state and a message unconditionally.
     #[test]
     fn a_valid_state_file_loads_its_entries_with_no_message() {
         let fs = filesystem_holding(VALID_STATE_YAML);
@@ -2059,10 +2059,10 @@ mod tests {
         assert_eq!(warning, None);
     }
 
-    /// The first-run case, and the one branch that must stay silent.
-    ///
-    /// A warning here would fire on every fresh machine, for the ordinary condition
-    /// of never having deployed anything.
+    // The first-run case, and the one branch that must stay silent.
+    //
+    // A warning here would fire on every fresh machine, for the ordinary condition
+    // of never having deployed anything.
     #[test]
     fn an_absent_state_file_loads_empty_and_says_nothing() {
         let mut fs = MockFileSystem::default();
@@ -2088,11 +2088,11 @@ mod tests {
         );
     }
 
-    /// The two conditions are distinguished, not merely both reported.
-    ///
-    /// Repairing malformed YAML and fixing permissions are different jobs, so one
-    /// message for both sends the reader to the wrong one. Asserted in a single test
-    /// because the property is that the two *differ*, which neither alone can see.
+    // The two conditions are distinguished, not merely both reported.
+    //
+    // Repairing malformed YAML and fixing permissions are different jobs, so one
+    // message for both sends the reader to the wrong one. Asserted in a single test
+    // because the property is that the two *differ*, which neither alone can see.
     #[test]
     fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
         let mut unreadable = MockFileSystem::default();
@@ -2125,11 +2125,11 @@ mod tests {
         );
     }
 
-    /// Reachable only with no configured `state_directory` and no determinable home.
-    ///
-    /// `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
-    /// whose body is `expand_path("~")` — so this stubs the method that one calls.
-    /// `MockFileSystem` has no `expect_home` to stub.
+    // Reachable only with no configured `state_directory` and no determinable home.
+    //
+    // `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
+    // whose body is `expand_path("~")` — so this stubs the method that one calls.
+    // `MockFileSystem` has no `expect_home` to stub.
     #[test]
     fn a_state_file_whose_location_cannot_be_resolved_is_reported() {
         let mut fs = MockFileSystem::default();
@@ -2153,17 +2153,17 @@ mod tests {
         );
     }
 
-    /// A parse failure does not render a source snippet.
-    ///
-    /// serde-saphyr renders one in a parse error's `Display` by default, and this
-    /// message reaches an event stream and the MCP server's JSON. The file holds no
-    /// credentials, but it names every repository-file dotfile on the machine —
-    /// which is why `save_deploy_state` writes it owner-only.
-    ///
-    /// The marker sits on the line the parse fails at, so a rendered snippet would
-    /// certainly contain it. This is a *scanner* error, which is the class the
-    /// snippet suppression fully covers — see the test below for the class it does
-    /// not.
+    // A parse failure does not render a source snippet.
+    //
+    // serde-saphyr renders one in a parse error's `Display` by default, and this
+    // message reaches an event stream and the MCP server's JSON. The file holds no
+    // credentials, but it names every repository-file dotfile on the machine —
+    // which is why `save_deploy_state` writes it owner-only.
+    //
+    // The marker sits on the line the parse fails at, so a rendered snippet would
+    // certainly contain it. This is a *scanner* error, which is the class the
+    // snippet suppression fully covers — see the test below for the class it does
+    // not.
     #[test]
     fn a_parse_failure_does_not_render_a_source_snippet() {
         const MARKER: &str = "zzz-recon-marker/config.conf";
@@ -2184,18 +2184,18 @@ mod tests {
         );
     }
 
-    /// The residual the snippet suppression does **not** cover, pinned as a fact.
-    ///
-    /// `DuplicateMappingKey`'s text interpolates the key itself
-    /// (`message_formatters.rs`), so no option suppresses it — and in this file the
-    /// keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
-    /// this is reachable in production, not a contrived shape.
-    ///
-    /// Asserted in the direction it actually behaves rather than aspirationally: the
-    /// key **is** in the message today. Closing that means scrubbing the rendered
-    /// error, which is selfie-flka. If this test ever fails because the key stopped
-    /// appearing, selfie-flka was fixed and this should become its regression test
-    /// rather than being deleted.
+    // The residual the snippet suppression does **not** cover, pinned as a fact.
+    //
+    // `DuplicateMappingKey`'s text interpolates the key itself
+    // (`message_formatters.rs`), so no option suppresses it — and in this file the
+    // keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
+    // this is reachable in production, not a contrived shape.
+    //
+    // Asserted in the direction it actually behaves rather than aspirationally: the
+    // key **is** in the message today. Closing that means scrubbing the rendered
+    // error, which is selfie-flka. If this test ever fails because the key stopped
+    // appearing, selfie-flka was fixed and this should become its regression test
+    // rather than being deleted.
     #[test]
     fn a_duplicate_key_still_reaches_the_message() {
         const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
@@ -2216,12 +2216,12 @@ mod tests {
         );
     }
 
-    /// The bound engages on an error selfie does not control the length of.
-    ///
-    /// A duplicated **explicit** key (`? <key>`) carries the whole key into the
-    /// message, and an explicit key is not subject to YAML's 1024-byte simple-key
-    /// limit — which is why the plain `key:` form cannot reach the bound and why an
-    /// earlier version of this work recorded the bound as untestable.
+    // The bound engages on an error selfie does not control the length of.
+    //
+    // A duplicated **explicit** key (`? <key>`) carries the whole key into the
+    // message, and an explicit key is not subject to YAML's 1024-byte simple-key
+    // limit — which is why the plain `key:` form cannot reach the bound and why an
+    // earlier version of this work recorded the bound as untestable.
     #[test]
     fn an_unbounded_parse_error_is_cut_to_the_bound() {
         let key = "k".repeat(2500);

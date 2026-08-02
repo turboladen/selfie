@@ -183,8 +183,8 @@ async fn test_service_list_packages() {
     }
 }
 
-/// Test the spec_info service with a real package file
-/// This verifies that package definition info is correctly extracted
+// Test the spec_info service with a real package file
+// This verifies that package definition info is correctly extracted
 #[tokio::test]
 async fn test_service_spec_info_package() {
     // Arrange
@@ -230,8 +230,8 @@ async fn test_service_spec_info_package() {
     );
 }
 
-/// Test the validate service with a well-formed package
-/// This verifies that validation logic works correctly for valid packages
+// Test the validate service with a well-formed package
+// This verifies that validation logic works correctly for valid packages
 #[tokio::test]
 async fn test_service_validate_package() {
     // Arrange
@@ -258,8 +258,8 @@ async fn test_service_validate_package() {
     );
 }
 
-/// Test that all events have proper metadata and operation context
-/// This verifies the event system works correctly across the service layer
+// Test that all events have proper metadata and operation context
+// This verifies the event system works correctly across the service layer
 #[tokio::test]
 async fn test_service_event_metadata() {
     // Arrange
@@ -295,8 +295,8 @@ async fn test_service_event_metadata() {
     }
 }
 
-/// Test error handling when operations fail
-/// This verifies that failures are properly handled and communicated through events
+// Test error handling when operations fail
+// This verifies that failures are properly handled and communicated through events
 #[tokio::test]
 async fn test_service_error_handling() {
     // Arrange
@@ -335,8 +335,8 @@ async fn test_service_error_handling() {
 
 // === Dependency chain integration tests ===
 
-/// Test installing a package with a single dependency.
-/// Both packages should be installed in the correct order.
+// Test installing a package with a single dependency.
+// Both packages should be installed in the correct order.
 #[tokio::test]
 async fn test_service_install_single_dependency() {
     let temp_dir = TempDir::new().unwrap();
@@ -351,8 +351,8 @@ async fn test_service_install_single_dependency() {
     assert_successful_operation(&events);
 }
 
-/// Test installing a package with a chain of dependencies (A->B->C).
-/// All three packages should be installed in dependency order.
+// Test installing a package with a chain of dependencies (A->B->C).
+// All three packages should be installed in dependency order.
 #[tokio::test]
 async fn test_service_install_chain_dependencies() {
     let temp_dir = TempDir::new().unwrap();
@@ -365,8 +365,8 @@ async fn test_service_install_chain_dependencies() {
     assert_successful_operation(&events);
 }
 
-/// Test that installing a package with a missing dependency fails
-/// with a DependencyError::MissingDependency.
+// Test that installing a package with a missing dependency fails
+// with a DependencyError::MissingDependency.
 #[tokio::test]
 async fn test_service_install_missing_dependency() {
     let temp_dir = TempDir::new().unwrap();
@@ -392,7 +392,7 @@ async fn test_service_install_missing_dependency() {
     }
 }
 
-/// Test that circular dependencies are detected and produce a clear error.
+// Test that circular dependencies are detected and produce a clear error.
 #[tokio::test]
 async fn test_service_install_circular_dependency() {
     let temp_dir = TempDir::new().unwrap();
@@ -420,7 +420,7 @@ async fn test_service_install_circular_dependency() {
     }
 }
 
-/// Test that already-installed dependencies are skipped gracefully.
+// Test that already-installed dependencies are skipped gracefully.
 #[tokio::test]
 async fn test_service_install_already_installed_dependency() {
     let temp_dir = TempDir::new().unwrap();
@@ -444,8 +444,8 @@ async fn test_service_install_already_installed_dependency() {
     assert_successful_operation(&events);
 }
 
-/// Test that PackageListReady is emitted before any PackageListItemCompleted,
-/// and PackageListLoaded is emitted after all PackageListItemCompleted events.
+// Test that PackageListReady is emitted before any PackageListItemCompleted,
+// and PackageListLoaded is emitted after all PackageListItemCompleted events.
 #[tokio::test]
 async fn test_package_list_ready_emitted_before_item_completed() {
     let temp_dir = TempDir::new().unwrap();
@@ -504,7 +504,7 @@ async fn test_package_list_ready_emitted_before_item_completed() {
     assert_eq!(ready_count, 2, "PackageListReady should contain 2 packages");
 }
 
-/// Test that PostInstallNote is emitted during a fresh install when the package has a note
+// Test that PostInstallNote is emitted during a fresh install when the package has a note
 #[tokio::test]
 async fn test_service_install_emits_post_install_note() {
     // Arrange
@@ -547,7 +547,7 @@ async fn test_service_install_emits_post_install_note() {
     }
 }
 
-/// Test that PostInstallNote is NOT emitted when package is already installed
+// Test that PostInstallNote is NOT emitted when package is already installed
 #[tokio::test]
 async fn test_service_install_no_post_install_note_when_already_installed() {
     // Arrange

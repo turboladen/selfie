@@ -1353,18 +1353,18 @@ vars: {}
         );
     }
 
-    /// Keeps `KNOWN_DOTFILE_FIELDS` in sync with what `DotfileEntry` serializes.
-    ///
-    /// Two fixtures, not one: every field but `target` is `skip_serializing_if`,
-    /// so a single entry can never emit all four keys and a one-fixture version
-    /// would silently stop covering `command` or `vars`.
-    /// `_dotfiles` is refused at the top level; `_target` is not.
-    ///
-    /// The second half is the load-bearing one. `docs/package-files.md`
-    /// documents `_target: &target …` as the way to share a path between
-    /// entries, and it stays legal only because `target` is not a top-level
-    /// field. Adding `"target"` to `KNOWN_PACKAGE_FIELDS` breaks every file
-    /// using the documented pattern, and this is what says so.
+    // Keeps `KNOWN_DOTFILE_FIELDS` in sync with what `DotfileEntry` serializes.
+    //
+    // Two fixtures, not one: every field but `target` is `skip_serializing_if`,
+    // so a single entry can never emit all four keys and a one-fixture version
+    // would silently stop covering `command` or `vars`.
+    // `_dotfiles` is refused at the top level; `_target` is not.
+    //
+    // The second half is the load-bearing one. `docs/package-files.md`
+    // documents `_target: &target …` as the way to share a path between
+    // entries, and it stays legal only because `target` is not a top-level
+    // field. Adding `"target"` to `KNOWN_PACKAGE_FIELDS` breaks every file
+    // using the documented pattern, and this is what says so.
     #[test]
     fn a_top_level_anchor_is_refused_only_when_it_shadows_a_package_field() {
         assert!(shadows_package_field("_dotfiles"));
@@ -1382,11 +1382,11 @@ vars: {}
         );
     }
 
-    /// The two levels have different field lists, and each says which it means.
-    ///
-    /// `_target` shadows inside an entry and does not at the top level; the same
-    /// key, opposite answers. A single shared list would make one of the two
-    /// wrong.
+    // The two levels have different field lists, and each says which it means.
+    //
+    // `_target` shadows inside an entry and does not at the top level; the same
+    // key, opposite answers. A single shared list would make one of the two
+    // wrong.
     #[test]
     fn the_two_field_levels_answer_differently_for_the_same_key() {
         assert!(shadows_dotfile_field("_target"));
@@ -1396,8 +1396,8 @@ vars: {}
         assert!(!shadows_dotfile_field("_dotfiles"));
     }
 
-    /// A shadowing key gets the ambiguity message; a plain one gets the field
-    /// list for its own level.
+    // A shadowing key gets the ambiguity message; a plain one gets the field
+    // list for its own level.
     #[test]
     fn an_unknown_key_is_described_against_the_list_in_force() {
         let shadowed =
@@ -1421,7 +1421,7 @@ vars: {}
         );
     }
 
-    /// Derived from raw YAML, and quiet when there is none.
+    // Derived from raw YAML, and quiet when there is none.
     #[test]
     fn shadowing_keys_are_read_from_the_raw_yaml() {
         let yaml = r#"name: myapp
@@ -1446,7 +1446,7 @@ environments:
         );
     }
 
-    /// `set_source` keeps the derived list in step with the YAML it came from.
+    // `set_source` keeps the derived list in step with the YAML it came from.
     #[test]
     fn set_source_derives_the_shadowing_keys() {
         let mut package = Package::new_template("myapp");

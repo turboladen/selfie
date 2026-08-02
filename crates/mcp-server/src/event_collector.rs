@@ -376,14 +376,14 @@ mod tests {
         }
     }
 
-    /// An apply that refused an entry comes back as an error result, and the
-    /// payload agrees with the envelope.
-    ///
-    /// `tool_result` turns `success: false` into `CallToolResult::error`, so an
-    /// assistant is told the call did not do what was asked. The payload's
-    /// `status` has to move with it: `"status": "success"` inside a result
-    /// flagged as an error is the same two-meanings-in-one-field defect as the
-    /// counter this distinguishes.
+    // An apply that refused an entry comes back as an error result, and the
+    // payload agrees with the envelope.
+    //
+    // `tool_result` turns `success: false` into `CallToolResult::error`, so an
+    // assistant is told the call did not do what was asked. The payload's
+    // `status` has to move with it: `"status": "success"` inside a result
+    // flagged as an error is the same two-meanings-in-one-field defect as the
+    // counter this distinguishes.
     #[tokio::test]
     async fn an_apply_that_refused_an_entry_is_an_error_result() {
         use selfie::package::event::{OperationSuccess, StepCount};
@@ -417,7 +417,7 @@ mod tests {
         );
     }
 
-    /// Control: an apply with nothing refused is still a success result.
+    // Control: an apply with nothing refused is still a success result.
     #[tokio::test]
     async fn an_apply_that_refused_nothing_is_a_success_result() {
         use selfie::package::event::{OperationSuccess, StepCount};
@@ -440,13 +440,13 @@ mod tests {
         assert_eq!(result.data["result"]["status"], "success");
     }
 
-    /// A failed command's output must not reach the JSON an assistant reads.
-    ///
-    /// This passes today and is a lock, not a fix: failures are rendered with
-    /// `Display`, which names the command and its exit code and nothing else. The
-    /// secret is placed on **stderr** deliberately — `CommandFailure::ExecutionFailed`
-    /// has no `stdout` field, so a secret on stdout could not reach this code by
-    /// any route and the test would pass without observing anything.
+    // A failed command's output must not reach the JSON an assistant reads.
+    //
+    // This passes today and is a lock, not a fix: failures are rendered with
+    // `Display`, which names the command and its exit code and nothing else. The
+    // secret is placed on **stderr** deliberately — `CommandFailure::ExecutionFailed`
+    // has no `stdout` field, so a secret on stdout could not reach this code by
+    // any route and the test would pass without observing anything.
     #[tokio::test]
     async fn a_failed_command_leaks_no_output_into_the_json() {
         const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
