@@ -1256,7 +1256,7 @@ mod irregular_targets {
         }
     }
 
-    /// The controls: an ordinary target, and one that is not there yet.
+    // The controls: an ordinary target, and one that is not there yet.
     #[test]
     fn a_regular_file_and_an_absent_path_are_not_refused() {
         let dir = tempdir().unwrap();
@@ -1267,14 +1267,14 @@ mod irregular_targets {
         assert!(irregular_refusal(&dir.path().join("absent")).is_none());
     }
 
-    /// A symlink to a fifo is refused, because the read that follows would follow
-    /// the link and block on the fifo.
-    ///
-    /// The whole reason this question is asked with a *following* stat. With
-    /// `symlink_metadata` — the syscall `symlink_refusal` uses — this answers
-    /// `None`, the target read follows the link, and apply hangs exactly as it
-    /// did before the guard existed. The guard would have looked present and
-    /// done nothing.
+    // A symlink to a fifo is refused, because the read that follows would follow
+    // the link and block on the fifo.
+    //
+    // The whole reason this question is asked with a *following* stat. With
+    // `symlink_metadata` — the syscall `symlink_refusal` uses — this answers
+    // `None`, the target read follows the link, and apply hangs exactly as it
+    // did before the guard existed. The guard would have looked present and
+    // done nothing.
     #[test]
     fn a_symlink_to_a_fifo_is_refused() {
         let dir = tempdir().unwrap();
@@ -1290,10 +1290,10 @@ mod irregular_targets {
         }
     }
 
-    /// A symlink to a regular file is not this check's business.
-    ///
-    /// It is `symlink_refusal`'s, and answering here too would report one problem
-    /// in two voices.
+    // A symlink to a regular file is not this check's business.
+    //
+    // It is `symlink_refusal`'s, and answering here too would report one problem
+    // in two voices.
     #[test]
     fn a_symlink_to_a_regular_file_is_left_to_the_symlink_check() {
         let dir = tempdir().unwrap();
@@ -1306,7 +1306,7 @@ mod irregular_targets {
         assert!(symlink_refusal(&link).is_some(), "control: it is a symlink");
     }
 
-    /// A dangling link has nothing to open, so it is not irregular.
+    // A dangling link has nothing to open, so it is not irregular.
     #[test]
     fn a_dangling_symlink_is_not_irregular() {
         let dir = tempdir().unwrap();
@@ -1317,10 +1317,10 @@ mod irregular_targets {
         assert!(symlink_refusal(&link).is_some(), "control: it is a symlink");
     }
 
-    /// The writer refuses a fifo with no reader, and does not block doing it.
-    ///
-    /// Without `O_NONBLOCK` the `open` itself blocks here and never reaches the
-    /// descriptor check, so this is the test that observes the flag.
+    // The writer refuses a fifo with no reader, and does not block doing it.
+    //
+    // Without `O_NONBLOCK` the `open` itself blocks here and never reaches the
+    // descriptor check, so this is the test that observes the flag.
     #[test]
     fn the_writer_refuses_a_readerless_fifo_without_blocking() {
         let dir = tempdir().unwrap();
@@ -1338,20 +1338,20 @@ mod irregular_targets {
         }
     }
 
-    /// With a reader attached the open succeeds, and the descriptor check is what
-    /// refuses.
-    ///
-    /// The route is pinned by construction rather than asserted: POSIX guarantees
-    /// `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds
-    /// the fifo open, so the failed-open path is unreachable here and only the
-    /// `fstat` after the open can produce the refusal. The reader is opened by
-    /// this thread with `O_NONBLOCK`, which POSIX guarantees returns immediately
-    /// with no writer — a reader thread could not signal readiness, because its
-    /// own open would block until the writer arrived, and the test would silently
-    /// fall back to the readerless route it is written to exclude.
-    ///
-    /// That the `fstat` fired, rather than the write proceeding, is observable:
-    /// the reader receives nothing.
+    // With a reader attached the open succeeds, and the descriptor check is what
+    // refuses.
+    //
+    // The route is pinned by construction rather than asserted: POSIX guarantees
+    // `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds
+    // the fifo open, so the failed-open path is unreachable here and only the
+    // `fstat` after the open can produce the refusal. The reader is opened by
+    // this thread with `O_NONBLOCK`, which POSIX guarantees returns immediately
+    // with no writer — a reader thread could not signal readiness, because its
+    // own open would block until the writer arrived, and the test would silently
+    // fall back to the readerless route it is written to exclude.
+    //
+    // That the `fstat` fired, rather than the write proceeding, is observable:
+    // the reader receives nothing.
     #[test]
     fn the_writer_refuses_a_fifo_that_has_a_reader() {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -1386,7 +1386,7 @@ mod irregular_targets {
         );
     }
 
-    /// The writer refuses a character device rather than writing to it.
+    // The writer refuses a character device rather than writing to it.
     #[test]
     fn the_writer_refuses_a_character_device() {
         let err = RealFileSystem

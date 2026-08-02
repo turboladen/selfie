@@ -6172,11 +6172,11 @@ mod irregular_targets {
         );
     }
 
-    /// Apply refuses a fifo target instead of hanging on it.
-    ///
-    /// Before the guard, the *checksum read* blocked — not the write. Opening a
-    /// fifo for reading waits for a writer exactly as opening it for writing waits
-    /// for a reader, and that read happens well before any write is attempted.
+    // Apply refuses a fifo target instead of hanging on it.
+    //
+    // Before the guard, the *checksum read* blocked — not the write. Opening a
+    // fifo for reading waits for a writer exactly as opening it for writing waits
+    // for a reader, and that read happens well before any write is attempted.
     #[tokio::test(flavor = "multi_thread")]
     async fn apply_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
@@ -6198,11 +6198,11 @@ mod irregular_targets {
         );
     }
 
-    /// A symlink pointing at a fifo is refused too.
-    ///
-    /// The case a non-following stat misses. `symlink_refusal` answers "it is a
-    /// symlink" and returns before the fifo is ever considered, and the target
-    /// read then follows the link and blocks — the guard present, the hang intact.
+    // A symlink pointing at a fifo is refused too.
+    //
+    // The case a non-following stat misses. `symlink_refusal` answers "it is a
+    // symlink" and returns before the fifo is ever considered, and the target
+    // read then follows the link and blocks — the guard present, the hang intact.
     #[tokio::test(flavor = "multi_thread")]
     async fn apply_refuses_a_symlink_to_a_fifo_without_hanging() {
         let dirs = TestDirs::new();
@@ -6226,7 +6226,7 @@ mod irregular_targets {
         );
     }
 
-    /// Apply refuses a character device rather than writing to it.
+    // Apply refuses a character device rather than writing to it.
     #[tokio::test(flavor = "multi_thread")]
     async fn apply_refuses_a_character_device_target() {
         let dirs = TestDirs::new();
@@ -6271,7 +6271,7 @@ mod irregular_targets {
         );
     }
 
-    /// Track refuses a fifo target instead of copying it into the repository.
+    // Track refuses a fifo target instead of copying it into the repository.
     #[tokio::test(flavor = "multi_thread")]
     async fn track_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
@@ -6298,10 +6298,10 @@ mod irregular_targets {
         }
     }
 
-    /// Control: an ordinary target still deploys.
-    ///
-    /// Without this, a guard that refused every target would pass every test
-    /// above.
+    // Control: an ordinary target still deploys.
+    //
+    // Without this, a guard that refused every target would pass every test
+    // above.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_regular_target_is_still_deployed() {
         let dirs = TestDirs::new();
@@ -6378,7 +6378,7 @@ mod unmanageable_symlink_reason {
             .collect()
     }
 
-    /// Apply says why it is leaving the entry alone.
+    // Apply says why it is leaving the entry alone.
     #[tokio::test]
     async fn apply_says_why_an_in_sync_symlinked_target_will_not_settle() {
         let dirs = TestDirs::new();
@@ -6396,7 +6396,7 @@ mod unmanageable_symlink_reason {
         );
     }
 
-    /// Drift says the same thing, on the line that keeps reappearing.
+    // Drift says the same thing, on the line that keeps reappearing.
     #[tokio::test]
     async fn drift_says_why_the_not_tracked_line_never_clears() {
         let dirs = TestDirs::new();
@@ -6418,12 +6418,12 @@ mod unmanageable_symlink_reason {
         );
     }
 
-    /// The control: a plain untracked in-sync target gets no reason from either
-    /// command.
-    ///
-    /// It settles on the first apply, so there is nothing to explain. Without
-    /// this, a change that attached the reason unconditionally would satisfy both
-    /// tests above.
+    // The control: a plain untracked in-sync target gets no reason from either
+    // command.
+    //
+    // It settles on the first apply, so there is nothing to explain. Without
+    // this, a change that attached the reason unconditionally would satisfy both
+    // tests above.
     #[tokio::test]
     async fn a_plain_in_sync_target_gets_no_reason_from_either_command() {
         let dirs = TestDirs::new();
@@ -6498,11 +6498,11 @@ mod unmanageable_symlink_reason {
         );
     }
 
-    /// The drift classification stays a bare label.
-    ///
-    /// The reason travels in its own field: the MCP server serializes
-    /// `drift_type` as a typed value and the CLI prints it as one, so appending
-    /// prose to it would corrupt what a caller matches on.
+    // The drift classification stays a bare label.
+    //
+    // The reason travels in its own field: the MCP server serializes
+    // `drift_type` as a typed value and the CLI prints it as one, so appending
+    // prose to it would corrupt what a caller matches on.
     #[tokio::test]
     async fn the_reason_does_not_contaminate_the_drift_type() {
         let dirs = TestDirs::new();
