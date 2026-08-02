@@ -29,12 +29,13 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, Package,
+        ContentSource, DotfileEntry, Package, describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
         port::PackageRepository,
+        validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
 };
@@ -228,7 +229,7 @@ fn deploy_state_path<F: FileSystem>(
 /// file is repaired by hand. What it must not do is proceed *silently*.
 ///
 /// Note the state this returns is later saved over the file it could not read.
-/// That is `selfie-8qyv`, deferred deliberately rather than overlooked.
+/// That is deferred deliberately rather than overlooked.
 fn load_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
@@ -669,7 +670,7 @@ where
     /// [`refuse_unresolvable`](Self::refuse_unresolvable) returns: both are
     /// decided from the entry alone before anything runs, so returning different
     /// outcomes made `stop_on_error` end the run for one and not the other, and
-    /// the documentation described the opposite (selfie-m5dv). A refused entry is
+    /// the documentation described the opposite. A refused entry is
     /// not a skipped one.
     async fn usable_target<'e>(
         &self,
@@ -1048,7 +1049,7 @@ async fn perform_deploy<F: FileSystem>(
             _ => format!("Failed to write '{}': {e}", unit.target_path.display()),
         };
         sender.send_warning(message).await;
-        // `Err` has the caller count this as skipped and leaves the deploy state
+        // `Err` has the caller count this as refused and leaves the deploy state
         // untouched, so nothing is recorded as deployed that was not. An entry
         // already in the state keeps its previous checksums and is stale rather than
         // untracked, which is the honest record: for a refusal nothing was written,
@@ -1110,6 +1111,16 @@ where
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut conflict_count: usize = 0;
+    // Entries this run was asked to deploy and did not. Kept apart from
+    // `skipped_count` because a caller cannot act on a number that means both
+    // "nothing to do" and "selfie declined": that conflation is what let `selfie
+    // apply` exit 0 having deployed nothing (selfie-c28).
+    //
+    // The split is the one the secret-bearing path already draws between
+    // `SecretOutcome::Failed` and `SecretOutcome::Skipped` — see
+    // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
+    // never reached the repository-file path until now.
+    let mut refused_count: usize = 0;
 
     // Set when `stop_on_error` aborts the run. Held rather than returned so the
     // deploy state below is still saved.
@@ -1124,6 +1135,36 @@ where
         if let Some(name) = filter_name
             && package.name() != name
         {
+            continue;
+        }
+
+        // Refuse the whole package before asking what dotfiles it has, because
+        // the answer is not trustworthy: `_dotfiles:` reads as a YAML anchor, so
+        // the list comes back empty and the `is_empty` check below would skip the
+        // package in silence — a successful run that deployed nothing
+        // (selfie-g199).
+        //
+        // Whole-package rather than per-entry, unlike the entry-level rule this
+        // mirrors: the ambiguity is in the file's top level, so there is no entry
+        // to attach it to, and the entries it does have may not be the ones its
+        // author wrote.
+        //
+        // Empty for a programmatically built package, so nothing here fires for a
+        // caller that never had raw YAML.
+        let shadowing = package.shadowing_top_level_keys();
+        if !shadowing.is_empty() {
+            let described: Vec<String> = shadowing
+                .iter()
+                .map(|key| describe_unknown_key_in(key, KNOWN_PACKAGE_FIELDS))
+                .collect();
+            sender
+                .send_warning(format!(
+                    "Skipping package '{}': {}",
+                    package.name(),
+                    described.join("; ")
+                ))
+                .await;
+            refused_count += 1;
             continue;
         }
 
@@ -1171,7 +1212,7 @@ where
                         SecretOutcome::Skipped => skipped_count += 1,
                         SecretOutcome::Conflicted => conflict_count += 1,
                         SecretOutcome::Failed => {
-                            skipped_count += 1;
+                            refused_count += 1;
                             // Cancellation is decided before `stop_on_error` gets
                             // to explain the failure, and outside its branch,
                             // because a cancelled run stops either way.
@@ -1214,7 +1255,7 @@ where
                     sender
                         .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1229,7 +1270,7 @@ where
                         "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
-                skipped_count += 1;
+                refused_count += 1;
                 continue;
             }
 
@@ -1248,7 +1289,7 @@ where
                     sender
                         .send_warning(target_refusal(entry.target(), rejection))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1263,7 +1304,7 @@ where
                             source_path.display()
                         ))
                         .await;
-                    skipped_count += 1;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -1333,7 +1374,7 @@ where
                 && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
-                skipped_count += 1;
+                refused_count += 1;
                 continue;
             }
 
@@ -1355,7 +1396,10 @@ where
                             deployed_count += 1;
                         }
                     } else {
-                        skipped_count += 1;
+                        // A refusal or a write failure. `perform_deploy` has
+                        // already said which in a warning; here they are the same
+                        // thing — asked to deploy, did not.
+                        refused_count += 1;
                     }
                 }
                 DeployDecision::Skip(reason) => {
@@ -1442,7 +1486,11 @@ where
                                 deployed_count += 1;
                             }
                         } else {
-                            skipped_count += 1;
+                            // The second of `perform_deploy`'s two failure sites,
+                            // easy to miss because the first one looks the same.
+                            // A conflict the user accepted and selfie then could
+                            // not write is a refusal exactly like the plain one.
+                            refused_count += 1;
                         }
                     } else {
                         sender
@@ -1486,11 +1534,20 @@ where
         return OperationResult::Failure(OperationFailure::Generic(message));
     }
 
-    let total = deployed_count + skipped_count + conflict_count;
+    // `refused_count` belongs in the total: leaving it out would shrink the step
+    // count by exactly the number of refusals, so a run that refused two of three
+    // entries would report (1/1) and the two refusals would vanish from the
+    // summary as well as from the counters.
+    //
+    // That makes this "outcomes recorded" rather than "entries seen": a package
+    // refused whole for a top-level unknown key contributes one outcome and no
+    // entries.
+    let total = deployed_count + skipped_count + conflict_count + refused_count;
     OperationResult::Success(OperationSuccess::DotfilesApplied {
         deployed_count,
         skipped_count,
         conflict_count,
+        refused_count,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total, total),
     })
@@ -1988,10 +2045,10 @@ mod tests {
     const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
          deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
 
-    /// The positive control for every test below.
-    ///
-    /// Without it they would all pass against a `load_deploy_state` that returned an
-    /// empty state and a message unconditionally.
+    // The positive control for every test below.
+    //
+    // Without it they would all pass against a `load_deploy_state` that returned an
+    // empty state and a message unconditionally.
     #[test]
     fn a_valid_state_file_loads_its_entries_with_no_message() {
         let fs = filesystem_holding(VALID_STATE_YAML);
@@ -2002,10 +2059,10 @@ mod tests {
         assert_eq!(warning, None);
     }
 
-    /// The first-run case, and the one branch that must stay silent.
-    ///
-    /// A warning here would fire on every fresh machine, for the ordinary condition
-    /// of never having deployed anything.
+    // The first-run case, and the one branch that must stay silent.
+    //
+    // A warning here would fire on every fresh machine, for the ordinary condition
+    // of never having deployed anything.
     #[test]
     fn an_absent_state_file_loads_empty_and_says_nothing() {
         let mut fs = MockFileSystem::default();
@@ -2031,11 +2088,11 @@ mod tests {
         );
     }
 
-    /// The two conditions are distinguished, not merely both reported.
-    ///
-    /// Repairing malformed YAML and fixing permissions are different jobs, so one
-    /// message for both sends the reader to the wrong one. Asserted in a single test
-    /// because the property is that the two *differ*, which neither alone can see.
+    // The two conditions are distinguished, not merely both reported.
+    //
+    // Repairing malformed YAML and fixing permissions are different jobs, so one
+    // message for both sends the reader to the wrong one. Asserted in a single test
+    // because the property is that the two *differ*, which neither alone can see.
     #[test]
     fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
         let mut unreadable = MockFileSystem::default();
@@ -2068,11 +2125,11 @@ mod tests {
         );
     }
 
-    /// Reachable only with no configured `state_directory` and no determinable home.
-    ///
-    /// `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
-    /// whose body is `expand_path("~")` — so this stubs the method that one calls.
-    /// `MockFileSystem` has no `expect_home` to stub.
+    // Reachable only with no configured `state_directory` and no determinable home.
+    //
+    // `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
+    // whose body is `expand_path("~")` — so this stubs the method that one calls.
+    // `MockFileSystem` has no `expect_home` to stub.
     #[test]
     fn a_state_file_whose_location_cannot_be_resolved_is_reported() {
         let mut fs = MockFileSystem::default();
@@ -2096,17 +2153,17 @@ mod tests {
         );
     }
 
-    /// A parse failure does not render a source snippet.
-    ///
-    /// serde-saphyr renders one in a parse error's `Display` by default, and this
-    /// message reaches an event stream and the MCP server's JSON. The file holds no
-    /// credentials, but it names every repository-file dotfile on the machine —
-    /// which is why `save_deploy_state` writes it owner-only.
-    ///
-    /// The marker sits on the line the parse fails at, so a rendered snippet would
-    /// certainly contain it. This is a *scanner* error, which is the class the
-    /// snippet suppression fully covers — see the test below for the class it does
-    /// not.
+    // A parse failure does not render a source snippet.
+    //
+    // serde-saphyr renders one in a parse error's `Display` by default, and this
+    // message reaches an event stream and the MCP server's JSON. The file holds no
+    // credentials, but it names every repository-file dotfile on the machine —
+    // which is why `save_deploy_state` writes it owner-only.
+    //
+    // The marker sits on the line the parse fails at, so a rendered snippet would
+    // certainly contain it. This is a *scanner* error, which is the class the
+    // snippet suppression fully covers — see the test below for the class it does
+    // not.
     #[test]
     fn a_parse_failure_does_not_render_a_source_snippet() {
         const MARKER: &str = "zzz-recon-marker/config.conf";
@@ -2127,18 +2184,18 @@ mod tests {
         );
     }
 
-    /// The residual the snippet suppression does **not** cover, pinned as a fact.
-    ///
-    /// `DuplicateMappingKey`'s text interpolates the key itself
-    /// (`message_formatters.rs`), so no option suppresses it — and in this file the
-    /// keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
-    /// this is reachable in production, not a contrived shape.
-    ///
-    /// Asserted in the direction it actually behaves rather than aspirationally: the
-    /// key **is** in the message today. Closing that means scrubbing the rendered
-    /// error, which is selfie-flka. If this test ever fails because the key stopped
-    /// appearing, selfie-flka was fixed and this should become its regression test
-    /// rather than being deleted.
+    // The residual the snippet suppression does **not** cover, pinned as a fact.
+    //
+    // `DuplicateMappingKey`'s text interpolates the key itself
+    // (`message_formatters.rs`), so no option suppresses it — and in this file the
+    // keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
+    // this is reachable in production, not a contrived shape.
+    //
+    // Asserted in the direction it actually behaves rather than aspirationally: the
+    // key **is** in the message today. Closing that means scrubbing the rendered
+    // error, which is selfie-flka. If this test ever fails because the key stopped
+    // appearing, selfie-flka was fixed and this should become its regression test
+    // rather than being deleted.
     #[test]
     fn a_duplicate_key_still_reaches_the_message() {
         const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
@@ -2159,12 +2216,12 @@ mod tests {
         );
     }
 
-    /// The bound engages on an error selfie does not control the length of.
-    ///
-    /// A duplicated **explicit** key (`? <key>`) carries the whole key into the
-    /// message, and an explicit key is not subject to YAML's 1024-byte simple-key
-    /// limit — which is why the plain `key:` form cannot reach the bound and why an
-    /// earlier version of this work recorded the bound as untestable.
+    // The bound engages on an error selfie does not control the length of.
+    //
+    // A duplicated **explicit** key (`? <key>`) carries the whole key into the
+    // message, and an explicit key is not subject to YAML's 1024-byte simple-key
+    // limit — which is why the plain `key:` form cannot reach the bound and why an
+    // earlier version of this work recorded the bound as untestable.
     #[test]
     fn an_unbounded_parse_error_is_cut_to_the_bound() {
         let key = "k".repeat(2500);

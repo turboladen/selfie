@@ -120,8 +120,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                 package_path: path.to_path_buf(),
                 source: Arc::new(e),
             })?;
-        package.path = path.to_path_buf();
-        package.raw_yaml = content;
+        package.set_source(path.to_path_buf(), content);
 
         Ok(package)
     }

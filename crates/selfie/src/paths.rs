@@ -55,7 +55,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 /// this work on paths that do not exist yet.
 ///
 /// Do not call `std::fs` from here: that takes the library around its own port, and
-/// a `symlink_metadata` walk adds a check-then-read race. selfie-9pdh tracks the
+/// a `symlink_metadata` walk adds a check-then-read race. A non-racy option is
 /// real fix (`openat2`'s `RESOLVE_BENEATH`, kernel-enforced on Linux).
 #[must_use]
 pub(crate) fn is_within(path: &Path, base_dir: &Path) -> bool {

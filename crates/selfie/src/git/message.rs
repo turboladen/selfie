@@ -38,7 +38,7 @@ const REDACTION: &str = "***";
 /// struct-variant literal — library, adapter, or test — can put raw git output
 /// into [`GitSyncError`](super::GitSyncError) or
 /// [`GitStatusError`](super::GitStatusError). That is the whole point of the
-/// type: `.claude/rules/verification.md` asks for invariants the compiler
+/// type: asks for invariants the compiler
 /// holds rather than ones a doc comment states.
 ///
 /// What it covers, and what it deliberately does not, is on
@@ -49,7 +49,7 @@ const REDACTION: &str = "***";
 /// Deliberately, and for the same reason as
 /// [`BoundedText`](crate::commands::BoundedText): this is text selfie
 /// *forwards* rather than content it holds back, and it has already been
-/// redacted. `.claude/rules/secrets.md` prescribes scanning an event's `Debug`
+/// redacted. prescribes scanning an event's `Debug`
 /// output for a secret, so a hand-written `Debug` printing `<N bytes>` would
 /// hide forwarded git output from that scan — a credential arriving in a shape
 /// this does not cover would go unseen instead of caught.
@@ -379,7 +379,7 @@ mod tests {
     use test_common::assert_secret_free;
 
     /// High-entropy, 24 characters, and shaped like nothing else in a fixture —
-    /// `.claude/rules/secrets.md` refuses a secret that reads like a path, a
+    /// refuses a secret that reads like a path, a
     /// package name, or an environment name.
     const TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 
@@ -400,9 +400,9 @@ mod tests {
         assert_eq!(out, "https://***@host/repo.git");
     }
 
-    /// The shape that actually leaks. This is git 2.50.1's own output, verbatim,
-    /// from a non-interactive fetch against a remote whose URL carries a token
-    /// as its username — which is what `gh auth setup-git` writes.
+    // The shape that actually leaks. This is git 2.50.1's own output, verbatim,
+    // from a non-interactive fetch against a remote whose URL carries a token
+    // as its username — which is what `gh auth setup-git` writes.
     #[test]
     fn redacts_a_token_used_as_the_username() {
         let out = redact_credentials(&format!(
@@ -418,9 +418,9 @@ mod tests {
         );
     }
 
-    /// The same message over IPv6. Pinned because the bracketed host is what a
-    /// "simplification" that splits the authority on `:` to find the host would
-    /// break, and it would break silently.
+    // The same message over IPv6. Pinned because the bracketed host is what a
+    // "simplification" that splits the authority on `:` to find the host would
+    // break, and it would break silently.
     #[test]
     fn redacts_a_token_from_a_bracketed_ipv6_authority() {
         let out = redact_credentials(&format!(
@@ -444,8 +444,8 @@ mod tests {
         );
     }
 
-    /// Last `@` in the authority, not the first: a first-match rule leaves the
-    /// tail of the password (`ss`) behind.
+    // Last `@` in the authority, not the first: a first-match rule leaves the
+    // tail of the password (`ss`) behind.
     #[test]
     fn redacts_a_password_containing_an_at_sign() {
         let out = redact_credentials(&format!("https://user:p@{TOKEN}@host/repo.git"));
@@ -454,8 +454,8 @@ mod tests {
         assert_eq!(out, "https://***@host/repo.git");
     }
 
-    /// …and scoped to the authority, not the whole token. `rfind` over the token
-    /// would yield `https://***b` and take the host with it.
+    // …and scoped to the authority, not the whole token. `rfind` over the token
+    // would yield `https://***b` and take the host with it.
     #[test]
     fn leaves_an_at_sign_in_the_path_alone_and_keeps_the_host() {
         assert_eq!(
@@ -464,10 +464,10 @@ mod tests {
         );
     }
 
-    /// Two URLs in one whitespace-delimited token, the first *without* a
-    /// credential. A scan that stopped at the first authority returned this
-    /// token untouched and leaked the second credential in full — it did, and
-    /// a reviewer caught it rather than a test.
+    // Two URLs in one whitespace-delimited token, the first *without* a
+    // credential. A scan that stopped at the first authority returned this
+    // token untouched and leaked the second credential in full — it did, and
+    // a reviewer caught it rather than a test.
     #[test]
     fn redacts_a_credential_url_embedded_after_a_path() {
         let out = redact_credentials(&format!(
@@ -478,8 +478,8 @@ mod tests {
         assert_eq!(out, "https://host/redirect?to=https://***@other/repo");
     }
 
-    /// The same gap with a credential in *both* authorities: stopping after the
-    /// first redacted one and forwarded the other.
+    // The same gap with a credential in *both* authorities: stopping after the
+    // first redacted one and forwarded the other.
     #[test]
     fn redacts_every_authority_in_a_single_token() {
         let out = redact_credentials(&format!(
@@ -490,9 +490,9 @@ mod tests {
         assert_eq!(out, "https://***@host/https://***@real/r.git");
     }
 
-    /// `url.<base>.insteadOf` is the standard way to inject a credential-bearing
-    /// remote, and its value is one token holding two URLs. A gix config error
-    /// echoing it reaches [`GitMessage::new`].
+    // `url.<base>.insteadOf` is the standard way to inject a credential-bearing
+    // remote, and its value is one token holding two URLs. A gix config error
+    // echoing it reaches [`GitMessage::new`].
     #[test]
     fn redacts_an_insteadof_style_configuration_value() {
         let out = redact_credentials(&format!(
@@ -503,11 +503,11 @@ mod tests {
         assert_eq!(out, "url.https://***@host/.insteadOf=https://host/");
     }
 
-    /// A credential in a *bare* authority that is followed, in the same token,
-    /// by an unrelated `scheme://`. Looking for the opening authority only when
-    /// the token held no `://` at all meant the search succeeded on the later
-    /// scheme and this credential was never examined — the token came back
-    /// byte-for-byte unchanged. Found by review, not by a test.
+    // A credential in a *bare* authority that is followed, in the same token,
+    // by an unrelated `scheme://`. Looking for the opening authority only when
+    // the token held no `://` at all meant the search succeeded on the later
+    // scheme and this credential was never examined — the token came back
+    // byte-for-byte unchanged. Found by review, not by a test.
     #[test]
     fn redacts_a_bare_authority_followed_by_a_later_scheme() {
         let out = redact_credentials(&format!("{TOKEN}@evil.example:https://good.example/"));
@@ -516,16 +516,16 @@ mod tests {
         assert_eq!(out, "***@evil.example:https://good.example/");
     }
 
-    /// The same gap in its realistic dress: an scp-style `insteadOf` base, whose
-    /// value is a plain URL.
-    ///
-    /// Note the `url.` config-key prefix goes with the userinfo. A bare
-    /// authority has no scheme to anchor on, so the redaction can only start at
-    /// the token, and everything before the `@` is treated as userinfo. That is
-    /// the documented over-redaction tradeoff, and the safe direction: telling a
-    /// config-key prefix apart from a username means deciding which text before
-    /// an `@` is harmless, which is the fails-open guess this module refuses to
-    /// make.
+    // The same gap in its realistic dress: an scp-style `insteadOf` base, whose
+    // value is a plain URL.
+    //
+    // Note the `url.` config-key prefix goes with the userinfo. A bare
+    // authority has no scheme to anchor on, so the redaction can only start at
+    // the token, and everything before the `@` is treated as userinfo. That is
+    // the documented over-redaction tradeoff, and the safe direction: telling a
+    // config-key prefix apart from a username means deciding which text before
+    // an `@` is harmless, which is the fails-open guess this module refuses to
+    // make.
     #[test]
     fn redacts_an_scp_style_insteadof_base() {
         let out = redact_credentials(&format!("url.{TOKEN}@internal:.insteadOf=https://host/"));
@@ -534,9 +534,9 @@ mod tests {
         assert_eq!(out, "***@internal:.insteadOf=https://host/");
     }
 
-    /// The `insteadOf` VALUE, after the `=`. Considering only `://`-introduced
-    /// authorities left this one unexamined — and `insteadOf` is the very shape
-    /// this module cites as its motivating case, so the doc named a leak.
+    // The `insteadOf` VALUE, after the `=`. Considering only `://`-introduced
+    // authorities left this one unexamined — and `insteadOf` is the very shape
+    // this module cites as its motivating case, so the doc named a leak.
     #[test]
     fn redacts_a_credential_in_an_insteadof_value() {
         let out = redact_credentials(&format!(
@@ -547,8 +547,8 @@ mod tests {
         assert_eq!(out, "url.https://github.com/.insteadOf=***@github.com:");
     }
 
-    /// A second authority joined by a comma, with the first already redacted —
-    /// leak 2's exact shape a third time, in the delimiter that config dumps use.
+    // A second authority joined by a comma, with the first already redacted —
+    // leak 2's exact shape a third time, in the delimiter that config dumps use.
     #[test]
     fn redacts_a_comma_joined_second_authority() {
         let out = redact_credentials(&format!("git+ssh://ok@host/x,{TOKEN}@evil:p"));
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(out, "git+ssh://***@host/x,***@evil:p");
     }
 
-    /// A query parameter, covered by the same `=` delimiter.
+    // A query parameter, covered by the same `=` delimiter.
     #[test]
     fn redacts_a_credential_in_a_query_parameter() {
         let out = redact_credentials(&format!("https://h/?u=x&next={TOKEN}@evil:1"));
@@ -569,9 +569,9 @@ mod tests {
         assert_eq!(out, "https://h/?u=***@evil:1");
     }
 
-    /// The regression a tightest-span rule caused: `=` inside the userinfo moved
-    /// the redaction start past most of the credential and emitted the rest
-    /// verbatim. Fifteen of twenty characters survived.
+    // The regression a tightest-span rule caused: `=` inside the userinfo moved
+    // the redaction start past most of the credential and emitted the rest
+    // verbatim. Fifteen of twenty characters survived.
     #[test]
     fn a_delimiter_inside_the_userinfo_does_not_shorten_the_redaction() {
         let out = redact_credentials(&format!("https://user:{TOKEN_WITH_DELIMITERS}@host/r"));
@@ -580,8 +580,8 @@ mod tests {
         assert_eq!(out, "https://***@host/r");
     }
 
-    /// The same, with the delimiter in a username rather than a password, and
-    /// reached through the scp-style candidate rather than the `://` one.
+    // The same, with the delimiter in a username rather than a password, and
+    // reached through the scp-style candidate rather than the `://` one.
     #[test]
     fn a_delimiter_inside_an_scp_style_userinfo_does_not_shorten_the_redaction() {
         let out = redact_credentials(&format!("{TOKEN_WITH_DELIMITERS}@host:org/repo.git"));
@@ -592,12 +592,12 @@ mod tests {
 
     // ─── The residual hole, pinned so it stays stated ───────────────────────
 
-    /// `/` is deliberately not a candidate delimiter, so an authority introduced
-    /// by a path separator is never examined. This is the direct price of
-    /// `leaves_an_at_sign_in_the_path_alone_and_keeps_the_host`: any rule that
-    /// catches this one also destroys that one's host. Asserting the miss keeps
-    /// the uncovered list honest — widen the rule and this fails, forcing the
-    /// prose to be updated rather than left overclaiming.
+    // `/` is deliberately not a candidate delimiter, so an authority introduced
+    // by a path separator is never examined. This is the direct price of
+    // `leaves_an_at_sign_in_the_path_alone_and_keeps_the_host`: any rule that
+    // catches this one also destroys that one's host. Asserting the miss keeps
+    // the uncovered list honest — widen the rule and this fails, forcing the
+    // prose to be updated rather than left overclaiming.
     #[test]
     fn an_authority_after_a_path_separator_is_not_covered() {
         for leaky in [
@@ -613,10 +613,10 @@ mod tests {
         }
     }
 
-    /// The whitespace hole at its worst. The pinned partial miss below sits a
-    /// few lines away and reads like the whole story; it is not. With the
-    /// whitespace immediately before the `@`, the piece holding the credential
-    /// contains no `@` at all and passes through byte for byte.
+    // The whitespace hole at its worst. The pinned partial miss below sits a
+    // few lines away and reads like the whole story; it is not. With the
+    // whitespace immediately before the `@`, the piece holding the credential
+    // contains no `@` at all and passes through byte for byte.
     #[test]
     fn whitespace_immediately_before_the_at_sign_misses_totally() {
         let leaky = format!("https://user:{TOKEN}\n@host/r");
@@ -645,10 +645,10 @@ mod tests {
 
     // ─── Redaction: the control against over-redaction ──────────────────────
 
-    /// git 2.50.1 already strips the userinfo from *this* message. It has to
-    /// come back byte-identical, or the tests above would still pass with a
-    /// redactor that simply blanked everything — and the error would stop being
-    /// diagnosable, which is the failure mode nobody notices until an incident.
+    // git 2.50.1 already strips the userinfo from *this* message. It has to
+    // come back byte-identical, or the tests above would still pass with a
+    // redactor that simply blanked everything — and the error would stop being
+    // diagnosable, which is the failure mode nobody notices until an incident.
     #[test]
     fn leaves_credential_free_git_output_byte_identical() {
         for line in [
@@ -662,8 +662,8 @@ mod tests {
         }
     }
 
-    /// An empty userinfo is not a credential, and rewriting it to `***@host`
-    /// would invent one.
+    // An empty userinfo is not a credential, and rewriting it to `***@host`
+    // would invent one.
     #[test]
     fn leaves_an_empty_userinfo_alone() {
         assert_eq!(redact_credentials("https://@host/r"), "https://@host/r");
@@ -671,9 +671,9 @@ mod tests {
 
     // ─── Redaction: the stated holes, pinned so they stay stated ────────────
 
-    /// Documented in [`redact_credentials`] as uncovered. Asserting it keeps the
-    /// doc comment honest: if someone widens the rule, this fails and they have
-    /// to update the prose rather than leave it overclaiming.
+    // Documented in [`redact_credentials`] as uncovered. Asserting it keeps the
+    // doc comment honest: if someone widens the rule, this fails and they have
+    // to update the prose rather than leave it overclaiming.
     #[test]
     fn a_slash_inside_the_userinfo_is_not_covered() {
         let leaky = format!("https://user:pa/ss{TOKEN}@host/repo.git");
@@ -685,8 +685,8 @@ mod tests {
         );
     }
 
-    /// Likewise. Both halves of the split are shown, so the partial nature of
-    /// the miss is on the record rather than merely asserted.
+    // Likewise. Both halves of the split are shown, so the partial nature of
+    // the miss is on the record rather than merely asserted.
     #[test]
     fn whitespace_inside_the_userinfo_is_not_covered() {
         assert_eq!(
@@ -710,18 +710,18 @@ mod tests {
         );
     }
 
-    /// The ordering invariant, and the reason [`GitMessage::clean`] redacts
-    /// first. The credential straddles the elision cut, so a bound-then-redact
-    /// implementation keeps the start of the token in the head — with the `@`
-    /// in the elided middle, leaving the redactor nothing to anchor on.
-    /// Redacting first cannot fail that way.
-    ///
-    /// **The fixture has to be placed, not guessed.** `assert_secret_free`
-    /// matches a twelve-character window, so the cut has to fall exactly twelve
-    /// characters into the token: any later and the whole credential lands in
-    /// the elided middle, the scan finds nothing, and the test passes under a
-    /// bound-then-redact implementation while appearing to assert the opposite.
-    /// It did, until the mutation for this test was run.
+    // The ordering invariant, and the reason [`GitMessage::clean`] redacts
+    // first. The credential straddles the elision cut, so a bound-then-redact
+    // implementation keeps the start of the token in the head — with the `@`
+    // in the elided middle, leaving the redactor nothing to anchor on.
+    // Redacting first cannot fail that way.
+    //
+    // **The fixture has to be placed, not guessed.** `assert_secret_free`
+    // matches a twelve-character window, so the cut has to fall exactly twelve
+    // characters into the token: any later and the whole credential lands in
+    // the elided middle, the scan finds nothing, and the test passes under a
+    // bound-then-redact implementation while appearing to assert the opposite.
+    // It did, until the mutation for this test was run.
     #[test]
     fn bounding_cannot_split_a_credential_because_redaction_runs_first() {
         /// The window `assert_secret_free` scans for, spelled out because the

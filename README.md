@@ -192,6 +192,44 @@ selfie --help
    selfie apply ripgrep
    ```
 
+## Exit codes
+
+A `selfie` command that runs exits with one of these three codes. Scripts and CI steps should branch
+on them rather than on output text. A command line selfie cannot parse — an unknown flag, a missing
+argument — is rejected by the argument parser before any of this applies, and exits `2`.
+
+| Code  | Meaning                                                                       |
+| ----- | ----------------------------------------------------------------------------- |
+| `0`   | The command did everything it was asked to do.                                |
+| `1`   | The command failed, **or refused part of its work**. See below.               |
+| `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
+
+### A refusal is not a success
+
+`selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run
+succeeded and the command reports itself as completed. Selfie refuses an entry when it cannot deploy
+it safely or unambiguously — an unrecognized key in the entry, a target it will not write to (a
+symlink, or a path outside your home directory), or a source file it cannot read. Each refusal is
+named in the output, and the summary line counts them:
+
+```
+Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)
+```
+
+Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
+
+- **A skip.** The entry was already in sync, so there was nothing to do.
+- **A conflict.** The target exists, is untracked, and differs from the repository file. Selfie
+  leaves it alone and reports it, because overwriting it is your decision — see
+  [Dotfiles](docs/package-files.md#dotfiles).
+
+`selfie apply --dry-run` follows the same rule: a refusal it can predict without writing anything is
+still reported, and still exits `1`. A preview whose job is to tell you what `apply` would do must
+not report success for a run that would refuse.
+
+The MCP server applies the same contract: a refusal comes back as an error result with
+`"status": "refused"`, so an assistant is not told the deploy worked.
+
 ## Documentation
 
 ### Complete Documentation

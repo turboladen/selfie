@@ -93,6 +93,19 @@ environments:
     file_path
 }
 
+/// Write a package file from raw YAML, returning its path.
+///
+/// The escape hatch from [`create_package_with_dotfiles`], which builds the
+/// `dotfiles:` key itself and so cannot express a file whose defect is in that
+/// key's *name* or in an entry's extra keys. A `PackageBuilder` fixture cannot
+/// stand in either: the builder never populates `raw_yaml`, so a test about
+/// top-level keys built that way passes without ever exercising the check.
+fn write_package_yaml(package_dir: &std::path::Path, name: &str, yaml: &str) -> PathBuf {
+    let file_path = package_dir.join(format!("{name}.yml"));
+    std::fs::write(&file_path, yaml).unwrap();
+    file_path
+}
+
 /// Create standard test directories under a temp dir
 struct TestDirs {
     _temp: TempDir,
@@ -905,9 +918,14 @@ async fn test_apply_rejects_path_traversal() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
@@ -940,9 +958,14 @@ async fn test_apply_missing_source_warns_and_skips() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
@@ -1070,12 +1093,12 @@ async fn test_deploy_state_persists_across_service_instances() {
     }
 }
 
-/// A state file written before `DeployEntry::target` was removed still loads.
-///
-/// Every state file on every machine still carries a `target:` key. If it stopped
-/// deserializing, `load_deploy_state` would swallow the error and return an empty
-/// state, so every entry everywhere would become `NotTracked` at once — a mass
-/// re-deploy and a conflict prompt per file, from a field nobody reads.
+// A state file written before `DeployEntry::target` was removed still loads.
+//
+// Every state file on every machine still carries a `target:` key. If it stopped
+// deserializing, `load_deploy_state` would swallow the error and return an empty
+// state, so every entry everywhere would become `NotTracked` at once — a mass
+// re-deploy and a conflict prompt per file, from a field nobody reads.
 #[tokio::test]
 async fn a_state_file_carrying_the_removed_target_field_still_loads() {
     let dirs = TestDirs::new();
@@ -1234,19 +1257,24 @@ async fn test_apply_target_parent_dir_is_file() {
         OperationResult::Success(OperationSuccess::DotfilesApplied {
             deployed_count,
             skipped_count,
+            refused_count,
             ..
         }) => {
-            assert_eq!(*skipped_count, 1);
+            // Refused, not skipped: selfie was asked to deploy this and did not.
+            // The `skipped_count == 0` half is the load-bearing one — it is what
+            // fails if the two buckets are merged again (selfie-c28).
+            assert_eq!(*refused_count, 1);
+            assert_eq!(*skipped_count, 0);
             assert_eq!(*deployed_count, 0);
         }
         other => panic!("Expected DotfilesApplied success, got: {other:?}"),
     }
 }
 
-/// Recovery, not reporting: a corrupt state file does not stop the deploy.
-///
-/// That it is also *reported* is `deploy_state_diagnostics`' job — the two
-/// properties are independent, and this one held while selfie was still silent.
+// Recovery, not reporting: a corrupt state file does not stop the deploy.
+//
+// That it is also *reported* is `deploy_state_diagnostics`' job — the two
+// properties are independent, and this one held while selfie was still silent.
 #[tokio::test]
 async fn test_apply_corrupt_state_file_recovers() {
     let dirs = TestDirs::new();
@@ -1590,11 +1618,11 @@ async fn test_track_for_package_fails_when_package_not_found() {
     );
 }
 
-/// Tracking a file under the home directory records it as `~/…`.
-///
-/// The home directory is injected rather than read, so the test says nothing
-/// about the machine it runs on: `/Users` vs `/home` and the real `$HOME` are
-/// both out of the picture.
+// Tracking a file under the home directory records it as `~/…`.
+//
+// The home directory is injected rather than read, so the test says nothing
+// about the machine it runs on: `/Users` vs `/home` and the real `$HOME` are
+// both out of the picture.
 #[tokio::test]
 async fn a_tracked_target_under_home_is_recorded_relative_to_it() {
     use selfie::package::port::PackageRepository;
@@ -1644,9 +1672,9 @@ async fn a_tracked_target_under_home_is_recorded_relative_to_it() {
     );
 }
 
-/// `track_for_package` writes the entry through a different function than
-/// `track_standalone`, so it needs its own proof rather than an argument that
-/// the two are alike.
+// `track_for_package` writes the entry through a different function than
+// `track_standalone`, so it needs its own proof rather than an argument that
+// the two are alike.
 #[tokio::test]
 async fn a_target_tracked_into_a_package_is_recorded_relative_to_home() {
     let dirs = TestDirs::new();
@@ -1680,9 +1708,9 @@ async fn a_target_tracked_into_a_package_is_recorded_relative_to_home() {
     );
 }
 
-/// Re-tracking a file already in the spec reports the spec's target, not the
-/// path the caller happened to type. The two differ exactly here: the spec holds
-/// `~/…` and the caller passes an absolute path.
+// Re-tracking a file already in the spec reports the spec's target, not the
+// path the caller happened to type. The two differ exactly here: the spec holds
+// `~/…` and the caller passes an absolute path.
 #[tokio::test]
 async fn re_tracking_reports_the_target_the_spec_holds() {
     let dirs = TestDirs::new();
@@ -1717,8 +1745,8 @@ async fn re_tracking_reports_the_target_the_spec_holds() {
     }
 }
 
-/// A target outside the home directory keeps its absolute form. Without this the
-/// two tests above would pass on an implementation that tildes every path.
+// A target outside the home directory keeps its absolute form. Without this the
+// two tests above would pass on an implementation that tildes every path.
 #[tokio::test]
 async fn a_tracked_target_outside_home_keeps_its_absolute_path() {
     let dirs = TestDirs::new();
@@ -3617,19 +3645,19 @@ mod secret_bearing {
 
         // ── The token has to reach the runner ────────────────────────────────
 
-        /// The discriminating test: proves the *service's* token is what a
-        /// provider command is run with.
-        ///
-        /// Two `vars` rather than two entries on purpose. `resolve_content` loops
-        /// over an entry's bindings with no cancellation check between them, so
-        /// the second command is dispatched with whatever token was threaded and
-        /// nothing else can intercept it. Two *entries* would be caught by the
-        /// between-entries guard in `handle_apply` and would prove nothing about
-        /// what the runner received.
-        ///
-        /// This does lean on that absence of a guard inside the `vars` loop. If
-        /// one is ever added there, this test stops discriminating and starts
-        /// passing for the wrong reason — rewrite it rather than trusting it.
+        // The discriminating test: proves the *service's* token is what a
+        // provider command is run with.
+        //
+        // Two `vars` rather than two entries on purpose. `resolve_content` loops
+        // over an entry's bindings with no cancellation check between them, so
+        // the second command is dispatched with whatever token was threaded and
+        // nothing else can intercept it. Two *entries* would be caught by the
+        // between-entries guard in `handle_apply` and would prove nothing about
+        // what the runner received.
+        //
+        // This does lean on that absence of a guard inside the `vars` loop. If
+        // one is ever added there, this test stops discriminating and starts
+        // passing for the wrong reason — rewrite it rather than trusting it.
         #[tokio::test]
         async fn the_live_token_reaches_the_command_runner() {
             let dirs = TestDirs::new();
@@ -3669,26 +3697,26 @@ mod secret_bearing {
             );
         }
 
-        /// The third window: cancellation landing *between two bindings*.
-        ///
-        /// Neither guard in `handle_apply` covers this. The between-entries guard
-        /// has already run for this entry, and the `Failed`-arm guard has not
-        /// been reached — `resolve_content` is midway through the entry's `vars`,
-        /// and it iterates them with no cancellation check of its own (the same
-        /// absence `the_live_token_reaches_the_command_runner` relies on).
-        ///
-        /// What closes it is the runner: `ShellCommandRunner::run_buffered`
-        /// checks the token before spawning and returns `Cancelled`, which
-        /// becomes a resolve failure and lands in the `Failed` arm, where
-        /// cancellation is read before `stop_on_error`. So the window is covered,
-        /// but only because a live token reaches the runner — which is the very
-        /// thing this unit fixed. Before it, the fresh token was never cancelled,
-        /// so the pre-spawn check could never fire and the second binding would
-        /// have run happily after the user pressed Ctrl+C.
-        ///
-        /// The fake models that pre-spawn refusal explicitly rather than
-        /// inheriting it, because a test double that answers a cancelled token
-        /// with success would show this window as closed when it is not.
+        // The third window: cancellation landing *between two bindings*.
+        //
+        // Neither guard in `handle_apply` covers this. The between-entries guard
+        // has already run for this entry, and the `Failed`-arm guard has not
+        // been reached — `resolve_content` is midway through the entry's `vars`,
+        // and it iterates them with no cancellation check of its own (the same
+        // absence `the_live_token_reaches_the_command_runner` relies on).
+        //
+        // What closes it is the runner: `ShellCommandRunner::run_buffered`
+        // checks the token before spawning and returns `Cancelled`, which
+        // becomes a resolve failure and lands in the `Failed` arm, where
+        // cancellation is read before `stop_on_error`. So the window is covered,
+        // but only because a live token reaches the runner — which is the very
+        // thing this unit fixed. Before it, the fresh token was never cancelled,
+        // so the pre-spawn check could never fire and the second binding would
+        // have run happily after the user pressed Ctrl+C.
+        //
+        // The fake models that pre-spawn refusal explicitly rather than
+        // inheriting it, because a test double that answers a cancelled token
+        // with success would show this window as closed when it is not.
         #[tokio::test]
         async fn a_cancellation_between_two_bindings_is_reported_honestly() {
             let dirs = TestDirs::new();
@@ -3763,10 +3791,10 @@ mod secret_bearing {
             assert_cancelled(&events);
         }
 
-        /// The positive control for the test above.
-        ///
-        /// Without it, that test passes just as well if apply were failing for
-        /// some reason having nothing to do with the token.
+        // The positive control for the test above.
+        //
+        // Without it, that test passes just as well if apply were failing for
+        // some reason having nothing to do with the token.
         #[tokio::test]
         async fn an_uncancelled_token_runs_the_provider_command() {
             let dirs = TestDirs::new();
@@ -3792,14 +3820,14 @@ mod secret_bearing {
 
         // ── Mid-command ──────────────────────────────────────────────────────
 
-        /// A command killed by Ctrl+C must not be blamed on the package file.
-        ///
-        /// `stop_on_error` defaults to **true**, and a cancelled command fails —
-        /// so the failure arm reaches `stop_on_error`'s explanation first and the
-        /// run reports "Stopped after failing to apply dotfile 'X' (stop_on_error
-        /// is enabled)". That names the user's own interrupt as a spec problem
-        /// and sends them looking for one. The between-entries guard cannot help
-        /// here: the break happens in the same iteration the command died in.
+        // A command killed by Ctrl+C must not be blamed on the package file.
+        //
+        // `stop_on_error` defaults to **true**, and a cancelled command fails —
+        // so the failure arm reaches `stop_on_error`'s explanation first and the
+        // run reports "Stopped after failing to apply dotfile 'X' (stop_on_error
+        // is enabled)". That names the user's own interrupt as a spec problem
+        // and sends them looking for one. The between-entries guard cannot help
+        // here: the break happens in the same iteration the command died in.
         #[tokio::test]
         async fn a_command_killed_by_cancellation_is_not_reported_as_a_spec_failure() {
             let dirs = TestDirs::new();
@@ -3828,24 +3856,24 @@ mod secret_bearing {
             );
         }
 
-        /// The fourth window: cancellation arriving once the *last* entry has
-        /// started, where the loop's guard can never run again.
-        ///
-        /// This is the case the three-entry test below sets up deliberately to
-        /// avoid — "with the provider last, the loop ends on its own and the
-        /// guard is never reached". That sentence describes a real hole, and this
-        /// is the follow-up it was owed.
-        ///
-        /// Distinct from the other three because nothing *fails* here: the
-        /// command succeeds despite the cancellation, so no failure arm is
-        /// reached and no guard is left to run. Without the post-loop check the
-        /// run reports `Success` for a run the user interrupted — and for a
-        /// provider entry that means a credential on disk with nothing in the
-        /// stream mentioning Ctrl+C at all.
-        ///
-        /// The target is asserted **present** on purpose. Cancelling does not
-        /// unwrite a file that was already written; the fix is to stop reporting
-        /// the run as clean, not to pretend the write did not happen.
+        // The fourth window: cancellation arriving once the *last* entry has
+        // started, where the loop's guard can never run again.
+        //
+        // This is the case the three-entry test below sets up deliberately to
+        // avoid — "with the provider last, the loop ends on its own and the
+        // guard is never reached". That sentence describes a real hole, and this
+        // is the follow-up it was owed.
+        //
+        // Distinct from the other three because nothing *fails* here: the
+        // command succeeds despite the cancellation, so no failure arm is
+        // reached and no guard is left to run. Without the post-loop check the
+        // run reports `Success` for a run the user interrupted — and for a
+        // provider entry that means a credential on disk with nothing in the
+        // stream mentioning Ctrl+C at all.
+        //
+        // The target is asserted **present** on purpose. Cancelling does not
+        // unwrite a file that was already written; the fix is to stop reporting
+        // the run as clean, not to pretend the write did not happen.
         #[tokio::test]
         async fn a_cancellation_during_the_last_entry_is_still_reported() {
             let dirs = TestDirs::new();
@@ -3880,18 +3908,18 @@ mod secret_bearing {
 
         // ── What a cancelled run leaves behind ───────────────────────────────
 
-        /// Cancelling must not discard the record of what was already deployed.
-        ///
-        /// The run breaks out of the loop rather than returning, so deploy state
-        /// still reaches disk. Returning early would leave the files in place
-        /// with no record of them, and the next drift check would report
-        /// correctly-deployed files as untracked.
-        ///
-        /// Three entries, because the invariant needs an entry *after* the
-        /// cancelling one: with the provider last, the loop ends on its own and
-        /// the guard is never reached. Not a dry run, because dry runs skip
-        /// saving state entirely — which would make the assertion pass for a
-        /// reason that has nothing to do with cancellation.
+        // Cancelling must not discard the record of what was already deployed.
+        //
+        // The run breaks out of the loop rather than returning, so deploy state
+        // still reaches disk. Returning early would leave the files in place
+        // with no record of them, and the next drift check would report
+        // correctly-deployed files as untracked.
+        //
+        // Three entries, because the invariant needs an entry *after* the
+        // cancelling one: with the provider last, the loop ends on its own and
+        // the guard is never reached. Not a dry run, because dry runs skip
+        // saving state entirely — which would make the assertion pass for a
+        // reason that has nothing to do with cancellation.
         #[tokio::test]
         async fn a_cancelled_apply_still_records_what_it_already_deployed() {
             let dirs = TestDirs::new();
@@ -3951,15 +3979,15 @@ mod secret_bearing {
         }
     }
 
-    /// What a noisy login shell puts in a credentials file (selfie-evf9).
-    ///
-    /// The unit tests in `commands::shell` assert what the runner returns. These
-    /// assert the thing that actually matters: the bytes on disk, through the
-    /// whole service, with a real shell process in the middle.
-    ///
-    /// The shell is a script standing in for the user's, so nothing here reads or
-    /// writes the developer's own configuration. See `commands::shell`'s
-    /// `content_tests` for why that is a faithful stand-in.
+    // What a noisy login shell puts in a credentials file (selfie-evf9).
+    //
+    // The unit tests in `commands::shell` assert what the runner returns. These
+    // assert the thing that actually matters: the bytes on disk, through the
+    // whole service, with a real shell process in the middle.
+    //
+    // The shell is a script standing in for the user's, so nothing here reads or
+    // writes the developer's own configuration. See `commands::shell`'s
+    // `content_tests` for why that is a faithful stand-in.
     #[cfg(unix)]
     mod noisy_shell {
         use super::*;
@@ -4105,28 +4133,35 @@ mod symlinked_targets {
             .collect()
     }
 
-    /// `(deployed, skipped, conflict)` — the conflict count is part of the tuple
-    /// because a refusal deliberately lands in a different bucket from a conflict.
-    fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize) {
+    // `(deployed, skipped, conflict, refused)` — every bucket, because the
+    // point of each is that it is not one of the others. A refusal is not a
+    // conflict, and since selfie-c28 it is not a skip either.
+    fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
             OperationResult::Success(OperationSuccess::DotfilesApplied {
                 deployed_count,
                 skipped_count,
                 conflict_count,
+                refused_count,
                 ..
-            }) => (*deployed_count, *skipped_count, *conflict_count),
+            }) => (
+                *deployed_count,
+                *skipped_count,
+                *conflict_count,
+                *refused_count,
+            ),
             other => panic!("expected DotfilesApplied, got {other:?}"),
         }
     }
 
-    /// The refusal must not fire on a target apply had no reason to write to.
-    ///
-    /// Deploying by copying does not forbid a symlinked target; it declines to
-    /// *write through* one. Someone who keeps their dotfiles symlinked from
-    /// elsewhere and is already in sync should see nothing at all. Without this,
-    /// `a_symlinked_target_is_refused_on_a_routine_repo_update` would also pass
-    /// against an implementation that refused every symlinked target outright —
-    /// confirmed by mutation.
+    // The refusal must not fire on a target apply had no reason to write to.
+    //
+    // Deploying by copying does not forbid a symlinked target; it declines to
+    // *write through* one. Someone who keeps their dotfiles symlinked from
+    // elsewhere and is already in sync should see nothing at all. Without this,
+    // `a_symlinked_target_is_refused_on_a_routine_repo_update` would also pass
+    // against an implementation that refused every symlinked target outright —
+    // confirmed by mutation.
     #[tokio::test]
     async fn an_in_sync_symlinked_target_is_left_alone_and_not_reported() {
         let dirs = TestDirs::new();
@@ -4152,16 +4187,16 @@ mod symlinked_targets {
         );
     }
 
-    /// An untracked, already-matching symlinked target is not recorded as deployed.
-    ///
-    /// selfie never wrote it and never will, so an entry claiming it did is a
-    /// promise the refusal guarantees it can never keep: the entry can never
-    /// advance, and `detect_drift` would answer `None` for it forever (selfie-phnh).
-    ///
-    /// Two entries, identical but for the link, because the axis under test is the
-    /// symlink and nothing else — both are already in sync, so both take the same
-    /// `Skip` branch. The plain one is the control: a fix that simply stopped
-    /// recording would fail on it.
+    // An untracked, already-matching symlinked target is not recorded as deployed.
+    //
+    // selfie never wrote it and never will, so an entry claiming it did is a
+    // promise the refusal guarantees it can never keep: the entry can never
+    // advance, and `detect_drift` would answer `None` for it forever (selfie-phnh).
+    //
+    // Two entries, identical but for the link, because the axis under test is the
+    // symlink and nothing else — both are already in sync, so both take the same
+    // `Skip` branch. The plain one is the control: a fix that simply stopped
+    // recording would fail on it.
     #[tokio::test]
     async fn an_untracked_matching_symlinked_target_records_no_deployment() {
         let dirs = TestDirs::new();
@@ -4203,12 +4238,12 @@ mod symlinked_targets {
         );
     }
 
-    /// The routine path, and the reason a refusal beats replacing the link.
-    ///
-    /// `RepoChanged` routes to `DeployDecision::Deploy` with no conflict and no
-    /// `--yes`, so this is the ordinary apply after any edit to a repository file
-    /// — not a rare case. Replacing the link here would silently discard it and
-    /// orphan its destination on the first apply after any edit.
+    // The routine path, and the reason a refusal beats replacing the link.
+    //
+    // `RepoChanged` routes to `DeployDecision::Deploy` with no conflict and no
+    // `--yes`, so this is the ordinary apply after any edit to a repository file
+    // — not a rare case. Replacing the link here would silently discard it and
+    // orphan its destination on the first apply after any edit.
     #[tokio::test]
     async fn a_symlinked_target_is_refused_on_a_routine_repo_update() {
         let dirs = TestDirs::new();
@@ -4230,7 +4265,7 @@ mod symlinked_targets {
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
-            (1, 0, 0),
+            (1, 0, 0, 0),
             "the fixture depends on this apply really writing: {first:?}"
         );
         let destination = dirs.target_dir.join("destination");
@@ -4256,8 +4291,8 @@ mod symlinked_targets {
         );
         assert_eq!(
             deploy_counts(&events),
-            (0, 1, 0),
-            "a refusal is a skip, not a deploy"
+            (0, 0, 0, 1),
+            "a refusal is counted as refused, not as a deploy"
         );
         // Which branch the refusal was reached from is invisible in the counts —
         // `Deploy` and `Conflict` both land in the same bucket behind it. Drift
@@ -4278,12 +4313,12 @@ mod symlinked_targets {
         );
     }
 
-    /// A dangling link is refused too, and its destination is not created.
-    ///
-    /// This is the case a caller cannot detect by inspecting the target
-    /// afterwards: `path_exists` follows the link and reports false, so apply
-    /// decides to deploy with no conflict, and `fs::write` would then create the
-    /// file at whatever path the link names.
+    // A dangling link is refused too, and its destination is not created.
+    //
+    // This is the case a caller cannot detect by inspecting the target
+    // afterwards: `path_exists` follows the link and reports false, so apply
+    // decides to deploy with no conflict, and `fs::write` would then create the
+    // file at whatever path the link names.
     #[tokio::test]
     async fn a_dangling_symlinked_target_does_not_create_its_destination() {
         let dirs = TestDirs::new();
@@ -4304,12 +4339,12 @@ mod symlinked_targets {
             "the link's destination was created"
         );
         assert!(is_symlink(&target));
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
-    /// `--yes` resolves a conflict; it does not authorize writing through a link.
-    ///
-    /// The two are independent decisions, and the flag speaks only to the first.
+    // `--yes` resolves a conflict; it does not authorize writing through a link.
+    //
+    // The two are independent decisions, and the flag speaks only to the first.
     #[tokio::test]
     async fn auto_accept_does_not_override_the_refusal() {
         let dirs = TestDirs::new();
@@ -4335,14 +4370,14 @@ mod symlinked_targets {
             "USER EDITED"
         );
         assert!(is_symlink(&target));
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
-    /// A preview must report the refusal, not promise a deploy that will not happen.
-    ///
-    /// The same ordering rule the secret path already follows: checks that a real
-    /// apply would refuse on come before the dry-run short-circuit, so a preview
-    /// describes the run you are about to perform rather than a different one.
+    // A preview must report the refusal, not promise a deploy that will not happen.
+    //
+    // The same ordering rule the secret path already follows: checks that a real
+    // apply would refuse on come before the dry-run short-circuit, so a preview
+    // describes the run you are about to perform rather than a different one.
     #[tokio::test]
     async fn a_dry_run_reports_the_refusal_rather_than_previewing_a_deploy() {
         let dirs = TestDirs::new();
@@ -4363,7 +4398,7 @@ mod symlinked_targets {
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
-            (1, 0, 0),
+            (1, 0, 0, 0),
             "the fixture depends on this apply really writing: {first:?}"
         );
         let destination = dirs.target_dir.join("destination");
@@ -4411,12 +4446,12 @@ mod symlinked_targets {
         );
     }
 
-    /// The user is never asked a question whose answer cannot be honored.
-    ///
-    /// A conflict on a symlinked target used to reach the interactive resolver,
-    /// which showed a diff and asked whether to overwrite — and then refused the
-    /// write whichever way the user answered. The refusal is settled before the
-    /// resolver is consulted, so the prompt never happens.
+    // The user is never asked a question whose answer cannot be honored.
+    //
+    // A conflict on a symlinked target used to reach the interactive resolver,
+    // which showed a diff and asked whether to overwrite — and then refused the
+    // write whichever way the user answered. The refusal is settled before the
+    // resolver is consulted, so the prompt never happens.
     #[tokio::test]
     async fn a_conflicting_symlinked_target_is_refused_without_prompting() {
         use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
@@ -4459,14 +4494,17 @@ mod symlinked_targets {
             "USER EDITED"
         );
         assert!(is_symlink(&target));
-        // Counted as skipped, NOT as a conflict, though the content differs and the
+        // Counted as refused, NOT as a conflict, though the content differs and the
         // entry would otherwise have been one. A conflict is a question for the
         // user; this one is already settled, so it is not asked. Asserted so the
         // bucket cannot move back without someone deciding to.
+        //
+        // Not `skipped` either, since selfie-c28: an entry selfie declined to write
+        // is not one there was nothing to do for.
         assert_eq!(
             deploy_counts(&events),
-            (0, 1, 0),
-            "a refused entry must be a skip, not a conflict"
+            (0, 0, 0, 1),
+            "a refused entry is counted as refused: not a conflict, and not a skip"
         );
         assert!(
             !events
@@ -4476,23 +4514,23 @@ mod symlinked_targets {
         );
     }
 
-    /// The writer refuses on its own, with the hoisted check taken out of the way.
-    ///
-    /// This is the TOCTOU defense, and it is the half of the fix that nothing else
-    /// observes. With the check in `handle_apply` doing its job, reverting
-    /// `perform_deploy` to `write_file` fails **no other test in the workspace** —
-    /// measured, 787 passing either way. So without this test a future reader can
-    /// find the writer redundant, delete it, see a green suite, and have removed the
-    /// only protection against a link planted *during* an apply.
-    ///
-    /// Blinding `symlink_refusal` reproduces that race deterministically: the check
-    /// sees nothing, the write goes ahead, and `O_NOFOLLOW` has to catch it. No
-    /// sleeping, no threads, no flakiness.
-    ///
-    /// `auto_accept` is load-bearing. Without it a differing target takes the
-    /// conflict branch and never reaches `perform_deploy`, so a weaker version of
-    /// this test — one that only checked the victim file was untouched — would pass
-    /// without exercising the writer at all.
+    // The writer refuses on its own, with the hoisted check taken out of the way.
+    //
+    // This is the TOCTOU defense, and it is the half of the fix that nothing else
+    // observes. With the check in `handle_apply` doing its job, reverting
+    // `perform_deploy` to `write_file` fails **no other test in the workspace** —
+    // measured, 787 passing either way. So without this test a future reader can
+    // find the writer redundant, delete it, see a green suite, and have removed the
+    // only protection against a link planted *during* an apply.
+    //
+    // Blinding `symlink_refusal` reproduces that race deterministically: the check
+    // sees nothing, the write goes ahead, and `O_NOFOLLOW` has to catch it. No
+    // sleeping, no threads, no flakiness.
+    //
+    // `auto_accept` is load-bearing. Without it a differing target takes the
+    // conflict branch and never reaches `perform_deploy`, so a weaker version of
+    // this test — one that only checked the victim file was untouched — would pass
+    // without exercising the writer at all.
     #[tokio::test]
     async fn the_writer_refuses_even_when_the_check_is_blinded() {
         use selfie::config::SelfieConfigBuilder;
@@ -4619,10 +4657,10 @@ mod symlinked_targets {
             warnings.iter().any(|w| w.contains("is a symlink")),
             "the writer's own refusal must still be reported: {warnings:?}"
         );
-        assert_eq!(deploy_counts(&events), (0, 1, 0));
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
-    /// An ordinary target is unaffected by any of the above.
+    // An ordinary target is unaffected by any of the above.
     #[tokio::test]
     async fn an_ordinary_target_still_deploys() {
         let dirs = TestDirs::new();
@@ -4637,11 +4675,11 @@ mod symlinked_targets {
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
-        assert_eq!(deploy_counts(&events), (1, 0, 0));
+        assert_eq!(deploy_counts(&events), (1, 0, 0, 0));
     }
 
-    /// The deploy state file names every path selfie manages here, so it must not
-    /// be readable by anyone but its owner.
+    // The deploy state file names every path selfie manages here, so it must not
+    // be readable by anyone but its owner.
     #[tokio::test]
     async fn the_deploy_state_file_is_owner_only() {
         let dirs = TestDirs::new();
@@ -4684,7 +4722,7 @@ mod symlinked_targets {
         );
     }
 
-    /// A state file left world-readable by an earlier version is corrected.
+    // A state file left world-readable by an earlier version is corrected.
     #[tokio::test]
     async fn an_existing_world_readable_state_file_is_tightened() {
         let dirs = TestDirs::new();
@@ -4723,8 +4761,8 @@ mod target_expansion {
     use selfie::fs::{RealFileSystem, expand_target_path};
     use tempfile::TempDir;
 
-    /// The final component is never resolved, which is what lets the writers see a
-    /// symlink at all. See `expand_target_path`'s documentation.
+    // The final component is never resolved, which is what lets the writers see a
+    // symlink at all. See `expand_target_path`'s documentation.
     #[test]
     fn a_symlinked_target_keeps_its_own_path() {
         let temp = TempDir::new().unwrap();
@@ -4742,14 +4780,14 @@ mod target_expansion {
         );
     }
 
-    /// Two spellings of one file that differ through a symlinked directory no
-    /// longer compare equal.
-    ///
-    /// Duplicate detection in `dotfiles track` compares expanded paths, so it now
-    /// misses this case where canonicalizing used to catch it. Recorded because it
-    /// is the regression most likely to tempt someone into putting `expand_path`
-    /// back — which would reopen selfie-4m9. Fix it by comparing differently, not
-    /// by resolving here.
+    // Two spellings of one file that differ through a symlinked directory no
+    // longer compare equal.
+    //
+    // Duplicate detection in `dotfiles track` compares expanded paths, so it now
+    // misses this case where canonicalizing used to catch it. Recorded because it
+    // is the regression most likely to tempt someone into putting `expand_path`
+    // back — which would reopen selfie-4m9. Fix it by comparing differently, not
+    // by resolving here.
     #[test]
     fn paths_differing_through_a_symlinked_directory_no_longer_match() {
         let temp = TempDir::new().unwrap();
@@ -4766,13 +4804,13 @@ mod target_expansion {
     }
 }
 
-/// What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
-/// what the lexical containment guard does not say about a symlinked source.
-///
-/// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
-/// two commands that used to be silent about it and the guard that documents a limit
-/// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
-/// of this is observable through it. Everything runs inside a `TempDir`.
+// What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
+// what the lexical containment guard does not say about a symlinked source.
+//
+// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
+// two commands that used to be silent about it and the guard that documents a limit
+// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
+// of this is observable through it. Everything runs inside a `TempDir`.
 #[cfg(unix)]
 mod symlink_consistency {
     use super::*;
@@ -4835,9 +4873,9 @@ mod symlink_consistency {
 
     // ── drift ───────────────────────────────────────────────────────────────
 
-    /// D1. The case in selfie-qvwq's title: a repository edit that can never reach
-    /// the target, reported as `repo changed` on every run forever because the
-    /// deploy state can never advance. Drift now names the symlink alongside it.
+    // D1. The case in selfie-qvwq's title: a repository edit that can never reach
+    // the target, reported as `repo changed` on every run forever because the
+    // deploy state can never advance. Drift now names the symlink alongside it.
     #[tokio::test]
     async fn drift_names_the_symlink_when_it_reports_drift() {
         let dirs = TestDirs::new();
@@ -4858,13 +4896,13 @@ mod symlink_consistency {
         );
     }
 
-    /// D2. Parity in the silent direction: a symlinked target already in sync is one
-    /// apply has no reason to write to, and apply says nothing about it
-    /// (`an_in_sync_symlinked_target_is_left_alone_and_not_reported`). Drift must not
-    /// invent a complaint apply does not make.
-    ///
-    /// Without this, D1 would also pass against an implementation that warned about
-    /// every symlinked target it saw.
+    // D2. Parity in the silent direction: a symlinked target already in sync is one
+    // apply has no reason to write to, and apply says nothing about it
+    // (`an_in_sync_symlinked_target_is_left_alone_and_not_reported`). Drift must not
+    // invent a complaint apply does not make.
+    //
+    // Without this, D1 would also pass against an implementation that warned about
+    // every symlinked target it saw.
     #[tokio::test]
     async fn drift_says_nothing_about_an_in_sync_symlinked_target() {
         let dirs = TestDirs::new();
@@ -4882,17 +4920,17 @@ mod symlink_consistency {
         );
     }
 
-    /// D4. What the state file no longer claims, seen from the command that reads it.
-    ///
-    /// The fresh-machine sequence in selfie-phnh: a config already symlinked into
-    /// place by another tool, matching the repository file, and `apply` run once.
-    /// The entry stays `not tracked` because nothing was recorded — where it used to
-    /// settle to `none`, so drift reported the target as in sync on a machine selfie
-    /// had never deployed to and could not deploy to.
-    ///
-    /// Still no refusal *reason* here, which is deliberate and is the parity D5
-    /// pins: `apply` is silent about this entry, so drift is too. Making both speak
-    /// is a separate question from what the state file claims.
+    // D4. What the state file no longer claims, seen from the command that reads it.
+    //
+    // The fresh-machine sequence in selfie-phnh: a config already symlinked into
+    // place by another tool, matching the repository file, and `apply` run once.
+    // The entry stays `not tracked` because nothing was recorded — where it used to
+    // settle to `none`, so drift reported the target as in sync on a machine selfie
+    // had never deployed to and could not deploy to.
+    //
+    // Still no refusal *reason* here, which is deliberate and is the parity D5
+    // pins: `apply` is silent about this entry, so drift is too. Making both speak
+    // is a separate question from what the state file claims.
     #[tokio::test]
     async fn drift_no_longer_calls_a_never_deployed_symlinked_target_in_sync() {
         let dirs = TestDirs::new();
@@ -4917,11 +4955,11 @@ mod symlink_consistency {
         );
     }
 
-    /// D3 (row 1a). The fresh-machine case: a target already symlinked into place by
-    /// another tool, never deployed by selfie, whose destination differs from the
-    /// repository file. Drift classifies it `not tracked` rather than `repo changed`,
-    /// so a fix that only handled `RepoChanged` would leave this silent — which is
-    /// why the fixture varies along the drift-type axis.
+    // D3 (row 1a). The fresh-machine case: a target already symlinked into place by
+    // another tool, never deployed by selfie, whose destination differs from the
+    // repository file. Drift classifies it `not tracked` rather than `repo changed`,
+    // so a fix that only handled `RepoChanged` would leave this silent — which is
+    // why the fixture varies along the drift-type axis.
     #[tokio::test]
     async fn drift_names_the_symlink_on_a_never_deployed_target() {
         let dirs = TestDirs::new();
@@ -4942,16 +4980,16 @@ mod symlink_consistency {
         );
     }
 
-    /// D5 (row 1b). The fixture that separates `deploy_decision` from `drift != None`.
-    ///
-    /// Never deployed, so drift is `NotTracked` and the entry is reported as drifted
-    /// — but the destination's contents already match the repository file, so
-    /// `deploy_decision` returns `Skip` and **apply is silent**. Gating the refusal on
-    /// the drift type instead of on apply's own decision would warn here, recreating
-    /// the drift-vs-apply disagreement in the opposite direction.
-    ///
-    /// The apply half is asserted in the same test on purpose: the property is that
-    /// the two commands agree, and a test that only looked at drift could not see it.
+    // D5 (row 1b). The fixture that separates `deploy_decision` from `drift != None`.
+    //
+    // Never deployed, so drift is `NotTracked` and the entry is reported as drifted
+    // — but the destination's contents already match the repository file, so
+    // `deploy_decision` returns `Skip` and **apply is silent**. Gating the refusal on
+    // the drift type instead of on apply's own decision would warn here, recreating
+    // the drift-vs-apply disagreement in the opposite direction.
+    //
+    // The apply half is asserted in the same test on purpose: the property is that
+    // the two commands agree, and a test that only looked at drift could not see it.
     #[tokio::test]
     async fn drift_is_silent_where_apply_is_silent_on_an_untracked_matching_link() {
         let dirs = TestDirs::new();
@@ -4982,9 +5020,9 @@ mod symlink_consistency {
         );
     }
 
-    /// D4. Drift and apply describe the same refusal with the same sentence, because
-    /// they call the same `refusal_warning`. A user who runs one then the other must
-    /// not have to work out whether two different messages mean the same thing.
+    // D4. Drift and apply describe the same refusal with the same sentence, because
+    // they call the same `refusal_warning`. A user who runs one then the other must
+    // not have to work out whether two different messages mean the same thing.
     #[tokio::test]
     async fn drift_and_apply_word_the_refusal_identically() {
         let dirs = TestDirs::new();
@@ -5005,12 +5043,12 @@ mod symlink_consistency {
 
     // ── track ───────────────────────────────────────────────────────────────
 
-    /// T1. Tracking a symlinked target is refused rather than recorded.
-    ///
-    /// There is no configuration in which tracking one does what the user asked:
-    /// apply refuses to write through it, so the entry is either permanently inert or
-    /// permanently broken. The refusal names the destination, because deciding what
-    /// to do about it needs to know where the link goes.
+    // T1. Tracking a symlinked target is refused rather than recorded.
+    //
+    // There is no configuration in which tracking one does what the user asked:
+    // apply refuses to write through it, so the entry is either permanently inert or
+    // permanently broken. The refusal names the destination, because deciding what
+    // to do about it needs to know where the link goes.
     #[tokio::test]
     async fn tracking_a_symlinked_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5033,13 +5071,13 @@ mod symlink_consistency {
         );
     }
 
-    /// T2. The refusal lands before every write, which is the part that matters.
-    ///
-    /// Tracking reads *through* a link, so a refusal placed after any of the three
-    /// writes would already have copied the destination's contents into the dotfiles
-    /// directory — a file the user never named, and one `selfie sync push` would
-    /// commit — written a spec, and recorded a deploy state entry for a deployment
-    /// that never happened. T1 cannot see any of that; it only sees the verdict.
+    // T2. The refusal lands before every write, which is the part that matters.
+    //
+    // Tracking reads *through* a link, so a refusal placed after any of the three
+    // writes would already have copied the destination's contents into the dotfiles
+    // directory — a file the user never named, and one `selfie sync push` would
+    // commit — written a spec, and recorded a deploy state entry for a deployment
+    // that never happened. T1 cannot see any of that; it only sees the verdict.
     #[tokio::test]
     async fn a_refused_track_writes_nothing() {
         let dirs = TestDirs::new();
@@ -5078,11 +5116,11 @@ mod symlink_consistency {
         );
     }
 
-    /// T3. A dangling link is refused as a symlink, not reported as a missing file.
-    ///
-    /// `path_exists` follows the link, so the existence check answers "no" for a path
-    /// the user can see in their own shell. This is the only fixture on which the
-    /// refusal's position relative to that check is observable.
+    // T3. A dangling link is refused as a symlink, not reported as a missing file.
+    //
+    // `path_exists` follows the link, so the existence check answers "no" for a path
+    // the user can see in their own shell. This is the only fixture on which the
+    // refusal's position relative to that check is observable.
     #[tokio::test]
     async fn tracking_a_dangling_symlink_says_symlink_not_missing() {
         let dirs = TestDirs::new();
@@ -5108,11 +5146,11 @@ mod symlink_consistency {
         );
     }
 
-    /// T4. The other track handler refuses too.
-    ///
-    /// `track_for_package` is a separate function with its own copy of the read, the
-    /// write and the state record, so a fix applied to one handler leaves the other
-    /// exfiltrating the destination exactly as before.
+    // T4. The other track handler refuses too.
+    //
+    // `track_for_package` is a separate function with its own copy of the read, the
+    // write and the state record, so a fix applied to one handler leaves the other
+    // exfiltrating the destination exactly as before.
     #[tokio::test]
     async fn tracking_a_symlinked_target_for_a_package_is_refused() {
         let dirs = TestDirs::new();
@@ -5146,19 +5184,19 @@ mod symlink_consistency {
 
     // ── the lexical containment guard (selfie-86o) ──────────────────────────
 
-    /// The containment guard is lexical, so a symlink inside the package directory
-    /// escapes it. Recorded as an executable fact rather than only as prose.
-    ///
-    /// **This test asserts a limitation, and it is meant to fail if the limitation is
-    /// removed.** Anyone who makes the guard symlink-aware should delete it together
-    /// with the paragraph on `crate::paths::is_within` that it pins — the two must not
-    /// be able to disagree.
-    ///
-    /// Both forms are covered because they are not equally visible. With a symlinked
-    /// **file** the escape is at the final component. With a symlinked **directory**
-    /// it is not: `symlink_metadata` on the full source path reports a regular file,
-    /// asserted below, so a guard that inspected only the final component would report
-    /// containment with complete confidence and let this through unchanged.
+    // The containment guard is lexical, so a symlink inside the package directory
+    // escapes it. Recorded as an executable fact rather than only as prose.
+    //
+    // **This test asserts a limitation, and it is meant to fail if the limitation is
+    // removed.** Anyone who makes the guard symlink-aware should delete it together
+    // with the paragraph on `crate::paths::is_within` that it pins — the two must not
+    // be able to disagree.
+    //
+    // Both forms are covered because they are not equally visible. With a symlinked
+    // **file** the escape is at the final component. With a symlinked **directory**
+    // it is not: `symlink_metadata` on the full source path reports a regular file,
+    // asserted below, so a guard that inspected only the final component would report
+    // containment with complete confidence and let this through unchanged.
     #[tokio::test]
     async fn a_symlinked_source_escapes_the_containment_guard() {
         // A symlinked file inside the package directory.
@@ -5230,19 +5268,19 @@ mod symlink_consistency {
     }
 }
 
-/// The one target rule, as each command applies it.
-///
-/// Four beads, two of them disagreements between enforcement sites and two of
-/// them defects within one: `selfie spec validate` accepting what apply refuses
-/// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
-/// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
-/// entry-level refusals returning different outcomes (selfie-m5dv).
-/// `deploy_target` is the reconciled rule and these are the commands' side of it.
-///
-/// Unix-only for the same reason `symlink_consistency` is: everything here runs
-/// against a real filesystem inside a `TempDir`. Nothing creates a
-/// CWD-relative fixture — a relative target is refused before anything stats it,
-/// which is the property under test.
+// The one target rule, as each command applies it.
+//
+// Four beads, two of them disagreements between enforcement sites and two of
+// them defects within one: `selfie spec validate` accepting what apply refuses
+// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
+// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
+// entry-level refusals returning different outcomes (selfie-m5dv).
+// `deploy_target` is the reconciled rule and these are the commands' side of it.
+//
+// Unix-only for the same reason `symlink_consistency` is: everything here runs
+// against a real filesystem inside a `TempDir`. Nothing creates a
+// CWD-relative fixture — a relative target is refused before anything stats it,
+// which is the property under test.
 #[cfg(unix)]
 mod target_rule {
     use super::*;
@@ -5256,21 +5294,21 @@ mod target_rule {
         create_package_with_dotfiles(&dirs.package_dir, "myapp", &[("myapp/config.toml", target)]);
     }
 
-    /// selfie-q9t3: track had no absoluteness guard at all, so a relative target
-    /// resolved against the process working directory, was recorded, and was then
-    /// refused by every later apply.
-    ///
-    /// Deleting the guard makes this fail: `path_exists` is then reached, finds
-    /// nothing CWD-relative, and the failure becomes "Target file does not exist:
-    /// …". The negative assertion discriminates rather than passing vacuously.
-    ///
-    /// It does **not** prove the guard's position relative to `symlink_refusal`.
-    /// That returns `None` for any path that does not exist, so only a
-    /// CWD-relative symlink fixture could observe the difference, and no test
-    /// here may create one. Against that check the guard sits ahead on argument —
-    /// it touches no filesystem, and both `symlink_refusal` and `path_exists`
-    /// stat a relative path against the process working directory — not because a
-    /// test holds it there.
+    // selfie-q9t3: track had no absoluteness guard at all, so a relative target
+    // resolved against the process working directory, was recorded, and was then
+    // refused by every later apply.
+    //
+    // Deleting the guard makes this fail: `path_exists` is then reached, finds
+    // nothing CWD-relative, and the failure becomes "Target file does not exist:
+    // …". The negative assertion discriminates rather than passing vacuously.
+    //
+    // It does **not** prove the guard's position relative to `symlink_refusal`.
+    // That returns `None` for any path that does not exist, so only a
+    // CWD-relative symlink fixture could observe the difference, and no test
+    // here may create one. Against that check the guard sits ahead on argument —
+    // it touches no filesystem, and both `symlink_refusal` and `path_exists`
+    // stat a relative path against the process working directory — not because a
+    // test holds it there.
     #[tokio::test]
     async fn tracking_a_relative_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5293,19 +5331,19 @@ mod target_rule {
         );
     }
 
-    /// The refusal lands before every write, as the symlink refusal does.
-    ///
-    /// **This test did not fail under any mutation run against it** — moving the
-    /// guard below the three writes, deleting it outright, and moving it below
-    /// `symlink_refusal` all left it green, while the test above caught the first
-    /// two. The reason is the fixture: a relative target does not exist, so
-    /// `path_exists` returns early and nothing is written whether the guard ran or
-    /// not, and a fixture that did exist would have to be created relative to the
-    /// process working directory, which no test here may do.
-    ///
-    /// Kept deliberately, as documentation rather than enforcement: it names the
-    /// spec, source copy and deploy-state record that a refusal must not leave
-    /// behind. Do not read it as proof that it does not.
+    // The refusal lands before every write, as the symlink refusal does.
+    //
+    // **This test did not fail under any mutation run against it** — moving the
+    // guard below the three writes, deleting it outright, and moving it below
+    // `symlink_refusal` all left it green, while the test above caught the first
+    // two. The reason is the fixture: a relative target does not exist, so
+    // `path_exists` returns early and nothing is written whether the guard ran or
+    // not, and a fixture that did exist would have to be created relative to the
+    // process working directory, which no test here may do.
+    //
+    // Kept deliberately, as documentation rather than enforcement: it names the
+    // spec, source copy and deploy-state record that a refusal must not leave
+    // behind. Do not read it as proof that it does not.
     #[tokio::test]
     async fn a_refused_relative_track_writes_nothing() {
         let dirs = TestDirs::new();
@@ -5335,8 +5373,8 @@ mod target_rule {
         );
     }
 
-    /// selfie-hkhb: the diagnostic for `~user/…` used to restate the absoluteness
-    /// rule, for a path that visibly starts with `~`.
+    // selfie-hkhb: the diagnostic for `~user/…` used to restate the absoluteness
+    // rule, for a path that visibly starts with `~`.
     #[tokio::test]
     async fn tracking_a_named_user_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5359,9 +5397,9 @@ mod target_rule {
         );
     }
 
-    /// The other track handler is a separate copy of the read, the write and the
-    /// state record, so a fix applied to one leaves the other recording entries
-    /// that can never deploy.
+    // The other track handler is a separate copy of the read, the write and the
+    // state record, so a fix applied to one leaves the other recording entries
+    // that can never deploy.
     #[tokio::test]
     async fn tracking_a_relative_target_for_a_package_is_refused() {
         let dirs = TestDirs::new();
@@ -5385,11 +5423,11 @@ mod target_rule {
         );
     }
 
-    /// The target guard sits ahead of the already-tracked short-circuit, so an
-    /// entry the rule refuses is not reported as tracked.
-    ///
-    /// Without this the short-circuit answers first and the command succeeds,
-    /// telling the user selfie is managing a target no apply will ever deploy.
+    // The target guard sits ahead of the already-tracked short-circuit, so an
+    // entry the rule refuses is not reported as tracked.
+    //
+    // Without this the short-circuit answers first and the command succeeds,
+    // telling the user selfie is managing a target no apply will ever deploy.
     #[tokio::test]
     async fn tracking_an_already_recorded_bad_target_is_still_refused() {
         let dirs = TestDirs::new();
@@ -5414,14 +5452,16 @@ mod target_rule {
         );
     }
 
-    /// selfie-m5dv: a relative target skipped while an escaping template aborted,
-    /// though neither ran a command, and the documentation described the
-    /// opposite.
-    ///
-    /// Two entries, the refused one first, because `service.rs`'s `Skipped` and
-    /// `Failed` arms both increment `skipped_count` — a one-entry package cannot
-    /// tell the two outcomes apart. What distinguishes them is whether the run
-    /// reaches the second entry at all.
+    // selfie-m5dv: a relative target skipped while an escaping template aborted,
+    // though neither ran a command, and the documentation described the
+    // opposite.
+    //
+    // Two entries, the refused one first, because the counters cannot tell these
+    // two apart on their own: `Skipped` and `Failed` differ in *which* bucket
+    // they increment, but this test is about `stop_on_error`, and what
+    // distinguishes an aborted run from a continued one is whether the second
+    // entry is reached at all. A one-entry package has no second entry, so it
+    // would pass whether the run stopped or carried on.
     #[tokio::test]
     async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
         async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
@@ -5467,8 +5507,8 @@ mod target_rule {
         );
     }
 
-    /// Drift refuses in apply's words. The two used to differ, so the same spec
-    /// defect read as two problems depending on which command found it.
+    // Drift refuses in apply's words. The two used to differ, so the same spec
+    // defect read as two problems depending on which command found it.
     #[tokio::test]
     async fn drift_refuses_a_target_in_applies_words() {
         let dirs = TestDirs::new();
@@ -5549,7 +5589,7 @@ mod deploy_state_diagnostics {
         );
     }
 
-    /// Call site 1 of 4: `handle_apply`.
+    // Call site 1 of 4: `handle_apply`.
     #[tokio::test]
     async fn apply_reports_a_corrupt_state_file() {
         let dirs = TestDirs::new();
@@ -5561,11 +5601,11 @@ mod deploy_state_diagnostics {
         assert_reports_the_corrupt_file(&events);
     }
 
-    /// Call site 2 of 4: `handle_check_drift`.
-    ///
-    /// The one that matters most. `drift` never saves, so it emits no "failed to
-    /// save" warning of its own — without this the command that only reads would be
-    /// the one command silent about a state file it could not read.
+    // Call site 2 of 4: `handle_check_drift`.
+    //
+    // The one that matters most. `drift` never saves, so it emits no "failed to
+    // save" warning of its own — without this the command that only reads would be
+    // the one command silent about a state file it could not read.
     #[tokio::test]
     async fn drift_reports_a_corrupt_state_file() {
         let dirs = TestDirs::new();
@@ -5577,7 +5617,7 @@ mod deploy_state_diagnostics {
         assert_reports_the_corrupt_file(&events);
     }
 
-    /// Call site 3 of 4: `handle_track_standalone`.
+    // Call site 3 of 4: `handle_track_standalone`.
     #[tokio::test]
     async fn track_standalone_reports_a_corrupt_state_file() {
         let dirs = TestDirs::new();
@@ -5595,7 +5635,7 @@ mod deploy_state_diagnostics {
         assert_reports_the_corrupt_file(&events);
     }
 
-    /// Call site 4 of 4: `handle_track_for_package`.
+    // Call site 4 of 4: `handle_track_for_package`.
     #[tokio::test]
     async fn track_for_package_reports_a_corrupt_state_file() {
         let dirs = TestDirs::new();
@@ -5618,8 +5658,8 @@ mod deploy_state_diagnostics {
         assert_reports_the_corrupt_file(&events);
     }
 
-    /// The silence that must survive: a first run has no state file and says so
-    /// about nothing. A warning here would fire on every fresh machine.
+    // The silence that must survive: a first run has no state file and says so
+    // about nothing. A warning here would fire on every fresh machine.
     #[tokio::test]
     async fn a_first_run_reports_nothing_about_the_state_file() {
         let dirs = TestDirs::new();
@@ -5634,14 +5674,14 @@ mod deploy_state_diagnostics {
         );
     }
 
-    /// A state file that cannot be *read* is reported differently from one that
-    /// cannot be *parsed*, through the event stream and not just in isolation.
-    ///
-    /// The unreadable file is a directory at the state file's path: `path_exists`
-    /// answers true and the read then fails, without depending on the runner's
-    /// privileges the way a `chmod 000` file would. Unix in practice, and this
-    /// module is not gated, so the assertion tolerates either failure wording — what
-    /// it pins is that the *load* is reported and named apart from the save.
+    // A state file that cannot be *read* is reported differently from one that
+    // cannot be *parsed*, through the event stream and not just in isolation.
+    //
+    // The unreadable file is a directory at the state file's path: `path_exists`
+    // answers true and the read then fails, without depending on the runner's
+    // privileges the way a `chmod 000` file would. Unix in practice, and this
+    // module is not gated, so the assertion tolerates either failure wording — what
+    // it pins is that the *load* is reported and named apart from the save.
     #[cfg(unix)]
     #[tokio::test]
     async fn apply_reports_an_unreadable_state_file_apart_from_the_failed_save() {
@@ -5664,5 +5704,400 @@ mod deploy_state_diagnostics {
                 .any(|w| w.contains("Failed to save deploy state")),
             "control: the save fails too, and says so in its own words: {all:?}"
         );
+    }
+}
+
+// What `selfie apply` reports when it refuses.
+//
+// A refusal used to land in `skipped_count` beside "already in sync", so a
+// caller — a script reading the exit code, or an assistant reading the MCP
+// envelope — could not tell a run that deployed nothing from a run that had
+// nothing to deploy (selfie-c28). These pin the buckets apart.
+mod refusal_accounting {
+    use super::*;
+
+    /// `(deployed, skipped, conflict, refused)`.
+    fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                skipped_count,
+                conflict_count,
+                refused_count,
+                ..
+            }) => (
+                *deployed_count,
+                *skipped_count,
+                *conflict_count,
+                *refused_count,
+            ),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    fn steps(events: &[PackageEvent]) -> (usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                steps_completed, ..
+            }) => (steps_completed.completed, steps_completed.total),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    // The two buckets are told apart, on a fixture that varies along that axis
+    // and nothing else.
+    //
+    // Both entries are repository files with an existing target; the only
+    // difference is that one carries an unrecognized key and is therefore
+    // refused. A fixture with only the refused entry would pass against an
+    // implementation that renamed `skipped_count` to `refused_count` wholesale,
+    // which is the change this test exists to reject.
+    #[tokio::test]
+    async fn a_refused_entry_is_counted_apart_from_an_in_sync_one() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/insync.toml"), "SAME").unwrap();
+
+        let in_sync = dirs.target_dir.join("insync.toml");
+        std::fs::write(&in_sync, "SAME").unwrap();
+        let refused = dirs.target_dir.join("refused.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/insync.toml"
+    target: "{}"
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                in_sync.display(),
+                refused.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(counts(&events), (0, 1, 0, 1));
+        assert!(
+            !refused.exists(),
+            "the refused entry must not have been deployed"
+        );
+    }
+
+    // A conflict the user accepted, which selfie then could not write.
+    //
+    // This is `perform_deploy`'s *second* failure site — the one inside the
+    // conflict branch, which looks identical to the first and was missed when
+    // this fix was planned as "six sites". A target that is a directory reaches
+    // it: the target read fails, so the entry is a `Conflict`; `auto_accept`
+    // settles it; and the write then fails with `EISDIR`.
+    #[tokio::test]
+    async fn a_write_that_fails_after_an_accepted_conflict_is_refused() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+
+        // A directory where the target file should be.
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::create_dir_all(&target).unwrap();
+
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            counts(&events),
+            (0, 0, 0, 1),
+            "an accepted conflict that could not be written is a refusal, not a skip"
+        );
+        assert!(target.is_dir(), "the directory must be left alone");
+    }
+
+    // Every outcome is still a step.
+    //
+    // Moving refusals out of `skipped_count` shrinks the step total unless
+    // `refused_count` is added back into it, and nothing else observes that
+    // arithmetic. Without this, a run refusing two of three entries would
+    // report `(1/1)`.
+    #[tokio::test]
+    async fn refused_entries_still_count_toward_the_step_total() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/deployed.toml"), "NEW").unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/insync.toml"), "SAME").unwrap();
+
+        let deployed = dirs.target_dir.join("deployed.toml");
+        let in_sync = dirs.target_dir.join("insync.toml");
+        std::fs::write(&in_sync, "SAME").unwrap();
+        let refused = dirs.target_dir.join("refused.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/deployed.toml"
+    target: "{}"
+  - source: "myapp/insync.toml"
+    target: "{}"
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                deployed.display(),
+                in_sync.display(),
+                refused.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(counts(&events), (1, 1, 0, 1));
+        assert_eq!(
+            steps(&events),
+            (3, 3),
+            "three entries were processed, so three steps happened"
+        );
+    }
+
+    // A run with nothing to refuse says so, and a run with a refusal says so.
+    //
+    // The control half matters: `had_refusals` returning `true` unconditionally
+    // would satisfy every other test here.
+    #[tokio::test]
+    async fn had_refusals_answers_both_ways() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let clean = match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => s.had_refusals(),
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert!(!clean, "a clean deploy reports no refusals");
+
+        // Same package, now with an entry that cannot be deployed.
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                dirs.target_dir.join("other.toml").display()
+            ),
+        );
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let refused = match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => s.had_refusals(),
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert!(refused, "a refusal is reported by the same predicate");
+    }
+
+    // `--dry-run` exits non-zero for a refusal it only previewed.
+    //
+    // A deliberate contract decision rather than a side effect: a preview whose
+    // job is to say what `apply` would do must not report success for a run
+    // that would refuse. The refusal fires on the dry-run path because it is
+    // decided from the entry alone, before anything is written.
+    #[tokio::test]
+    async fn a_dry_run_reports_a_refusal_it_only_previewed() {
+        let dirs = TestDirs::new();
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/typo.toml"
+    target: "{}"
+    var: oops
+"#,
+                dirs.target_dir.join("config.toml").display()
+            ),
+        );
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(counts(&events), (0, 0, 0, 1));
+        match get_operation_result(&events).unwrap() {
+            OperationResult::Success(s) => assert!(s.had_refusals()),
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+}
+
+// `_dotfiles:` at a package's top level, and what `selfie apply` does about it.
+//
+// Read as a YAML anchor, the key leaves the package with no dotfiles at all, so
+// apply deployed nothing and reported success — no warning, no error, no count
+// (selfie-g199). `selfie spec validate` reports it too, but apply never runs
+// validation, so the refusal has to live on the apply path itself.
+mod top_level_anchor_shadowing {
+    use super::*;
+
+    fn refused_count(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count, ..
+            }) => *refused_count,
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Apply refuses the package and says why.
+    //
+    // The target must not exist afterwards: the entry under `_dotfiles:` is not
+    // deployed, which is the pre-existing behavior — what changes is that
+    // selfie now says so instead of reporting success.
+    #[tokio::test]
+    async fn apply_refuses_a_package_whose_dotfiles_key_is_shadowed() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+_dotfiles:
+  - source: "myapp/config.toml"
+    target: "{}"
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1);
+        assert!(!target.exists(), "nothing should have been deployed");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("myapp")
+                && w.contains("_dotfiles")
+                && w.contains("cannot be told apart from a misspelling")),
+            "the refusal must name the package and the key: {warnings:?}"
+        );
+    }
+
+    // The documented top-level anchor still deploys.
+    //
+    // The control, and the reason the refusal is scoped to keys that shadow a
+    // *package* field: `docs/package-files.md` documents `_target: &target …`,
+    // and a check that refused every `_`-prefixed top-level key would pass the
+    // test above and break every file using the documented pattern.
+    #[tokio::test]
+    async fn apply_deploys_a_package_using_the_documented_target_anchor() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"_brew: &brew "echo installed"
+_target: &target "{}"
+name: myapp
+environments:
+  test:
+    install: *brew
+dotfiles:
+  - source: "myapp/config.toml"
+    target: *target
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "the anchored target must still be deployed to"
+        );
+    }
+
+    // A package with genuinely no dotfiles is still silent.
+    //
+    // Without this, an implementation that refused every package reaching the
+    // empty-dotfiles check would pass the first test.
+    #[tokio::test]
+    async fn a_package_with_no_dotfiles_at_all_is_not_refused() {
+        let dirs = TestDirs::new();
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+"#,
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0);
+        assert_eq!(warning_messages(&events), Vec::<String>::new());
     }
 }
