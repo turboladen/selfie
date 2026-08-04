@@ -25,7 +25,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::{
             TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
-            state_file_path,
+            repository_path, state_file_path,
         },
     },
     package::{
@@ -212,24 +212,15 @@ fn deploy_state_path<F: FileSystem>(
     )
 }
 
-/// Load the deploy state from disk, or return an empty state.
+/// Load the deploy state, or an empty one if it cannot be used.
 ///
-/// Returns the state and, when a state file could not be *used*, a message saying
-/// which file and what went wrong — the path where there is one to name, and the
-/// kind of file where the path itself is what could not be worked out. An absent
-/// file is the ordinary first-run case and produces no message: on a machine
-/// selfie has never deployed to, an empty state is the right answer rather than a
-/// condition to report.
+/// The second return is a warning naming the file and what went wrong. An absent
+/// file is the ordinary first run and warns nothing; a file that cannot be located,
+/// read, or parsed each warn differently, because the fixes differ.
 ///
-/// The other three outcomes each report, and a corrupt file and an unreadable one
-/// say different things on purpose — repairing malformed YAML and fixing
-/// permissions are different jobs, and one message for both sends the reader to
-/// the wrong one. Every caller proceeds afterwards: an empty state costs a round
-/// of conflict prompts, while refusing to run would block every apply until the
-/// file is repaired by hand. What it must not do is proceed *silently*.
-///
-/// Note the state this returns is later saved over the file it could not read.
-/// That is deferred deliberately rather than overlooked.
+/// Never fails: callers always proceed with whatever state came back. An empty one
+/// costs a round of conflict prompts, where refusing to run would block every apply
+/// until someone repairs the file by hand.
 fn load_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
@@ -301,26 +292,29 @@ fn load_deploy_state<F: FileSystem>(
     }
 }
 
-/// Save the deploy state to disk, owner-only where the platform allows it.
+/// Write the deploy state, owner-only where the platform allows it.
 ///
-/// The contents are not credentials, but they name each repository-file dotfile
-/// selfie manages on this machine, with checksums of the repository files behind
-/// them — those it deployed, and those it found already matching. At the process
-/// umask default that is typically world-readable — a reconnaissance aid on a
-/// shared host, readable by people who cannot read several of the files it
-/// describes.
+/// Owner-only because the file names every repository-file dotfile selfie manages
+/// here, with checksums — no credentials, but a reconnaissance aid on a shared
+/// host. Secret-bearing entries record nothing, so this is not a complete list.
 ///
-/// Secret-bearing entries are *not* in here — they record nothing at all — so this
-/// is not a complete list of what selfie manages.
+/// # Errors
 ///
-/// Owner-only comes from `write_file_private`, the same method the secret-bearing
-/// targets use, so the two cannot drift apart again. See its documentation for what
-/// that does and does not guarantee away from Unix.
+/// [`FileSystemError`] if the state path cannot be resolved, the state cannot be
+/// serialized, or the write fails.
 fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
     state: &DeployState,
 ) -> Result<(), FileSystemError> {
+    // Deliberately less durable than `write_file_no_follow`: that syncs the file's
+    // data before renaming, and the directory fsync missing here is the safe
+    // direction. Losing this file costs nothing — the next run re-derives it.
+    //
+    // Do not "fix" that by syncing harder. A record only lies when it outlives the
+    // write it describes, so making the state survive a crash the target write did
+    // not would widen that window. The ordering is established at the other end:
+    // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
     let path = deploy_state_path(filesystem, config)?;
     let yaml = serde_saphyr::to_string(state).map_err(|e| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
@@ -526,13 +520,8 @@ where
 ///
 /// Commands and var names come from the package file and are references, not
 /// credentials, so they are safe to surface. Used as the `source` of the events
-/// this path emits. The wording lives on [`ContentSource`] so that apply, `selfie
-/// dotfiles list`, and the MCP server cannot describe the same entry differently.
-///
-/// Takes the content source rather than the entry so there is no refusal wording
-/// to choose here: what this returns goes into the event stream and thence into
-/// MCP's JSON, and an entry that cannot deploy has no business being named as
-/// though it had a source. Callers hold the matched `ContentSource` already.
+/// this path emits; the wording lives on [`ContentSource`] so apply, `dotfiles
+/// list` and the MCP server cannot describe the same entry differently.
 fn secret_origin(content: &ContentSource<'_>) -> String {
     content.to_string()
 }
@@ -603,13 +592,10 @@ struct SecretTarget<'a> {
 
 /// Deploying the secret-bearing entries of one package.
 ///
-/// The seven phases below were one function. Splitting them needed this struct
-/// first: each phase wants most of this context, so as free functions they all
-/// carried six or seven parameters, which is what kept them welded together.
-///
-/// Holds resolved content in memory only: it is compared against the target
-/// directly, written with owner-only permissions, and never recorded in deploy
-/// state. Nothing derived from it reaches an event.
+/// Resolved content stays in memory: compared against the target directly, written
+/// owner-only, never recorded in deploy state, never put in an event.
+// Exists so the phases below can be separate methods. Each wants most of this
+// context, and as free functions they carried six or seven parameters apiece.
 struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
@@ -973,26 +959,14 @@ where
     }
 }
 
-/// Why an entry that is already in sync will nonetheless never settle.
+/// Why an in-sync entry will never settle, when that is the case.
 ///
-/// An untracked target whose contents already match is `Skip`, so apply writes
-/// nothing and refuses nothing — and records nothing either, because selfie did
-/// not write it and never will (selfie-phnh). `detect_drift` therefore keeps
-/// answering `NotTracked`, and `dotfiles drift` keeps listing it, on every run
-/// forever. The user is shown a permanent complaint with no stated cause
-/// (selfie-ktha).
-///
-/// Both commands read this one function rather than repeating the condition, so
-/// the two cannot answer differently — the same reason the refusal itself is
-/// gated on `deploy_decision`. Apply puts the reason on its skip line and drift
-/// on its drift line: each says it in the channel it already uses, and neither
-/// raises a warning it did not raise before. That is what keeps the parity
-/// pins structural: the *refusal* still appears
-/// exactly where apply would refuse, and nothing here changes that gate.
-///
-/// Scoped to `NotTracked`. A **tracked** entry whose target later became a
-/// symlink is a different bug with no drift line at all, and
-/// answering for it here would half-fix that one from the wrong place.
+/// `Some` for an untracked target whose contents already match but which is a
+/// symlink: apply skips it and records nothing, so drift reports it on every run
+/// forever. Call it from both apply and drift so their wording cannot diverge.
+// Scoped to `NotTracked` deliberately. A *tracked* entry whose target later became
+// a symlink produces no drift line at all — a different bug — and answering for it
+// here would half-fix that one from the wrong place (selfie-v7py).
 fn unmanaged_symlink_reason<F: FileSystem>(
     filesystem: &F,
     drift: &DriftType,
@@ -1025,6 +999,73 @@ fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
 // plus the remedy that only applies while the entry does not exist yet.
 fn track_refusal(refusal: &FileSystemError) -> String {
     format!("{refusal}. Replace the symlink with a regular file, or track the path it points to.")
+}
+
+// Both track handlers word a refused copy *into* the dotfiles repository.
+//
+// Destructures rather than rendering the `FileSystemError`, and that is the whole
+// point of the function. Every variant here says **"target"** in its `Display` --
+// they were written for a dotfile target, the path selfie deploys out to. This
+// path is the reverse: selfie is copying the user's file **in**, to a path it
+// composed itself from the dotfiles directory. Interpolating the error would
+// answer a question about the target when the problem is in the repository, and
+// send the user to inspect the wrong file. `a_refused_repository_write_does_not_
+// call_it_a_target` holds that.
+//
+// The remedy differs from `track_refusal`'s for the same reason: "track the path
+// it points to" is advice about a target, and there is no target involved here.
+// What the user can actually do is clear the repository path or pick another name.
+fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> String {
+    let what = match refusal {
+        FileSystemError::SymlinkedTarget { points_to, .. } => match points_to {
+            Some(dest) => format!("it is a symlink to '{}'", dest.display()),
+            None => "it is a symlink".to_string(),
+        },
+        FileSystemError::IrregularTarget { kind, .. } => format!("it is a {kind}"),
+        // Not a refusal: a permission problem, a full disk. Rendered as-is,
+        // because the filesystem's own message is the useful one and it makes no
+        // claim about a target.
+        other => return format!("Cannot write source file: {other}"),
+    };
+
+    // "the tracked copy at" rather than naming a directory: `handle_track_
+    // standalone` composes this under `dotfiles_directory` and
+    // `handle_track_for_package` alongside the package YAML, so any sentence
+    // naming one of the two is wrong at the other call site.
+    format!(
+        "Cannot write the tracked copy at '{}': {what}. \
+         Remove it, or track under a different name.",
+        source_path.display()
+    )
+}
+
+// Why selfie will not read a file out of its own repository.
+//
+// Reading a fifo blocks until a writer arrives, exactly as writing one blocks
+// until a reader does -- so a fifo committed into the dotfiles directory hangs
+// `selfie apply` and `dotfiles drift` with no timeout, since `command_timeout`
+// governs provider commands rather than filesystem calls (selfie-lwv5).
+//
+// Returns the reason only. The three read sites frame it differently -- two warn
+// and skip, one fails a template resolve -- so the frame belongs to the caller
+// and only the wording is shared, the same split `TargetRejection::message` uses.
+//
+// Worded for a *source*, not a target. `IrregularTarget`'s own `Display` says
+// "target resolves to a …", which describes the path selfie deploys out to; here
+// the problem is a file in the repository the user syncs between machines, and
+// the remedy is to replace it rather than to name a different target.
+pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
+    match refusal {
+        FileSystemError::IrregularTarget { kind, .. } => {
+            format!("the repository file is a {kind} and selfie will not read it")
+        }
+        // Fails **closed**, and deliberately not a `_ => {}` that would skip the
+        // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
+        // so nothing reaches this arm; a wildcard would silently let a future
+        // variant through and un-guard the read, which is the failure this whole
+        // guard exists to prevent. Refuse on anything it reports.
+        other => format!("selfie will not read the repository file: {other}"),
+    }
 }
 
 // The three deploy-side sites that refuse a target by the rule: apply's
@@ -1354,6 +1395,25 @@ where
             // beside the symlink check instead would leave the hang in place.
             if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
+                refused_count += 1;
+                continue;
+            }
+
+            // Immediately ahead of the read, which is what this guards: a fifo
+            // source blocks `read_file` until a writer arrives and hangs apply.
+            // Anchored to the read rather than to the containment check above,
+            // because drift runs those two in the opposite order (selfie-tl1w)
+            // and anchoring to `is_within` would put this guard on a different
+            // side of the target rule in the two commands.
+            if let Some(refusal) =
+                filesystem.irregular_target_refusal(&repository_path(&source_path))
+            {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{source}': {}. Replace it with a regular file.",
+                        repository_read_refusal(&refusal)
+                    ))
+                    .await;
                 refused_count += 1;
                 continue;
             }
@@ -1732,6 +1792,22 @@ where
                 continue;
             }
 
+            // Same guard apply applies, in the same position -- immediately ahead
+            // of the source read -- and worded identically. Drift reads the
+            // source to checksum it, so it hangs on a fifo there exactly as apply
+            // does.
+            if let Some(refusal) =
+                filesystem.irregular_target_refusal(&repository_path(&source_path))
+            {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{source}': {}. Replace it with a regular file.",
+                        repository_read_refusal(&refusal)
+                    ))
+                    .await;
+                continue;
+            }
+
             // Read source — emit warning if missing instead of silently skipping
             let source_content = match filesystem.read_file(&source_path) {
                 Ok(content) => content,
@@ -1917,9 +1993,12 @@ where
         )));
     }
 
-    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot write source file: {e}"
+    if let Err(e) =
+        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
+    {
+        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
+            &source_path,
+            &e,
         )));
     }
 
@@ -2093,9 +2172,12 @@ where
     }
 
     // Copy the file
-    if let Err(e) = filesystem.write_file(&source_path, content.as_bytes()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot write source file: {e}"
+    if let Err(e) =
+        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
+    {
+        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
+            &source_path,
+            &e,
         )));
     }
 
@@ -2360,5 +2442,77 @@ mod tests {
             "an error longer than the bound was forwarded whole: {} bytes",
             warning.len()
         );
+    }
+
+    // selfie-yw7i. Track copies the user's file *into* the dotfiles repository, so
+    // a refusal is about a repository path -- but every `FileSystemError` variant
+    // here says "target" in its own `Display`, having been written for a dotfile
+    // target, the path selfie deploys *out* to. Rendering one verbatim tells
+    // someone who ran `selfie dotfiles track ~/.gemrc` that their "target" is a
+    // symlink, when the symlink is the copy destination they never named.
+    //
+    // Asserted as an absence for the same reason as the `save_package` sibling:
+    // the regression to guard is a reversion to `Cannot write source file: {e}`,
+    // which puts the word straight back while still naming a path.
+    #[test]
+    fn a_refused_repository_write_does_not_call_it_a_target() {
+        let source = Path::new("/dotfiles/gemrc/.gemrc");
+
+        for refusal in [
+            FileSystemError::SymlinkedTarget {
+                path: source.to_path_buf(),
+                points_to: Some(PathBuf::from("/tmp/planted")),
+            },
+            FileSystemError::IrregularTarget {
+                path: source.to_path_buf(),
+                kind: "named pipe (fifo)",
+            },
+        ] {
+            let message = repository_write_refusal(source, &refusal);
+            assert!(
+                !message.contains("target"),
+                "refusal calls a repository path a target: {message}"
+            );
+            assert!(
+                message.contains("/dotfiles/gemrc/.gemrc"),
+                "refusal does not name the repository path: {message}"
+            );
+            // The remedy `track_refusal` gives is about a target and is wrong
+            // here: there is no target to point at.
+            assert!(
+                !message.contains("track the path it points to"),
+                "refusal offers the target-side remedy: {message}"
+            );
+        }
+    }
+
+    // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
+    // variant from `irregular_target_refusal` today, so this is the only thing
+    // holding the arm: hand it one directly and the read must still be refused
+    // with something a user can read. A `_ => {}` that skipped the guard would
+    // return an empty string here.
+    #[test]
+    fn a_read_refusal_that_is_not_an_irregular_file_still_refuses() {
+        let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
+            path: PathBuf::from("/pkgs/myapp/config.toml"),
+            points_to: None,
+        });
+        assert!(!message.is_empty(), "the guard fell through silently");
+        assert!(message.contains("repository file"), "got: {message}");
+    }
+
+    // The control: a failure that is not a refusal keeps the filesystem's own
+    // message, so the rephrasing is narrow rather than swallowing every write
+    // error. Its `Display` is allowed to say whatever it says.
+    #[test]
+    fn a_repository_write_failure_that_is_not_a_refusal_is_passed_through() {
+        let message = repository_write_refusal(
+            Path::new("/dotfiles/gemrc/.gemrc"),
+            &FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Permission denied",
+            ))),
+        );
+        assert!(message.contains("Permission denied"), "got: {message}");
     }
 }

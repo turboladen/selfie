@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    fs::{FileSystem, filesystem::FileSystemError},
+    dotfile_service::service::repository_read_refusal,
+    fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
         GetPackage, Package,
         port::{
@@ -148,6 +149,22 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             ))));
         }
 
+        // `spec validate` reads templates through here, and reading a fifo blocks
+        // until a writer arrives — so a fifo template wedged `selfie spec validate`
+        // with no timeout, the same hang apply and drift have. Same guard, same
+        // position: after containment, immediately before the read.
+        if let Some(refusal) = self
+            .fs
+            .irregular_target_refusal(&repository_path(&resolved))
+        {
+            return Err(FileSystemError::IoError(Arc::new(std::io::Error::other(
+                format!(
+                    "{}. Replace it with a regular file.",
+                    repository_read_refusal(&refusal)
+                ),
+            ))));
+        }
+
         self.fs.read_file(&resolved)
     }
 
@@ -267,8 +284,41 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             )))
         })?;
 
-        // Write the YAML content to the specified path
-        self.fs.write_file(path, yaml_content.as_bytes())?;
+        // Write the YAML content to the specified path.
+        //
+        // `write_file_no_follow` rather than a plain write: a symlink at `path`
+        // would otherwise be followed and the package YAML written wherever it
+        // points. The `path_exists` checks that guard the callers of this
+        // function *follow* symlinks, so a **dangling** one passes them and the
+        // write then creates the file at the planter's chosen path (selfie-yw7i).
+        //
+        // The direction here is inward -- into selfie's own package directory --
+        // so the refusal is re-worded rather than rendered as-is. See
+        // `PackageRepoError::UnwritablePath` for why the filesystem error's own
+        // text cannot be used.
+        self.fs
+            .write_file_no_follow(&repository_path(path), yaml_content.as_bytes())
+            .map_err(|e| match &e {
+                FileSystemError::SymlinkedTarget { points_to, .. } => {
+                    PackageRepoError::UnwritablePath {
+                        path: path.to_path_buf(),
+                        reason: match points_to {
+                            Some(dest) => {
+                                format!("it is a symlink to '{}'", dest.display())
+                            }
+                            None => "it is a symlink".to_string(),
+                        },
+                    }
+                }
+                FileSystemError::IrregularTarget { kind, .. } => PackageRepoError::UnwritablePath {
+                    path: path.to_path_buf(),
+                    reason: format!("it is a {kind}"),
+                },
+                // Not a refusal -- a permission problem, a full disk. The
+                // filesystem's own message is the right one for those, and it
+                // does not claim anything about a target.
+                _ => PackageRepoError::FileSystemError(e),
+            })?;
 
         // Best-effort: run dprint fmt on the saved file to normalize formatting.
         // Silently ignored if dprint is not installed, fails, or times out (5s).
@@ -816,6 +866,45 @@ mod tests {
         }
     }
 
+    // `spec validate` reads templates through `read_referenced_file`, and reading
+    // a fifo blocks until a writer arrives. Before the guard this wedged the
+    // command with no timeout, reproduced as `selfie spec validate` printing
+    // "Validating creds..." and never returning.
+    //
+    // A real filesystem and a real fifo: `MockFileSystem` cannot block, so a
+    // mocked fixture would pass against the unguarded code and prove nothing.
+    // The deadline is what turns a regression into a failure instead of a wedged
+    // suite -- the read blocks on this thread, so no async timeout would fire.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_template_is_refused_by_validate() {
+        use std::sync::mpsc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(package_dir.join("creds")).unwrap();
+        let template = package_dir.join("creds/credentials.tpl");
+        nix::unistd::mkfifo(&template, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        let package_path = package_dir.join("creds.yml");
+        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                repo.read_referenced_file(&package_path, "creds/credentials.tpl")
+                    .map_err(|e| e.to_string()),
+            );
+        });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a fifo template must not block");
+        let message = result.expect_err("a fifo template must be refused");
+        assert!(message.contains("named pipe (fifo)"), "got: {message}");
+        assert!(message.contains("repository file"), "got: {message}");
+    }
+
     #[test]
     fn test_find_dependent_packages_no_dependencies() {
         // Test finding dependents when there are none
@@ -1125,8 +1214,8 @@ environments:
             package_path.clone(),
         );
 
-        // Mock the write_file operation
-        fs.mock_write_file(&package_path);
+        // Mock the write operation
+        fs.mock_write_file_no_follow(&package_path);
 
         let repo = YamlPackageRepository::new(fs, package_dir);
 
@@ -1155,7 +1244,7 @@ environments:
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
-        fs.expect_write_file().times(0);
+        fs.expect_write_file_no_follow().times(0);
 
         let repo = YamlPackageRepository::new(fs, package_dir);
         let err = repo
@@ -1183,7 +1272,7 @@ environments:
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
-        fs.expect_write_file().times(0);
+        fs.expect_write_file_no_follow().times(0);
 
         let package: Package = serde_saphyr::from_str(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
@@ -1212,7 +1301,7 @@ environments:
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
-        fs.expect_write_file().times(0);
+        fs.expect_write_file_no_follow().times(0);
 
         let package: Package = serde_saphyr::from_str(
             "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
@@ -1240,7 +1329,7 @@ environments:
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
-        fs.mock_write_file(&package_path);
+        fs.mock_write_file_no_follow(&package_path);
 
         let package: Package = serde_saphyr::from_str(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
@@ -1269,12 +1358,10 @@ environments:
             package_path.clone(),
         );
 
-        // Mock write_file to fail
-        fs.expect_write_file()
-            .with(
-                mockall::predicate::eq(package_path.clone()),
-                mockall::predicate::always(),
-            )
+        // Mock the write to fail
+        let expected = package_path.clone();
+        fs.expect_write_file_no_follow()
+            .withf(move |target, _| target.path() == expected)
             .returning(|_, _| {
                 Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
                     std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
@@ -1290,6 +1377,80 @@ environments:
             result.unwrap_err(),
             PackageRepoError::FileSystemError(_)
         ));
+    }
+
+    // Builds a repository whose write fails with `refusal`, and returns the
+    // rendered error from `save_package`.
+    fn save_package_refused_with(refusal: FileSystemError) -> String {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("test-package.yml");
+
+        let package = Package::new(
+            "test-package".to_string(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            HashMap::new(),
+            package_path.clone(),
+        );
+
+        fs.expect_write_file_no_follow()
+            .returning(move |_, _| Err(refusal.clone()));
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        repo.save_package(&package, &package_path)
+            .unwrap_err()
+            .to_string()
+    }
+
+    // selfie-yw7i. A package file is written *into* selfie's own package
+    // directory, so a refusal must describe that file -- but both refusal
+    // variants say "target" in their own `Display`, because both were written
+    // for a dotfile target, the path selfie deploys *out* to. Rendering either
+    // one verbatim tells someone who ran `selfie spec update` that their
+    // "target" is a symlink, naming a thing that is not in the sentence they
+    // typed.
+    //
+    // Asserted as an absence, which is what makes it bite: the natural
+    // regression here is not a wrong message but a reversion to
+    // `PackageRepoError::FileSystemError`, whose passthrough `Display` puts the
+    // word straight back. The path assertion alone would not catch that, since
+    // the filesystem error names the path too.
+    #[test]
+    fn a_refused_package_path_does_not_call_it_a_target() {
+        for refusal in [
+            FileSystemError::SymlinkedTarget {
+                path: PathBuf::from("/test/packages/test-package.yml"),
+                points_to: Some(PathBuf::from("/tmp/planted")),
+            },
+            FileSystemError::IrregularTarget {
+                path: PathBuf::from("/test/packages/test-package.yml"),
+                kind: "named pipe (fifo)",
+            },
+        ] {
+            let message = save_package_refused_with(refusal);
+            assert!(
+                !message.contains("target"),
+                "refusal calls a package file a target: {message}"
+            );
+            assert!(
+                message.contains("test-package.yml"),
+                "refusal does not name the package file: {message}"
+            );
+        }
+    }
+
+    // The control for the test above: a failure that is *not* a refusal keeps the
+    // filesystem's own message, so the mapping is narrow rather than swallowing
+    // every write error into one rephrased variant.
+    #[test]
+    fn a_package_write_failure_that_is_not_a_refusal_is_passed_through() {
+        let message = save_package_refused_with(FileSystemError::IoError(Arc::new(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+        )));
+        assert!(message.contains("Permission denied"), "got: {message}");
     }
 
     #[test]

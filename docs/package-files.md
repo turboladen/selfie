@@ -661,6 +661,30 @@ is recorded for a target selfie will not write to, so there is no state for the 
 Note that `selfie sync status` summarizes drift counts and does not carry this reason; it points at
 `selfie dotfiles drift`, which does.
 
+### Files in your repository
+
+The same two hazards exist on the other side of the copy, in the repository selfie reads from.
+
+A source that is a named pipe (fifo), a socket, or a device node is refused wherever selfie would
+read it — `selfie apply`, `selfie dotfiles drift`, `selfie spec validate`, and the template behind a
+[`vars:` entry](#provider-sourced-and-templated-dotfiles):
+
+```
+⚠ Skipping 'myapp/config.toml': the repository file is a named pipe (fifo) and selfie will not read it. Replace it with a regular file.
+```
+
+Git cannot store these, so a clone will not produce one — a local `mkfifo` or a restored backup can.
+
+A symlink at a path selfie is about to write **into** your repository is also refused, which covers
+`selfie dotfiles track` and `selfie spec create`/`update`/`edit`:
+
+```
+✗ Cannot write the tracked copy at '/home/you/dotfiles/gitconfig/gitconfig': it is a symlink to '/tmp/elsewhere'. Remove it, or track under a different name.
+```
+
+This holds wherever selfie writes a file itself. Git sync and the post-save formatter run through
+separate tools and are not covered.
+
 ### Provider-sourced and templated dotfiles
 
 Where a config file holds a credential, the value can come from a command run at deploy time instead

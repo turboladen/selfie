@@ -175,10 +175,10 @@ Test egress at the **boundary**, not by listing known paths:
     `home()` — instead of a `FileSystem`, so neither `canonicalize` nor `expand_path` is reachable
     from inside it. There is no longer a resolving call in that function to defend.
   - **A deploy or track path must obtain its target from `deploy_target`; `expand_target_path` is
-    for callers that only compare or display one.** Three functions hand out a `TargetPath` and only
-    two construct one — the count is of **functions**, not of `TargetPath { … }` literals, of which
-    `state_file_path` holds two — and the three promise different things, so do not collapse them
-    into a list:
+    for callers that only compare or display one.** Four functions hand out a `TargetPath` and only
+    three construct one — the count is of **functions**, not of `TargetPath { … }` literals, of
+    which `state_file_path` holds two — and the four promise different things, so do not collapse
+    them into a list:
     - `deploy_target` is the **strongest** and the only one a deploy or track path may use. It
       refuses `~user/…` and anything not absolute _before_ expanding, and re-checks absoluteness
       after — so a `~/…` that could not be expanded for want of a home directory is refused rather
@@ -189,14 +189,28 @@ Test egress at the **boundary**, not by listing known paths:
       inside it. It says nothing about whether the path can be _deployed to_: `~alice/.gemrc` comes
       back as the literal relative path. Callers that only compare or display a target use it
       deliberately.
-    - `state_file_path` is the **weakest** — its configured branch joins `state_directory` exactly
-      as given, so what comes back is only as unresolved as the caller was configured with — and it
-      is documented as such where it lives.
-- **Secret targets are written with `write_file_private`, never `write_file`,
-  `write_file_no_follow`, or any other writer** — temp file in the target's own directory at mode
-  `0600`, then rename. Symlink-safe is **not** the same as owner-only: `write_file_no_follow` also
-  refuses to follow a link, and creates at `0666 & ~umask`. Refusing to follow a link is the weaker
-  of the two properties a credential needs.
+    - `state_file_path` joins `state_directory` exactly as given in its configured branch, so what
+      comes back is only as unresolved as the caller was configured with — and it is documented as
+      such where it lives.
+    - `repository_path` is the **weakest**, and the only one not about a deploy target: it is the
+      identity on the `&Path` it is handed. No target rule, no expansion, no normalization. It
+      exists because the writers and the refusal checks take a `TargetPath`, and selfie also writes
+      to and reads from paths it composed itself — `track`'s copy into the dotfiles repository,
+      `save_package`'s YAML, and the repository files `apply` and `dotfiles drift` read back — which
+      need the same no-symlink, no-fifo treatment. It is `pub(crate)` and not re-exported, so
+      `expand_target_path` stays the only constructor reachable outside the crate —
+      `state_file_path` is `pub(crate)` too, and `deploy_target` mints nothing. Never route a
+      user-supplied target through it: that drops the rule every command applies to targets, and
+      `deploy_target` is what a deploy or track _target_ must use. Its inputs are paths built from a
+      configured directory plus already validated components.
+- **Secret targets are written with `write_file_private`, never `write_file_no_follow` or any other
+  writer** — temp file in the target's own directory at mode `0600`, then rename. Symlink-safe is
+  **not** the same as owner-only: `write_file_no_follow` also refuses to follow a link, and creates
+  at `0666 & ~umask`. Refusing to follow a link is the weaker of the two properties a credential
+  needs. The port offers **exactly these two writers** and no plain following one — `write_file` was
+  removed once its last three call sites moved, so "selfie never writes through a symlink" holds by
+  construction rather than by review of the call sites (selfie-yw7i). Adding a following writer back
+  reopens every site at once.
 - **Owner-only means `& 0o077 == 0`, not `& 0o007`.** Group-readable leaks a credential to exactly
   the people you are hiding it from on a shared machine.
 - **All package-relative source paths go through `crate::paths` containment.** This guard has been

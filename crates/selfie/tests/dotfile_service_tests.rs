@@ -1,17 +1,17 @@
-//! Integration tests for the dotfile service layer
-//!
-//! These tests verify dotfile deployment operations using real filesystem
-//! and repository implementations with temporary directories.
-//!
-//! ## Directory layout
-//!
-//! Source paths resolve relative to the YAML file's parent directory, so:
-//!
-//! - Package dotfiles: YAML lives in `packages/`, source files in `packages/<name>/`
-//! - Standalone dotfiles: YAML lives in `dotfiles/`, source files in `dotfiles/<name>/`
-//!
-//! This is why most tests create source files under `dirs.package_dir` — the
-//! package YAML files are there, so that's the resolution base.
+// Integration tests for the dotfile service layer
+//
+// These tests verify dotfile deployment operations using real filesystem
+// and repository implementations with temporary directories.
+//
+// ## Directory layout
+//
+// Source paths resolve relative to the YAML file's parent directory, so:
+//
+// - Package dotfiles: YAML lives in `packages/`, source files in `packages/<name>/`
+// - Standalone dotfiles: YAML lives in `dotfiles/`, source files in `dotfiles/<name>/`
+//
+// This is why most tests create source files under `dirs.package_dir` — the
+// package YAML files are there, so that's the resolution base.
 
 use std::path::PathBuf;
 
@@ -35,12 +35,12 @@ use selfie::{
     },
 };
 
-/// Collect all events from an event stream
+// Collect all events from an event stream
 async fn collect_events(stream: selfie::package::event::EventStream) -> Vec<PackageEvent> {
     stream.collect::<Vec<_>>().await
 }
 
-/// Extract the operation result from collected events
+// Extract the operation result from collected events
 fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     events.iter().find_map(|e| match e {
         PackageEvent::Completed { result, .. } => Some(result),
@@ -48,7 +48,7 @@ fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     })
 }
 
-/// The message of a run that failed, for the operations that report one.
+// The message of a run that failed, for the operations that report one.
 fn failure_message(events: &[PackageEvent]) -> String {
     match get_operation_result(events).expect("no Completed event") {
         OperationResult::Failure(failure) => failure.to_string(),
@@ -56,7 +56,7 @@ fn failure_message(events: &[PackageEvent]) -> String {
     }
 }
 
-/// Every warning a run emitted.
+// Every warning a run emitted.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
         .iter()
@@ -67,7 +67,7 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .collect()
 }
 
-/// Helper to create a package YAML file with a dotfiles section
+// Helper to create a package YAML file with a dotfiles section
 fn create_package_with_dotfiles(
     package_dir: &std::path::Path,
     name: &str,
@@ -93,20 +93,20 @@ environments:
     file_path
 }
 
-/// Write a package file from raw YAML, returning its path.
-///
-/// The escape hatch from [`create_package_with_dotfiles`], which builds the
-/// `dotfiles:` key itself and so cannot express a file whose defect is in that
-/// key's *name* or in an entry's extra keys. A `PackageBuilder` fixture cannot
-/// stand in either: the builder never populates `raw_yaml`, so a test about
-/// top-level keys built that way passes without ever exercising the check.
+// Write a package file from raw YAML, returning its path.
+//
+// The escape hatch from [`create_package_with_dotfiles`], which builds the
+// `dotfiles:` key itself and so cannot express a file whose defect is in that
+// key's *name* or in an entry's extra keys. A `PackageBuilder` fixture cannot
+// stand in either: the builder never populates `raw_yaml`, so a test about
+// top-level keys built that way passes without ever exercising the check.
 fn write_package_yaml(package_dir: &std::path::Path, name: &str, yaml: &str) -> PathBuf {
     let file_path = package_dir.join(format!("{name}.yml"));
     std::fs::write(&file_path, yaml).unwrap();
     file_path
 }
 
-/// Create standard test directories under a temp dir
+// Create standard test directories under a temp dir
 struct TestDirs {
     _temp: TempDir,
     package_dir: PathBuf,
@@ -135,7 +135,7 @@ impl TestDirs {
         }
     }
 
-    /// Create a service backed only by the packages directory.
+    // Create a service backed only by the packages directory.
     fn service(
         &self,
     ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
@@ -143,7 +143,7 @@ impl TestDirs {
         self.service_with_runner(FakeCommandRunner::new())
     }
 
-    /// A packages-only service whose provider commands answer from `runner`.
+    // A packages-only service whose provider commands answer from `runner`.
     fn service_with_runner(
         &self,
         runner: FakeCommandRunner,
@@ -152,12 +152,12 @@ impl TestDirs {
         self.service_with_runner_and_token(runner, CancellationToken::new())
     }
 
-    /// As [`service_with_runner`](Self::service_with_runner), but the caller
-    /// supplies the cancellation token and may use any runner type.
-    ///
-    /// Generic over the runner because the cancellation tests need one that
-    /// observes the token it is handed, which `FakeCommandRunner` deliberately
-    /// ignores.
+    // As [`service_with_runner`](Self::service_with_runner), but the caller
+    // supplies the cancellation token and may use any runner type.
+    //
+    // Generic over the runner because the cancellation tests need one that
+    // observes the token it is handed, which `FakeCommandRunner` deliberately
+    // ignores.
     fn service_with_runner_and_token<CR>(
         &self,
         runner: CR,
@@ -177,10 +177,10 @@ impl TestDirs {
         DotfileServiceImpl::new(repo, fs, runner, config, token)
     }
 
-    /// A packages-only service whose `stop_on_error` is set explicitly.
-    ///
-    /// The flag decides whether a refused entry ends the run, so a test about
-    /// that has to set both sides rather than rely on the default.
+    // A packages-only service whose `stop_on_error` is set explicitly.
+    //
+    // The flag decides whether a refused entry ends the run, so a test about
+    // that has to set both sides rather than rely on the default.
     fn service_with_runner_and_stop_on_error(
         &self,
         runner: FakeCommandRunner,
@@ -199,7 +199,7 @@ impl TestDirs {
         DotfileServiceImpl::new(repo, fs, runner, config, CancellationToken::new())
     }
 
-    /// Create a service backed by both `packages/` and `dotfiles/` directories.
+    // Create a service backed by both `packages/` and `dotfiles/` directories.
     fn service_with_dotfiles(
         &self,
     ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
@@ -223,10 +223,10 @@ impl TestDirs {
         .with_dotfiles_repository(dotfiles_repo)
     }
 
-    /// A service that believes the home directory is `home`.
-    ///
-    /// Injected rather than read from the environment: `$HOME` is process-wide
-    /// and these tests run in parallel.
+    // A service that believes the home directory is `home`.
+    //
+    // Injected rather than read from the environment: `$HOME` is process-wide
+    // and these tests run in parallel.
     fn service_with_home(
         &self,
         home: &std::path::Path,
@@ -249,7 +249,7 @@ impl TestDirs {
     }
 }
 
-/// `RealFileSystem` with a chosen home directory and nothing else changed.
+// `RealFileSystem` with a chosen home directory and nothing else changed.
 #[derive(Clone, Debug)]
 struct HomeAt(RealFileSystem, PathBuf);
 
@@ -278,13 +278,6 @@ impl selfie::fs::FileSystem for HomeAt {
         path: &std::path::Path,
     ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
         self.0.read_file_bytes(path)
-    }
-    fn write_file(
-        &self,
-        path: &std::path::Path,
-        data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file(path, data)
     }
     fn write_file_private(
         &self,
@@ -616,7 +609,7 @@ async fn test_apply_conflict_resolver_accept() {
     use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
     use std::sync::Arc;
 
-    /// A test resolver that always accepts conflicts.
+    // A test resolver that always accepts conflicts.
     struct AlwaysAccept;
     impl ConflictResolver for AlwaysAccept {
         fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
@@ -678,7 +671,7 @@ async fn test_apply_conflict_resolver_skip() {
     use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
     use std::sync::Arc;
 
-    /// A test resolver that always skips conflicts.
+    // A test resolver that always skips conflicts.
     struct AlwaysSkip;
     impl ConflictResolver for AlwaysSkip {
         fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
@@ -1792,10 +1785,10 @@ mod secret_bearing {
     use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
     use std::sync::{Arc, Mutex};
 
-    /// A value distinctive enough that finding it anywhere is unambiguous.
+    // A value distinctive enough that finding it anywhere is unambiguous.
     const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
-    /// Write a package whose single dotfile is a whole-file provider entry.
+    // Write a package whose single dotfile is a whole-file provider entry.
     fn provider_package(package_dir: &std::path::Path, target: &str, command: &str) {
         let yaml = format!(
             "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
@@ -1804,7 +1797,7 @@ mod secret_bearing {
         std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
     }
 
-    /// Write a package whose single dotfile is a template, plus the template.
+    // Write a package whose single dotfile is a template, plus the template.
     fn template_package(
         package_dir: &std::path::Path,
         target: &str,
@@ -1824,12 +1817,12 @@ mod secret_bearing {
         std::fs::write(package_dir.join("creds.yml"), yaml).unwrap();
     }
 
-    /// Assert that no event reproduces `secret`, in any rendering.
-    ///
-    /// Scans every event and every field rather than one variant's diff: a leak
-    /// added to a warning, or to a newly introduced field, has to fail this too.
-    /// *Which* renderings count is `test_common::secrets`' decision, not this
-    /// call site's — see that module for what they are and what they miss.
+    // Assert that no event reproduces `secret`, in any rendering.
+    //
+    // Scans every event and every field rather than one variant's diff: a leak
+    // added to a warning, or to a newly introduced field, has to fail this too.
+    // *Which* renderings count is `test_common::secrets`' decision, not this
+    // call site's — see that module for what they are and what they miss.
     #[track_caller]
     fn assert_no_event_mentions(events: &[PackageEvent], secret: impl AsRef<[u8]>) {
         let secret = secret.as_ref();
@@ -1838,11 +1831,11 @@ mod secret_bearing {
         }
     }
 
-    /// A resolver that accepts every conflict.
-    ///
-    /// Secret-bearing entries ignore `auto_accept`, so a test needing the
-    /// overwrite path has to go through a resolver — the same route a human at a
-    /// terminal takes.
+    // A resolver that accepts every conflict.
+    //
+    // Secret-bearing entries ignore `auto_accept`, so a test needing the
+    // overwrite path has to go through a resolver — the same route a human at a
+    // terminal takes.
     struct AlwaysAcceptSecret;
 
     impl ConflictResolver for AlwaysAcceptSecret {
@@ -3192,7 +3185,7 @@ mod secret_bearing {
         assert!(format!("{events:?}").contains("not logged in"));
     }
 
-    /// A resolver that records what it was handed and always accepts.
+    // A resolver that records what it was handed and always accepts.
     #[derive(Default)]
     struct RecordingResolver {
         seen: Arc<Mutex<Vec<String>>>,
@@ -3250,11 +3243,11 @@ mod secret_bearing {
     // deploys and no diagnostic. One test per consumer path asserts the refusal
     // is reported, so a consumer that swallows it fails a test.
 
-    /// A template whose var name cannot be substituted, plus its template file.
-    ///
-    /// The template really exists and really contains the placeholder: if the
-    /// entry were treated as any kind of deployable entry the target would be
-    /// written, so `!target.exists()` can only mean it was refused.
+    // A template whose var name cannot be substituted, plus its template file.
+    //
+    // The template really exists and really contains the placeholder: if the
+    // entry were treated as any kind of deployable entry the target would be
+    // written, so `!target.exists()` can only mean it was refused.
     fn bad_var_name_package(package_dir: &std::path::Path, target: &str, var: &str) {
         std::fs::create_dir_all(package_dir.join("creds")).unwrap();
         std::fs::write(
@@ -3425,13 +3418,13 @@ mod secret_bearing {
         );
     }
 
-    /// Ctrl+C during `selfie apply`.
-    ///
-    /// Apply gained the ability to run commands after the cancellation token was
-    /// threaded through the rest of the service layer, and did not inherit it:
-    /// the resolve path built a fresh `CancellationToken` nobody held, so an `op
-    /// read` blocked on a biometric prompt could only be escaped by waiting out
-    /// `command_timeout`.
+    // Ctrl+C during `selfie apply`.
+    //
+    // Apply gained the ability to run commands after the cancellation token was
+    // threaded through the rest of the service layer, and did not inherit it:
+    // the resolve path built a fresh `CancellationToken` nobody held, so an `op
+    // read` blocked on a biometric prompt could only be escaped by waiting out
+    // `command_timeout`.
     mod cancellation {
         use super::*;
         use selfie::commands::{
@@ -3440,47 +3433,47 @@ mod secret_bearing {
         use std::path::Path;
         use std::time::Duration;
 
-        /// What the runner should do on a given call.
+        // What the runner should do on a given call.
         #[derive(Clone, Copy, Debug, Default)]
         struct CallEffect {
-            /// Cancel the token the *service* holds, as a signal handler would
-            /// while this command is in flight.
+            // Cancel the token the *service* holds, as a signal handler would
+            // while this command is in flight.
             cancel: bool,
-            /// Report the command as killed, which is what `ShellCommandRunner`
-            /// does once the token fires.
+            // Report the command as killed, which is what `ShellCommandRunner`
+            // does once the token fires.
             fail_as_cancelled: bool,
         }
 
-        /// A runner that records the token it is **handed** and cancels the token
-        /// the service was **built with**.
-        ///
-        /// Those being two different things is the entire mechanism, and it is not
-        /// self-evident. `resolve_content` takes one `&CancellationToken` and
-        /// reuses that same reference for every command of an entry — so a fake
-        /// that cancelled the token it was *handed* would cancel a placeholder
-        /// just as readily as the real one, and every assertion below would hold
-        /// with the bug still in place. Holding an independent clone of the real
-        /// token means `observed` differs between the two worlds: the second call
-        /// sees `true` only if what reached the runner *is* the service's token.
+        // A runner that records the token it is **handed** and cancels the token
+        // the service was **built with**.
+        //
+        // Those being two different things is the entire mechanism, and it is not
+        // self-evident. `resolve_content` takes one `&CancellationToken` and
+        // reuses that same reference for every command of an entry — so a fake
+        // that cancelled the token it was *handed* would cancel a placeholder
+        // just as readily as the real one, and every assertion below would hold
+        // with the bug still in place. Holding an independent clone of the real
+        // token means `observed` differs between the two worlds: the second call
+        // sees `true` only if what reached the runner *is* the service's token.
         #[derive(Clone, Debug)]
         struct TokenObservingRunner {
-            /// The token the service was constructed with.
+            // The token the service was constructed with.
             real_token: CancellationToken,
-            /// `is_cancelled()` of the token handed to each call, in call order.
+            // `is_cancelled()` of the token handed to each call, in call order.
             observed: Arc<Mutex<Vec<bool>>>,
-            /// Commands seen, in call order.
+            // Commands seen, in call order.
             calls: Arc<Mutex<Vec<String>>>,
-            /// Indexed by call number.
+            // Indexed by call number.
             effects: Vec<CallEffect>,
-            /// Refuse any call handed an already-cancelled token, as
-            /// `ShellCommandRunner::run_buffered` does in its pre-spawn check.
-            ///
-            /// Off by default so the other tests observe the token without the
-            /// runner acting on it. On, it makes this fake faithful to the
-            /// production runner on the one behavior that closes the
-            /// between-bindings window.
+            // Refuse any call handed an already-cancelled token, as
+            // `ShellCommandRunner::run_buffered` does in its pre-spawn check.
+            //
+            // Off by default so the other tests observe the token without the
+            // runner acting on it. On, it makes this fake faithful to the
+            // production runner on the one behavior that closes the
+            // between-bindings window.
             refuse_when_handed_cancelled: bool,
-            /// Returned as stdout by any call that is not failing.
+            // Returned as stdout by any call that is not failing.
             stdout: Vec<u8>,
         }
 
@@ -3496,14 +3489,14 @@ mod secret_bearing {
                 }
             }
 
-            /// Behave like the real shell runner: refuse a pre-cancelled token.
+            // Behave like the real shell runner: refuse a pre-cancelled token.
             fn refusing_a_cancelled_token(mut self) -> Self {
                 self.refuse_when_handed_cancelled = true;
                 self
             }
 
-            /// Cancel while the *first* command is in flight, and report that
-            /// command as killed — a faithful Ctrl+C.
+            // Cancel while the *first* command is in flight, and report that
+            // command as killed — a faithful Ctrl+C.
             fn cancelling_and_failing(real_token: &CancellationToken) -> Self {
                 Self::new(
                     real_token,
@@ -3602,8 +3595,8 @@ mod secret_bearing {
                 self.answer(command, token)
             }
 
-            /// The path resolve actually takes, so this is the one these tests
-            /// observe the token through.
+            // The path resolve actually takes, so this is the one these tests
+            // observe the token through.
             async fn execute_for_content(
                 &self,
                 command: &str,
@@ -3624,7 +3617,7 @@ mod secret_bearing {
             }
         }
 
-        /// A successful `CommandOutput` carrying `stdout`.
+        // A successful `CommandOutput` carrying `stdout`.
         fn command_output(stdout: Vec<u8>) -> CommandOutput {
             use std::os::unix::process::ExitStatusExt as _;
             CommandOutput::from_parts(
@@ -3635,7 +3628,7 @@ mod secret_bearing {
             )
         }
 
-        /// Assert the run ended in a failure whose message names cancellation.
+        // Assert the run ended in a failure whose message names cancellation.
         #[track_caller]
         fn assert_cancelled(events: &[PackageEvent]) {
             let result = get_operation_result(events)
@@ -4001,7 +3994,7 @@ mod secret_bearing {
         use selfie::commands::ShellCommandRunner;
         use std::time::Duration;
 
-        /// A shell that writes before, during and after the command it is given.
+        // A shell that writes before, during and after the command it is given.
         fn noisy_runner(dir: &std::path::Path) -> ShellCommandRunner {
             let path = dir.join("noisy-shell");
             test_common::write_executable(
@@ -4016,13 +4009,13 @@ mod secret_bearing {
             ShellCommandRunner::new(path.to_str().unwrap(), Duration::from_secs(30))
         }
 
-        /// Where the command reads the credential from.
-        ///
-        /// The command must not *contain* the secret: a package file's command
-        /// string is quoted back in events and errors on purpose, so a fixture
-        /// that spells the credential into it fails the leak scan for a reason
-        /// that has nothing to do with what is under test. A real provider is
-        /// `op read …`, which names a credential without being one.
+        // Where the command reads the credential from.
+        //
+        // The command must not *contain* the secret: a package file's command
+        // string is quoted back in events and errors on purpose, so a fixture
+        // that spells the credential into it fails the leak scan for a reason
+        // that has nothing to do with what is under test. A real provider is
+        // `op read …`, which names a credential without being one.
         fn secret_source(dir: &std::path::Path) -> PathBuf {
             let path = dir.join("vault-stand-in");
             std::fs::write(&path, SECRET).unwrap();
@@ -4103,14 +4096,14 @@ mod secret_bearing {
     }
 }
 
-/// Deploying a repository file onto a symlinked target, and the permissions of the
-/// deploy state file.
-///
-/// Unix-only: symlink following and permission bits are not observable through
-/// `MockFileSystem`, whose `write_file` is a stub with no filesystem behind it. The
-/// assertions that matter here — where the bytes actually landed, and what mode the
-/// state file carries — cannot be expressed against it. Everything runs inside a
-/// `TempDir`, so nothing outside it is touched.
+// Deploying a repository file onto a symlinked target, and the permissions of the
+// deploy state file.
+//
+// Unix-only: symlink following and permission bits are not observable through
+// `MockFileSystem`, whose writers are stubs with no filesystem behind them. The
+// assertions that matter here — where the bytes actually landed, and what mode the
+// state file carries — cannot be expressed against it. Everything runs inside a
+// `TempDir`, so nothing outside it is touched.
 #[cfg(unix)]
 mod symlinked_targets {
     use super::*;
@@ -4525,10 +4518,12 @@ mod symlinked_targets {
     //
     // This is the TOCTOU defense, and it is the half of the fix that nothing else
     // observes. With the check in `handle_apply` doing its job, reverting
-    // `perform_deploy` to `write_file` fails **no other test in the workspace** —
-    // measured, 787 passing either way. So without this test a future reader can
-    // find the writer redundant, delete it, see a green suite, and have removed the
-    // only protection against a link planted *during* an apply.
+    // `perform_deploy` to a following write — `fs::write`, since the port no longer
+    // offers one — fails **no other test in the workspace**; measured at 787 passing
+    // either way, when the port still had a `write_file` to revert to. So without
+    // this test a future reader can find the writer redundant, delete it, see a
+    // green suite, and have removed the only protection against a link planted
+    // *during* an apply.
     //
     // Blinding `symlink_refusal` reproduces that race deterministically: the check
     // sees nothing, the write goes ahead, and `O_NOFOLLOW` has to catch it. No
@@ -4548,14 +4543,14 @@ mod symlinked_targets {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        /// `RealFileSystem` with the symlink *report* suppressed and nothing else
-        /// changed — an attacker who wins the race between the check and the write.
-        ///
-        /// Counts writes so the test can prove the writer was actually reached.
-        /// Without that, a refactor that detects the link by some route other than
-        /// `symlink_refusal` would leave this decorator blinding nothing, the test
-        /// would pass having exercised none of what it is named for, and
-        /// `O_NOFOLLOW` would become deletable again — the exact hole this guards.
+        // `RealFileSystem` with the symlink *report* suppressed and nothing else
+        // changed — an attacker who wins the race between the check and the write.
+        //
+        // Counts writes so the test can prove the writer was actually reached.
+        // Without that, a refactor that detects the link by some route other than
+        // `symlink_refusal` would leave this decorator blinding nothing, the test
+        // would pass having exercised none of what it is named for, and
+        // `O_NOFOLLOW` would become deletable again — the exact hole this guards.
         #[derive(Clone, Debug)]
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
@@ -4564,10 +4559,10 @@ mod symlinked_targets {
                 None
             }
 
-            /// Deliberately **not** blinded: this decorator blinds one check, the
-            /// symlink one, so that the writer's `O_NOFOLLOW` is the only thing
-            /// left to refuse. Blinding the irregular check too would widen what
-            /// this test claims to cover and hide a real regression in it.
+            // Deliberately **not** blinded: this decorator blinds one check, the
+            // symlink one, so that the writer's `O_NOFOLLOW` is the only thing
+            // left to refuse. Blinding the irregular check too would widen what
+            // this test claims to cover and hide a real regression in it.
             fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
                 self.0.irregular_target_refusal(path)
             }
@@ -4577,9 +4572,6 @@ mod symlinked_targets {
             }
             fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
                 self.0.read_file_bytes(path)
-            }
-            fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
-                self.0.write_file(path, data)
             }
             fn write_file_private(
                 &self,
@@ -4767,10 +4759,10 @@ mod symlinked_targets {
     }
 }
 
-/// Consequences of expanding a target without canonicalizing it.
-///
-/// These are behavior changes rather than fixes, asserted so they are deliberate
-/// and visible rather than discovered later.
+// Consequences of expanding a target without canonicalizing it.
+//
+// These are behavior changes rather than fixes, asserted so they are deliberate
+// and visible rather than discovered later.
 #[cfg(unix)]
 mod target_expansion {
     use selfie::fs::{RealFileSystem, expand_target_path};
@@ -4864,7 +4856,7 @@ mod symlink_consistency {
             .collect()
     }
 
-    /// A package whose one entry targets `target`, with `content` in the repository.
+    // A package whose one entry targets `target`, with `content` in the repository.
     fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
         repo_source(dirs, "myapp/config.toml", content);
         create_package_with_dotfiles(
@@ -4874,10 +4866,10 @@ mod symlink_consistency {
         );
     }
 
-    /// Deploy normally, then migrate the target to a stow-style link: move the
-    /// deployed file aside and symlink to it. Leaves the recorded deploy state
-    /// matching the link's destination exactly, which is the state a user reaches by
-    /// adopting a symlink layout after using selfie.
+    // Deploy normally, then migrate the target to a stow-style link: move the
+    // deployed file aside and symlink to it. Leaves the recorded deploy state
+    // matching the link's destination exactly, which is the state a user reaches by
+    // adopting a symlink layout after using selfie.
     async fn deploy_then_link_aside(dirs: &TestDirs, target: &Path) -> PathBuf {
         collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         let destination = dirs.target_dir.join("destination");
@@ -5300,8 +5292,8 @@ mod symlink_consistency {
 mod target_rule {
     use super::*;
 
-    /// A package with one entry whose source exists, so an error can only come
-    /// from the target.
+    // A package with one entry whose source exists, so an error can only come
+    // from the target.
     fn package_targeting(dirs: &TestDirs, target: &str) {
         let source = dirs.package_dir.join("myapp/config.toml");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
@@ -5543,12 +5535,12 @@ mod target_rule {
     }
 }
 
-/// That an unusable deploy-state file is reported, on every command that loads one.
-///
-/// `load_deploy_state`'s own four branches are covered at the unit layer in
-/// `dotfile_service::service`. What these add is the wiring: each of the four
-/// callers forwards the message through a separate `.await`, so deleting any one
-/// leaves the other three green. One observing test per call site.
+// That an unusable deploy-state file is reported, on every command that loads one.
+//
+// `load_deploy_state`'s own four branches are covered at the unit layer in
+// `dotfile_service::service`. What these add is the wiring: each of the four
+// callers forwards the message through a separate `.await`, so deleting any one
+// leaves the other three green. One observing test per call site.
 mod deploy_state_diagnostics {
     use super::*;
 
@@ -5731,7 +5723,7 @@ mod deploy_state_diagnostics {
 mod refusal_accounting {
     use super::*;
 
-    /// `(deployed, skipped, conflict, refused)`.
+    // `(deployed, skipped, conflict, refused)`.
     fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
             OperationResult::Success(OperationSuccess::DotfilesApplied {
@@ -6134,8 +6126,8 @@ mod irregular_targets {
     use std::path::Path;
     use std::time::Duration;
 
-    /// Long enough that a slow machine does not trip it, short enough that a real
-    /// hang is caught quickly.
+    // Long enough that a slow machine does not trip it, short enough that a real
+    // hang is caught quickly.
     const DEADLINE: Duration = Duration::from_secs(10);
 
     fn make_fifo(path: &Path) {
@@ -6161,7 +6153,7 @@ mod irregular_targets {
         }
     }
 
-    /// One package, one entry, whose target is `target`.
+    // One package, one entry, whose target is `target`.
     fn package_targeting(dirs: &TestDirs, target: &Path) {
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
@@ -6319,26 +6311,26 @@ mod irregular_targets {
     }
 }
 
-/// The permanent `not tracked` drift line for a target selfie will never manage.
-///
-/// An untracked dotfile whose target is a symlink and whose contents already
-/// match is `Skip`: apply writes nothing, refuses nothing, and records nothing —
-/// selfie did not write it and never will. So `detect_drift` keeps answering
-/// `NotTracked` and `dotfiles drift` keeps listing it, forever, with nothing
-/// saying why (selfie-ktha).
-///
-/// Both commands now say the same sentence in the channel each already uses:
-/// apply on its skip line, drift on its drift line. Neither raises a warning it
-/// did not raise before, which is what keeps
-/// `an_in_sync_symlinked_target_is_left_alone_and_not_reported` and
-/// `drift_says_nothing_about_an_in_sync_symlinked_target` passing unmodified.
+// The permanent `not tracked` drift line for a target selfie will never manage.
+//
+// An untracked dotfile whose target is a symlink and whose contents already
+// match is `Skip`: apply writes nothing, refuses nothing, and records nothing —
+// selfie did not write it and never will. So `detect_drift` keeps answering
+// `NotTracked` and `dotfiles drift` keeps listing it, forever, with nothing
+// saying why (selfie-ktha).
+//
+// Both commands now say the same sentence in the channel each already uses:
+// apply on its skip line, drift on its drift line. Neither raises a warning it
+// did not raise before, which is what keeps
+// `an_in_sync_symlinked_target_is_left_alone_and_not_reported` and
+// `drift_says_nothing_about_an_in_sync_symlinked_target` passing unmodified.
 #[cfg(unix)]
 mod unmanageable_symlink_reason {
     use super::*;
     use std::path::Path;
 
-    /// An untracked entry, already in sync, whose target is `link` or a plain
-    /// file — the axis under test.
+    // An untracked entry, already in sync, whose target is `link` or a plain
+    // file — the axis under test.
     fn in_sync_entry(dirs: &TestDirs, target: &Path, symlinked: bool) {
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
@@ -6519,5 +6511,343 @@ mod unmanageable_symlink_reason {
             })
             .collect();
         assert_eq!(types, vec!["not tracked".to_string()]);
+    }
+}
+
+// The copy `track` makes *into* the repository must not follow a symlink at its
+// destination either.
+//
+// Distinct from every refusal above, which is about the dotfile **target** --
+// the path selfie deploys out to. These are about the path selfie composes for
+// itself from `dotfiles_directory`/`package_directory` plus a name, and writes
+// the user's file into.
+//
+// Every fixture here plants a **dangling** link on purpose. A link to an
+// existing file is caught by the `path_exists` check that already guards these
+// writes ("Source file already exists"); a dangling one returns `false` from
+// that check -- it follows the link and finds nothing -- so it passes the guard
+// and reaches the write. That is the case a plain `fs::write` follows, and the
+// only one these tests could fail on before the fix.
+// selfie-yw7i
+#[cfg(unix)]
+mod repository_writes_do_not_follow_symlinks {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    // Where the planted link points: outside both managed directories, so a
+    // write landing there is unambiguous evidence the link was followed.
+    fn planted_link_to(dir: &Path, link: &Path) -> PathBuf {
+        let destination = dir.join("planted-destination");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&destination, link).unwrap();
+        assert!(
+            !destination.exists(),
+            "the link must dangle, or the existence check refuses it before the write"
+        );
+        destination
+    }
+
+    // The refusal names the repository path and does not describe it as a target.
+    //
+    // Asserts the absence of the two `FileSystemError` `Display` **phrases**
+    // rather than of the bare word "target". A tempdir path here genuinely
+    // contains that word -- `TestDirs` names one directory `target`, and the
+    // planted link points into it -- so a substring check on the word alone
+    // fails on the fixture's own paths while the wording is correct. The
+    // phrases are what a reversion to rendering the error verbatim would
+    // reintroduce, and they cannot appear in a path.
+    fn assert_refused_without_calling_it_a_target(failure: &str, repository_path: &Path) {
+        for phrase in ["target is a symlink", "target resolves to a"] {
+            assert!(
+                !failure.contains(phrase),
+                "a repository path was described as a target: {failure}"
+            );
+        }
+        let name = repository_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            failure.contains(name.as_ref()),
+            "the refusal does not name the repository path: {failure}"
+        );
+    }
+
+    #[tokio::test]
+    async fn track_standalone_refuses_a_symlinked_source_path() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        // Exactly where `handle_track_standalone` will compose its copy.
+        let source = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        let destination = planted_link_to(&dirs.target_dir, &source);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => {
+                assert_refused_without_calling_it_a_target(&failure.to_string(), &source);
+            }
+            other => panic!("tracking through a symlinked source path must fail, got {other:?}"),
+        }
+
+        assert!(
+            !destination.exists(),
+            "the write followed the link and landed at {}",
+            destination.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn track_for_package_refuses_a_symlinked_source_path() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        std::fs::write(
+            dirs.package_dir.join("ruby.yml"),
+            "name: ruby\nversion: 1.0.0\nenvironments:\n  test:\n    install: true\n",
+        )
+        .unwrap();
+
+        // `handle_track_for_package` composes alongside the package YAML.
+        let source = dirs.package_dir.join("ruby").join("gemrc");
+        let destination = planted_link_to(&dirs.target_dir, &source);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("ruby", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => {
+                assert_refused_without_calling_it_a_target(&failure.to_string(), &source);
+            }
+            other => panic!("tracking through a symlinked source path must fail, got {other:?}"),
+        }
+
+        assert!(
+            !destination.exists(),
+            "the write followed the link and landed at {}",
+            destination.display()
+        );
+    }
+
+    // The control, and the reason the two tests above are not vacuous: with no
+    // link planted, the identical fixture tracks successfully and the copy lands
+    // at the composed path. A guard that refused every track would pass both
+    // tests above and fail here.
+    #[tokio::test]
+    async fn an_unobstructed_source_path_is_still_written() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events).expect("no Completed event"),
+                OperationResult::Success(_)
+            ),
+            "an ordinary track must still succeed: {:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dirs.dotfiles_dir.join("gemrc").join("gemrc")).unwrap(),
+            "gem: --no-document"
+        );
+    }
+}
+
+// Sources that are neither absent nor a regular file.
+//
+// The `irregular_targets` module above is about a dotfile *target* -- the path
+// selfie writes out to. This is the identical defect on the other side of the
+// copy: a fifo, socket or device node committed into the **repository** is read
+// as a source, and reading a fifo blocks until a writer arrives exactly as
+// reading one as a target does.
+//
+// Reachable in practice even though git cannot store a fifo: a local `mkfifo` in
+// the dotfiles directory, a restored backup, or a filesystem-level copy all
+// produce one.
+//
+// Four reads, not one. `handle_apply` deploys from the source;
+// `handle_check_drift` checksums it; `resolve_content`'s `Template` arm reads it
+// on the **secret-bearing** path, since a `source:` + `vars:` entry resolves its
+// template from an ordinary repository file; and `read_referenced_file` reads
+// that same template for `selfie spec validate`. The last one is covered by
+// `a_fifo_template_is_refused_by_validate` in the repository tests.
+//
+// `flavor = "multi_thread"` and the deadline are load-bearing for the same
+// reason the target-side module gives: the blocking read sits in a spawned task,
+// so on a current-thread runtime the timer never fires.
+// selfie-lwv5, the source-side sibling of selfie-qwj3
+#[cfg(unix)]
+mod irregular_sources {
+    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    fn make_fifo(path: &Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // One package, one entry, whose **source** is a fifo in the repository.
+    fn package_with_fifo_source(dirs: &TestDirs, target: &Path) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        make_fifo(&dirs.package_dir.join("myapp/config.toml"));
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    // The wording every source-side refusal shares.
+    #[track_caller]
+    fn assert_names_the_repository_file(warnings: &[String]) {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("named pipe (fifo)") && w.contains("repository file")),
+            "no warning named the repository file as a fifo: {warnings:?}"
+        );
+        // The target-side wording would send the user to inspect the wrong file:
+        // the problem is in the repository they sync, not at the deploy target.
+        assert!(
+            !warnings.iter().any(|w| w.contains("target resolves to a")),
+            "a source refusal used the target-side wording: {warnings:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_fifo_source_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_with_fifo_source(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo source");
+
+        assert_names_the_repository_file(&warning_messages(&events));
+        assert!(
+            !target.exists(),
+            "nothing may be deployed from a source selfie refused to read"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_refuses_a_fifo_source_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "whatever").unwrap();
+        package_with_fifo_source(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().check_drift().await).await
+        })
+        .await
+        .expect("drift must not block on a fifo source");
+
+        assert_names_the_repository_file(&warning_messages(&events));
+    }
+
+    // The secret-bearing read: a `source:` + `vars:` template.
+    //
+    // The bead guessed this path was unaffected because a provider resolves by
+    // running a command. That is true of `command:` entries only -- a template
+    // entry reads a repository file like any other, and this is the read that
+    // hangs while apply is handling a credential.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fifo_template_is_refused_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+
+        std::fs::create_dir_all(dirs.package_dir.join("creds")).unwrap();
+        make_fifo(&dirs.package_dir.join("creds/credentials.tpl"));
+        std::fs::write(
+            dirs.package_dir.join("creds.yml"),
+            format!(
+                "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"creds/credentials.tpl\"\n    target: \"{}\"\n    vars:\n      \
+                 token: \"echo secret\"\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo template");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("named pipe (fifo)") && w.contains("repository file")),
+            "no warning named the template as a fifo: {warnings:?}"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may be written from a template selfie refused to read"
+        );
+    }
+
+    // The control for all three, and the reason none of them is vacuous: the
+    // same fixtures with a *regular* source deploy and report drift normally. A
+    // guard that refused every source would pass the three tests above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regular_source_is_still_deployed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "an ordinary source must still deploy: {:?}",
+            warning_messages(&events)
+        );
     }
 }

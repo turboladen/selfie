@@ -85,6 +85,17 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
     None
 }
 
+/// The directory `path` lives in, as one the filesystem will actually open.
+///
+/// `Path::parent` gives `Some("")` for a bare name like `config.toml`, and
+/// `File::open("")` is `ENOENT`. `create_dir_all` and `tempfile_in` both cope
+/// with the empty path; the directory fsync does not.
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
 /// [`FileSystemError::IrregularTarget`] for anything `irregular_kind` names.
 ///
 /// Free function taking a `&Path` so `write_file_no_follow` can classify a failed
@@ -105,15 +116,6 @@ impl FileSystem for RealFileSystem {
         fs::read(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
-    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileSystemError> {
-        // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
-        }
-        fs::write(path, data).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
-        Ok(())
-    }
-
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
         use std::io::Write as _;
 
@@ -132,17 +134,8 @@ impl FileSystem for RealFileSystem {
 
         // The temporary file must live in the target's own directory: elsewhere it may
         // be on another filesystem, making the rename non-atomic, or world-readable.
-        //
-        // `parent()` yields Some("") for a bare relative name. Filtering that to "."
-        // is defensive normalization rather than load-bearing: `create_dir_all("")` is
-        // a no-op returning `Ok` and `tempfile_in("")` already resolves to the current
-        // directory, so removing the filter would not change behavior today. It is
-        // here so the parent is always a real directory rather than relying on those
-        // two coincidences holding.
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        // See `parent_dir` for why the bare-relative-name case needs normalizing.
+        let parent = parent_dir(path);
         fs::create_dir_all(parent).map_err(target_err)?;
 
         let mut builder = tempfile::Builder::new();
@@ -193,11 +186,10 @@ impl FileSystem for RealFileSystem {
         let path = path.path();
         let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
 
-        // Matches `write_file`: a target whose directory does not exist yet is
-        // created rather than refused.
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(io_err)?;
-        }
+        // A target whose directory does not exist yet is created rather than
+        // refused, matching `write_file_private`.
+        let parent = parent_dir(path);
+        fs::create_dir_all(parent).map_err(io_err)?;
 
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -300,7 +292,55 @@ impl FileSystem for RealFileSystem {
             Err(e) => return Err(io_err(e)),
         }
 
-        file.write_all(data).map_err(io_err)
+        file.write_all(data).map_err(io_err)?;
+
+        // Durability, because a caller records the write as having happened.
+        //
+        // `perform_deploy` calls `record_deployment` immediately after this
+        // returns, and both track handlers record a deployment after their copy
+        // into the repository. If the write is lost to a crash while that record
+        // survives, the state claims content the target does not have --
+        // `detect_drift` then reports `TargetChanged`, `deploy_decision` turns
+        // that into a `Conflict`, and with no resolver the entry is skipped
+        // forever. A lost deploy becomes a sticky conflict blamed on the user
+        // (selfie-aub).
+        //
+        // Ordering is what fixes it, so this belongs *before* the record rather
+        // than beside it: making the state file more durable while the target
+        // stays lossy would widen the window instead of closing it. That is why
+        // `save_deploy_state` is deliberately left alone.
+        //
+        // Costs two fsyncs per file actually written -- nothing on a skip, a dry
+        // run, or an entry already in sync.
+        file.sync_all().map_err(io_err)?;
+
+        // The data is durable; the directory entry naming it is not. A freshly
+        // created file can survive its own fsync and still vanish, because the
+        // parent directory's update has not been committed.
+        //
+        // **Best-effort, deliberately.** Opening a directory needs *read*
+        // permission, while creating and writing a file in it needs write and
+        // execute -- so a `0o300` directory takes the write and refuses this
+        // open with `EACCES`. Failing here would turn a deploy that works today
+        // into an error for that case, which is a worse outcome than the
+        // durability this buys. `a_write_only_parent_directory_still_succeeds`
+        // holds it.
+        //
+        // Only the **immediate** parent. When `create_dir_all` above has just
+        // built a chain, the grandparent's entry for the new directory is not
+        // synced, so a crash can still lose the whole subtree.
+        //
+        // On macOS `sync_all` is `fsync(2)`, which APFS does not treat as a
+        // write barrier -- `F_FULLFSYNC` is, at a cost of hundreds of
+        // milliseconds. So what this guarantees is ordering against a process or
+        // kernel crash everywhere, and against power loss only where the
+        // filesystem honors `fsync`. Do not restate it as more than that.
+        #[cfg(unix)]
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+
+        Ok(())
     }
 
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
@@ -394,6 +434,26 @@ mod tests {
     use std::fs::File;
     use tempfile::tempdir;
 
+    // Tested on the helper, not through a write: reaching this case through
+    // `write_file_no_follow` needs a relative path, and that needs
+    // `set_current_dir`, which is process-global and would race the suite.
+    // selfie-aub
+    #[test]
+    fn a_bare_relative_name_gets_the_current_directory_as_its_parent() {
+        assert_eq!(parent_dir(Path::new("config.toml")), Path::new("."));
+    }
+
+    // The control: an ordinary path keeps its real parent, so the helper is not
+    // simply answering "." for everything.
+    #[test]
+    fn a_nested_path_keeps_its_own_parent() {
+        assert_eq!(
+            parent_dir(Path::new("/pkgs/myapp/config.toml")),
+            Path::new("/pkgs/myapp")
+        );
+        assert_eq!(parent_dir(Path::new("/config.toml")), Path::new("/"));
+    }
+
     #[test]
     fn test_path_exists() {
         let fs = RealFileSystem;
@@ -455,31 +515,6 @@ mod tests {
         let non_existent = dir.path().join("non_existent.txt");
         let err = fs.read_file(&non_existent).unwrap_err();
         assert!(matches!(err, FileSystemError::IoError(_)));
-    }
-
-    #[test]
-    fn test_write_file() {
-        let fs = RealFileSystem;
-
-        // Create a temporary directory
-        let temp_dir = tempdir().unwrap();
-        let file_path = temp_dir.path().join("test_write.txt");
-
-        // Test writing to a file
-        let test_content = b"Hello, world!";
-        fs.write_file(&file_path, test_content).unwrap();
-
-        // Verify the file was written correctly
-        let content = std::fs::read(&file_path).unwrap();
-        assert_eq!(content, test_content);
-
-        // Test writing to a file in a nested directory that doesn't exist
-        let nested_path = temp_dir.path().join("nested").join("dir").join("test.txt");
-        fs.write_file(&nested_path, test_content).unwrap();
-
-        // Verify the file was written and directories were created
-        let nested_content = std::fs::read(&nested_path).unwrap();
-        assert_eq!(nested_content, test_content);
     }
 
     #[test]
@@ -681,9 +716,11 @@ fn tp(path: &Path) -> TargetPath {
 ///
 /// Grouped by what each test actually proves.
 ///
-/// The six tests directly below all still pass against [`FileSystem::write_file`]'s
-/// `create_dir_all` + `fs::write`, so they guard against gross breakage rather than
-/// against the defects this method exists to fix.
+/// The six tests directly below all still pass against a naive `create_dir_all` +
+/// `fs::write`, so they guard against gross breakage rather than against the defects
+/// this method exists to fix. Named as that pair rather than as a method: the port
+/// no longer has a following writer to compare against, and the comparison is with
+/// the implementation someone might reach for, not with an API that exists.
 ///
 /// Everything in `unix` is load-bearing: temporarily swapping this implementation
 /// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
@@ -908,8 +945,8 @@ mod private_write_tests {
             let target = parent.join("creds");
             // The target must already exist for this to discriminate. Rewriting an
             // existing file needs write permission on the *file*, not on its
-            // directory, so `write_file` succeeds here; an atomic replace still has to
-            // create a sibling, so it cannot.
+            // directory, so a plain `fs::write` succeeds here; an atomic replace
+            // still has to create a sibling, so it cannot.
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -966,11 +1003,11 @@ mod private_write_tests {
 
 /// Tests for [`FileSystem::write_file_no_follow`].
 ///
-/// The plain-file tests below hold equally for [`FileSystem::write_file`], so they
-/// guard against gross breakage rather than against the defect this method exists
-/// to fix.
+/// The plain-file tests below hold equally for a naive `create_dir_all` + `fs::write`,
+/// so they guard against gross breakage rather than against the defect this method
+/// exists to fix.
 ///
-/// In `unix`, the three refusal tests are the ones that fail against `write_file`;
+/// In `unix`, the three refusal tests are the ones that fail against that naive pair;
 /// the two mode tests are the ones that fail against
 /// [`FileSystem::write_file_private`], which would tighten a dotfile nobody asked to
 /// have tightened. Neither group covers both neighbors, which is why both are here.
@@ -1148,7 +1185,10 @@ mod no_follow_write_tests {
             // against -- an ordinary dotfile is not a credential and this method
             // must not quietly tighten one.
             let control = dir.path().join("control");
-            RealFileSystem.write_file(&control, b"x").unwrap();
+            // `fs::write` rather than a port method: the control has to be an
+            // *ordinary* write, and every writer the port still offers has a
+            // property under test here.
+            fs::write(&control, b"x").unwrap();
             if mode_of(&control) & 0o077 == 0 {
                 let message = "the ambient umask makes ordinary writes owner-only, \
                                so this cannot tell the two apart";
@@ -1184,6 +1224,40 @@ mod no_follow_write_tests {
             // quietly overstated later: `O_NOFOLLOW` covers the final component
             // only.
             assert!(real.join("config").exists());
+        }
+
+        // The directory fsync must not turn a working write into a failure.
+        //
+        // Opening a directory needs **read** permission; creating and
+        // writing a file in it needs write and execute. So `0o300` is a directory
+        // selfie can write into and cannot open -- the write succeeds, the file's
+        // own `sync_all` succeeds, and only the directory fsync fails, with
+        // `EACCES`. Making that fatal would break deploys into any write-only
+        // directory, which is why it is best-effort.
+        //
+        // The mode is the whole fixture: at `0o700` this passes against a fatal
+        // implementation too, and proves nothing.
+        // selfie-aub
+        #[test]
+        fn a_write_only_parent_directory_still_succeeds() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!("SKIP a_write_only_parent_directory_still_succeeds: running as root");
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("write-only");
+            fs::create_dir(&parent).unwrap();
+            let target = parent.join("config");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+
+            let result = RealFileSystem.write_file_no_follow(&tp(&target), b"content");
+
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            result.expect("a write-only parent directory must not fail the write");
+            assert_eq!(fs::read(&target).unwrap(), b"content");
         }
     }
 }
