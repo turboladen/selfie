@@ -663,10 +663,7 @@ Note that `selfie sync status` summarizes drift counts and does not carry this r
 
 ### Files in your repository
 
-Everything above is about the **target** — the path selfie writes out to. The same two hazards exist
-on the other side of the copy, in the repository selfie reads from, and are refused the same way.
-
-#### An irregular file in the repository is refused, not read
+The same two hazards exist on the other side of the copy, in the repository selfie reads from.
 
 A source that is a named pipe (fifo), a socket, or a device node is refused wherever selfie would
 read it — `selfie apply`, `selfie dotfiles drift`, `selfie spec validate`, and the template behind a
@@ -676,35 +673,17 @@ read it — `selfie apply`, `selfie dotfiles drift`, `selfie spec validate`, and
 ⚠ Skipping 'myapp/config.toml': the repository file is a named pipe (fifo) and selfie will not read it. Replace it with a regular file.
 ```
 
-The fifo is the one that mattered: opening one for reading blocks until something opens the other
-end, so a fifo committed into your dotfiles directory hung `selfie apply` with no timeout —
-`command_timeout` bounds provider commands, not filesystem reads.
+Git cannot store these, so a clone will not produce one — a local `mkfifo` or a restored backup can.
 
-Git cannot store a fifo or a device node, so a normal clone will not produce one. A local `mkfifo`,
-a restored backup, or a filesystem-level copy of your dotfiles directory all will.
-
-The wording differs from the target-side refusal on purpose. The problem is in the repository you
-sync between machines, not at the path you deploy to, and the fix is to replace the file rather than
-to point the entry somewhere else.
-
-#### A symlink in the repository is refused when selfie writes to it
-
-`selfie dotfiles track` copies the file you name into your repository, and
-`selfie spec create`/`update`/`edit` write the package YAML. Both refuse a symlink at the path they
-are about to write:
+A symlink at a path selfie is about to write **into** your repository is also refused, which covers
+`selfie dotfiles track` and `selfie spec create`/`update`/`edit`:
 
 ```
 ✗ Cannot write the tracked copy at '/home/you/dotfiles/gitconfig/gitconfig': it is a symlink to '/tmp/elsewhere'. Remove it, or track under a different name.
 ```
 
-A **dangling** link is the case this catches that nothing else does. selfie checks whether the file
-already exists before copying, and that check follows the link — so a link pointing at nothing
-reports "no file here", passes the check, and a plain write would then create the file at the link's
-destination instead of in your repository.
-
-selfie's own writers never follow a symlink, so this holds wherever selfie writes a file itself, not
-only for the two commands named above. Git sync and the post-save formatter run through separate
-tools and are not covered by it.
+This holds wherever selfie writes a file itself. Git sync and the post-save formatter run through
+separate tools and are not covered.
 
 ### Provider-sourced and templated dotfiles
 
