@@ -254,6 +254,13 @@ impl TestDirs {
 struct HomeAt(RealFileSystem, PathBuf);
 
 impl selfie::fs::FileSystem for HomeAt {
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.irregular_target_refusal(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         // Only a bare `~`. Anything else keeps the real behavior, so the
         // decorator cannot quietly change what the rest of track resolves.
@@ -4557,6 +4564,14 @@ mod symlinked_targets {
                 None
             }
 
+            /// Deliberately **not** blinded: this decorator blinds one check, the
+            /// symlink one, so that the writer's `O_NOFOLLOW` is the only thing
+            /// left to refuse. Blinding the irregular check too would widen what
+            /// this test claims to cover and hide a real regression in it.
+            fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
+                self.0.irregular_target_refusal(path)
+            }
+
             fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
                 self.0.read_file(path)
             }
@@ -6099,5 +6114,410 @@ environments:
 
         assert_eq!(refused_count(&events), 0);
         assert_eq!(warning_messages(&events), Vec::<String>::new());
+    }
+}
+
+// Targets that are neither absent nor a regular file.
+//
+// A fifo target hung `selfie apply` forever and a device node was written to
+// (selfie-qwj3). The hang is the reason every test here has a deadline: reaching
+// the unguarded path does not fail a test, it wedges it, and a wedged test is
+// scored as neither pass nor fail.
+//
+// `flavor = "multi_thread"` is load-bearing. The service does its work in a
+// `tokio::spawn`ed task, so on the default current-thread runtime a blocking
+// `read` inside that task stalls the whole runtime — including the timer, which
+// then never fires and the timeout never returns.
+#[cfg(unix)]
+mod irregular_targets {
+    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Long enough that a slow machine does not trip it, short enough that a real
+    /// hang is caught quickly.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    fn make_fifo(path: &Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn refused_count(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count, ..
+            }) => *refused_count,
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    /// One package, one entry, whose target is `target`.
+    fn package_targeting(dirs: &TestDirs, target: &Path) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    // Apply refuses a fifo target instead of hanging on it.
+    //
+    // Before the guard, the *checksum read* blocked — not the write. Opening a
+    // fifo for reading waits for a writer exactly as opening it for writing waits
+    // for a reader, and that read happens well before any write is attempted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a fifo target");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "the refusal must name what it found: {warnings:?}"
+        );
+    }
+
+    // A symlink pointing at a fifo is refused too.
+    //
+    // The case a non-following stat misses. `symlink_refusal` answers "it is a
+    // symlink" and returns before the fifo is ever considered, and the target
+    // read then follows the link and blocks — the guard present, the hang intact.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_symlink_to_a_fifo_without_hanging() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("real-fifo");
+        make_fifo(&fifo);
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&fifo, &target).unwrap();
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a symlink to a fifo");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "a link to a fifo must be refused as a fifo: {warnings:?}"
+        );
+    }
+
+    // Apply refuses a character device rather than writing to it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_refuses_a_character_device_target() {
+        let dirs = TestDirs::new();
+        package_targeting(&dirs, Path::new("/dev/null"));
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("apply must not block on a device target");
+
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("character device")),
+            "the refusal must name what it found: {warnings:?}"
+        );
+    }
+
+    // Drift refuses a fifo target instead of hanging on it.
+    //
+    // Drift checksums the target exactly as apply does, so it hung on the same
+    // open — which selfie-qwj3 does not mention and which the fix has to cover
+    // for the two commands to keep agreeing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().check_drift().await).await
+        })
+        .await
+        .expect("drift must not block on a fifo target");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "drift must refuse it the same way apply does: {warnings:?}"
+        );
+    }
+
+    // Track refuses a fifo target instead of copying it into the repository.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn track_refuses_a_fifo_target_without_hanging() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        make_fifo(&target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("myapp", target.to_str().unwrap())
+                    .await,
+            )
+            .await
+        })
+        .await
+        .expect("track must not block on a fifo target");
+
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Failure(failure) => assert!(
+                failure.to_string().contains("named pipe (fifo)"),
+                "got: {failure}"
+            ),
+            other => panic!("tracking a fifo must fail, got {other:?}"),
+        }
+    }
+
+    // Control: an ordinary target still deploys.
+    //
+    // Without this, a guard that refused every target would pass every test
+    // above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regular_target_is_still_deployed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, &target);
+
+        let events = tokio::time::timeout(DEADLINE, async {
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        })
+        .await
+        .expect("a regular target must not block");
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
+    }
+}
+
+/// The permanent `not tracked` drift line for a target selfie will never manage.
+///
+/// An untracked dotfile whose target is a symlink and whose contents already
+/// match is `Skip`: apply writes nothing, refuses nothing, and records nothing —
+/// selfie did not write it and never will. So `detect_drift` keeps answering
+/// `NotTracked` and `dotfiles drift` keeps listing it, forever, with nothing
+/// saying why (selfie-ktha).
+///
+/// Both commands now say the same sentence in the channel each already uses:
+/// apply on its skip line, drift on its drift line. Neither raises a warning it
+/// did not raise before, which is what keeps
+/// `an_in_sync_symlinked_target_is_left_alone_and_not_reported` and
+/// `drift_says_nothing_about_an_in_sync_symlinked_target` passing unmodified.
+#[cfg(unix)]
+mod unmanageable_symlink_reason {
+    use super::*;
+    use std::path::Path;
+
+    /// An untracked entry, already in sync, whose target is `link` or a plain
+    /// file — the axis under test.
+    fn in_sync_entry(dirs: &TestDirs, target: &Path, symlinked: bool) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
+
+        if symlinked {
+            let destination = dirs.target_dir.join("destination");
+            std::fs::write(&destination, "SAME").unwrap();
+            std::os::unix::fs::symlink(&destination, target).unwrap();
+        } else {
+            std::fs::write(target, "SAME").unwrap();
+        }
+
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    fn skip_reasons(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileSkipped { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drift_reasons(events: &[PackageEvent]) -> Vec<Option<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Apply says why it is leaving the entry alone.
+    #[tokio::test]
+    async fn apply_says_why_an_in_sync_symlinked_target_will_not_settle() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let reasons = skip_reasons(&events);
+        assert!(
+            reasons.iter().any(|r| r.contains("already in sync")
+                && r.contains("symlink")
+                && r.contains("records no deployment")),
+            "the skip line must carry the reason: {reasons:?}"
+        );
+    }
+
+    // Drift says the same thing, on the line that keeps reappearing.
+    #[tokio::test]
+    async fn drift_says_why_the_not_tracked_line_never_clears() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        // Apply first: this is the state the user is actually in, having run apply
+        // and found the drift line still there afterwards.
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let reasons = drift_reasons(&events);
+        assert_eq!(reasons.len(), 1, "expected one drift line: {reasons:?}");
+        assert!(
+            reasons[0]
+                .as_deref()
+                .is_some_and(|r| r.contains("symlink") && r.contains("will not manage")),
+            "the drift line must carry the reason: {reasons:?}"
+        );
+    }
+
+    // The control: a plain untracked in-sync target gets no reason from either
+    // command.
+    //
+    // It settles on the first apply, so there is nothing to explain. Without
+    // this, a change that attached the reason unconditionally would satisfy both
+    // tests above.
+    #[tokio::test]
+    async fn a_plain_in_sync_target_gets_no_reason_from_either_command() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, false);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let reasons = skip_reasons(&apply);
+        assert!(
+            reasons.iter().all(|r| !r.contains("symlink")),
+            "a plain target has nothing to explain: {reasons:?}"
+        );
+
+        // And having been recorded, it produces no drift line at all.
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift_reasons(&drift),
+            Vec::<Option<String>>::new(),
+            "a plain target settles, so there is no line to annotate"
+        );
+    }
+
+    // A *tracked* symlinked target gets no reason, and that boundary is
+    // deliberate.
+    //
+    // Found by mutation: widening the condition from `NotTracked` to include
+    // `None` failed nothing, because every other fixture here varies the
+    // symlink axis — plain file versus link — and none varies the drift type.
+    // So the scoping this function documents was not enforced by anything.
+    //
+    // An entry that was deployed and whose target later became a symlink is
+    // selfie-v7py: it produces **no drift line at all**, so there is no
+    // permanent complaint to explain and nothing here should speak. Whoever
+    // fixes v7py will have to change this test on purpose, which is the point
+    // of it.
+    #[tokio::test]
+    async fn a_tracked_symlinked_target_is_outside_this_reason() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+
+        // Deploy to a plain file first, so the entry is tracked.
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            skip_reasons(&first).is_empty(),
+            "control: the first apply deploys rather than skipping"
+        );
+
+        // Now move it aside and link to it: same content, still tracked.
+        let destination = dirs.target_dir.join("destination");
+        std::fs::rename(&target, &destination).unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let reasons = skip_reasons(&apply);
+        assert!(
+            reasons.iter().all(|r| !r.contains("symlink")),
+            "a tracked entry is not what this reason is about: {reasons:?}"
+        );
+
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(
+            drift_reasons(&drift),
+            Vec::<Option<String>>::new(),
+            "selfie-v7py: no drift line at all, so nothing to annotate"
+        );
+    }
+
+    // The drift classification stays a bare label.
+    //
+    // The reason travels in its own field: the MCP server serializes
+    // `drift_type` as a typed value and the CLI prints it as one, so appending
+    // prose to it would corrupt what a caller matches on.
+    #[tokio::test]
+    async fn the_reason_does_not_contaminate_the_drift_type() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        in_sync_entry(&dirs, &target, true);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let types: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types, vec!["not tracked".to_string()]);
     }
 }

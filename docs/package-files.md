@@ -595,6 +595,18 @@ To put a target under selfie's management, replace the symlink with a regular fi
 
 A symlinked **parent directory** is still followed. Only the final component is checked.
 
+### Fifo, socket and device targets
+
+A target that is a named pipe (fifo), a socket, or a device node is refused rather than written to,
+by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
+
+```
+⚠ Skipping 'myapp/config.toml': /home/you/.config/myapp/config.toml: target resolves to a named pipe (fifo) and selfie will not write to it
+```
+
+A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
+reason. A **directory** at the target is not in this group; it is reported as an ordinary error.
+
 #### `selfie dotfiles track` refuses a symlinked target
 
 Tracking a symlinked target **fails** rather than recording it:
@@ -631,13 +643,20 @@ will clear it until the link is dealt with.
 
 The **refusal** follows `apply`'s own decision, so it appears only where `apply` would refuse to
 write. The **drift line** does not: an untracked target whose contents already match the repository
-file is still listed as drifted, even though `apply` skips it silently. In that case you get the
-drift line without the symlink reason.
+file is still listed as drifted, even though `apply` writes nothing and refuses nothing for it. That
+line carries the reason as well, without the refusal:
 
-That combination — `not tracked`, on every run, with no reason beside it — is what a symlinked
-target already in sync looks like, and running `selfie apply` does not clear it: nothing is recorded
-for a target selfie will not write to, so there is no state for the entry to advance to.
-[Symlinked targets](#symlinked-targets) explains why, and what clears it.
+```
+⚠   Drift in ~/.gitconfig: not tracked — the target is a symlink, so selfie will not manage it and records no deployment for it
+```
+
+`selfie apply` says the same thing on its skip line for the same entry, so the two commands agree
+about a target neither of them will ever manage.
+
+That combination — `not tracked`, on every run, with the symlink reason beside it — is what a
+symlinked target already in sync looks like, and running `selfie apply` does not clear it: nothing
+is recorded for a target selfie will not write to, so there is no state for the entry to advance to.
+[Symlinked targets](#symlinked-targets) explains what clears it.
 
 Note that `selfie sync status` summarizes drift counts and does not carry this reason; it points at
 `selfie dotfiles drift`, which does.

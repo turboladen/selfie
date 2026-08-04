@@ -228,12 +228,18 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "target": target,
             "diff": diff,
         })),
+        // `drift_type` stays the bare classification an assistant can match on;
+        // the explanation is its own field rather than appended prose.
         PackageEvent::DotfileDriftDetected {
-            target, drift_type, ..
+            target,
+            drift_type,
+            reason,
+            ..
         } => Some(serde_json::json!({
             "type": "dotfile_drift_detected",
             "target": target,
             "drift_type": drift_type,
+            "reason": reason,
         })),
         PackageEvent::PostInstallNote {
             package_name, note, ..

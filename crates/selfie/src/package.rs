@@ -118,7 +118,7 @@ impl GetPackage {
 ///
 /// `Template` and `Provider` are secret-bearing: their content is produced by
 /// running user-supplied commands at apply time, is held only in memory, and is
-/// never recorded. See ADR-0003.
+/// never recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentSource<'a> {
     /// A file in the package repository, copied as-is.
@@ -139,7 +139,7 @@ pub enum ContentSource<'a> {
 /// Renders references only — a repository path, a command string, var *names* —
 /// never a resolved value. Nothing here runs a command or reads a template, so
 /// describing an entry can neither leak a secret nor trigger an authentication
-/// prompt. See ADR-0003.
+/// prompt.
 impl std::fmt::Display for ContentSource<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -696,7 +696,7 @@ pub struct EnvironmentConfig {
 
     /// Dotfiles deployed only in this environment. An entry whose `target`
     /// matches a shared (top-level) dotfile overrides it; one with a new
-    /// `target` is added. See ADR-0001.
+    /// `target` is added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) dotfiles: Vec<DotfileEntry>,
 }
@@ -873,7 +873,6 @@ impl Package {
     /// Compute the effective dotfiles for `environment`: the shared (top-level)
     /// entries, with any whose `target` matches an environment-specific entry
     /// replaced by it, plus environment-specific entries with new targets.
-    /// See ADR-0001.
     #[must_use]
     pub fn dotfiles_for_environment(&self, environment: &str) -> Vec<DotfileEntry> {
         let env_dotfiles = self

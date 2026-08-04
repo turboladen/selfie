@@ -165,15 +165,12 @@ pub trait FileSystem: Send + Sync {
     /// symlink can still redirect where the file lands. Same limitation as
     /// [`write_file_private`](FileSystem::write_file_private).
     ///
-    /// # Platform notes
+    /// # Strength of the guarantee
     ///
-    /// On Unix the refusal is enforced by the **kernel**, through `O_NOFOLLOW` on the
-    /// creating `open(2)`. There is no interval between deciding and writing, so a
-    /// link planted concurrently is refused just the same.
-    ///
-    /// On every other platform this is a `symlink_metadata` check performed before the
-    /// write, which a concurrent planter can win. It is a mitigation there, not the
-    /// guarantee Unix gives.
+    /// On Unix a link planted concurrently is refused just the same — there is no
+    /// interval between deciding and writing. On other platforms the check precedes
+    /// the write, so a concurrent planter can win: a mitigation there, not a
+    /// guarantee.
     ///
     /// # Errors
     ///
@@ -183,10 +180,9 @@ pub trait FileSystem: Send + Sync {
     /// - Permission is denied to write to the file or directory
     /// - Any other IO error occurs during writing
     ///
-    /// The *refusal* is exact, but its *classification* is not quite: the failed open
-    /// is identified by looking at the path afterwards, so a link deleted in that
-    /// window surfaces as an `IoError` rather than `SymlinkedTarget`. Nothing was
-    /// written either way -- only the wording of the report differs.
+    /// The refusal is exact; its *classification* is not quite. A link deleted
+    /// between the failed write and the report surfaces as an `IoError` rather than
+    /// `SymlinkedTarget`. Nothing was written either way — only the wording differs.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
@@ -206,16 +202,32 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Never use it to decide whether a write is safe.
     /// [`write_file_no_follow`](FileSystem::write_file_no_follow) refuses on its own,
-    /// on Unix in the kernel. Checking here and writing there would reintroduce
-    /// exactly the race that method avoids; this only ever moves *when the user is
-    /// told* and *whether a deployment is recorded*, never whether the write happens.
-    ///
-    /// That second one is `handle_apply`'s already-in-sync branch, which declines to
-    /// record a deployment for a symlinked target it will never write to. It is safe
-    /// for the same reason the first is, and with the same limit: a stale answer
-    /// omits an entry the next run re-evaluates, and can manufacture one only
-    /// through a link planted inside the window between the check and the record.
+    /// and checking here as well would reintroduce the race that method avoids. This
+    /// may move *when the user is told* and *whether a deployment is recorded*, never
+    /// whether the write happens — a stale answer omits something the next run
+    /// re-evaluates.
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
+
+    /// [`FileSystemError::IrregularTarget`] if `path` resolves to something that
+    /// is neither absent nor a regular file
+    ///
+    /// A fifo, socket, device node or directory. `None` for a regular file, for a
+    /// path that does not exist, and for a **symlink to a regular file** — a
+    /// symlink is [`symlink_refusal`](FileSystem::symlink_refusal)'s question, and
+    /// answering it here too would report one thing two ways.
+    ///
+    /// Must answer for what an `open` of `path` would land on, so a symlink to a
+    /// fifo is a fifo.
+    ///
+    /// **Call this before every read of a path selfie does not control.** A write
+    /// is protected either way — [`write_file_no_follow`](FileSystem::write_file_no_follow)
+    /// re-checks the descriptor it opened — but nothing does that for a read, and
+    /// opening a fifo to read blocks exactly as opening it to write does. Removing
+    /// this from a read path restores an indefinite hang.
+    ///
+    /// Advisory for writes: stat-then-act is racy, so a fifo swapped in afterwards
+    /// is caught by the writer rather than here.
+    fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
     ///
@@ -382,6 +394,24 @@ pub enum FileSystemError {
         path: PathBuf,
         points_to: Option<PathBuf>,
     },
+
+    /// A target that is neither absent nor a regular file
+    ///
+    /// A fifo, socket, device node or directory. Refused rather than written to,
+    /// and refused before it is *read*: opening a fifo blocks until the other end
+    /// is opened, so `selfie apply` hung indefinitely on one and `command_timeout`
+    /// did not bound it — that governs provider commands, not filesystem calls
+    ///
+    /// `kind` names what was found, because the remedy differs: a leftover socket
+    /// is deleted, a device node in `/dev` means the target path is wrong.
+    ///
+    /// Says "resolves to" rather than "is": this is answered with a *following*
+    /// stat, so it covers a symlink pointing at a fifo as well as a bare one. A
+    /// plain symlink is reported as [`SymlinkedTarget`](Self::SymlinkedTarget)
+    /// instead — that question is asked with a non-following stat, and the two
+    /// must not be conflated.
+    #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
+    IrregularTarget { path: PathBuf, kind: &'static str },
 }
 
 #[cfg(feature = "with_mocks")]

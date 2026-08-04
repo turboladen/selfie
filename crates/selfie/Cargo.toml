@@ -55,7 +55,10 @@ tokio = { version = "1.44", features = [
 libc = "0.2"
 
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.31", features = ["user"] }
+# "fs" is for `mkfifo`, which the irregular-target tests need to build a target
+# that blocks on open. There is no std equivalent; the alternatives were a
+# subprocess or the crate's first `unsafe` block.
+nix = { version = "0.31", features = ["user", "fs"] }
 
 [features]
 default = []

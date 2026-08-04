@@ -7,7 +7,7 @@
 //!
 //! **This deliberately does not scan every event for the secret**, the way the
 //! dotfile leak tests do. That pattern belongs to the dotfile resolve path, where
-//! ADR-0003 guarantees resolved content never enters an event at all. On the
+//! resolved content never enters an event at all. On the
 //! package path a check command's output entering the event stream *is* the
 //! design: `CheckResultCompleted` carries it so that `selfie package check` can
 //! display it, and `PackageEvent::Info` streams an install command's output live.

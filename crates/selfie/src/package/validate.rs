@@ -29,8 +29,7 @@ pub struct TemplateReference<'a> {
 ///
 /// An unused name is an error rather than a warning because it is the only signal
 /// available for a misspelling: a typo in the template leaves that placeholder
-/// verbatim, and the correctly-spelled declared name then goes unused. See
-/// ADR-0004.
+/// verbatim, and the correctly-spelled declared name then goes unused.
 ///
 /// Takes the template's contents rather than its path — reading it is the
 /// caller's job, which keeps validation free of file system access.

@@ -310,10 +310,8 @@ fn load_deploy_state<F: FileSystem>(
 /// shared host, readable by people who cannot read several of the files it
 /// describes.
 ///
-/// Secret-bearing entries are *not* in here: they record nothing at all, per
-/// ADR-0003. So this is not a complete list of what selfie manages, and tightening
-/// it does not make ADR-0003's argument moot — that turns on what a stored checksum
-/// of a credential would be, and there still is none.
+/// Secret-bearing entries are *not* in here — they record nothing at all — so this
+/// is not a complete list of what selfie manages.
 ///
 /// Owner-only comes from `write_file_private`, the same method the secret-bearing
 /// targets use, so the two cannot drift apart again. See its documentation for what
@@ -611,7 +609,7 @@ struct SecretTarget<'a> {
 ///
 /// Holds resolved content in memory only: it is compared against the target
 /// directly, written with owner-only permissions, and never recorded in deploy
-/// state. Nothing derived from it reaches an event. See ADR-0003.
+/// state. Nothing derived from it reaches an event.
 struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
@@ -686,6 +684,20 @@ where
                 return Err(SecretOutcome::Failed);
             }
         };
+
+        // Same guard the repository-file path applies, in the same position:
+        // before anything reads the target. `read_target` below opens it, and a
+        // fifo blocks that open indefinitely.
+        //
+        // `Failed` rather than `Skipped`, for the reason given above: this is
+        // decided from the target alone before anything runs, and a refused entry
+        // is not a skipped one.
+        if let Some(refusal) = self.filesystem.irregular_target_refusal(&path) {
+            self.sender
+                .send_warning(refusal_warning(entry.target(), &refusal))
+                .await;
+            return Err(SecretOutcome::Failed);
+        }
 
         Ok(SecretTarget {
             entry,
@@ -793,9 +805,8 @@ where
     /// only thing that establishes owner-only permissions, so returning here
     /// without it would leave a pre-existing world-readable target
     /// world-readable while reporting it as managed. That is exactly the
-    /// adoption case ADR-0003 cites as the reason this design is safe, and the
-    /// docs promise mode `0600` with no "unless the content already matched"
-    /// attached.
+    /// adoption case this design's safety rests on, and the docs promise mode
+    /// `0600` with no "unless the content already matched" attached.
     ///
     /// Tightening is conditional: rewriting a correct file on every apply would
     /// churn its inode and mtime and make "already in sync" a lie. A failure to
@@ -962,9 +973,50 @@ where
     }
 }
 
-// Three sites word a refused deploy: `handle_apply`'s check, the write itself, and
-// `handle_check_drift`. Format it here rather than at a call site — no test pins
-// this wrapper at the write site, so a copy there could drift unnoticed.
+/// Why an entry that is already in sync will nonetheless never settle.
+///
+/// An untracked target whose contents already match is `Skip`, so apply writes
+/// nothing and refuses nothing — and records nothing either, because selfie did
+/// not write it and never will (selfie-phnh). `detect_drift` therefore keeps
+/// answering `NotTracked`, and `dotfiles drift` keeps listing it, on every run
+/// forever. The user is shown a permanent complaint with no stated cause
+/// (selfie-ktha).
+///
+/// Both commands read this one function rather than repeating the condition, so
+/// the two cannot answer differently — the same reason the refusal itself is
+/// gated on `deploy_decision`. Apply puts the reason on its skip line and drift
+/// on its drift line: each says it in the channel it already uses, and neither
+/// raises a warning it did not raise before. That is what keeps the parity
+/// pins structural: the *refusal* still appears
+/// exactly where apply would refuse, and nothing here changes that gate.
+///
+/// Scoped to `NotTracked`. A **tracked** entry whose target later became a
+/// symlink is a different bug with no drift line at all, and
+/// answering for it here would half-fix that one from the wrong place.
+fn unmanaged_symlink_reason<F: FileSystem>(
+    filesystem: &F,
+    drift: &DriftType,
+    decision: &DeployDecision,
+    target: &TargetPath,
+) -> Option<&'static str> {
+    (*drift == DriftType::NotTracked
+        && matches!(decision, DeployDecision::Skip(_))
+        && filesystem.symlink_refusal(target).is_some())
+    .then_some(
+        "the target is a symlink, so selfie will not manage it \
+         and records no deployment for it",
+    )
+}
+
+// Every site that words a refused deploy shares this, so apply, drift and the
+// writer cannot describe the same refusal differently. Format it here rather than
+// at a call site — no test pins this wrapper at the write site, so a copy there
+// could drift unnoticed.
+//
+// Named as a property rather than counted. The count was "three", and was correct
+// until the same change that wrote it added three more call sites — a number in a
+// comment is a claim that goes stale on the next edit, in a file whose whole
+// subject is claims going stale.
 fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
 }
@@ -1294,6 +1346,18 @@ where
                 }
             };
 
+            // Ahead of every read of the target below, not merely ahead of the
+            // write. Reading a fifo blocks until a writer opens it, exactly as
+            // writing one blocks until a reader does, so the checksum read further
+            // down hangs `selfie apply` before the write is ever reached — and a
+            // character device would be read from, then written to. Placing this
+            // beside the symlink check instead would leave the hang in place.
+            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                refused_count += 1;
+                continue;
+            }
+
             // Read source file
             let source_content = match filesystem.read_file(&source_path) {
                 Ok(content) => content,
@@ -1378,6 +1442,10 @@ where
                 continue;
             }
 
+            // Computed before the match, which consumes `decision`. `None` for
+            // every branch but `Skip`, so only that one reads it.
+            let unmanaged = unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path);
+
             match decision {
                 DeployDecision::Deploy => {
                     if perform_deploy(
@@ -1421,12 +1489,23 @@ where
                     // that is the same window the check above already lives with --
                     // narrower, in fact, since nothing intervenes. Do not read it as
                     // "can never manufacture one": the race is small, not absent.
-                    if drift == DriftType::NotTracked
-                        && !options.dry_run
-                        && filesystem.symlink_refusal(&target_path).is_none()
-                    {
+                    //
+                    // `unmanaged` answers the same question the record condition
+                    // used to ask inline, so this is one `symlink_refusal` call
+                    // rather than two, and drift reads the same function.
+                    if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
                         deploy_state.record_deployment(source, &source_checksum);
                     }
+
+                    // Say why it will not settle, on the line the user is already
+                    // reading. Not a warning: nothing was written and nothing was
+                    // refused, and raising one here would break the control whose
+                    // whole value is that an in-sync symlinked target is left in
+                    // silence.
+                    let reason = match unmanaged {
+                        Some(why) => format!("{reason}; {why}"),
+                        None => reason,
+                    };
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
@@ -1635,6 +1714,14 @@ where
                 }
             };
 
+            // Drift reads the target to checksum it, so it hangs on a fifo exactly
+            // as apply does. Same guard, same position — ahead of the read — and
+            // worded identically through `refusal_warning`.
+            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                continue;
+            }
+
             // Same lexical guard as handle_apply — see `crate::paths::is_within`.
             if !is_within(&source_path, &base_dir) {
                 sender
@@ -1675,10 +1762,20 @@ where
             };
 
             let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             if drift != DriftType::None {
+                // The reason rides on the drift line rather than on a warning,
+                // because this is the line the user is already looking at and the
+                // one that keeps coming back. Apply says the same sentence on its
+                // skip line; both read `unmanaged_symlink_reason`.
                 sender
-                    .send_dotfile_drift_detected(target_path.display(), &drift)
+                    .send_dotfile_drift_detected(
+                        target_path.display(),
+                        &drift,
+                        unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path),
+                    )
                     .await;
                 drift_count += 1;
             }
@@ -1689,10 +1786,8 @@ where
             // and apply is silent for it; gating on the drift type would warn
             // exactly where apply says nothing. The drift event keeps its own gate
             // on purpose: only the refusal follows apply's decision.
-            if !matches!(
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum),
-                DeployDecision::Skip(_)
-            ) && let Some(refusal) = filesystem.symlink_refusal(&target_path)
+            if !matches!(decision, DeployDecision::Skip(_))
+                && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
             }
@@ -1760,6 +1855,21 @@ where
     // dangling one would be reported as a missing file.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    }
+
+    // Also ahead of the read: tracking copies the target into the dotfiles
+    // repository, and reading a fifo blocks until a writer arrives. There is
+    // nothing to track in a fifo or a device node in any case.
+    //
+    // Deliberately not `track_refusal`, which the symlink case above uses: that
+    // one appends "replace the symlink with a regular file, or track the path it
+    // points to", and neither half applies here -- a fifo points at nothing, and
+    // "replace it with a regular file" describes deleting the user's pipe. The
+    // remedy that does apply is naming a different target, so this says that.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "{refusal}. Point the entry at a regular file instead."
+        )));
     }
 
     if !filesystem.path_exists(expanded_target.path()) {
@@ -1923,6 +2033,21 @@ where
     // because refusing an idempotent no-op helps nobody.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    }
+
+    // Also ahead of the read: tracking copies the target into the dotfiles
+    // repository, and reading a fifo blocks until a writer arrives. There is
+    // nothing to track in a fifo or a device node in any case.
+    //
+    // Deliberately not `track_refusal`, which the symlink case above uses: that
+    // one appends "replace the symlink with a regular file, or track the path it
+    // points to", and neither half applies here -- a fifo points at nothing, and
+    // "replace it with a regular file" describes deleting the user's pipe. The
+    // remedy that does apply is naming a different target, so this says that.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "{refusal}. Point the entry at a regular file instead."
+        )));
     }
 
     // Validate the target path
