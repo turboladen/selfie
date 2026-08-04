@@ -179,6 +179,14 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
+    // On unix the refusal is the kernel's: `O_NOFOLLOW` on the creating `open(2)`,
+    // so there is no interval between deciding and writing. Elsewhere it is a
+    // `symlink_metadata` check before the write, which a concurrent planter can win
+    // — hence the weaker claim the trait makes for those platforms.
+    //
+    // A failed open is classified by stat-ing the path afterwards rather than by
+    // matching an errno, which is why a link deleted in that window reports as an
+    // `IoError`.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
         use std::io::Write as _;
 
@@ -299,6 +307,16 @@ impl FileSystem for RealFileSystem {
         symlink_refusal(path.path())
     }
 
+    // Uses a **following** stat, unlike `symlink_refusal` above. The question is
+    // what the next `open` lands on, and `read_file` and `write_file_no_follow`
+    // both resolve the path — so a non-following stat would see a symlink, answer
+    // `None`, and let the fifo behind it block the read. A dangling link fails the
+    // stat and is `None`, which is right: nothing to open, and `symlink_refusal`
+    // reports it. The two guards answer different questions and need different
+    // syscalls; mirroring this one on the other reintroduces the hang.
+    //
+    // Unix only. Elsewhere it is always `None` — the file types it distinguishes
+    // do not exist there.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         irregular_refusal(path.path())
     }

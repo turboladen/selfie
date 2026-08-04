@@ -597,40 +597,15 @@ A symlinked **parent directory** is still followed. Only the final component is 
 
 ### Fifo, socket and device targets
 
-A target that is a named pipe (fifo), a socket, or a character or block device node is **refused**,
+A target that is a named pipe (fifo), a socket, or a device node is refused rather than written to,
 by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
 
 ```
 ⚠ Skipping 'myapp/config.toml': /home/you/.config/myapp/config.toml: target resolves to a named pipe (fifo) and selfie will not write to it
 ```
 
-A fifo is the one that used to be dangerous. Opening one **blocks until the other end is opened** —
-for reading as much as for writing — so a fifo target hung `selfie apply` indefinitely, and
-`command_timeout` did not bound it: that setting governs provider commands, not filesystem calls.
-The hang came from the checksum read, before any write was attempted, which is why `drift` hung on
-one too. A device node was worse in a quieter way: selfie wrote your config file straight into it.
-
-The refusal says **resolves to** rather than _is_, because it follows symlinks: a link pointing at a
-fifo is refused as a fifo. That is deliberate — the hazard is whatever selfie would end up opening,
-and a link to a fifo blocks exactly as a bare one does. A link to an ordinary file is still reported
-as [a symlink](#symlinked-targets) instead.
-
-A **directory** at the target is not in this group. It cannot hang and cannot be written through, so
-it is reported as an ordinary error.
-
-Two layers do this, and they cover different things:
-
-- **Before reading or writing the target**, selfie checks what is there and refuses. For everything
-  that **reads** the target — the checksum apply takes, the one `drift` takes, the copy `track`
-  makes — this is the whole of the protection: there is no second layer behind it, and opening a
-  fifo to read blocks just as opening one to write does.
-- **The write itself** opens the target non-blocking and then inspects the file it actually opened,
-  refusing before writing a byte. This one has no gap: a fifo or device put in place after the first
-  check is still refused rather than written to.
-
-The first check is a check followed by an action, so something swapped in between the two is not
-caught by it. That bounds what it promises for a write, where the second layer is the guarantee — it
-does not make it optional for a read, where nothing else is watching.
+A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
+reason. A **directory** at the target is not in this group; it is reported as an ordinary error.
 
 #### `selfie dotfiles track` refuses a symlinked target
 

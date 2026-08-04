@@ -165,15 +165,12 @@ pub trait FileSystem: Send + Sync {
     /// symlink can still redirect where the file lands. Same limitation as
     /// [`write_file_private`](FileSystem::write_file_private).
     ///
-    /// # Platform notes
+    /// # Strength of the guarantee
     ///
-    /// On Unix the refusal is enforced by the **kernel**, through `O_NOFOLLOW` on the
-    /// creating `open(2)`. There is no interval between deciding and writing, so a
-    /// link planted concurrently is refused just the same.
-    ///
-    /// On every other platform this is a `symlink_metadata` check performed before the
-    /// write, which a concurrent planter can win. It is a mitigation there, not the
-    /// guarantee Unix gives.
+    /// On Unix a link planted concurrently is refused just the same — there is no
+    /// interval between deciding and writing. On other platforms the check precedes
+    /// the write, so a concurrent planter can win: a mitigation there, not a
+    /// guarantee.
     ///
     /// # Errors
     ///
@@ -183,10 +180,9 @@ pub trait FileSystem: Send + Sync {
     /// - Permission is denied to write to the file or directory
     /// - Any other IO error occurs during writing
     ///
-    /// The *refusal* is exact, but its *classification* is not quite: the failed open
-    /// is identified by looking at the path afterwards, so a link deleted in that
-    /// window surfaces as an `IoError` rather than `SymlinkedTarget`. Nothing was
-    /// written either way -- only the wording of the report differs.
+    /// The refusal is exact; its *classification* is not quite. A link deleted
+    /// between the failed write and the report surfaces as an `IoError` rather than
+    /// `SymlinkedTarget`. Nothing was written either way — only the wording differs.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
@@ -206,15 +202,10 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Never use it to decide whether a write is safe.
     /// [`write_file_no_follow`](FileSystem::write_file_no_follow) refuses on its own,
-    /// on Unix in the kernel. Checking here and writing there would reintroduce
-    /// exactly the race that method avoids; this only ever moves *when the user is
-    /// told* and *whether a deployment is recorded*, never whether the write happens.
-    ///
-    /// That second one is `handle_apply`'s already-in-sync branch, which declines to
-    /// record a deployment for a symlinked target it will never write to. It is safe
-    /// for the same reason the first is, and with the same limit: a stale answer
-    /// omits an entry the next run re-evaluates, and can manufacture one only
-    /// through a link planted inside the window between the check and the record.
+    /// and checking here as well would reintroduce the race that method avoids. This
+    /// may move *when the user is told* and *whether a deployment is recorded*, never
+    /// whether the write happens — a stale answer omits something the next run
+    /// re-evaluates.
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// [`FileSystemError::IrregularTarget`] if `path` resolves to something that
@@ -225,43 +216,17 @@ pub trait FileSystem: Send + Sync {
     /// symlink is [`symlink_refusal`](FileSystem::symlink_refusal)'s question, and
     /// answering it here too would report one thing two ways.
     ///
-    /// # Why this is asked with a *following* stat
+    /// Must answer for what an `open` of `path` would land on, so a symlink to a
+    /// fifo is a fifo.
     ///
-    /// The question is "what will the next `read_file` or `write_file_no_follow`
-    /// open", and both of those resolve the path. A non-following stat sees a
-    /// symlink and answers `None`, and the fifo it points at then blocks the read
-    /// — which is exactly the hang this exists to prevent, arriving through a link
-    /// instead of directly. A dangling link fails the stat and is `None`, which is
-    /// correct: there is nothing to open, and `symlink_refusal` reports it.
+    /// **Call this before every read of a path selfie does not control.** A write
+    /// is protected either way — [`write_file_no_follow`](FileSystem::write_file_no_follow)
+    /// re-checks the descriptor it opened — but nothing does that for a read, and
+    /// opening a fifo to read blocks exactly as opening it to write does. Removing
+    /// this from a read path restores an indefinite hang.
     ///
-    /// This is why it does not mirror `symlink_refusal`'s implementation. The two
-    /// answer different questions and need different syscalls.
-    ///
-    /// # For reads, this is the enforcement — there is no second layer
-    ///
-    /// [`write_file_no_follow`](FileSystem::write_file_no_follow) re-checks the
-    /// descriptor it opened, so a *write* is safe whether or not this was
-    /// consulted. **Nothing does that for a read.** Apply checksums the target,
-    /// drift checksums it, and track copies it, all through
-    /// [`read_file`](FileSystem::read_file), which has no equivalent check — and
-    /// opening a fifo for reading blocks exactly as opening it for writing does.
-    /// Removing this call from a read path restores the hang.
-    ///
-    /// So: deleting this is not "losing a nicety", it is removing the only thing
-    /// standing between `selfie apply` and an indefinite block.
-    ///
-    /// # What it does not do
-    ///
-    /// Stat-then-act is inherently racy: a fifo swapped in after this returns is
-    /// not caught by it, and for a *write* the guarantee lives in
-    /// `write_file_no_follow` rather than here. That is the limit of the claim —
-    /// it bounds what this promises, and does not make it optional.
-    ///
-    /// # Platform notes
-    ///
-    /// Unix only. Everywhere else this returns `None`: the file types it
-    /// distinguishes are Unix ones, and there is nothing it could meaningfully
-    /// report.
+    /// Advisory for writes: stat-then-act is racy, so a fifo swapped in afterwards
+    /// is caught by the writer rather than here.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
