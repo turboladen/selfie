@@ -34,15 +34,12 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
 ///
 /// [`FileSystem::write_file_private`], [`FileSystem::write_file_no_follow`],
 /// [`FileSystem::symlink_refusal`] and [`FileSystem::is_owner_only`] take this
-/// instead of a `&Path`, so canonicalizing a path and then writing it fails to
-/// compile. Each of those four applies to the path **as given**; handing one a
-/// resolved path silently forfeits what it promises.
+/// instead of a `&Path`, so canonicalizing and then writing fails to compile.
+/// Each applies to the path **as given**.
 ///
-/// The guarantee is that you cannot resolve a `TargetPath` once you hold one --
-/// not that the path inside was never resolved. There is deliberately no
-/// `Deref`, so `Path`'s own `canonicalize`, `exists` and `metadata` are not *on*
-/// the type. They stay one explicit [`path`](TargetPath::path) away, which is the
-/// point: resolving has to be written down rather than reached by autoderef.
+/// The guarantee is that you cannot resolve one once you hold it — not that the
+/// path inside was never resolved. There is no `Deref`, so `canonicalize`,
+/// `exists` and `metadata` stay one explicit [`path`](TargetPath::path) away.
 ///
 /// ```compile_fail
 /// use selfie::fs::{RealFileSystem, expand_target_path};
@@ -50,8 +47,6 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
 /// let target = expand_target_path(&RealFileSystem, "/etc/hosts");
 /// let _ = target.canonicalize();
 /// ```
-///
-/// and only this module can mint one:
 ///
 /// ```compile_fail
 /// use selfie::fs::TargetPath;
@@ -61,9 +56,8 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
 /// };
 /// ```
 ///
-/// Neither of those may fail for some unrelated reason -- a renamed export, a
-/// bad import -- so this one has to build, naming every item the two above
-/// import:
+/// Both must fail for the right reason and not a renamed export, so this one has
+/// to build:
 ///
 /// ```
 /// use selfie::fs::{RealFileSystem, TargetPath, expand_target_path};
@@ -149,16 +143,14 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
 
 /// A path *inside* a directory selfie manages, taken exactly as given.
 ///
-/// The third and weakest constructor, and the only one that is not about a
-/// deploy target at all. It exists because the writers and the refusal checks
-/// take a [`TargetPath`] rather than a `&Path`, and selfie also writes to — and
-/// reads from — paths it composed itself: the copy `track` places in the dotfiles
-/// repository, the package YAML `save_package` writes, and the repository files
-/// `apply` and `dotfiles drift` read back. Those need the same no-symlink,
-/// no-fifo treatment, and there is otherwise no way to ask for it.
+/// The third and weakest constructor, and the only one not about a deploy target.
+/// The writers and refusal checks take a [`TargetPath`], and selfie also reads and
+/// writes paths it composed itself — `track`'s copy into the dotfiles repository,
+/// the YAML `save_package` writes, the repository files `apply` and `drift` read.
+/// Those need the same no-symlink, no-fifo treatment.
 ///
-/// It promises **less** than the other two, and the difference is the whole
-/// reason it is a separate function rather than an argument to them:
+/// It promises **less** than the other two, which is why it is a separate
+/// function:
 ///
 /// - No [`TargetRejection`] rule. It does not require an absolute path and does
 ///   not refuse `~user/…`.
