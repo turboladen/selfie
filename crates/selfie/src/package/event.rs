@@ -2076,8 +2076,7 @@ pub enum PackageEvent {
         /// Why this drift will not clear on its own, when that is knowable.
         ///
         /// `Some` for an entry selfie will never manage, whose drift line would
-        /// otherwise reappear on every run with nothing to explain it
-        /// (selfie-ktha).
+        /// otherwise reappear on every run with nothing to explain it.
         reason: Option<String>,
     },
 

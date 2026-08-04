@@ -212,24 +212,15 @@ fn deploy_state_path<F: FileSystem>(
     )
 }
 
-/// Load the deploy state from disk, or return an empty state.
+/// Load the deploy state, or an empty one if it cannot be used.
 ///
-/// Returns the state and, when a state file could not be *used*, a message saying
-/// which file and what went wrong — the path where there is one to name, and the
-/// kind of file where the path itself is what could not be worked out. An absent
-/// file is the ordinary first-run case and produces no message: on a machine
-/// selfie has never deployed to, an empty state is the right answer rather than a
-/// condition to report.
+/// The second return is a warning naming the file and what went wrong. An absent
+/// file is the ordinary first run and warns nothing; a file that cannot be located,
+/// read, or parsed each warn differently, because the fixes differ.
 ///
-/// The other three outcomes each report, and a corrupt file and an unreadable one
-/// say different things on purpose — repairing malformed YAML and fixing
-/// permissions are different jobs, and one message for both sends the reader to
-/// the wrong one. Every caller proceeds afterwards: an empty state costs a round
-/// of conflict prompts, while refusing to run would block every apply until the
-/// file is repaired by hand. What it must not do is proceed *silently*.
-///
-/// Note the state this returns is later saved over the file it could not read.
-/// That is deferred deliberately rather than overlooked.
+/// Never fails: callers always proceed with whatever state came back. An empty one
+/// costs a round of conflict prompts, where refusing to run would block every apply
+/// until someone repairs the file by hand.
 fn load_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
@@ -301,41 +292,29 @@ fn load_deploy_state<F: FileSystem>(
     }
 }
 
-/// Save the deploy state to disk, owner-only where the platform allows it.
+/// Write the deploy state, owner-only where the platform allows it.
 ///
-/// The contents are not credentials, but they name each repository-file dotfile
-/// selfie manages on this machine, with checksums of the repository files behind
-/// them — those it deployed, and those it found already matching. At the process
-/// umask default that is typically world-readable — a reconnaissance aid on a
-/// shared host, readable by people who cannot read several of the files it
-/// describes.
+/// Owner-only because the file names every repository-file dotfile selfie manages
+/// here, with checksums — no credentials, but a reconnaissance aid on a shared
+/// host. Secret-bearing entries record nothing, so this is not a complete list.
 ///
-/// Secret-bearing entries are *not* in here — they record nothing at all — so this
-/// is not a complete list of what selfie manages.
+/// # Errors
 ///
-/// Owner-only comes from `write_file_private`, the same method the secret-bearing
-/// targets use, so the two cannot drift apart again. See its documentation for what
-/// that does and does not guarantee away from Unix.
-///
-/// # Durability, and why this file deliberately has less of it
-///
-/// `write_file_private` syncs the temporary file's **data** before renaming, so
-/// what is missing here is the directory fsync on the rename — and that omission
-/// is the safe direction. Losing the state file costs nothing: the entries are
-/// re-derived on the next run, an untracked source whose target already matches is
-/// recorded again, and one that differs is deployed.
-///
-/// Making it *more* durable would be the wrong fix. The record can
-/// only lie when it outlives the write it describes, so guaranteeing the state
-/// survives a crash while the target write may not would widen that window rather
-/// than close it. The ordering is established at the other end, in
-/// `write_file_no_follow`, which is durable before `record_deployment` runs.
-// selfie-aub
+/// [`FileSystemError`] if the state path cannot be resolved, the state cannot be
+/// serialized, or the write fails.
 fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
     state: &DeployState,
 ) -> Result<(), FileSystemError> {
+    // Deliberately less durable than `write_file_no_follow`: that syncs the file's
+    // data before renaming, and the directory fsync missing here is the safe
+    // direction. Losing this file costs nothing — the next run re-derives it.
+    //
+    // Do not "fix" that by syncing harder. A record only lies when it outlives the
+    // write it describes, so making the state survive a crash the target write did
+    // not would widen that window. The ordering is established at the other end:
+    // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
     let path = deploy_state_path(filesystem, config)?;
     let yaml = serde_saphyr::to_string(state).map_err(|e| {
         FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
@@ -541,13 +520,8 @@ where
 ///
 /// Commands and var names come from the package file and are references, not
 /// credentials, so they are safe to surface. Used as the `source` of the events
-/// this path emits. The wording lives on [`ContentSource`] so that apply, `selfie
-/// dotfiles list`, and the MCP server cannot describe the same entry differently.
-///
-/// Takes the content source rather than the entry so there is no refusal wording
-/// to choose here: what this returns goes into the event stream and thence into
-/// MCP's JSON, and an entry that cannot deploy has no business being named as
-/// though it had a source. Callers hold the matched `ContentSource` already.
+/// this path emits; the wording lives on [`ContentSource`] so apply, `dotfiles
+/// list` and the MCP server cannot describe the same entry differently.
 fn secret_origin(content: &ContentSource<'_>) -> String {
     content.to_string()
 }
@@ -618,13 +592,10 @@ struct SecretTarget<'a> {
 
 /// Deploying the secret-bearing entries of one package.
 ///
-/// The seven phases below were one function. Splitting them needed this struct
-/// first: each phase wants most of this context, so as free functions they all
-/// carried six or seven parameters, which is what kept them welded together.
-///
-/// Holds resolved content in memory only: it is compared against the target
-/// directly, written with owner-only permissions, and never recorded in deploy
-/// state. Nothing derived from it reaches an event.
+/// Resolved content stays in memory: compared against the target directly, written
+/// owner-only, never recorded in deploy state, never put in an event.
+// Exists so the phases below can be separate methods. Each wants most of this
+// context, and as free functions they carried six or seven parameters apiece.
 struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
@@ -988,26 +959,14 @@ where
     }
 }
 
-/// Why an entry that is already in sync will nonetheless never settle.
+/// Why an in-sync entry will never settle, when that is the case.
 ///
-/// An untracked target whose contents already match is `Skip`, so apply writes
-/// nothing and refuses nothing — and records nothing either, because selfie did
-/// not write it and never will (selfie-phnh). `detect_drift` therefore keeps
-/// answering `NotTracked`, and `dotfiles drift` keeps listing it, on every run
-/// forever. The user is shown a permanent complaint with no stated cause
-/// (selfie-ktha).
-///
-/// Both commands read this one function rather than repeating the condition, so
-/// the two cannot answer differently — the same reason the refusal itself is
-/// gated on `deploy_decision`. Apply puts the reason on its skip line and drift
-/// on its drift line: each says it in the channel it already uses, and neither
-/// raises a warning it did not raise before. That is what keeps the parity
-/// pins structural: the *refusal* still appears
-/// exactly where apply would refuse, and nothing here changes that gate.
-///
-/// Scoped to `NotTracked`. A **tracked** entry whose target later became a
-/// symlink is a different bug with no drift line at all, and
-/// answering for it here would half-fix that one from the wrong place.
+/// `Some` for an untracked target whose contents already match but which is a
+/// symlink: apply skips it and records nothing, so drift reports it on every run
+/// forever. Call it from both apply and drift so their wording cannot diverge.
+// Scoped to `NotTracked` deliberately. A *tracked* entry whose target later became
+// a symlink produces no drift line at all — a different bug — and answering for it
+// here would half-fix that one from the wrong place (selfie-v7py).
 fn unmanaged_symlink_reason<F: FileSystem>(
     filesystem: &F,
     drift: &DriftType,
