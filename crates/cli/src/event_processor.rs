@@ -551,6 +551,37 @@ mod tests {
         assert!(result.had_errors);
     }
 
+    // The CLI half of the sudo refusal: exit non-zero, and put the two halves of
+    // the refusal in their own channels rather than one blob. Constructed as a
+    // stream rather than driven through a service, per the event-consumer
+    // convention.
+    #[tokio::test]
+    async fn a_privilege_refusal_exits_non_zero_and_keeps_its_suggestion() {
+        use selfie::package::event::{OperationFailure, OperationResult};
+        use selfie::privilege::SudoRefusal;
+
+        let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
+            operation_info: make_operation_info("dotfiles"),
+            result: OperationResult::Failure(OperationFailure::Privilege(SudoRefusal)),
+        }];
+
+        let display = DisplayManager::new(false);
+        let display_for_assert = display.clone();
+        let processor = EventProcessor::new(display);
+        let event_stream = Box::pin(stream::iter(events));
+        let result = processor.process_events(event_stream, |_event| false).await;
+
+        assert_eq!(result.exit_code, 1);
+        assert!(result.had_errors);
+
+        // The collected detail carries both halves, so `--verbose` summaries and
+        // the MCP server's JSON still say what to do about it.
+        let collected = display_for_assert.collected_errors();
+        let message = &collected.first().expect("an error was collected").message;
+        assert!(message.contains("under sudo"), "got: {message}");
+        assert!(message.contains("--allow-root"), "got: {message}");
+    }
+
     #[tokio::test]
     async fn test_custom_handler_counts_event_types() {
         use selfie::package::event::{OperationFailure, OperationResult};
