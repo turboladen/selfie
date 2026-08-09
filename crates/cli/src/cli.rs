@@ -84,6 +84,18 @@ pub struct ClapCli {
     #[clap(long, global = true, default_value_t = false)]
     pub(crate) no_color: bool,
 
+    /// Deploy dotfiles even when running under sudo
+    ///
+    /// Without this, `apply` and the track commands refuse to run under sudo:
+    /// every dotfile in the run would be written as root, including the ones
+    /// under your home directory, and `~` may not even resolve to your home
+    /// directory once sudo has had its way with `$HOME`.
+    ///
+    /// Deliberately has no configuration-file equivalent — a setting that
+    /// disabled this permanently would defeat it.
+    #[clap(long, global = true, default_value_t = false)]
+    pub(crate) allow_root: bool,
+
     /// The main command to execute
     #[clap(subcommand)]
     pub(crate) command: ClapCommands,

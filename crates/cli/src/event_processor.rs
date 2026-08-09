@@ -262,6 +262,10 @@ impl EventProcessor {
                                 path.display()
                             ));
                         }
+                        OperationFailure::Privilege(refusal) => {
+                            self.display.print_error(refusal.message());
+                            self.display.print_suggestion(refusal.suggestion());
+                        }
                         _ => {
                             self.display.print_error(err.to_string());
                         }

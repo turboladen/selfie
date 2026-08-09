@@ -21,6 +21,7 @@ use selfie::{
         git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
+    privilege::RealPrivilege,
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
@@ -34,8 +35,12 @@ type ConcreteService = PackageServiceImpl<
     GixGitStatusProvider,
 >;
 
-type ConcreteDotfileService =
-    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner>;
+type ConcreteDotfileService = DotfileServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    RealFileSystem,
+    ShellCommandRunner,
+    RealPrivilege,
+>;
 
 type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
 
@@ -239,12 +244,16 @@ impl SelfieServer {
         // visible property of *this* adapter — `main.rs` says the same about
         // `PackageServiceImpl`. `command_timeout` remains the bound on a provider
         // command that blocks.
+        // No `allowing_root` call, and no tool parameter that could reach one: an
+        // AI assistant has no reason to be driving selfie under sudo, so the
+        // refusal here is unconditional.
         let mut dotfile_service = DotfileServiceImpl::new(
             repo,
             RealFileSystem,
             runner,
             config.clone(),
             CancellationToken::new(),
+            RealPrivilege,
         );
 
         // Add standalone dotfiles repository if the directory exists

@@ -16,6 +16,7 @@
 //! - [`config`] - Application configuration management
 //! - [`commands`] - Command execution abstractions
 //! - [`fs`] - File system abstractions
+//! - [`privilege`] - Whether the process holds privilege it should not write with
 //! - [`validation`] - Validation types and utilities
 //!
 //! # Examples
@@ -35,6 +36,7 @@ pub mod git;
 pub mod namespace;
 pub mod package;
 pub(crate) mod paths;
+pub mod privilege;
 pub mod sync_service;
 pub mod validation;
 

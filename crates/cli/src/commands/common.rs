@@ -19,6 +19,7 @@ use selfie::{
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
+    privilege::RealPrivilege,
     sync_service::{SyncService, service::SyncServiceImpl},
 };
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,12 @@ fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
 pub(crate) fn create_dotfile_service(
     config: &CliConfig,
     cancellation_token: CancellationToken,
-) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner> {
+) -> DotfileServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    RealFileSystem,
+    ShellCommandRunner,
+    RealPrivilege,
+> {
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
     let runner = create_command_runner(config);
@@ -67,7 +73,16 @@ pub(crate) fn create_dotfile_service(
         runner,
         config.selfie_config().clone(),
         cancellation_token,
+        RealPrivilege,
     );
+
+    // Every CLI path that writes a dotfile is built here — `apply`, `track`,
+    // `dotfiles track` and `package track-dotfile` all come through this
+    // function — which is why the sudo refusal is wired once, at the port, and
+    // not checked in each command handler.
+    if config.allow_root() {
+        service = service.allowing_root();
+    }
 
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if dotfiles_dir.is_dir() {

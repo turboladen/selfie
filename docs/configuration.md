@@ -273,6 +273,21 @@ selfie --verbose package install docker
 selfie --no-color package list
 ```
 
+### `--allow-root`
+
+`selfie apply` and the track commands refuse to run under `sudo`: the whole run would be written as
+root, including the entries under your home directory. `--allow-root` overrides that for the case
+where you mean it.
+
+```bash
+sudo selfie --allow-root apply
+```
+
+It is the one flag with **no** configuration-file equivalent, deliberately — a `cli:` setting that
+turned the guard off permanently would defeat a guard whose entire value is that it fires on the run
+you did not think through. Running as root without `sudo` (a container, a CI job, or root managing
+root's own dotfiles) is not affected and needs no flag.
+
 ## Configuration Validation
 
 Validate your configuration file:
