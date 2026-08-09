@@ -7104,6 +7104,11 @@ mod running_under_sudo {
     // Drift writes nothing, so gating it would be friction for no gain. This is
     // also the control proving the gate is scoped rather than global — a check
     // added to every method passes every test above and fails this one.
+    //
+    // Asserts drift *succeeded*, not merely that it was not refused by name. The
+    // weaker form was written first and a mutation walked straight through it: a
+    // gate reporting `Generic` rather than `Privilege` stops drift dead and still
+    // satisfies "the failure is not a privilege refusal".
     #[tokio::test]
     async fn drift_is_not_gated() {
         let dirs = TestDirs::new().running_as(Elevation::Sudo);
@@ -7112,8 +7117,11 @@ mod running_under_sudo {
         let events = collect_events(dirs.service().check_drift().await).await;
 
         assert!(
-            !was_refused(&events),
-            "drift is read-only and must not be refused: {:?}",
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "drift is read-only and must still run under sudo, got: {:?}",
             get_operation_result(&events)
         );
     }
