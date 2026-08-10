@@ -558,11 +558,24 @@ mod tests {
     #[tokio::test]
     async fn a_privilege_refusal_exits_non_zero_and_keeps_its_suggestion() {
         use selfie::package::event::{OperationFailure, OperationResult};
-        use selfie::privilege::SudoRefusal;
+        use selfie::privilege::{Elevation, Privilege, RootPolicy, WriteScope};
+
+        // Minted through the policy rather than constructed here: `SudoRefusal`'s
+        // field is private, so the library is the only thing that can produce
+        // one. An adapter cannot fabricate a refusal that never happened.
+        struct UnderSudo;
+        impl Privilege for UnderSudo {
+            fn elevation(&self) -> Elevation {
+                Elevation::Sudo
+            }
+        }
+        let refusal = RootPolicy::new(UnderSudo)
+            .refusal(WriteScope::Dotfiles)
+            .expect("a sudo run must be refused");
 
         let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
             operation_info: make_operation_info("dotfiles"),
-            result: OperationResult::Failure(OperationFailure::Privilege(SudoRefusal)),
+            result: OperationResult::Failure(OperationFailure::Privilege(refusal)),
         }];
 
         let display = DisplayManager::new(false);

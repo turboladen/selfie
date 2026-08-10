@@ -38,7 +38,7 @@ use crate::{
         validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
-    privilege::{Privilege, RootPolicy, SudoRefusal},
+    privilege::{Privilege, RootPolicy, SudoRefusal, WriteScope},
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -134,7 +134,7 @@ where
     /// that `P` needs no `'static`, `Clone` or `Debug` bound, which the other
     /// three ports all carry.
     fn sudo_refusal(&self) -> Option<SudoRefusal> {
-        self.root_policy.refusal()
+        self.root_policy.refusal(WriteScope::Dotfiles)
     }
 
     /// Collect packages from both the main package repository and the optional

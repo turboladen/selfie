@@ -20,7 +20,7 @@ use crate::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
         OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
     },
-    privilege::{Privilege, RootPolicy},
+    privilege::{Privilege, RootPolicy, WriteScope},
 };
 
 use super::port::{
@@ -217,7 +217,7 @@ where
         // between prepare and execute. Refusing at `execute_push` alone would
         // walk the user through every one of those prompts and then discard the
         // answers.
-        if let Some(refusal) = self.root_policy.refusal() {
+        if let Some(refusal) = self.root_policy.refusal(WriteScope::Repository) {
             return Err(SyncError::Privilege(refusal));
         }
 
@@ -294,7 +294,7 @@ where
         // Checked again here, not only in `prepare_push`. The two are separate
         // trait methods and the MCP server calls them as separate tool
         // invocations, so nothing guarantees the query ran first.
-        let refusal = self.root_policy.refusal();
+        let refusal = self.root_policy.refusal(WriteScope::Repository);
         let git = self.git.clone();
         let config = self.config.clone();
 
@@ -435,7 +435,7 @@ where
     }
 
     async fn pull(&self) -> EventStream {
-        let refusal = self.root_policy.refusal();
+        let refusal = self.root_policy.refusal(WriteScope::Repository);
         let git = self.git.clone();
         let config = self.config.clone();
 

@@ -50,11 +50,26 @@ pub trait Privilege {
     fn elevation(&self) -> Elevation;
 }
 
-/// Why selfie will not write dotfiles in this process.
+/// What a refused run would have written as root.
 ///
-/// Carries no data: there is exactly one thing being refused. It exists as a
-/// type rather than a message so a caller cannot paraphrase it, and so a test
-/// can assert the refusal happened without matching on prose.
+/// The refusal is the same rule either way, but the two consequences share no
+/// wording: a `sync push` writes no dotfile at all, so telling someone their home
+/// directory is at stake describes a run that was never going to happen. A
+/// message that confidently names the wrong damage is worse than a vague one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteScope {
+    /// Dotfiles, the deploy state file, and the dotfiles repository.
+    Dotfiles,
+    /// Commits, refs and index entries in the user's git repository.
+    Repository,
+}
+
+/// Why selfie will not write in this process.
+///
+/// Carries only [`WriteScope`]: there is one rule, and the scope decides how its
+/// consequence reads. It exists as a type rather than a message so a caller
+/// cannot paraphrase it, and so a test can assert the refusal happened without
+/// matching on prose.
 ///
 /// Splits its wording into [`message`](Self::message) and
 /// [`suggestion`](Self::suggestion) for the same reason
@@ -62,18 +77,26 @@ pub trait Privilege {
 /// channels for what went wrong and what to do about it, and joining them here
 /// would forfeit that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SudoRefusal;
+pub struct SudoRefusal(WriteScope);
 
 impl SudoRefusal {
     /// What is wrong, phrased to read after `"Error: "`.
     ///
     /// Names the consequence rather than the rule. "selfie will not run under
-    /// sudo" tells someone they are blocked; the files landing root-owned in
-    /// their home directory tells them why they did not want this.
+    /// sudo" tells someone they are blocked; the files landing root-owned where
+    /// they have to live with them tells them why they did not want this.
     #[must_use]
     pub fn message(&self) -> &'static str {
-        "Refusing to run under sudo: every dotfile in this run would be written as root, \
-         including the ones under your home directory"
+        match self.0 {
+            WriteScope::Dotfiles => {
+                "Refusing to run under sudo: every dotfile in this run would be written as root, \
+                 including the ones under your home directory"
+            }
+            WriteScope::Repository => {
+                "Refusing to run under sudo: this would leave root-owned objects, refs and index \
+                 entries inside a repository you own, which ordinary git then fails on"
+            }
+        }
     }
 
     /// What to do instead.
@@ -83,9 +106,17 @@ impl SudoRefusal {
     /// what it has no way to express is elevating for *one* entry.
     #[must_use]
     pub fn suggestion(&self) -> &'static str {
-        "Re-run without sudo. selfie has no per-entry privilege scope, so a target you cannot \
-         write stays one failed entry; pass --allow-root only if you intend every target in the \
-         run to be written as root."
+        match self.0 {
+            WriteScope::Dotfiles => {
+                "Re-run without sudo. selfie has no per-entry privilege scope, so a target you \
+                 cannot write stays one failed entry; pass --allow-root only if you intend every \
+                 target in the run to be written as root."
+            }
+            WriteScope::Repository => {
+                "Re-run without sudo. Pass --allow-root only if this repository is meant to be \
+                 root-owned."
+            }
+        }
     }
 }
 
@@ -94,13 +125,17 @@ impl SudoRefusal {
 /// The one place the rule lives. Private, and deliberately so: [`RootPolicy`] is
 /// the only way to apply it, which is what keeps a second service from growing
 /// its own slightly different gate.
-fn refuse_sudo<P: Privilege + ?Sized>(privilege: &P, allow_root: bool) -> Result<(), SudoRefusal> {
+fn refuse_sudo<P: Privilege + ?Sized>(
+    privilege: &P,
+    allow_root: bool,
+    scope: WriteScope,
+) -> Result<(), SudoRefusal> {
     if allow_root {
         return Ok(());
     }
 
     match privilege.elevation() {
-        Elevation::Sudo => Err(SudoRefusal),
+        Elevation::Sudo => Err(SudoRefusal(scope)),
         Elevation::Root | Elevation::Unprivileged => Ok(()),
     }
 }
@@ -139,11 +174,14 @@ impl<P: Privilege> RootPolicy<P> {
 
     /// The refusal this run must report instead of doing any work, if any.
     ///
+    /// `scope` is what the caller would have written, and only affects the
+    /// wording — the rule is the same for both.
+    ///
     /// Callers evaluate this *before* spawning, so `P` never has to cross an
     /// async boundary and needs no `'static` or `Clone` bound of its own.
     #[must_use]
-    pub fn refusal(&self) -> Option<SudoRefusal> {
-        refuse_sudo(&self.privilege, self.allow_root).err()
+    pub fn refusal(&self, scope: WriteScope) -> Option<SudoRefusal> {
+        refuse_sudo(&self.privilege, self.allow_root, scope).err()
     }
 }
 
@@ -209,8 +247,8 @@ mod tests {
     #[test]
     fn a_sudo_run_is_refused() {
         assert_eq!(
-            refuse_sudo(&fixed(Elevation::Sudo), false),
-            Err(SudoRefusal)
+            refuse_sudo(&fixed(Elevation::Sudo), false, WriteScope::Dotfiles),
+            Err(SudoRefusal(WriteScope::Dotfiles))
         );
     }
 
@@ -219,17 +257,26 @@ mod tests {
     // which is the entire reason the rule reads `SUDO_UID` at all.
     #[test]
     fn a_real_root_run_is_allowed() {
-        assert_eq!(refuse_sudo(&fixed(Elevation::Root), false), Ok(()));
+        assert_eq!(
+            refuse_sudo(&fixed(Elevation::Root), false, WriteScope::Dotfiles),
+            Ok(())
+        );
     }
 
     #[test]
     fn an_ordinary_run_is_allowed() {
-        assert_eq!(refuse_sudo(&fixed(Elevation::Unprivileged), false), Ok(()));
+        assert_eq!(
+            refuse_sudo(&fixed(Elevation::Unprivileged), false, WriteScope::Dotfiles),
+            Ok(())
+        );
     }
 
     #[test]
     fn allow_root_overrides_the_refusal() {
-        assert_eq!(refuse_sudo(&fixed(Elevation::Sudo), true), Ok(()));
+        assert_eq!(
+            refuse_sudo(&fixed(Elevation::Sudo), true, WriteScope::Dotfiles),
+            Ok(())
+        );
     }
 
     // The public surface, which is what every service actually calls. Testing
@@ -238,18 +285,21 @@ mod tests {
     #[test]
     fn the_policy_carries_both_halves() {
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Sudo)).refusal(),
-            Some(SudoRefusal)
+            RootPolicy::new(fixed(Elevation::Sudo)).refusal(WriteScope::Dotfiles),
+            Some(SudoRefusal(WriteScope::Dotfiles))
         );
         assert_eq!(
             RootPolicy::new(fixed(Elevation::Sudo))
                 .allowing_root()
-                .refusal(),
+                .refusal(WriteScope::Dotfiles),
             None
         );
-        assert_eq!(RootPolicy::new(fixed(Elevation::Root)).refusal(), None);
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Unprivileged)).refusal(),
+            RootPolicy::new(fixed(Elevation::Root)).refusal(WriteScope::Dotfiles),
+            None
+        );
+        assert_eq!(
+            RootPolicy::new(fixed(Elevation::Unprivileged)).refusal(WriteScope::Dotfiles),
             None
         );
     }
@@ -270,9 +320,11 @@ mod tests {
     #[test]
     fn the_suggestion_names_the_override() {
         assert!(
-            SudoRefusal.suggestion().contains("--allow-root"),
+            SudoRefusal(WriteScope::Dotfiles)
+                .suggestion()
+                .contains("--allow-root"),
             "got: {}",
-            SudoRefusal.suggestion()
+            SudoRefusal(WriteScope::Dotfiles).suggestion()
         );
     }
 }
