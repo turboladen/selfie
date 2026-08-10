@@ -36,9 +36,6 @@ use crate::completers::complete_package_names;
 pub struct ClapCli {
     /// Override the target environment from configuration file
     ///
-    /// Specifies which environment configuration to use for package operations.
-    /// This overrides the environment setting in the config file.
-    ///
     /// Example: --environment=macos, --environment=linux
     #[clap(long, short = 'e', global = true)]
     pub(crate) environment: Option<String>,
@@ -46,7 +43,6 @@ pub struct ClapCli {
     /// Override the package directory from configuration file
     ///
     /// Specifies the directory where package definition files are located.
-    /// This overrides the `package_directory` setting in the config file.
     ///
     /// Example: --package-directory=/path/to/packages
     #[clap(long, short = 'p', global = true)]
@@ -54,8 +50,7 @@ pub struct ClapCli {
 
     /// Override the dotfiles directory from configuration file
     ///
-    /// Specifies the directory containing dotfile source files for `selfie apply`.
-    /// This overrides the `dotfiles_directory` setting in the config file.
+    /// Specifies the directory for dotfile source files used by `selfie apply`.
     ///
     /// Example: --dotfiles-directory=/path/to/dotfiles
     #[clap(long, global = true)]
@@ -63,8 +58,7 @@ pub struct ClapCli {
 
     /// Override the state directory from configuration file
     ///
-    /// Specifies the directory for deploy state tracking (checksums, drift detection).
-    /// This overrides the `state_directory` setting in the config file.
+    /// Specifies the directory for deploy state tracking: checksums, drift detection.
     ///
     /// Example: --state-directory=/path/to/state
     #[clap(long, global = true)]
@@ -105,10 +99,6 @@ pub struct ClapCli {
 }
 
 /// Top-level commands available in the selfie CLI
-///
-/// The CLI is organized into main command categories that group related
-/// operations together. Each command category has its own subcommands
-/// and specific options.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ClapCommands {
     /// Spec (definition) operations — create, edit, remove, validate, info
@@ -125,20 +115,17 @@ pub(crate) enum ClapCommands {
 
     /// Deploy config files from packages to target locations
     ///
-    /// Deploys configuration files defined in package YAML files to their
-    /// target locations on the system. Detects conflicts and drift.
+    /// Detects conflicts and drift before writing anything.
     Apply(ApplyArgs),
 
     /// Dotfile management operations — drift, list, track
     ///
-    /// Commands for inspecting and managing dotfiles across packages.
-    /// Use `selfie apply` to deploy dotfiles; use `selfie dotfiles` to
-    /// inspect drift, list tracked files, and track new ones.
+    /// Inspects rather than deploys: use `selfie apply` to deploy dotfiles, and
+    /// these to inspect drift, list tracked files, and track new ones.
     Dotfiles(DotfilesCommands),
 
     /// Git sync operations — status, push, pull
     ///
-    /// Commands for syncing package specs and dotfiles via git.
     /// Generates per-package conventional commits automatically.
     Sync(SyncCommands),
 
