@@ -21,6 +21,7 @@ use selfie::{
         git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
+    privilege::{RealPrivilege, SudoPolicy},
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
@@ -34,10 +35,14 @@ type ConcreteService = PackageServiceImpl<
     GixGitStatusProvider,
 >;
 
-type ConcreteDotfileService =
-    DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner>;
+type ConcreteDotfileService = DotfileServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    RealFileSystem,
+    ShellCommandRunner,
+    RealPrivilege,
+>;
 
-type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
+type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService, RealPrivilege>;
 
 #[derive(Clone)]
 pub struct SelfieServer {
@@ -239,12 +244,16 @@ impl SelfieServer {
         // visible property of *this* adapter — `main.rs` says the same about
         // `PackageServiceImpl`. `command_timeout` remains the bound on a provider
         // command that blocks.
+        // No `allowing_sudo` call, and no tool parameter that could reach one: an
+        // AI assistant has no reason to be driving selfie under sudo, so the
+        // refusal here is unconditional.
         let mut dotfile_service = DotfileServiceImpl::new(
             repo,
             RealFileSystem,
             runner,
             config.clone(),
             CancellationToken::new(),
+            SudoPolicy::new(RealPrivilege),
         );
 
         // Add standalone dotfiles repository if the directory exists
@@ -253,8 +262,12 @@ impl SelfieServer {
             let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
             dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
         }
-        let sync_service =
-            SyncServiceImpl::new(GixGitAdapter, dotfile_service.clone(), config.clone());
+        let sync_service = SyncServiceImpl::new(
+            GixGitAdapter,
+            dotfile_service.clone(),
+            config.clone(),
+            SudoPolicy::new(RealPrivilege),
+        );
         Self {
             service: Arc::new(service),
             dotfile_service: Arc::new(dotfile_service),

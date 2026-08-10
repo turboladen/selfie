@@ -30,10 +30,25 @@ use selfie::{
     },
     fs::RealFileSystem,
     package::{
-        event::{OperationResult, OperationSuccess, PackageEvent},
+        event::{OperationFailure, OperationResult, OperationSuccess, PackageEvent},
         repository::YamlPackageRepository,
     },
+    privilege::{Elevation, Privilege, SudoPolicy},
 };
+
+// A service that believes it is running at a fixed privilege.
+//
+// Injected rather than read from the process, for the same reason `HomeAt`
+// exists below: the real answer depends on how the suite was invoked, so a
+// developer running `sudo cargo test` would otherwise fail every apply test.
+#[derive(Clone, Copy, Debug)]
+struct RunningAs(Elevation);
+
+impl Privilege for RunningAs {
+    fn elevation(&self) -> Elevation {
+        self.0
+    }
+}
 
 // Collect all events from an event stream
 async fn collect_events(stream: selfie::package::event::EventStream) -> Vec<PackageEvent> {
@@ -113,6 +128,9 @@ struct TestDirs {
     dotfiles_dir: PathBuf,
     target_dir: PathBuf,
     state_dir: PathBuf,
+    // What every service built from these dirs believes about its privilege,
+    // and whether `--allow-sudo` was passed.
+    sudo_policy: SudoPolicy<RunningAs>,
 }
 
 impl TestDirs {
@@ -132,14 +150,31 @@ impl TestDirs {
             dotfiles_dir,
             target_dir,
             state_dir,
+            sudo_policy: SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
         }
+    }
+
+    // Build every subsequent service as though the process were at `elevation`.
+    fn running_as(mut self, elevation: Elevation) -> Self {
+        self.sudo_policy = SudoPolicy::new(RunningAs(elevation));
+        self
+    }
+
+    // As though `--allow-sudo` had been passed. Keeps whatever elevation is set.
+    fn allowing_sudo(mut self) -> Self {
+        self.sudo_policy = self.sudo_policy.allowing_sudo();
+        self
     }
 
     // Create a service backed only by the packages directory.
     fn service(
         &self,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
-    {
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        RealFileSystem,
+        FakeCommandRunner,
+        RunningAs,
+    > {
         self.service_with_runner(FakeCommandRunner::new())
     }
 
@@ -147,8 +182,12 @@ impl TestDirs {
     fn service_with_runner(
         &self,
         runner: FakeCommandRunner,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
-    {
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        RealFileSystem,
+        FakeCommandRunner,
+        RunningAs,
+    > {
         self.service_with_runner_and_token(runner, CancellationToken::new())
     }
 
@@ -162,7 +201,7 @@ impl TestDirs {
         &self,
         runner: CR,
         token: CancellationToken,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, CR>
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, CR, RunningAs>
     where
         CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
     {
@@ -174,7 +213,7 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        DotfileServiceImpl::new(repo, fs, runner, config, token)
+        DotfileServiceImpl::new(repo, fs, runner, config, token, self.sudo_policy)
     }
 
     // A packages-only service whose `stop_on_error` is set explicitly.
@@ -185,8 +224,12 @@ impl TestDirs {
         &self,
         runner: FakeCommandRunner,
         stop_on_error: bool,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
-    {
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        RealFileSystem,
+        FakeCommandRunner,
+        RunningAs,
+    > {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -196,14 +239,25 @@ impl TestDirs {
             .stop_on_error(stop_on_error)
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        DotfileServiceImpl::new(repo, fs, runner, config, CancellationToken::new())
+        DotfileServiceImpl::new(
+            repo,
+            fs,
+            runner,
+            config,
+            CancellationToken::new(),
+            self.sudo_policy,
+        )
     }
 
     // Create a service backed by both `packages/` and `dotfiles/` directories.
     fn service_with_dotfiles(
         &self,
-    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, FakeCommandRunner>
-    {
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        RealFileSystem,
+        FakeCommandRunner,
+        RunningAs,
+    > {
         let fs = RealFileSystem;
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -219,6 +273,7 @@ impl TestDirs {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
+            self.sudo_policy,
         )
         .with_dotfiles_repository(dotfiles_repo)
     }
@@ -230,7 +285,8 @@ impl TestDirs {
     fn service_with_home(
         &self,
         home: &std::path::Path,
-    ) -> DotfileServiceImpl<YamlPackageRepository<HomeAt>, HomeAt, FakeCommandRunner> {
+    ) -> DotfileServiceImpl<YamlPackageRepository<HomeAt>, HomeAt, FakeCommandRunner, RunningAs>
+    {
         let fs = HomeAt(RealFileSystem, home.to_path_buf());
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -244,6 +300,7 @@ impl TestDirs {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
+            self.sudo_policy,
         )
         .with_dotfiles_repository(YamlPackageRepository::new(fs, self.dotfiles_dir.clone()))
     }
@@ -4637,6 +4694,7 @@ mod symlinked_targets {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
+            SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
         );
 
         let options = ApplyOptions {
@@ -6848,6 +6906,225 @@ mod irregular_sources {
             "REPO",
             "an ordinary source must still deploy: {:?}",
             warning_messages(&events)
+        );
+    }
+}
+
+// selfie-tcu2: `sudo selfie apply` writes every entry as root, including the
+// `~/` ones, and on a machine where sudo resets `$HOME` it writes them to
+// `/root` and reports success. These pin the refusal, and — more importantly —
+// that nothing was written before it fired.
+mod running_under_sudo {
+    use super::*;
+
+    fn repo_source(dirs: &TestDirs, relative: &str, content: &str) {
+        let path = dirs.package_dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    // A package with one deployable entry. Returns the target it deploys to, so
+    // a test can assert on the file that must not appear.
+    fn deployable(dirs: &TestDirs) -> PathBuf {
+        let target = dirs.target_dir.join("config.toml");
+        repo_source(dirs, "myapp/config.toml", "theme = \"dark\"\n");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    fn state_file(dirs: &TestDirs) -> PathBuf {
+        dirs.state_dir.join("deploy-state.yml")
+    }
+
+    fn was_refused(events: &[PackageEvent]) -> bool {
+        matches!(
+            get_operation_result(events),
+            Some(OperationResult::Failure(OperationFailure::Privilege(_)))
+        )
+    }
+
+    // The refusal is asserted by variant rather than by message, so rewording it
+    // cannot silently turn this into a test of prose.
+    #[tokio::test]
+    async fn apply_all_is_refused_and_writes_nothing() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        let target = deployable(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            was_refused(&events),
+            "expected a privilege refusal, got: {:?}",
+            get_operation_result(&events)
+        );
+        assert!(
+            !target.exists(),
+            "the target was written before the run was refused"
+        );
+        assert!(
+            !state_file(&dirs).exists(),
+            "deploy state was written as root; the next ordinary run could not read it"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_for_one_package_is_refused_and_writes_nothing() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        let target = deployable(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("myapp", ApplyOptions::default()).await).await;
+
+        assert!(
+            was_refused(&events),
+            "expected a privilege refusal, got: {:?}",
+            get_operation_result(&events)
+        );
+        assert!(!target.exists());
+        assert!(!state_file(&dirs).exists());
+    }
+
+    // A dry run writes no dotfile, but it still runs the user's provider
+    // commands — as root, against root's environment — so its answer is not
+    // trustworthy either. One rule, no exemption.
+    #[tokio::test]
+    async fn a_dry_run_is_refused_too() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        deployable(&dirs);
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert!(
+            was_refused(&events),
+            "expected a privilege refusal, got: {:?}",
+            get_operation_result(&events)
+        );
+    }
+
+    // Track writes into the dotfiles repository and the state file, so it is
+    // gated for the same reason apply is.
+    #[tokio::test]
+    async fn track_standalone_is_refused_and_writes_nothing() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            was_refused(&events),
+            "expected a privilege refusal, got: {:?}",
+            get_operation_result(&events)
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("starship.yml").exists(),
+            "a spec was written into the dotfiles repository as root"
+        );
+        assert!(!state_file(&dirs).exists());
+    }
+
+    #[tokio::test]
+    async fn track_for_package_is_refused_and_leaves_the_spec_alone() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        let before = std::fs::read_to_string(dirs.package_dir.join("bat.yml")).unwrap();
+
+        let target = dirs.target_dir.join("bat-config");
+        std::fs::write(&target, "--theme=ansi\n").unwrap();
+
+        let events = collect_events(
+            dirs.service()
+                .track_for_package("bat", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            was_refused(&events),
+            "expected a privilege refusal, got: {:?}",
+            get_operation_result(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dirs.package_dir.join("bat.yml")).unwrap(),
+            before,
+            "the package spec was rewritten as root"
+        );
+        assert!(!state_file(&dirs).exists());
+    }
+
+    // The control that keeps this rule from collapsing into "refuse at any euid
+    // 0". A container, a CI job, or root managing root's own dotfiles is a real
+    // use, and gating it behind a flag prevents an accident that cannot happen
+    // there.
+    #[tokio::test]
+    async fn real_root_deploys_normally() {
+        let dirs = TestDirs::new().running_as(Elevation::Root);
+        let target = deployable(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !was_refused(&events),
+            "a root run with no SUDO_UID must not be refused"
+        );
+        assert!(
+            target.exists(),
+            "the entry should have deployed: {:?}",
+            get_operation_result(&events)
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_sudo_deploys_despite_sudo() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        let target = deployable(&dirs);
+
+        let dirs = dirs.allowing_sudo();
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!was_refused(&events), "--allow-sudo must override the gate");
+        assert!(
+            target.exists(),
+            "the entry should have deployed: {:?}",
+            get_operation_result(&events)
+        );
+    }
+
+    // Drift writes nothing, so gating it would be friction for no gain. This is
+    // also the control proving the gate is scoped rather than global — a check
+    // added to every method passes every test above and fails this one.
+    //
+    // Asserts drift *succeeded*, not merely that it was not refused by name. The
+    // weaker form was written first and a mutation walked straight through it: a
+    // gate reporting `Generic` rather than `Privilege` stops drift dead and still
+    // satisfies "the failure is not a privilege refusal".
+    #[tokio::test]
+    async fn drift_is_not_gated() {
+        let dirs = TestDirs::new().running_as(Elevation::Sudo);
+        deployable(&dirs);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "drift is read-only and must still run under sudo, got: {:?}",
+            get_operation_result(&events)
         );
     }
 }

@@ -27,7 +27,17 @@ use selfie::{
     },
     fs::RealFileSystem,
     package::{event::PackageEvent, repository::YamlPackageRepository},
+    privilege::{Elevation, Privilege, SudoPolicy},
 };
+
+// A privilege port that always reports an ordinary, unelevated process.
+struct Unprivileged;
+
+impl Privilege for Unprivileged {
+    fn elevation(&self) -> Elevation {
+        Elevation::Unprivileged
+    }
+}
 
 const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
@@ -116,6 +126,9 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         runner,
         config,
         CancellationToken::new(),
+        // Not `RealPrivilege`: the answer would depend on how the suite was
+        // invoked, and `sudo cargo test` would refuse the apply this test needs.
+        SudoPolicy::new(Unprivileged),
     );
 
     let events: Vec<PackageEvent> = service

@@ -38,6 +38,7 @@ use crate::{
         validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
+    privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -61,7 +62,7 @@ const APPLY_CANCELLED: &str = "Apply cancelled";
 /// directory). When present, both repositories are scanned during apply and drift
 /// operations.
 #[derive(Debug, Clone)]
-pub struct DotfileServiceImpl<R, F, CR> {
+pub struct DotfileServiceImpl<R, F, CR, P> {
     package_repository: R,
     dotfiles_repository: Option<R>,
     filesystem: F,
@@ -70,13 +71,17 @@ pub struct DotfileServiceImpl<R, F, CR> {
     config: SelfieConfig,
     /// Token used to signal graceful cancellation of in-flight operations.
     cancellation_token: CancellationToken,
+    /// Whether this process reached root through `sudo`, and whether that was
+    /// asked for.
+    sudo_policy: SudoPolicy<P>,
 }
 
-impl<R, F, CR> DotfileServiceImpl<R, F, CR>
+impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
 where
     R: PackageRepository + Clone + Send + Sync + 'static,
     F: FileSystem + Clone + Send + Sync + 'static,
     CR: CommandRunner + Clone + Send + Sync + 'static,
+    P: Privilege,
 {
     /// Create a new dotfile service instance
     ///
@@ -86,12 +91,18 @@ where
     /// a live token has to say so at its own boundary — where it is visible —
     /// instead of a fresh token being conjured deep in the resolve path, which is
     /// what made Ctrl+C a no-op here for as long as this path could run commands.
+    ///
+    /// `sudo_policy` is required for the same reason. Sniffing the environment
+    /// inline would leave the MCP server — a second driving adapter that needs
+    /// the same refusal — to repeat the rule, and would leave no way to test
+    /// "running under sudo" short of running the suite as root.
     pub fn new(
         package_repository: R,
         filesystem: F,
         runner: CR,
         config: SelfieConfig,
         cancellation_token: CancellationToken,
+        sudo_policy: SudoPolicy<P>,
     ) -> Self {
         Self {
             package_repository,
@@ -100,6 +111,7 @@ where
             runner,
             config,
             cancellation_token,
+            sudo_policy,
         }
     }
 
@@ -111,6 +123,23 @@ where
     pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
         self.dotfiles_repository = Some(repo);
         self
+    }
+
+    /// The refusal this run must report instead of writing anything, if any.
+    ///
+    /// Every caller evaluates this *before* building the event stream, so `P`
+    /// itself never enters the spawned task — only the plain [`SudoRefusal`]
+    /// does. `Send + Sync` are still required, because the policy is a field of a
+    /// service the trait declares `Send + Sync`; what evaluating early buys is
+    /// that the [`DotfileService`] impl needs no `'static`, `Clone` or `Debug`
+    /// bound on `P`, which the other three ports all carry.
+    ///
+    /// That is a claim about the trait impl and not about the type. `Clone` is
+    /// derived, so cloning the service still requires `P: Clone` — which is why
+    /// the MCP server's `RealPrivilege` has it. A `P` with none of the three can
+    /// drive every method here; it just cannot be cloned along with the service.
+    fn sudo_refusal(&self) -> Option<SudoRefusal> {
+        self.sudo_policy.refusal(WriteScope::Dotfiles)
     }
 
     /// Collect packages from both the main package repository and the optional
@@ -333,13 +362,15 @@ fn is_safe_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
-impl<R, F, CR> DotfileService for DotfileServiceImpl<R, F, CR>
+impl<R, F, CR, P> DotfileService for DotfileServiceImpl<R, F, CR, P>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
     F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
     CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    P: Privilege + Send + Sync,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
+        let refusal = self.sudo_refusal();
         let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
@@ -358,8 +389,11 @@ where
 
             sender.send_started().await;
 
-            let result = match collected {
-                Ok((packages, warnings)) => {
+            let result = match (refusal, collected) {
+                (Some(refusal), _) => {
+                    OperationResult::Failure(OperationFailure::Privilege(refusal))
+                }
+                (None, Ok((packages, warnings))) => {
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
@@ -373,7 +407,7 @@ where
                     };
                     handle_apply(&packages, &ctx, None).await
                 }
-                Err(e) => {
+                (None, Err(e)) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
                 }
             };
@@ -383,6 +417,7 @@ where
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
+        let refusal = self.sudo_refusal();
         let collected =
             Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
         let fs = self.filesystem.clone();
@@ -402,8 +437,11 @@ where
 
             sender.send_started().await;
 
-            let result = match collected {
-                Ok((packages, warnings)) => {
+            let result = match (refusal, collected) {
+                (Some(refusal), _) => {
+                    OperationResult::Failure(OperationFailure::Privilege(refusal))
+                }
+                (None, Ok((packages, warnings))) => {
                     for warning in warnings {
                         sender.send_warning(&warning).await;
                     }
@@ -417,7 +455,7 @@ where
                     };
                     handle_apply(&packages, &ctx, Some(&name)).await
                 }
-                Err(e) => {
+                (None, Err(e)) => {
                     OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
                 }
             };
@@ -460,6 +498,7 @@ where
     }
 
     async fn track_standalone(&self, name: &str, target_path: &str) -> EventStream {
+        let refusal = self.sudo_refusal();
         let dotfiles_repo = self.dotfiles_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -476,21 +515,27 @@ where
             );
             sender.send_started().await;
 
-            let result = handle_track_standalone(
-                &name,
-                &target_path,
-                dotfiles_repo.as_ref(),
-                &fs,
-                &config,
-                &sender,
-            )
-            .await;
+            let result = match refusal {
+                Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
+                None => {
+                    handle_track_standalone(
+                        &name,
+                        &target_path,
+                        dotfiles_repo.as_ref(),
+                        &fs,
+                        &config,
+                        &sender,
+                    )
+                    .await
+                }
+            };
 
             sender.send_completed(result).await;
         })
     }
 
     async fn track_for_package(&self, package_name: &str, target_path: &str) -> EventStream {
+        let refusal = self.sudo_refusal();
         let repo = self.package_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -507,9 +552,20 @@ where
             );
             sender.send_started().await;
 
-            let result =
-                handle_track_for_package(&package_name, &target_path, &repo, &fs, &config, &sender)
-                    .await;
+            let result = match refusal {
+                Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
+                None => {
+                    handle_track_for_package(
+                        &package_name,
+                        &target_path,
+                        &repo,
+                        &fs,
+                        &config,
+                        &sender,
+                    )
+                    .await
+                }
+            };
 
             sender.send_completed(result).await;
         })

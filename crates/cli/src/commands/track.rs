@@ -45,6 +45,13 @@ pub(crate) async fn handle_track(
 ) -> i32 {
     info!("Interactive track for '{}'", file);
 
+    // Before the prompt, not after it. Every path out of `prompt_track_choice`
+    // ends in a service call the library refuses, so asking first would collect
+    // a package choice and a spec name and then throw both away.
+    if let Some(code) = common::refuse_under_sudo(config, display) {
+        return code;
+    }
+
     let repo = create_package_repository(config);
 
     // Check if this file is already tracked anywhere

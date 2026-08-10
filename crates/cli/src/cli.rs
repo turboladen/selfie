@@ -84,6 +84,21 @@ pub struct ClapCli {
     #[clap(long, global = true, default_value_t = false)]
     pub(crate) no_color: bool,
 
+    /// Run commands that write even when invoked under sudo
+    ///
+    /// Without this, every command that writes refuses to run under sudo: the
+    /// whole run would be written by whoever sudo switched to, including the
+    /// entries under your home directory, and `~` may not even resolve to your
+    /// home directory once sudo has had its way with `$HOME`.
+    ///
+    /// `sudo -u alice` is refused on the same grounds — the damage is the same,
+    /// only the owner differs.
+    ///
+    /// Deliberately has no configuration-file equivalent — a setting that
+    /// disabled this permanently would defeat it.
+    #[clap(long, global = true, default_value_t = false)]
+    pub(crate) allow_sudo: bool,
+
     /// The main command to execute
     #[clap(subcommand)]
     pub(crate) command: ClapCommands,

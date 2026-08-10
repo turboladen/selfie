@@ -53,12 +53,17 @@ tokio = { version = "1.44", features = [
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
+# has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
+# `unsafe` for the same reason the dev entry below did.
+nix = { version = "0.31", features = ["user"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # "fs" is for `mkfifo`, which the irregular-target tests need to build a target
 # that blocks on open. There is no std equivalent; the alternatives were a
-# subprocess or the crate's first `unsafe` block.
-nix = { version = "0.31", features = ["user", "fs"] }
+# subprocess or the crate's first `unsafe` block. "user" comes from the
+# production entry above, which cargo unifies into the test build.
+nix = { version = "0.31", features = ["fs"] }
 
 [features]
 default = []

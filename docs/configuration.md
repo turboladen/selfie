@@ -273,6 +273,42 @@ selfie --verbose package install docker
 selfie --no-color package list
 ```
 
+## Running Under `sudo`
+
+The commands in the table below refuse to run under `sudo`. `--allow-sudo` overrides that for the
+case where you mean it. Everything else is unaffected — see
+[what is not refused](#what-is-not-refused).
+
+What is refused is running as a **different user than the one who invoked selfie**. That includes
+`sudo -u alice`, which is not root at all and does the same kind of damage with a different owner on
+the files. Running as root _without_ `sudo` — a container, a CI job, or root managing root's own
+dotfiles — is not affected and needs no flag, and neither is a process that merely inherited
+`SUDO_UID` from a session running as you.
+
+| command                                            | why it is refused                                                                                                       |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `apply`                                            | the whole run is written by the other user, including the entries under your home directory                             |
+| `track`, `dotfiles track`, `package track-dotfile` | the same, plus a spec and deploy state you can no longer rewrite                                                        |
+| `sync push`, `sync pull`                           | commits, fetches and merges as that user, leaving objects, refs and index entries you do not own in a repository you do |
+
+The sync case is the one that does not repair itself. A deploy-state file owned by the wrong user is
+replaced on the next successful run, because it is written from a temporary file you own; git
+objects are not, and the next ordinary `git` fails on them.
+
+### What is not refused
+
+Read-only commands — `dotfiles drift`, `dotfiles list`, `sync status`, `package status`, everything
+under `spec` — are unaffected: they write nothing. So is `package install`, even though it very much
+writes: the commands it runs are yours, and some of them genuinely need `sudo`.
+
+```bash
+sudo selfie --allow-sudo apply
+```
+
+It is the one flag with **no** configuration-file equivalent, deliberately — a `cli:` setting that
+turned the guard off permanently would defeat a guard whose entire value is that it fires on the run
+you did not think through.
+
 ## Configuration Validation
 
 Validate your configuration file:

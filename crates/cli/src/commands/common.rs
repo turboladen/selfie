@@ -19,6 +19,7 @@ use selfie::{
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
+    privilege::{RealPrivilege, SudoPolicy, WriteScope},
     sync_service::{SyncService, service::SyncServiceImpl},
 };
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,12 @@ fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
 pub(crate) fn create_dotfile_service(
     config: &CliConfig,
     cancellation_token: CancellationToken,
-) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, RealFileSystem, ShellCommandRunner> {
+) -> DotfileServiceImpl<
+    YamlPackageRepository<RealFileSystem>,
+    RealFileSystem,
+    ShellCommandRunner,
+    RealPrivilege,
+> {
     let repo = create_package_repository(config);
     let fs = RealFileSystem;
     let runner = create_command_runner(config);
@@ -67,6 +73,7 @@ pub(crate) fn create_dotfile_service(
         runner,
         config.selfie_config().clone(),
         cancellation_token,
+        sudo_policy(config),
     );
 
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
@@ -87,7 +94,51 @@ pub(crate) fn create_sync_service(
 ) -> impl SyncService {
     let git = GixGitAdapter;
     let dotfile_service = create_dotfile_service(config, cancellation_token);
-    SyncServiceImpl::new(git, dotfile_service, config.selfie_config().clone())
+    // Its own policy rather than one read back out of `dotfile_service`: sync
+    // commits and pushes as root even though it deploys nothing, and root-owned
+    // git objects in a user-owned repository do not self-heal.
+    SyncServiceImpl::new(
+        git,
+        dotfile_service,
+        config.selfie_config().clone(),
+        sudo_policy(config),
+    )
+}
+
+/// The sudo refusal every service that writes is built with.
+///
+/// One function so the CLI cannot hand `--allow-sudo` to one service and forget
+/// the other. The refusal itself lives in the library and holds for any caller;
+/// what is true only by convention is that every CLI write path is built through
+/// the two constructors above. Nothing enforces that — `apply` once built its own
+/// service — so do not read it as a guarantee.
+fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
+    let policy = SudoPolicy::new(RealPrivilege);
+    if config.allow_sudo() {
+        policy.allowing_sudo()
+    } else {
+        policy
+    }
+}
+
+/// Report the sudo refusal before a handler does any work of its own.
+///
+/// **Not the gate.** The gate is in the library and refuses whatever the CLI
+/// does; this is an early exit so a handler does not do visible work it is about
+/// to throw away. Both read the same [`sudo_policy`], so they cannot disagree
+/// about whether to refuse — only about how far the run got first.
+///
+/// It exists because two handlers had something to do before the service was
+/// built, and both did the wrong thing under sudo: `handle_track_standalone`
+/// checked for the dotfiles directory, which on a machine where sudo resets
+/// `$HOME` resolves under `/root`, and suggested `mkdir -p /root/…` — creating
+/// the root-owned directory the refusal exists to prevent. `selfie track` ran the
+/// whole interactive prompt and discarded the answers.
+pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<i32> {
+    let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
+    display.print_error(refusal.message());
+    display.print_suggestion(refusal.suggestion());
+    Some(1)
 }
 
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.
@@ -100,6 +151,14 @@ pub(crate) async fn handle_track_standalone(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
+    // Ahead of the directory check, not after it. Under sudo on a machine whose
+    // sudoers policy resets `$HOME`, `dotfiles_directory` resolves under `/root`,
+    // the check fails, and the suggestion below tells the user to `mkdir -p` it —
+    // creating the root-owned directory the refusal exists to prevent.
+    if let Some(code) = refuse_under_sudo(config, display) {
+        return code;
+    }
+
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if !dotfiles_dir.is_dir() {
         display.print_error(format!(

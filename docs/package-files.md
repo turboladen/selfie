@@ -92,6 +92,16 @@ Prefer `~/` for anything under your home directory. `~/.gemrc` names the same fi
 same everywhere, such as `/etc/nginx.conf`. selfie deploys as whoever runs it and never elevates, so
 a target like that one needs write access you may not have.
 
+**`sudo selfie apply` is not the answer, and selfie refuses it.** There is no per-entry privilege
+scope, so the whole run would be written by whoever sudo switched to — including every `~/` entry,
+leaving files you no longer own in your own home directory. Worse, `~` may not even mean your home
+directory: expansion reads `$HOME`, and on a machine whose sudoers policy resets it, the dotfiles
+land in `/root` and the run reports success. A target you cannot write stays one failed entry, which
+is the smaller problem. The same refusal covers `selfie track`, `selfie dotfiles track` and
+`selfie package track-dotfile`. `--allow-sudo` overrides it, for the case where you do mean every
+target to be written by that user. `sudo -u alice` is refused on the same grounds, and for the same
+reason.
+
 The `~user/…` form — another user's home directory — is **not** supported. selfie expands `~/` for
 whoever is running it and nothing else. `selfie spec validate` reports a `~alice/.gemrc` target as
 an error, and `selfie apply` refuses it rather than deploying it somewhere.

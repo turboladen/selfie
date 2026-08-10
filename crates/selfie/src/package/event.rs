@@ -858,6 +858,13 @@ pub enum OperationFailure {
     DependencyError(DependencyFailure),
     /// Package listing/directory issues
     PackageList(crate::package::port::PackageListError),
+    /// The process holds privilege it must not write dotfiles with.
+    ///
+    /// Typed rather than folded into [`Generic`](Self::Generic) so a test can
+    /// assert the refusal happened without matching on its wording, and so an
+    /// adapter can render the two halves of
+    /// [`SudoRefusal`](crate::privilege::SudoRefusal) in its own channels.
+    Privilege(crate::privilege::SudoRefusal),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -915,6 +922,11 @@ impl std::fmt::Display for OperationFailure {
                 write!(f, "Dependency error: {dep_err}")
             }
             OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
+            // Both halves, because this is the one-string rendering an adapter
+            // falls back to when it has nowhere separate to put a suggestion.
+            OperationFailure::Privilege(refusal) => {
+                write!(f, "{}. {}", refusal.message(), refusal.suggestion())
+            }
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
