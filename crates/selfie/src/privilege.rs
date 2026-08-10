@@ -205,7 +205,7 @@ impl<P: Privilege> RootPolicy<P> {
 /// inherited the variable and is still running as the user who set it — a shell
 /// started under `sudo -u $USER`, or anything spawned from one.
 ///
-/// An unparseable value is treated as `sudo`. It cannot be compared, and
+/// An unparsable value is treated as `sudo`. It cannot be compared, and
 /// refusing is the safe direction; a real `sudo` always sets a decimal uid, so
 /// anything else was not written by the thing this rule is about.
 ///
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(classify(ROOT, Some("0")), Elevation::Root);
     }
 
-    // Unparseable cannot be compared, so it is refused. A real sudo always writes
+    // Unparsable cannot be compared, so it is refused. A real sudo always writes
     // a decimal uid; anything else was not written by the thing being detected,
     // and refusing is the safe direction.
     #[test]
