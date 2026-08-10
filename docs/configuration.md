@@ -275,15 +275,15 @@ selfie --no-color package list
 
 ## Running Under `sudo`
 
-Every selfie command that writes refuses to run under `sudo`. `--allow-sudo` overrides that for the
-case where you mean it.
+The commands in the table below refuse to run under `sudo`. `--allow-sudo` overrides that for the
+case where you mean it. Everything else is unaffected — see
+[what is not refused](#what-is-not-refused).
 
-What is refused is running as a **different user than the one who invoked selfie** — so
-`sudo -u
-alice selfie apply` is refused too, even though it is not root. It does the same kind of
-damage, just with a different owner on the files. Running as root _without_ `sudo` — a container, a
-CI job, or root managing root's own dotfiles — is not affected and needs no flag, and neither is a
-process that merely inherited `SUDO_UID` from a session running as you.
+What is refused is running as a **different user than the one who invoked selfie**. That includes
+`sudo -u alice`, which is not root at all and does the same kind of damage with a different owner on
+the files. Running as root _without_ `sudo` — a container, a CI job, or root managing root's own
+dotfiles — is not affected and needs no flag, and neither is a process that merely inherited
+`SUDO_UID` from a session running as you.
 
 | command                                            | why it is refused                                                                                                       |
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -295,9 +295,11 @@ The sync case is the one that does not repair itself. A deploy-state file owned 
 replaced on the next successful run, because it is written from a temporary file you own; git
 objects are not, and the next ordinary `git` fails on them.
 
+### What is not refused
+
 Read-only commands — `dotfiles drift`, `dotfiles list`, `sync status`, `package status`, everything
-under `spec` — are unaffected. So is `package install`: its commands are yours, and some of them
-genuinely need `sudo`.
+under `spec` — are unaffected: they write nothing. So is `package install`, even though it very much
+writes: the commands it runs are yours, and some of them genuinely need `sudo`.
 
 ```bash
 sudo selfie --allow-sudo apply

@@ -131,8 +131,13 @@ where
     /// itself never enters the spawned task — only the plain [`SudoRefusal`]
     /// does. `Send + Sync` are still required, because the policy is a field of a
     /// service the trait declares `Send + Sync`; what evaluating early buys is
-    /// that `P` needs no `'static`, `Clone` or `Debug` bound, which the other
-    /// three ports all carry.
+    /// that the [`DotfileService`] impl needs no `'static`, `Clone` or `Debug`
+    /// bound on `P`, which the other three ports all carry.
+    ///
+    /// That is a claim about the trait impl and not about the type. `Clone` is
+    /// derived, so cloning the service still requires `P: Clone` — which is why
+    /// the MCP server's `RealPrivilege` has it. A `P` with none of the three can
+    /// drive every method here; it just cannot be cloned along with the service.
     fn sudo_refusal(&self) -> Option<SudoRefusal> {
         self.sudo_policy.refusal(WriteScope::Dotfiles)
     }
