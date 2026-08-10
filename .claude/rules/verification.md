@@ -26,6 +26,9 @@ These are cheap, they apply everywhere, and each one is here because skipping it
 - **Your context's copy of `CLAUDE.md` and `.claude/rules/*` is a snapshot from session start**, not
   the tree, and subagents inherit it. Four agents reported a CLAUDE.md claim corrected hours earlier
   by a merged PR. Before calling any doc or rule stale, read it: `git show <ref>:<path>`.
+- A check whose pass condition is **"exited non-zero"** proves almost nothing: nearly every failure
+  mode satisfies it, including never reaching the code under test. The sudo-refusal check passed on
+  a run that died on a missing config file. Assert on the specific output as well as the status.
 
 Before reporting a negative result — "it isn't there", "the gate fails", "no test covers this" —
 confirm it a second way. Two of this session's accusations were withdrawn after doing so.
@@ -51,6 +54,10 @@ else's name.
 Better still, `git commit -- <paths>`. It commits exactly what you name and leaves another writer's
 index alone; plain staging does not, and a concurrently staged deletion will otherwise ride your
 commit.
+
+It also **skips untracked files**, which is how a commit here ended up missing the new module it was
+built around and not compiling. Path-limited commit and amend only ever consider files git already
+knows. Check `git status --short` for `??` first, or `git add -- <path>` the new ones.
 
 `git commit --amend -- <paths>` rebuilds the commit from the parent tree plus only those paths, so
 it **silently drops deletions** the original commit made. Use `git add -- <paths>` then a bare

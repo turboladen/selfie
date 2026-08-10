@@ -76,6 +76,24 @@ so every check passes and it is scored **survived**. Confirm the mutated line is
 value observed before recording either verdict: the two failure modes are symmetric, and neither
 shows up in an exit status.
 
+## A test that watches control flow cannot see what the program said
+
+Three refusal messages shipped wrong in one change: one claimed a supported feature was unsupported,
+one described dotfiles on a command that writes none, and one named root on a path that refuses
+non-root users too. Every test passed, and each was right about what it asserted — that the refusal
+fired, and which variant it was.
+
+Assert the _content_ of anything a user reads, and prefer asserting what it must **not** say: the
+wording stays editable, while a copy-paste between two arms fails. Check every method that
+contributes, not the first one — the third defect above survived in `suggestion()` after `message()`
+was fixed and tested.
+
+**Run the binary and read the output.** All three were found that way, twice from a container run,
+never from the suite. Behavior that depends on process identity — euid, `SUDO_UID` — cannot be
+exercised from `cargo test` at all: mock the port for the rule, then confirm the real thing in a
+throwaway container (`docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/build rust:latest`
+— a separate target dir because macOS artifacts are Mach-O).
+
 ## Ordering
 
 Do not depend on filesystem enumeration order. `readdir` returns sorted-ish order on macOS/APFS and
