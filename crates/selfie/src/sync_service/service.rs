@@ -20,7 +20,7 @@ use crate::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
         OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
     },
-    privilege::{Privilege, RootPolicy, WriteScope},
+    privilege::{Privilege, SudoPolicy, WriteScope},
 };
 
 use super::port::{
@@ -38,7 +38,7 @@ pub struct SyncServiceImpl<G, D, P> {
     git: G,
     dotfile_service: D,
     config: SelfieConfig,
-    root_policy: RootPolicy<P>,
+    sudo_policy: SudoPolicy<P>,
 }
 
 impl<G, D, P> SyncServiceImpl<G, D, P>
@@ -49,7 +49,7 @@ where
 {
     /// Create a new sync service instance.
     ///
-    /// `root_policy` is its own rather than being read back out of
+    /// `sudo_policy` is its own rather than being read back out of
     /// `dotfile_service`: [`DotfileService`] is a port about dotfiles, and giving
     /// it a "what privilege am I running with" accessor would put a question
     /// there that has nothing to do with the port's job.
@@ -57,13 +57,13 @@ where
         git: G,
         dotfile_service: D,
         config: SelfieConfig,
-        root_policy: RootPolicy<P>,
+        sudo_policy: SudoPolicy<P>,
     ) -> Self {
         Self {
             git,
             dotfile_service,
             config,
-            root_policy,
+            sudo_policy,
         }
     }
 
@@ -217,7 +217,7 @@ where
         // between prepare and execute. Refusing at `execute_push` alone would
         // walk the user through every one of those prompts and then discard the
         // answers.
-        if let Some(refusal) = self.root_policy.refusal(WriteScope::Repository) {
+        if let Some(refusal) = self.sudo_policy.refusal(WriteScope::Repository) {
             return Err(SyncError::Privilege(refusal));
         }
 
@@ -294,7 +294,7 @@ where
         // Checked again here, not only in `prepare_push`. The two are separate
         // trait methods and the MCP server calls them as separate tool
         // invocations, so nothing guarantees the query ran first.
-        let refusal = self.root_policy.refusal(WriteScope::Repository);
+        let refusal = self.sudo_policy.refusal(WriteScope::Repository);
         let git = self.git.clone();
         let config = self.config.clone();
 
@@ -435,7 +435,7 @@ where
     }
 
     async fn pull(&self) -> EventStream {
-        let refusal = self.root_policy.refusal(WriteScope::Repository);
+        let refusal = self.sudo_policy.refusal(WriteScope::Repository);
         let git = self.git.clone();
         let config = self.config.clone();
 
@@ -1772,7 +1772,7 @@ mod credential_egress_tests {
                 .environment("test-env")
                 .package_directory("/tmp/selfie-packages")
                 .build(),
-            RootPolicy::new(RunningAs(elevation)),
+            SudoPolicy::new(RunningAs(elevation)),
         )
     }
 
@@ -1877,7 +1877,7 @@ mod credential_egress_tests {
                     .environment("test-env")
                     .package_directory("/tmp/selfie-packages")
                     .build(),
-                RootPolicy::new(RunningAs(Elevation::Sudo)),
+                SudoPolicy::new(RunningAs(Elevation::Sudo)),
             )
         }
 
@@ -1959,7 +1959,7 @@ mod credential_egress_tests {
         }
 
         #[tokio::test]
-        async fn allow_root_overrides_the_sync_refusal() {
+        async fn allow_sudo_overrides_the_sync_refusal() {
             let service = SyncServiceImpl::new(
                 GitFailingWith {
                     fail_at: FailAt::Push,
@@ -1969,14 +1969,14 @@ mod credential_egress_tests {
                     .environment("test-env")
                     .package_directory("/tmp/selfie-packages")
                     .build(),
-                RootPolicy::new(RunningAs(Elevation::Sudo)).allowing_root(),
+                SudoPolicy::new(RunningAs(Elevation::Sudo)).allowing_sudo(),
             );
 
             let result = service.prepare_push(&PushOptions::default()).await;
 
             assert!(
                 reached_validation(&result),
-                "--allow-root must override the gate: {result:?}"
+                "--allow-sudo must override the gate: {result:?}"
             );
         }
     }

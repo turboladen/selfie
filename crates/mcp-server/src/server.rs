@@ -21,7 +21,7 @@ use selfie::{
         git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
-    privilege::{RealPrivilege, RootPolicy},
+    privilege::{RealPrivilege, SudoPolicy},
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
@@ -244,7 +244,7 @@ impl SelfieServer {
         // visible property of *this* adapter — `main.rs` says the same about
         // `PackageServiceImpl`. `command_timeout` remains the bound on a provider
         // command that blocks.
-        // No `allowing_root` call, and no tool parameter that could reach one: an
+        // No `allowing_sudo` call, and no tool parameter that could reach one: an
         // AI assistant has no reason to be driving selfie under sudo, so the
         // refusal here is unconditional.
         let mut dotfile_service = DotfileServiceImpl::new(
@@ -253,7 +253,7 @@ impl SelfieServer {
             runner,
             config.clone(),
             CancellationToken::new(),
-            RootPolicy::new(RealPrivilege),
+            SudoPolicy::new(RealPrivilege),
         );
 
         // Add standalone dotfiles repository if the directory exists
@@ -266,7 +266,7 @@ impl SelfieServer {
             GixGitAdapter,
             dotfile_service.clone(),
             config.clone(),
-            RootPolicy::new(RealPrivilege),
+            SudoPolicy::new(RealPrivilege),
         );
         Self {
             service: Arc::new(service),

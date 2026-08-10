@@ -275,7 +275,7 @@ selfie --no-color package list
 
 ## Running Under `sudo`
 
-Every selfie command that writes refuses to run under `sudo`. `--allow-root` overrides that for the
+Every selfie command that writes refuses to run under `sudo`. `--allow-sudo` overrides that for the
 case where you mean it.
 
 What is refused is running as a **different user than the one who invoked selfie** — so
@@ -300,7 +300,7 @@ under `spec` — are unaffected. So is `package install`: its commands are yours
 genuinely need `sudo`.
 
 ```bash
-sudo selfie --allow-root apply
+sudo selfie --allow-sudo apply
 ```
 
 It is the one flag with **no** configuration-file equivalent, deliberately — a `cli:` setting that

@@ -33,7 +33,7 @@ use selfie::{
         event::{OperationFailure, OperationResult, OperationSuccess, PackageEvent},
         repository::YamlPackageRepository,
     },
-    privilege::{Elevation, Privilege, RootPolicy},
+    privilege::{Elevation, Privilege, SudoPolicy},
 };
 
 // A service that believes it is running at a fixed privilege.
@@ -129,8 +129,8 @@ struct TestDirs {
     target_dir: PathBuf,
     state_dir: PathBuf,
     // What every service built from these dirs believes about its privilege,
-    // and whether `--allow-root` was passed.
-    root_policy: RootPolicy<RunningAs>,
+    // and whether `--allow-sudo` was passed.
+    sudo_policy: SudoPolicy<RunningAs>,
 }
 
 impl TestDirs {
@@ -150,19 +150,19 @@ impl TestDirs {
             dotfiles_dir,
             target_dir,
             state_dir,
-            root_policy: RootPolicy::new(RunningAs(Elevation::Unprivileged)),
+            sudo_policy: SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
         }
     }
 
     // Build every subsequent service as though the process were at `elevation`.
     fn running_as(mut self, elevation: Elevation) -> Self {
-        self.root_policy = RootPolicy::new(RunningAs(elevation));
+        self.sudo_policy = SudoPolicy::new(RunningAs(elevation));
         self
     }
 
-    // As though `--allow-root` had been passed. Keeps whatever elevation is set.
-    fn allowing_root(mut self) -> Self {
-        self.root_policy = self.root_policy.allowing_root();
+    // As though `--allow-sudo` had been passed. Keeps whatever elevation is set.
+    fn allowing_sudo(mut self) -> Self {
+        self.sudo_policy = self.sudo_policy.allowing_sudo();
         self
     }
 
@@ -213,7 +213,7 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .build();
         let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        DotfileServiceImpl::new(repo, fs, runner, config, token, self.root_policy)
+        DotfileServiceImpl::new(repo, fs, runner, config, token, self.sudo_policy)
     }
 
     // A packages-only service whose `stop_on_error` is set explicitly.
@@ -245,7 +245,7 @@ impl TestDirs {
             runner,
             config,
             CancellationToken::new(),
-            self.root_policy,
+            self.sudo_policy,
         )
     }
 
@@ -273,7 +273,7 @@ impl TestDirs {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
-            self.root_policy,
+            self.sudo_policy,
         )
         .with_dotfiles_repository(dotfiles_repo)
     }
@@ -300,7 +300,7 @@ impl TestDirs {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
-            self.root_policy,
+            self.sudo_policy,
         )
         .with_dotfiles_repository(YamlPackageRepository::new(fs, self.dotfiles_dir.clone()))
     }
@@ -4694,7 +4694,7 @@ mod symlinked_targets {
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
-            RootPolicy::new(RunningAs(Elevation::Unprivileged)),
+            SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
         );
 
         let options = ApplyOptions {
@@ -7088,14 +7088,14 @@ mod running_under_sudo {
     }
 
     #[tokio::test]
-    async fn allow_root_deploys_despite_sudo() {
+    async fn allow_sudo_deploys_despite_sudo() {
         let dirs = TestDirs::new().running_as(Elevation::Sudo);
         let target = deployable(&dirs);
 
-        let dirs = dirs.allowing_root();
+        let dirs = dirs.allowing_sudo();
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-        assert!(!was_refused(&events), "--allow-root must override the gate");
+        assert!(!was_refused(&events), "--allow-sudo must override the gate");
         assert!(
             target.exists(),
             "the entry should have deployed: {:?}",

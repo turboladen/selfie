@@ -84,7 +84,7 @@ pub struct ClapCli {
     #[clap(long, global = true, default_value_t = false)]
     pub(crate) no_color: bool,
 
-    /// Deploy dotfiles even when running under sudo
+    /// Run commands that write even when invoked under sudo
     ///
     /// Without this, every command that writes refuses to run under sudo: the
     /// whole run would be written by whoever sudo switched to, including the
@@ -97,7 +97,7 @@ pub struct ClapCli {
     /// Deliberately has no configuration-file equivalent — a setting that
     /// disabled this permanently would defeat it.
     #[clap(long, global = true, default_value_t = false)]
-    pub(crate) allow_root: bool,
+    pub(crate) allow_sudo: bool,
 
     /// The main command to execute
     #[clap(subcommand)]

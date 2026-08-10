@@ -38,7 +38,7 @@ use crate::{
         validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
-    privilege::{Privilege, RootPolicy, SudoRefusal, WriteScope},
+    privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -73,7 +73,7 @@ pub struct DotfileServiceImpl<R, F, CR, P> {
     cancellation_token: CancellationToken,
     /// Whether this process reached root through `sudo`, and whether that was
     /// asked for.
-    root_policy: RootPolicy<P>,
+    sudo_policy: SudoPolicy<P>,
 }
 
 impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
@@ -92,7 +92,7 @@ where
     /// instead of a fresh token being conjured deep in the resolve path, which is
     /// what made Ctrl+C a no-op here for as long as this path could run commands.
     ///
-    /// `root_policy` is required for the same reason. Sniffing the environment
+    /// `sudo_policy` is required for the same reason. Sniffing the environment
     /// inline would leave the MCP server — a second driving adapter that needs
     /// the same refusal — to repeat the rule, and would leave no way to test
     /// "running under sudo" short of running the suite as root.
@@ -102,7 +102,7 @@ where
         runner: CR,
         config: SelfieConfig,
         cancellation_token: CancellationToken,
-        root_policy: RootPolicy<P>,
+        sudo_policy: SudoPolicy<P>,
     ) -> Self {
         Self {
             package_repository,
@@ -111,7 +111,7 @@ where
             runner,
             config,
             cancellation_token,
-            root_policy,
+            sudo_policy,
         }
     }
 
@@ -134,7 +134,7 @@ where
     /// that `P` needs no `'static`, `Clone` or `Debug` bound, which the other
     /// three ports all carry.
     fn sudo_refusal(&self) -> Option<SudoRefusal> {
-        self.root_policy.refusal(WriteScope::Dotfiles)
+        self.sudo_policy.refusal(WriteScope::Dotfiles)
     }
 
     /// Collect packages from both the main package repository and the optional

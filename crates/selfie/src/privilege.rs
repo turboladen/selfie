@@ -117,11 +117,11 @@ impl SudoRefusal {
         match self.0 {
             WriteScope::Dotfiles => {
                 "Re-run without sudo. selfie has no per-entry privilege scope, so a target you \
-                 cannot write stays one failed entry; pass --allow-root only if you intend every \
+                 cannot write stays one failed entry; pass --allow-sudo only if you intend every \
                  target in the run to be written by the user sudo switched to."
             }
             WriteScope::Repository => {
-                "Re-run without sudo. Pass --allow-root only if this repository is meant to be \
+                "Re-run without sudo. Pass --allow-sudo only if this repository is meant to be \
                  owned by the user sudo switched to."
             }
         }
@@ -130,15 +130,15 @@ impl SudoRefusal {
 
 /// Refuse a run that reached root through `sudo`.
 ///
-/// The one place the rule lives. Private, and deliberately so: [`RootPolicy`] is
+/// The one place the rule lives. Private, and deliberately so: [`SudoPolicy`] is
 /// the only way to apply it, which is what keeps a second service from growing
 /// its own slightly different gate.
 fn refuse_sudo<P: Privilege + ?Sized>(
     privilege: &P,
-    allow_root: bool,
+    allow_sudo: bool,
     scope: WriteScope,
 ) -> Result<(), SudoRefusal> {
-    if allow_root {
+    if allow_sudo {
         return Ok(());
     }
 
@@ -157,26 +157,26 @@ fn refuse_sudo<P: Privilege + ?Sized>(
 /// stops two services drifting onto two slightly different rules.
 ///
 /// The override is off unless an adapter turns it on: the CLI does, from
-/// `--allow-root`, and nothing else does.
+/// `--allow-sudo`, and nothing else does.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RootPolicy<P> {
+pub struct SudoPolicy<P> {
     privilege: P,
-    allow_root: bool,
+    allow_sudo: bool,
 }
 
-impl<P: Privilege> RootPolicy<P> {
+impl<P: Privilege> SudoPolicy<P> {
     /// A policy that refuses a run reached through `sudo`.
     pub fn new(privilege: P) -> Self {
         Self {
             privilege,
-            allow_root: false,
+            allow_sudo: false,
         }
     }
 
     /// Excuse a run reached through `sudo`, deliberately.
     #[must_use]
-    pub fn allowing_root(mut self) -> Self {
-        self.allow_root = true;
+    pub fn allowing_sudo(mut self) -> Self {
+        self.allow_sudo = true;
         self
     }
 
@@ -189,7 +189,7 @@ impl<P: Privilege> RootPolicy<P> {
     /// async boundary and needs no `'static` or `Clone` bound of its own.
     #[must_use]
     pub fn refusal(&self, scope: WriteScope) -> Option<SudoRefusal> {
-        refuse_sudo(&self.privilege, self.allow_root, scope).err()
+        refuse_sudo(&self.privilege, self.allow_sudo, scope).err()
     }
 }
 
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_root_overrides_the_refusal() {
+    fn allow_sudo_overrides_the_refusal() {
         assert_eq!(
             refuse_sudo(&fixed(Elevation::Sudo), true, WriteScope::Dotfiles),
             Ok(())
@@ -312,26 +312,26 @@ mod tests {
     }
 
     // The public surface, which is what every service actually calls. Testing
-    // only `refuse_sudo` would leave a `RootPolicy` that ignores its own
+    // only `refuse_sudo` would leave a `SudoPolicy` that ignores its own
     // override, or never consults the port, entirely uncovered.
     #[test]
     fn the_policy_carries_both_halves() {
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Sudo)).refusal(WriteScope::Dotfiles),
+            SudoPolicy::new(fixed(Elevation::Sudo)).refusal(WriteScope::Dotfiles),
             Some(SudoRefusal(WriteScope::Dotfiles))
         );
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Sudo))
-                .allowing_root()
+            SudoPolicy::new(fixed(Elevation::Sudo))
+                .allowing_sudo()
                 .refusal(WriteScope::Dotfiles),
             None
         );
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Root)).refusal(WriteScope::Dotfiles),
+            SudoPolicy::new(fixed(Elevation::Root)).refusal(WriteScope::Dotfiles),
             None
         );
         assert_eq!(
-            RootPolicy::new(fixed(Elevation::Unprivileged)).refusal(WriteScope::Dotfiles),
+            SudoPolicy::new(fixed(Elevation::Unprivileged)).refusal(WriteScope::Dotfiles),
             None
         );
     }
@@ -416,16 +416,16 @@ mod tests {
         // because a container run printed it next to a message that was already
         // fixed. Checking one method is what let it through.
         //
-        // `--allow-root` is the flag's name and has to survive the check.
+        // The override flag is named `--allow-sudo` rather than `--allow-root`
+        // for this same reason, so nothing here needs an exemption.
         for text in [
             dotfiles.message(),
             dotfiles.suggestion(),
             repository.message(),
             repository.suggestion(),
         ] {
-            let without_flag = text.replace("--allow-root", "<flag>");
             assert!(
-                !without_flag.contains("root"),
+                !text.contains("root"),
                 "a refusal must not name root: sudo -u is refused too, got: {text}"
             );
         }
@@ -452,7 +452,7 @@ mod tests {
         assert!(
             SudoRefusal(WriteScope::Dotfiles)
                 .suggestion()
-                .contains("--allow-root"),
+                .contains("--allow-sudo"),
             "got: {}",
             SudoRefusal(WriteScope::Dotfiles).suggestion()
         );

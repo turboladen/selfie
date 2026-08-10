@@ -55,14 +55,14 @@ struct RawCliFile {
 pub(crate) struct CliConfig {
     selfie: SelfieConfig,
     cli: CliSection,
-    /// Whether `--allow-root` was passed.
+    /// Whether `--allow-sudo` was passed.
     ///
     /// Sits here rather than in [`CliSection`], which is what gets deserialized
-    /// from the config file. A `cli: { allow_root: true }` would permanently
+    /// from the config file. A `cli: { allow_sudo: true }` would permanently
     /// disable a guard whose whole value is that it fires on the run someone did
     /// not think through; keeping the field out of that struct makes writing one
     /// impossible rather than merely discouraged.
-    allow_root: bool,
+    allow_sudo: bool,
 }
 
 impl CliConfig {
@@ -71,7 +71,7 @@ impl CliConfig {
         Self {
             selfie,
             cli,
-            allow_root: false,
+            allow_sudo: false,
         }
     }
 
@@ -90,8 +90,8 @@ impl CliConfig {
         self.cli.use_colors
     }
 
-    pub(crate) fn allow_root(&self) -> bool {
-        self.allow_root
+    pub(crate) fn allow_sudo(&self) -> bool {
+        self.allow_sudo
     }
 
     // --- Delegated core getters ---
@@ -153,7 +153,7 @@ impl ClapCli {
         }
 
         let mut config = CliConfig::new(selfie_config, cli_section);
-        config.allow_root = self.allow_root;
+        config.allow_sudo = self.allow_sudo;
         config
     }
 }
@@ -391,33 +391,33 @@ mod tests {
     // subcommand it precedes is irrelevant, and this keeps the fixture from
     // growing a field every unrelated test would have to set.
     #[test]
-    fn allow_root_reaches_the_config() {
-        let args = ClapCli::parse_from(["selfie", "--allow-root", "apply"]);
+    fn allow_sudo_reaches_the_config() {
+        let args = ClapCli::parse_from(["selfie", "--allow-sudo", "apply"]);
         let config = args.build_cli_config(default_selfie_config(), CliSection::default());
-        assert!(config.allow_root());
+        assert!(config.allow_sudo());
     }
 
     #[test]
-    fn allow_root_is_off_without_the_flag() {
+    fn allow_sudo_is_off_without_the_flag() {
         let args = ClapCli::parse_from(["selfie", "apply"]);
         let config = args.build_cli_config(default_selfie_config(), CliSection::default());
-        assert!(!config.allow_root());
+        assert!(!config.allow_sudo());
     }
 
     // The guard's value is that it fires on the run someone did not think
     // through, so a config file must not be able to turn it off for good. That
-    // holds because `allow_root` is not a `CliSection` field — this asserts the
+    // holds because `allow_sudo` is not a `CliSection` field — this asserts the
     // consequence, so moving it into that struct fails here rather than silently
     // opening the route.
     #[test]
     fn a_config_file_cannot_turn_the_sudo_guard_off() {
-        let yaml = "cli:\n  allow_root: true\n";
+        let yaml = "cli:\n  allow_sudo: true\n";
         let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
 
         let args = ClapCli::parse_from(["selfie", "apply"]);
         let config = args.build_cli_config(default_selfie_config(), raw.cli);
 
-        assert!(!config.allow_root());
+        assert!(!config.allow_sudo());
     }
 
     #[test]

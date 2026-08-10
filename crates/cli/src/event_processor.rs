@@ -558,7 +558,7 @@ mod tests {
     #[tokio::test]
     async fn a_privilege_refusal_exits_non_zero_and_keeps_its_suggestion() {
         use selfie::package::event::{OperationFailure, OperationResult};
-        use selfie::privilege::{Elevation, Privilege, RootPolicy, WriteScope};
+        use selfie::privilege::{Elevation, Privilege, SudoPolicy, WriteScope};
 
         // Minted through the policy rather than constructed here: `SudoRefusal`'s
         // field is private, so the library is the only thing that can produce
@@ -569,7 +569,7 @@ mod tests {
                 Elevation::Sudo
             }
         }
-        let refusal = RootPolicy::new(UnderSudo)
+        let refusal = SudoPolicy::new(UnderSudo)
             .refusal(WriteScope::Dotfiles)
             .expect("a sudo run must be refused");
 
@@ -592,7 +592,7 @@ mod tests {
         let collected = display_for_assert.collected_errors();
         let message = &collected.first().expect("an error was collected").message;
         assert!(message.contains("under sudo"), "got: {message}");
-        assert!(message.contains("--allow-root"), "got: {message}");
+        assert!(message.contains("--allow-sudo"), "got: {message}");
     }
 
     #[tokio::test]
