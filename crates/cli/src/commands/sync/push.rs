@@ -76,6 +76,14 @@ pub(crate) async fn handle_push(
             display_validation_groups(&groups, use_colors, display);
             return 1;
         }
+        // Its own arm so the suggestion lands in the suggestion channel, as it
+        // does for the same refusal on the apply path. The `Display` impl joins
+        // both halves for callers with nowhere separate to put one.
+        Err(SyncError::Privilege(refusal)) => {
+            display.print_error(refusal.message());
+            display.print_suggestion(refusal.suggestion());
+            return 1;
+        }
         Err(e) => {
             display.print_error(e.to_string());
             return 1;

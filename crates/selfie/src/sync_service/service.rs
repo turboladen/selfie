@@ -20,6 +20,7 @@ use crate::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
         OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
     },
+    privilege::{Privilege, RootPolicy},
 };
 
 use super::port::{
@@ -31,24 +32,38 @@ use super::port::{
 /// Generic over:
 /// - `G`: [`GitSyncProvider`] — for testable git mocking
 /// - `D`: [`DotfileService`] — for drift checking in `sync status`
+/// - `P`: [`Privilege`] — for the sudo refusal on the mutating operations
 #[derive(Debug, Clone)]
-pub struct SyncServiceImpl<G, D> {
+pub struct SyncServiceImpl<G, D, P> {
     git: G,
     dotfile_service: D,
     config: SelfieConfig,
+    root_policy: RootPolicy<P>,
 }
 
-impl<G, D> SyncServiceImpl<G, D>
+impl<G, D, P> SyncServiceImpl<G, D, P>
 where
     G: GitSyncProvider + Clone + Send + Sync + 'static,
     D: DotfileService + Clone + Send + Sync + 'static,
+    P: Privilege,
 {
     /// Create a new sync service instance.
-    pub fn new(git: G, dotfile_service: D, config: SelfieConfig) -> Self {
+    ///
+    /// `root_policy` is its own rather than being read back out of
+    /// `dotfile_service`: [`DotfileService`] is a port about dotfiles, and giving
+    /// it a "what privilege am I running with" accessor would put a question
+    /// there that has nothing to do with the port's job.
+    pub fn new(
+        git: G,
+        dotfile_service: D,
+        config: SelfieConfig,
+        root_policy: RootPolicy<P>,
+    ) -> Self {
         Self {
             git,
             dotfile_service,
             config,
+            root_policy,
         }
     }
 
@@ -96,10 +111,11 @@ where
     })?
 }
 
-impl<G, D> SyncService for SyncServiceImpl<G, D>
+impl<G, D, P> SyncService for SyncServiceImpl<G, D, P>
 where
     G: GitSyncProvider + Clone + Send + Sync + 'static,
     D: DotfileService + Clone + Send + Sync + 'static,
+    P: Privilege + Send + Sync,
 {
     async fn status(&self) -> EventStream {
         let git = self.git.clone();
@@ -197,6 +213,14 @@ where
     }
 
     async fn prepare_push(&self, options: &PushOptions) -> Result<PrepareResult, SyncError> {
+        // Ahead of the git work, because the CLI prompts per proposed commit
+        // between prepare and execute. Refusing at `execute_push` alone would
+        // walk the user through every one of those prompts and then discard the
+        // answers.
+        if let Some(refusal) = self.root_policy.refusal() {
+            return Err(SyncError::Privilege(refusal));
+        }
+
         let repo_info = blocking_git("discover_repo", {
             let git = self.git.clone();
             let dir = self.config.package_directory().to_path_buf();
@@ -267,6 +291,10 @@ where
     }
 
     async fn execute_push(&self, commits: Vec<ConfirmedCommit>) -> EventStream {
+        // Checked again here, not only in `prepare_push`. The two are separate
+        // trait methods and the MCP server calls them as separate tool
+        // invocations, so nothing guarantees the query ran first.
+        let refusal = self.root_policy.refusal();
         let git = self.git.clone();
         let config = self.config.clone();
 
@@ -280,6 +308,15 @@ where
             );
 
             sender.send_started().await;
+
+            if let Some(refusal) = refusal {
+                sender
+                    .send_completed(OperationResult::Failure(OperationFailure::Privilege(
+                        refusal,
+                    )))
+                    .await;
+                return;
+            }
 
             let repo_info = match blocking_git("discover_repo", {
                 let git = git.clone();
@@ -398,6 +435,7 @@ where
     }
 
     async fn pull(&self) -> EventStream {
+        let refusal = self.root_policy.refusal();
         let git = self.git.clone();
         let config = self.config.clone();
 
@@ -411,6 +449,15 @@ where
             );
 
             sender.send_started().await;
+
+            if let Some(refusal) = refusal {
+                sender
+                    .send_completed(OperationResult::Failure(OperationFailure::Privilege(
+                        refusal,
+                    )))
+                    .await;
+                return;
+            }
 
             // Step 1: Discover repo
             let repo_info = match blocking_git("discover_repo", {
@@ -1572,6 +1619,7 @@ mod credential_egress_tests {
         CommitId, FastForwardResult, GitMessage, GitSyncError, GitSyncProvider, RepoInfo,
         RepoStatus,
     };
+    use crate::privilege::Elevation;
     use crate::sync_service::port::PushOptions;
     use test_common::assert_secret_free;
 
@@ -1694,7 +1742,27 @@ mod credential_egress_tests {
         }
     }
 
-    fn service(fail_at: FailAt) -> SyncServiceImpl<GitFailingWith, UnusedDotfileService> {
+    // A privilege port reporting a fixed answer, so these tests do not depend on
+    // how the suite was invoked.
+    #[derive(Clone, Copy, Debug)]
+    struct RunningAs(Elevation);
+
+    impl Privilege for RunningAs {
+        fn elevation(&self) -> Elevation {
+            self.0
+        }
+    }
+
+    fn service(
+        fail_at: FailAt,
+    ) -> SyncServiceImpl<GitFailingWith, UnusedDotfileService, RunningAs> {
+        service_running_as(fail_at, Elevation::Unprivileged)
+    }
+
+    fn service_running_as(
+        fail_at: FailAt,
+        elevation: Elevation,
+    ) -> SyncServiceImpl<GitFailingWith, UnusedDotfileService, RunningAs> {
         SyncServiceImpl::new(
             GitFailingWith { fail_at },
             UnusedDotfileService,
@@ -1704,6 +1772,7 @@ mod credential_egress_tests {
                 .environment("test-env")
                 .package_directory("/tmp/selfie-packages")
                 .build(),
+            RootPolicy::new(RunningAs(elevation)),
         )
     }
 
@@ -1748,6 +1817,168 @@ mod credential_egress_tests {
             rendered.contains("could not read Password"),
             "git's diagnosis must survive redaction, got: {rendered}"
         );
+    }
+
+    // selfie-adsm. Sync was not covered by selfie-tcu2's refusal: it holds a
+    // `DotfileService` that carries the gate, but only ever calls `check_drift`,
+    // which is correctly ungated -- so nothing in the sync path consulted it.
+    // Committing and pushing as root leaves root-owned objects, refs and index
+    // entries in a repository the user owns, and unlike deploy state that does
+    // not self-heal.
+    mod running_under_sudo {
+        use super::*;
+
+        // Panics on every call, so a passing test proves the refusal fired
+        // *before* git was reached rather than merely instead of reporting its
+        // result. Asserting on the returned error alone would not: a gate placed
+        // after the git work returns the same error.
+        #[derive(Clone)]
+        struct GitThatMustNotRun;
+
+        const NEVER: &str = "git must not be reached when the run is refused";
+
+        impl GitSyncProvider for GitThatMustNotRun {
+            fn discover_repo(&self, _: &Path) -> Result<RepoInfo, GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+            fn diff_commits(
+                &self,
+                _: &Path,
+                _: &CommitId,
+                _: &CommitId,
+            ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+                unreachable!("{NEVER}")
+            }
+        }
+
+        fn refusing() -> SyncServiceImpl<GitThatMustNotRun, UnusedDotfileService, RunningAs> {
+            SyncServiceImpl::new(
+                GitThatMustNotRun,
+                UnusedDotfileService,
+                crate::config::SelfieConfigBuilder::default()
+                    .environment("test-env")
+                    .package_directory("/tmp/selfie-packages")
+                    .build(),
+                RootPolicy::new(RunningAs(Elevation::Sudo)),
+            )
+        }
+
+        fn refused(events: &[PackageEvent]) -> bool {
+            events.iter().any(|e| {
+                matches!(
+                    e,
+                    PackageEvent::Completed {
+                        result: OperationResult::Failure(OperationFailure::Privilege(_)),
+                        ..
+                    }
+                )
+            })
+        }
+
+        // Refused at the query step, ahead of the git work, because the CLI
+        // prompts per proposed commit between prepare and execute. Gating only
+        // `execute_push` would walk the user through every prompt first.
+        #[tokio::test]
+        async fn prepare_push_is_refused_before_git_runs() {
+            let error = refusing()
+                .prepare_push(&PushOptions::default())
+                .await
+                .expect_err("a sudo run must not prepare a push");
+
+            assert!(
+                matches!(error, SyncError::Privilege(_)),
+                "expected a privilege refusal, got: {error:?}"
+            );
+        }
+
+        // Checked separately from `prepare_push` because the two are separate
+        // trait methods, and the MCP server calls them as separate tool
+        // invocations -- nothing guarantees the query ran first.
+        #[tokio::test]
+        async fn execute_push_is_refused_before_git_runs() {
+            let events: Vec<PackageEvent> = refusing()
+                .execute_push(vec![ConfirmedCommit {
+                    files: vec![PathBuf::from("starship.yml")],
+                    message: "chore(starship): update package spec".to_string(),
+                }])
+                .await
+                .collect()
+                .await;
+
+            assert!(refused(&events), "expected a privilege refusal: {events:?}");
+        }
+
+        #[tokio::test]
+        async fn pull_is_refused_before_git_runs() {
+            let events: Vec<PackageEvent> = refusing().pull().await.collect().await;
+
+            assert!(refused(&events), "expected a privilege refusal: {events:?}");
+        }
+
+        // Both controls assert the run reached *validation*, not that it
+        // succeeded: these fixtures name a `starship.yml` that is not on disk, so
+        // `prepare_push` always ends in `ValidationFailed`. That is the useful
+        // assertion anyway -- validation runs after `discover_repo` and
+        // `repo_status`, so reaching it proves the run got well past the gate and
+        // did real work, which `!matches!(.., Privilege(_))` alone would not.
+        //
+        // Without these two, every test above would still pass if the gate
+        // refused unconditionally, and `sudo` would not be what is under test.
+        fn reached_validation(result: &Result<PrepareResult, SyncError>) -> bool {
+            matches!(result, Err(SyncError::ValidationFailed { .. }))
+        }
+
+        #[tokio::test]
+        async fn real_root_may_still_push() {
+            let result = service_running_as(FailAt::Push, Elevation::Root)
+                .prepare_push(&PushOptions::default())
+                .await;
+
+            assert!(
+                reached_validation(&result),
+                "a root run with no SUDO_UID must not be refused: {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn allow_root_overrides_the_sync_refusal() {
+            let service = SyncServiceImpl::new(
+                GitFailingWith {
+                    fail_at: FailAt::Push,
+                },
+                UnusedDotfileService,
+                crate::config::SelfieConfigBuilder::default()
+                    .environment("test-env")
+                    .package_directory("/tmp/selfie-packages")
+                    .build(),
+                RootPolicy::new(RunningAs(Elevation::Sudo)).allowing_root(),
+            );
+
+            let result = service.prepare_push(&PushOptions::default()).await;
+
+            assert!(
+                reached_validation(&result),
+                "--allow-root must override the gate: {result:?}"
+            );
+        }
     }
 
     // The other MCP exit. `prepare_push` returns `SyncError` directly, and

@@ -16,6 +16,12 @@
 //!   run leaves it `root:root 0600`; the next ordinary run cannot read it and
 //!   proceeds with an empty state, re-prompting every conflict. If the state
 //!   directory did not exist beforehand, that one does not self-heal at all.
+//!
+//! `sync push` and `sync pull` are refused for a related reason and a worse
+//! outcome: they deploy nothing, but they commit, fetch and merge as root,
+//! leaving root-owned objects, refs and index entries inside a repository the
+//! user owns. A root-owned state file is replaced by the next successful run,
+//! because it comes from a user-owned temporary file. Git objects are not.
 
 /// How much privilege the process holds, and where it came from.
 ///
@@ -85,18 +91,10 @@ impl SudoRefusal {
 
 /// Refuse a run that reached root through `sudo`.
 ///
-/// The one place the rule lives. `allow_root` is the deliberate override, and is
-/// the caller's to supply — the CLI from `--allow-root`, the MCP server never,
-/// since an AI assistant has no reason to be driving selfie under sudo.
-///
-/// # Errors
-///
-/// [`SudoRefusal`] when the process is [`Elevation::Sudo`] and `allow_root` is
-/// not set.
-pub fn refuse_sudo<P: Privilege + ?Sized>(
-    privilege: &P,
-    allow_root: bool,
-) -> Result<(), SudoRefusal> {
+/// The one place the rule lives. Private, and deliberately so: [`RootPolicy`] is
+/// the only way to apply it, which is what keeps a second service from growing
+/// its own slightly different gate.
+fn refuse_sudo<P: Privilege + ?Sized>(privilege: &P, allow_root: bool) -> Result<(), SudoRefusal> {
     if allow_root {
         return Ok(());
     }
@@ -104,6 +102,48 @@ pub fn refuse_sudo<P: Privilege + ?Sized>(
     match privilege.elevation() {
         Elevation::Sudo => Err(SudoRefusal),
         Elevation::Root | Elevation::Unprivileged => Ok(()),
+    }
+}
+
+/// A privilege port and the override that can excuse it, as one value.
+///
+/// The two are meaningless apart — a port with no override refuses cases the
+/// user asked for, and an override with no port excuses nothing — so they travel
+/// together and a half-configured gate cannot be constructed. Every service that
+/// refuses under sudo holds one of these rather than the pair, which is what
+/// stops two services drifting onto two slightly different rules.
+///
+/// The override is off unless an adapter turns it on: the CLI does, from
+/// `--allow-root`, and nothing else does.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RootPolicy<P> {
+    privilege: P,
+    allow_root: bool,
+}
+
+impl<P: Privilege> RootPolicy<P> {
+    /// A policy that refuses a run reached through `sudo`.
+    pub fn new(privilege: P) -> Self {
+        Self {
+            privilege,
+            allow_root: false,
+        }
+    }
+
+    /// Excuse a run reached through `sudo`, deliberately.
+    #[must_use]
+    pub fn allowing_root(mut self) -> Self {
+        self.allow_root = true;
+        self
+    }
+
+    /// The refusal this run must report instead of doing any work, if any.
+    ///
+    /// Callers evaluate this *before* spawning, so `P` never has to cross an
+    /// async boundary and needs no `'static` or `Clone` bound of its own.
+    #[must_use]
+    pub fn refusal(&self) -> Option<SudoRefusal> {
+        refuse_sudo(&self.privilege, self.allow_root).err()
     }
 }
 
@@ -190,6 +230,28 @@ mod tests {
     #[test]
     fn allow_root_overrides_the_refusal() {
         assert_eq!(refuse_sudo(&fixed(Elevation::Sudo), true), Ok(()));
+    }
+
+    // The public surface, which is what every service actually calls. Testing
+    // only `refuse_sudo` would leave a `RootPolicy` that ignores its own
+    // override, or never consults the port, entirely uncovered.
+    #[test]
+    fn the_policy_carries_both_halves() {
+        assert_eq!(
+            RootPolicy::new(fixed(Elevation::Sudo)).refusal(),
+            Some(SudoRefusal)
+        );
+        assert_eq!(
+            RootPolicy::new(fixed(Elevation::Sudo))
+                .allowing_root()
+                .refusal(),
+            None
+        );
+        assert_eq!(RootPolicy::new(fixed(Elevation::Root)).refusal(), None);
+        assert_eq!(
+            RootPolicy::new(fixed(Elevation::Unprivileged)).refusal(),
+            None
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use selfie::{
         git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
-    privilege::RealPrivilege,
+    privilege::{RealPrivilege, RootPolicy},
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
@@ -42,7 +42,7 @@ type ConcreteDotfileService = DotfileServiceImpl<
     RealPrivilege,
 >;
 
-type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService>;
+type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService, RealPrivilege>;
 
 #[derive(Clone)]
 pub struct SelfieServer {
@@ -253,7 +253,7 @@ impl SelfieServer {
             runner,
             config.clone(),
             CancellationToken::new(),
-            RealPrivilege,
+            RootPolicy::new(RealPrivilege),
         );
 
         // Add standalone dotfiles repository if the directory exists
@@ -262,8 +262,12 @@ impl SelfieServer {
             let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
             dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
         }
-        let sync_service =
-            SyncServiceImpl::new(GixGitAdapter, dotfile_service.clone(), config.clone());
+        let sync_service = SyncServiceImpl::new(
+            GixGitAdapter,
+            dotfile_service.clone(),
+            config.clone(),
+            RootPolicy::new(RealPrivilege),
+        );
         Self {
             service: Arc::new(service),
             dotfile_service: Arc::new(dotfile_service),

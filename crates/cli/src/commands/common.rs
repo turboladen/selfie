@@ -19,7 +19,7 @@ use selfie::{
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
-    privilege::RealPrivilege,
+    privilege::{RealPrivilege, RootPolicy},
     sync_service::{SyncService, service::SyncServiceImpl},
 };
 use tokio_util::sync::CancellationToken;
@@ -73,18 +73,8 @@ pub(crate) fn create_dotfile_service(
         runner,
         config.selfie_config().clone(),
         cancellation_token,
-        RealPrivilege,
+        root_policy(config),
     );
-
-    // The refusal itself lives at the port, so it holds for any caller. What is
-    // true only by convention is that every CLI dotfile-writing path is built
-    // here — `apply`, `track`, `dotfiles track` and `package track-dotfile` are
-    // today, but nothing stops a handler constructing its own service and
-    // opting out, which `apply` used to do. Nothing enforces it; do not read
-    // this as a guarantee.
-    if config.allow_root() {
-        service = service.allowing_root();
-    }
 
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if dotfiles_dir.is_dir() {
@@ -104,7 +94,31 @@ pub(crate) fn create_sync_service(
 ) -> impl SyncService {
     let git = GixGitAdapter;
     let dotfile_service = create_dotfile_service(config, cancellation_token);
-    SyncServiceImpl::new(git, dotfile_service, config.selfie_config().clone())
+    // Its own policy rather than one read back out of `dotfile_service`: sync
+    // commits and pushes as root even though it deploys nothing, and root-owned
+    // git objects in a user-owned repository do not self-heal.
+    SyncServiceImpl::new(
+        git,
+        dotfile_service,
+        config.selfie_config().clone(),
+        root_policy(config),
+    )
+}
+
+/// The sudo refusal every service that writes is built with.
+///
+/// One function so the CLI cannot hand `--allow-root` to one service and forget
+/// the other. The refusal itself lives in the library and holds for any caller;
+/// what is true only by convention is that every CLI write path is built through
+/// the two constructors above. Nothing enforces that — `apply` once built its own
+/// service — so do not read it as a guarantee.
+fn root_policy(config: &CliConfig) -> RootPolicy<RealPrivilege> {
+    let policy = RootPolicy::new(RealPrivilege);
+    if config.allow_root() {
+        policy.allowing_root()
+    } else {
+        policy
+    }
 }
 
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.

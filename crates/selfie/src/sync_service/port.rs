@@ -32,6 +32,15 @@ pub enum SyncError {
         /// Per-file validation failures with structured details.
         failures: Vec<PackageValidationFailure>,
     },
+
+    /// The process reached root through `sudo`.
+    ///
+    /// Committing and pushing as root leaves root-owned objects, refs and index
+    /// entries inside a repository the user owns, which the next ordinary `git`
+    /// fails on. Unlike deploy state that does not self-heal, because nothing
+    /// later rewrites those files from a user-owned temp.
+    #[error("{}. {}", .0.message(), .0.suggestion())]
+    Privilege(crate::privilege::SudoRefusal),
 }
 
 /// A single package file that failed validation during sync push.

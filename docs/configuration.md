@@ -275,9 +275,22 @@ selfie --no-color package list
 
 ## Running Under `sudo`
 
-`selfie apply` and the track commands refuse to run under `sudo`: the whole run would be written as
-root, including the entries under your home directory. `--allow-root` overrides that for the case
-where you mean it.
+Every selfie command that writes refuses to run under `sudo`. `--allow-root` overrides that for the
+case where you mean it.
+
+| command                                            | why it is refused                                                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `apply`                                            | the whole run is written as root, including the entries under your home directory                                   |
+| `track`, `dotfiles track`, `package track-dotfile` | the same, plus a spec and deploy state written as root                                                              |
+| `sync push`, `sync pull`                           | commits, fetches and merges as root, leaving root-owned objects, refs and index entries inside a repository you own |
+
+The sync case is the one that does not repair itself. A root-owned deploy-state file is replaced on
+the next successful run, because it is written from a user-owned temporary file; root-owned git
+objects are not, and the next ordinary `git` fails on them.
+
+Read-only commands — `dotfiles drift`, `dotfiles list`, `sync status`, `package status`, everything
+under `spec` — are unaffected. So is `package install`: its commands are yours, and some of them
+genuinely need `sudo`.
 
 ```bash
 sudo selfie --allow-root apply

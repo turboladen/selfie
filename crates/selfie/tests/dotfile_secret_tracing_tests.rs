@@ -27,7 +27,7 @@ use selfie::{
     },
     fs::RealFileSystem,
     package::{event::PackageEvent, repository::YamlPackageRepository},
-    privilege::{Elevation, Privilege},
+    privilege::{Elevation, Privilege, RootPolicy},
 };
 
 // A privilege port that always reports an ordinary, unelevated process.
@@ -128,7 +128,7 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         CancellationToken::new(),
         // Not `RealPrivilege`: the answer would depend on how the suite was
         // invoked, and `sudo cargo test` would refuse the apply this test needs.
-        Unprivileged,
+        RootPolicy::new(Unprivileged),
     );
 
     let events: Vec<PackageEvent> = service

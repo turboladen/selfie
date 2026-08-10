@@ -38,7 +38,7 @@ use crate::{
         validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
-    privilege::{Privilege, SudoRefusal, refuse_sudo},
+    privilege::{Privilege, RootPolicy, SudoRefusal},
 };
 
 use super::port::{ApplyOptions, DotfileService};
@@ -71,11 +71,9 @@ pub struct DotfileServiceImpl<R, F, CR, P> {
     config: SelfieConfig,
     /// Token used to signal graceful cancellation of in-flight operations.
     cancellation_token: CancellationToken,
-    /// Reports whether this process reached root through `sudo`.
-    privilege: P,
-    /// The deliberate override for [`privilege`](Self::privilege), off unless an
-    /// adapter turns it on.
-    allow_root: bool,
+    /// Whether this process reached root through `sudo`, and whether that was
+    /// asked for.
+    root_policy: RootPolicy<P>,
 }
 
 impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
@@ -94,7 +92,7 @@ where
     /// instead of a fresh token being conjured deep in the resolve path, which is
     /// what made Ctrl+C a no-op here for as long as this path could run commands.
     ///
-    /// `privilege` is required for the same reason. Sniffing the environment
+    /// `root_policy` is required for the same reason. Sniffing the environment
     /// inline would leave the MCP server — a second driving adapter that needs
     /// the same refusal — to repeat the rule, and would leave no way to test
     /// "running under sudo" short of running the suite as root.
@@ -104,7 +102,7 @@ where
         runner: CR,
         config: SelfieConfig,
         cancellation_token: CancellationToken,
-        privilege: P,
+        root_policy: RootPolicy<P>,
     ) -> Self {
         Self {
             package_repository,
@@ -113,8 +111,7 @@ where
             runner,
             config,
             cancellation_token,
-            privilege,
-            allow_root: false,
+            root_policy,
         }
     }
 
@@ -128,27 +125,16 @@ where
         self
     }
 
-    /// Deploy even though this process reached root through `sudo`.
-    ///
-    /// A builder rather than a `new` parameter because off is the only safe
-    /// default and every adapter but one wants it: the CLI turns it on from
-    /// `--allow-root`, and nothing else does.
-    #[must_use]
-    pub fn allowing_root(mut self) -> Self {
-        self.allow_root = true;
-        self
-    }
-
     /// The refusal this run must report instead of writing anything, if any.
     ///
     /// Every caller evaluates this *before* building the event stream, so `P`
     /// itself never enters the spawned task — only the plain [`SudoRefusal`]
-    /// does. `Send + Sync` are still required, because the port is a field of a
+    /// does. `Send + Sync` are still required, because the policy is a field of a
     /// service the trait declares `Send + Sync`; what evaluating early buys is
     /// that `P` needs no `'static`, `Clone` or `Debug` bound, which the other
     /// three ports all carry.
     fn sudo_refusal(&self) -> Option<SudoRefusal> {
-        refuse_sudo(&self.privilege, self.allow_root).err()
+        self.root_policy.refusal()
     }
 
     /// Collect packages from both the main package repository and the optional
