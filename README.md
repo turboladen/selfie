@@ -288,7 +288,10 @@ selfie --verbose package install package-name
 
 ### Common Issues
 
-- **Permission errors**: Check if install commands need `sudo`
+- **Permission errors**: Check if install commands need `sudo`. Do not reach for `sudo selfie apply`
+  when a dotfile target is unwritable — selfie refuses it, because the run has no per-entry
+  privilege scope and would write every `~/` entry as root too. See
+  [Configuration](docs/configuration.md#running-under-sudo).
 - **Command not found**: Verify PATH includes tool installation locations
 - **Package validation fails**: Use `selfie spec validate package-name`
 - **Configuration issues**: Run `selfie config validate`
@@ -317,6 +320,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Login shell execution for install/check/audit commands
 - ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-dotfile`, `selfie track`
 - ✅ Dotfile drift detection: `selfie dotfiles drift`
+- ✅ Sudo refusal: `apply` and the track commands decline to run under `sudo`, with `--allow-root`
+  as the deliberate override
 - ✅ Dotfile listing: `selfie dotfiles list`
 - ✅ Provider-sourced and templated dotfiles: content from a command, or from a template with named
   values, resolved at deploy time and never stored

@@ -71,10 +71,15 @@ impl SudoRefusal {
     }
 
     /// What to do instead.
+    ///
+    /// Does not say system paths are unsupported. An absolute target is a
+    /// documented form, and selfie writes one whenever the running user can —
+    /// what it has no way to express is elevating for *one* entry.
     #[must_use]
     pub fn suggestion(&self) -> &'static str {
-        "Re-run without sudo. selfie does not deploy to system paths yet; pass --allow-root only \
-         if you intend every target to be written as root."
+        "Re-run without sudo. selfie has no per-entry privilege scope, so a target you cannot \
+         write stays one failed entry; pass --allow-root only if you intend every target in the \
+         run to be written as root."
     }
 }
 
@@ -107,6 +112,10 @@ pub fn refuse_sudo<P: Privilege + ?Sized>(
 /// Separated from [`RealPrivilege`] because the alternative is mutating the
 /// environment in a test, and `std::env::set_var` is `unsafe` in edition 2024
 /// and racy against every other thread in the process.
+///
+/// Only the `cfg(unix)` impl and the tests call it, so a non-unix build without
+/// them would warn it dead — and clippy runs with `-D warnings`.
+#[cfg(any(unix, test))]
 fn classify(is_root: bool, under_sudo: bool) -> Elevation {
     match (is_root, under_sudo) {
         (false, _) => Elevation::Unprivileged,

@@ -273,7 +273,7 @@ selfie --verbose package install docker
 selfie --no-color package list
 ```
 
-### `--allow-root`
+## Running Under `sudo`
 
 `selfie apply` and the track commands refuse to run under `sudo`: the whole run would be written as
 root, including the entries under your home directory. `--allow-root` overrides that for the case

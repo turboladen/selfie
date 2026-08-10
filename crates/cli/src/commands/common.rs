@@ -76,10 +76,12 @@ pub(crate) fn create_dotfile_service(
         RealPrivilege,
     );
 
-    // Every CLI path that writes a dotfile is built here — `apply`, `track`,
-    // `dotfiles track` and `package track-dotfile` all come through this
-    // function — which is why the sudo refusal is wired once, at the port, and
-    // not checked in each command handler.
+    // The refusal itself lives at the port, so it holds for any caller. What is
+    // true only by convention is that every CLI dotfile-writing path is built
+    // here — `apply`, `track`, `dotfiles track` and `package track-dotfile` are
+    // today, but nothing stops a handler constructing its own service and
+    // opting out, which `apply` used to do. Nothing enforces it; do not read
+    // this as a guarantee.
     if config.allow_root() {
         service = service.allowing_root();
     }

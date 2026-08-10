@@ -75,13 +75,6 @@ impl CliConfig {
         }
     }
 
-    /// Record that `--allow-root` was passed.
-    #[must_use]
-    pub(crate) fn allowing_root(mut self) -> Self {
-        self.allow_root = true;
-        self
-    }
-
     /// Get the underlying library config for passing to service calls.
     pub(crate) fn selfie_config(&self) -> &SelfieConfig {
         &self.selfie
@@ -159,12 +152,9 @@ impl ClapCli {
             cli_section.use_colors = false;
         }
 
-        let config = CliConfig::new(selfie_config, cli_section);
-        if self.allow_root {
-            config.allowing_root()
-        } else {
-            config
-        }
+        let mut config = CliConfig::new(selfie_config, cli_section);
+        config.allow_root = self.allow_root;
+        config
     }
 }
 
