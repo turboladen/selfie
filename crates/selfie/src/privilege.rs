@@ -314,6 +314,43 @@ mod tests {
         assert_eq!(classify(false, false), Elevation::Unprivileged);
     }
 
+    // The bug this exists for shipped, and no test caught it -- running it under a
+    // real euid 0 did. `sync push` refused with "every dotfile in this run would
+    // be written as root, including the ones under your home directory", on a
+    // command that writes no dotfile at all.
+    //
+    // Asserts what each scope must NOT say rather than its exact wording, so the
+    // messages stay editable while a copy-paste between the arms fails here.
+    #[test]
+    fn each_scope_describes_its_own_damage() {
+        let dotfiles = SudoRefusal(WriteScope::Dotfiles);
+        let repository = SudoRefusal(WriteScope::Repository);
+
+        assert_ne!(dotfiles.message(), repository.message());
+        assert_ne!(dotfiles.suggestion(), repository.suggestion());
+
+        for forbidden in ["dotfile", "home directory"] {
+            assert!(
+                !repository.message().contains(forbidden),
+                "the repository refusal must not describe a dotfile run, got: {}",
+                repository.message()
+            );
+        }
+
+        // The control: without it, a `Dotfiles` arm emptied of the same words
+        // would satisfy every assertion above.
+        assert!(
+            dotfiles.message().contains("dotfile"),
+            "got: {}",
+            dotfiles.message()
+        );
+        assert!(
+            repository.message().contains("repository"),
+            "got: {}",
+            repository.message()
+        );
+    }
+
     // The refusal has to say what to do, not only that it happened, and the
     // override is the only way past it -- a message that omits the flag leaves
     // the deliberate case with no route.
