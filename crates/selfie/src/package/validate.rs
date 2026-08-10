@@ -916,10 +916,10 @@ mod tests {
         Package::validate_dotfile_entry(&entry_from_yaml(yaml), "dotfiles[0]")
     }
 
-    /// Parse a whole package file the way the repository does.
-    ///
-    /// Deliberately not `PackageBuilder`: a built package has no unrecognized
-    /// keys to find, so a builder-based fixture would pass whatever the check did.
+    // Parse a whole package file the way the repository does.
+    //
+    // Deliberately not `PackageBuilder`: a built package has no unrecognized
+    // keys to find, so a builder-based fixture would pass whatever the check did.
     fn package_from_yaml(yaml: &str) -> Package {
         serde_saphyr::from_str(yaml).expect("package should parse")
     }
@@ -1833,11 +1833,11 @@ dotfiles:
         assert!(result.issues().has_errors());
     }
 
-    /// A package built from raw YAML, so `raw_yaml` is populated.
-    ///
-    /// `PackageBuilder` cannot be used for these: it never sets `raw_yaml`, so
-    /// `validate_unknown_fields` returns early and the test passes without
-    /// looking at anything.
+    // A package built from raw YAML, so `raw_yaml` is populated.
+    //
+    // `PackageBuilder` cannot be used for these: it never sets `raw_yaml`, so
+    // `validate_unknown_fields` returns early and the test passes without
+    // looking at anything.
     fn package_with_raw_yaml(yaml: &str) -> Package {
         let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
         package.set_source(

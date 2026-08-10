@@ -276,7 +276,7 @@ mod tests {
 
     const SECRET: &str = "s3cr3t-rotated-token";
 
-    /// A credentials file with one changed field among many — the driving case.
+    // A credentials file with one changed field among many — the driving case.
     fn multi_field(token: &str) -> String {
         format!(
             "---\n\

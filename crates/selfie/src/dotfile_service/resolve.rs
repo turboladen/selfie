@@ -396,14 +396,14 @@ mod tests {
     // `tests/` link the real lib and can use it.
     #[derive(Default, Clone)]
     struct FakeRunner {
-        /// command -> (exit code, stdout, stderr)
+        // command -> (exit code, stdout, stderr)
         responses: std::collections::HashMap<String, (i32, Vec<u8>, Vec<u8>)>,
-        /// Commands whose output cannot be read to the end.
+        // Commands whose output cannot be read to the end.
         read_failing: std::collections::HashSet<String>,
-        /// Commands whose output could not be told from the shell's.
+        // Commands whose output could not be told from the shell's.
         unseparable: std::collections::HashSet<String>,
-        /// command -> (bytes discarded ahead of the output, tail established).
-        /// Absent means the clean answer: nothing discarded, tail established.
+        // command -> (bytes discarded ahead of the output, tail established).
+        // Absent means the clean answer: nothing discarded, tail established.
         separation: std::collections::HashMap<String, (usize, bool)>,
         calls: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>,
     }
@@ -429,7 +429,7 @@ mod tests {
             self
         }
 
-        /// The command runs, but its stdout pipe dies part-way through.
+        // The command runs, but its stdout pipe dies part-way through.
         fn read_failing(command: &str) -> Self {
             let mut this = Self::default();
             this.read_failing.insert(command.to_string());
@@ -441,15 +441,15 @@ mod tests {
             self
         }
 
-        /// The command ran, but its output could not be told from the shell's.
+        // The command ran, but its output could not be told from the shell's.
         fn unseparable(command: &str) -> Self {
             let mut this = Self::default();
             this.unseparable.insert(command.to_string());
             this
         }
 
-        /// The command succeeded, with `discarded` bytes cut off ahead of its
-        /// output.
+        // The command succeeded, with `discarded` bytes cut off ahead of its
+        // output.
         fn with_noise_before(command: &str, stdout: &[u8], discarded: usize) -> Self {
             let mut this = Self::succeeding(command, stdout);
             this.separation
@@ -457,7 +457,7 @@ mod tests {
             this
         }
 
-        /// The command succeeded, but where its output ended is not established.
+        // The command succeeded, but where its output ended is not established.
         fn with_unverified_tail(command: &str, stdout: &[u8]) -> Self {
             let mut this = Self::succeeding(command, stdout);
             this.separation.insert(command.to_string(), (0, false));

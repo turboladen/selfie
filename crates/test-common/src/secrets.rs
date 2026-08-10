@@ -268,11 +268,11 @@ mod tests {
 
     const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
-    /// Eight newlines, then content. Windowing before squeezing left this with an
-    /// empty text needle, and `contains("")` fails every assertion.
+    // Eight newlines, then content. Windowing before squeezing left this with an
+    // empty text needle, and `contains("")` fails every assertion.
     const LEADING_WHITESPACE: &str = "\n\n\n\n\n\n\n\nhunter2-DO-NOT-LEAK";
 
-    /// A `Started` event carries no content at all, and must never be reported.
+    // A `Started` event carries no content at all, and must never be reported.
     const CONTENT_FREE_EVENT: &str = "Started { operation_info: OperationInfo { \
          operation_type: DotfileApply, package_name: \"\", environment: \"test\" } }";
 

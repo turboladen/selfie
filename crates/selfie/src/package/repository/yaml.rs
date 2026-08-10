@@ -1224,7 +1224,7 @@ environments:
         assert!(result.is_ok());
     }
 
-    /// A package YAML with one well-formed dotfile and one carrying `var:`.
+    // A package YAML with one well-formed dotfile and one carrying `var:`.
     fn package_with_typo() -> Package {
         serde_saphyr::from_str(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \

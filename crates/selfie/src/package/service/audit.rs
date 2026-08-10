@@ -1033,7 +1033,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        /// Tracks peak concurrent command executions.
+        // Tracks peak concurrent command executions.
         struct ConcurrencyTrackingRunner {
             current: Arc<AtomicUsize>,
             peak: Arc<AtomicUsize>,

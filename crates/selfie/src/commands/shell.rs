@@ -872,10 +872,10 @@ mod tests {
         CancellationToken::new()
     }
 
-    /// An `AsyncRead` that yields `bytes` and then fails.
-    ///
-    /// Stands in for a pipe that dies part-way through, which cannot be provoked
-    /// reliably from a real child process.
+    // An `AsyncRead` that yields `bytes` and then fails.
+    //
+    // Stands in for a pipe that dies part-way through, which cannot be provoked
+    // reliably from a real child process.
     struct FailingReader {
         bytes: Vec<u8>,
         fail: bool,
@@ -889,7 +889,7 @@ mod tests {
             }
         }
 
-        /// The control: the same bytes, then a clean EOF.
+        // The control: the same bytes, then a clean EOF.
         fn clean(bytes: &[u8]) -> Self {
             Self {
                 bytes: bytes.to_vec(),
@@ -920,18 +920,18 @@ mod tests {
         }
     }
 
-    /// A pipe that read to the end, for driving [`collect`].
+    // A pipe that read to the end, for driving [`collect`].
     async fn read_ok(bytes: &'static [u8]) -> std::io::Result<Vec<u8>> {
         Ok(bytes.to_vec())
     }
 
-    /// A pipe that died part-way through.
+    // A pipe that died part-way through.
     async fn read_failed() -> std::io::Result<Vec<u8>> {
         Err(std::io::Error::other("pipe died"))
     }
 
-    /// A child whose `wait()` itself failed, which must stay distinguishable
-    /// from a pipe that failed.
+    // A child whose `wait()` itself failed, which must stay distinguishable
+    // from a pipe that failed.
     async fn wait_failed() -> std::io::Result<std::process::ExitStatus> {
         Err(std::io::Error::other("wait died"))
     }
@@ -1101,33 +1101,33 @@ mod tests {
 
     // ---- T5: the deadlock this shape exists to avoid -------------------------
 
-    /// Writes well past the ~64KB pipe buffer on **both** streams.
-    ///
-    /// Shared by the buffered and streaming deadlock tests so the two cannot
-    /// drift into measuring different amounts of output.
+    // Writes well past the ~64KB pipe buffer on **both** streams.
+    //
+    // Shared by the buffered and streaming deadlock tests so the two cannot
+    // drift into measuring different amounts of output.
     const BOTH_PIPES_PAST_THE_BUFFER: &str = "for i in $(seq 1 4000); do \
          echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
          echo 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >&2; \
          done";
 
-    /// 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
-    /// ASCII.
-    ///
-    /// The `é` straddles the 1024-byte boundary the old read loop cut on. The
-    /// `0xFF` is what makes a byte-exactness assertion able to fail: a *valid*
-    /// character that gets split still round-trips through
-    /// `String::from_utf8_lossy(..).as_bytes()` byte for byte, so a fixture
-    /// without an invalid byte cannot detect output that was decoded before it
-    /// was captured.
-    /// **Octal, not `\\xNN`.** Hex escapes are a bash/BSD extension; POSIX
-    /// specifies `\\ooo`, and `/bin/sh` is dash on Debian and Ubuntu, whose
-    /// `printf` emits `\\xc3` as five literal characters. That made this fixture
-    /// produce no split character at all and the test fail for a reason having
-    /// nothing to do with the decoder.
+    // 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
+    // ASCII.
+    //
+    // The `é` straddles the 1024-byte boundary the old read loop cut on. The
+    // `0xFF` is what makes a byte-exactness assertion able to fail: a *valid*
+    // character that gets split still round-trips through
+    // `String::from_utf8_lossy(..).as_bytes()` byte for byte, so a fixture
+    // without an invalid byte cannot detect output that was decoded before it
+    // was captured.
+    // **Octal, not `\\xNN`.** Hex escapes are a bash/BSD extension; POSIX
+    // specifies `\\ooo`, and `/bin/sh` is dash on Debian and Ubuntu, whose
+    // `printf` emits `\\xc3` as five literal characters. That made this fixture
+    // produce no split character at all and the test fail for a reason having
+    // nothing to do with the decoder.
     const SPLIT_CHARACTER: &str = "printf 'a%.0s' $(seq 1 1023); printf '\\303\\251'; \
          printf '\\377'; printf 'b%.0s' $(seq 1 100)";
 
-    /// Exactly what [`SPLIT_CHARACTER`] writes to stdout.
+    // Exactly what [`SPLIT_CHARACTER`] writes to stdout.
     fn split_character_bytes() -> Vec<u8> {
         let mut expected = vec![b'a'; 1023];
         expected.extend_from_slice("é".as_bytes());
@@ -1203,26 +1203,26 @@ mod tests {
         );
     }
 
-    /// Is a process whose command line contains `marker` still running?
-    ///
-    /// **The marker has to be the command the shell execs**, not a comment
-    /// beside it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30`
-    /// and the comment is gone, so `pgrep -f marker` finds nothing whether or not
-    /// the child was killed — a test written that way passes either way. An
-    /// unusual sleep duration is the marker instead: it survives the exec because
-    /// it *is* the exec'd command.
-    ///
-    /// **The callers run it through `exec`, and that is load-bearing.** What the
-    /// runner promises is that it kills its *direct child*; what this function
-    /// observes is that no process is running the marker. Those are the same
-    /// claim only when the shell has replaced itself with the marker rather than
-    /// forking it. Replacing itself is what `exec` is specified to do, so this
-    /// holds on every POSIX shell — whereas relying on a shell to *choose* to
-    /// exec a lone command makes the test depend on an optimization. `bash` and
-    /// `dash` differ there, which is how a version of this without `exec` passed
-    /// on macOS and failed on Ubuntu, reporting a grandchild the runner never
-    /// promised to kill (that leak is real, tracked separately, and deliberately
-    /// out of scope here).
+    // Is a process whose command line contains `marker` still running?
+    //
+    // **The marker has to be the command the shell execs**, not a comment
+    // beside it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30`
+    // and the comment is gone, so `pgrep -f marker` finds nothing whether or not
+    // the child was killed — a test written that way passes either way. An
+    // unusual sleep duration is the marker instead: it survives the exec because
+    // it *is* the exec'd command.
+    //
+    // **The callers run it through `exec`, and that is load-bearing.** What the
+    // runner promises is that it kills its *direct child*; what this function
+    // observes is that no process is running the marker. Those are the same
+    // claim only when the shell has replaced itself with the marker rather than
+    // forking it. Replacing itself is what `exec` is specified to do, so this
+    // holds on every POSIX shell — whereas relying on a shell to *choose* to
+    // exec a lone command makes the test depend on an optimization. `bash` and
+    // `dash` differ there, which is how a version of this without `exec` passed
+    // on macOS and failed on Ubuntu, reporting a grandchild the runner never
+    // promised to kill (that leak is real, tracked separately, and deliberately
+    // out of scope here).
     fn a_process_matching(marker: &str) -> bool {
         let found = std::process::Command::new("pgrep")
             // `-x` anchors: the whole command line must be the marker, so an
@@ -1235,8 +1235,8 @@ mod tests {
         !found.stdout.is_empty()
     }
 
-    /// Kill anything left over, so a failing assertion does not also leak a
-    /// process into the developer's session.
+    // Kill anything left over, so a failing assertion does not also leak a
+    // process into the developer's session.
     fn kill_processes_matching(marker: &str) {
         let _ = std::process::Command::new("pkill")
             .args(["-x", "-f", &marker.replace('.', "\\.")])
@@ -1670,8 +1670,8 @@ mod tests {
     // end-to-end version of these can pass without the boundary ever being
     // crossed. Feeding hand-split slices is the only way to be sure it was.
 
-    /// Push `pieces` through one decoder in order, as a pipe would deliver them,
-    /// and collect the frames it chose to emit.
+    // Push `pieces` through one decoder in order, as a pipe would deliver them,
+    // and collect the frames it chose to emit.
     fn decode_pieces(pieces: &[&[u8]]) -> Vec<Vec<u8>> {
         let mut decoder = Utf8Boundary;
         let mut buf = BytesMut::new();
@@ -1837,7 +1837,7 @@ mod tests {
 
     // ---- What the pump does with the frames ----------------------------------
 
-    /// A child that will not exit on its own, for the read-failure test below.
+    // A child that will not exit on its own, for the read-failure test below.
     fn sleeping_child() -> tokio::process::Child {
         Command::new(ShellCommandRunner::default_shell())
             .arg("-c")
@@ -2109,14 +2109,14 @@ mod content_tests {
         CancellationToken::new()
     }
 
-    /// Write a stand-in shell into `dir` and return its path.
-    ///
-    /// `before` is written when the shell starts, as a profile banner is. `after`
-    /// is written from an `EXIT` trap, as a profile's own trap would be.
-    /// `background` is written by a detached child a fraction of a second later,
-    /// as an update checker started by a profile does — the case no boundary
-    /// drawn in the output stream can catch, because it depends on timing rather
-    /// than on position.
+    // Write a stand-in shell into `dir` and return its path.
+    //
+    // `before` is written when the shell starts, as a profile banner is. `after`
+    // is written from an `EXIT` trap, as a profile's own trap would be.
+    // `background` is written by a detached child a fraction of a second later,
+    // as an update checker started by a profile does — the case no boundary
+    // drawn in the output stream can catch, because it depends on timing rather
+    // than on position.
     fn noisy_shell(dir: &Path, before: &str, after: &str, background: bool) -> PathBuf {
         let mut body = String::from("#!/bin/sh\n");
         if !before.is_empty() {
@@ -2136,15 +2136,15 @@ mod content_tests {
         path
     }
 
-    /// A runner whose shell is noisy in every way at once.
+    // A runner whose shell is noisy in every way at once.
     fn noisy_runner(dir: &Path) -> ShellCommandRunner {
         let shell = noisy_shell(dir, "LEADBANNER", "TRAILCHATTER", true);
         ShellCommandRunner::new(shell.to_str().unwrap(), TIMEOUT)
     }
 
-    /// A command that takes long enough for the backgrounded writer to land in
-    /// the middle of it. Without the wait the race is won by accident and the
-    /// test passes for the wrong reason.
+    // A command that takes long enough for the backgrounded writer to land in
+    // the middle of it. Without the wait the race is won by accident and the
+    // test passes for the wrong reason.
     fn slow_secret() -> String {
         format!("sleep 0.6; printf '%s' '{SECRET}'")
     }
@@ -2384,7 +2384,7 @@ mod content_tests {
         );
     }
 
-    /// A stand-in shell whose startup does `redirect` before running its `-c`.
+    // A stand-in shell whose startup does `redirect` before running its `-c`.
     fn shell_redirecting(dir: &Path, name: &str, redirect: &str) -> PathBuf {
         let path = dir.join(name);
         test_common::write_executable(

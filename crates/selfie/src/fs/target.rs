@@ -433,10 +433,10 @@ mod tests {
         assert_eq!(result.path(), Path::new("~alice/test-file"));
     }
 
-    /// A filesystem whose home directory cannot be determined.
-    ///
-    /// The only fixture that reaches `deploy_target`'s post-expansion re-check:
-    /// every other input is decided by `TargetRejection::of` before expansion.
+    // A filesystem whose home directory cannot be determined.
+    //
+    // The only fixture that reaches `deploy_target`'s post-expansion re-check:
+    // every other input is decided by `TargetRejection::of` before expansion.
     fn no_home() -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.expect_expand_path().returning(|_| {

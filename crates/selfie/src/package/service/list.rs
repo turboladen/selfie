@@ -240,7 +240,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
-    /// A cloneable command runner that tracks peak concurrency.
+    // A cloneable command runner that tracks peak concurrency.
     #[derive(Clone)]
     struct ConcurrencyTrackingRunner {
         current: Arc<AtomicUsize>,

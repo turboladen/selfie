@@ -378,16 +378,16 @@ mod tests {
     use crate::commands::runner::MAX_BOUNDED_BYTES;
     use test_common::assert_secret_free;
 
-    /// High-entropy, 24 characters, and shaped like nothing else in a fixture —
-    /// refuses a secret that reads like a path, a
-    /// package name, or an environment name.
+    // High-entropy, 24 characters, and shaped like nothing else in a fixture —
+    // refuses a secret that reads like a path, a
+    // package name, or an environment name.
     const TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 
-    /// A credential that **contains the candidate delimiters**, which [`TOKEN`]
-    /// does not. Base64 pads with `=`, so a very large class of real tokens
-    /// carries one by construction — and a rule preferring the tightest span
-    /// emits everything before that `=` verbatim. No test using `TOKEN` alone
-    /// can see that class; thirteen mutations sailed through the gap.
+    // A credential that **contains the candidate delimiters**, which [`TOKEN`]
+    // does not. Base64 pads with `=`, so a very large class of real tokens
+    // carries one by construction — and a rule preferring the tightest span
+    // emits everything before that `=` verbatim. No test using `TOKEN` alone
+    // can see that class; thirteen mutations sailed through the gap.
     const TOKEN_WITH_DELIMITERS: &str = "c2VjcmV0S2V5,MQ==dEs9Zx";
 
     // ─── Redaction: the shapes that must be covered ─────────────────────────
@@ -724,8 +724,8 @@ mod tests {
     // It did, until the mutation for this test was run.
     #[test]
     fn bounding_cannot_split_a_credential_because_redaction_runs_first() {
-        /// The window `assert_secret_free` scans for, spelled out because the
-        /// placement below is arithmetic on it rather than a round number.
+        // The window `assert_secret_free` scans for, spelled out because the
+        // placement below is arithmetic on it rather than a round number.
         const SCAN_WINDOW: usize = 12;
         const URL_PREFIX: &str = "https://user:";
 

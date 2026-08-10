@@ -388,7 +388,7 @@ mod tests {
     use selfie::package::event::PackageListItem;
     use test_common::{ALT_TEST_ENV, TEST_ENV};
 
-    /// Helper to call handle_list_event with test defaults (non-TTY, no spinners)
+    // Helper to call handle_list_event with test defaults (non-TTY, no spinners)
     fn test_handle_event(event: &event::PackageEvent, config: &CliConfig, show_all: bool) -> bool {
         let display = DisplayManager::new(false);
         let use_colors = config.use_colors();
@@ -398,7 +398,7 @@ mod tests {
         )
     }
 
-    /// Helper to call handle_list_event with explicit is_tty flag
+    // Helper to call handle_list_event with explicit is_tty flag
     fn test_handle_event_with_tty(
         event: &event::PackageEvent,
         config: &CliConfig,
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(state.total_packages, 2);
     }
 
-    /// Helper: send Ready + two out-of-order Completed events and return the state.
+    // Helper: send Ready + two out-of-order Completed events and return the state.
     fn send_buffered_results(is_tty: bool) -> ListState {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = ListState::default();

@@ -462,7 +462,7 @@ mod tests {
     use std::path::PathBuf;
     use test_common::{test_config_with_dir, test_config_with_dir_and_env};
 
-    /// Helper: collect the final `OperationResult` from an event stream.
+    // Helper: collect the final `OperationResult` from an event stream.
     async fn collect_result(
         mut stream: selfie::package::event::EventStream,
     ) -> Option<OperationResult> {

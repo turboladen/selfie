@@ -35,8 +35,8 @@ use selfie::{
 const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 const CHECK_CMD: &str = "check-creds";
 
-/// A package whose check command fails, printing a credential to stdout and a
-/// genuine diagnostic to stderr.
+// A package whose check command fails, printing a credential to stdout and a
+// genuine diagnostic to stderr.
 fn failing_check_service(temp: &TempDir) -> impl PackageService {
     let package_dir = temp.path().to_path_buf();
     std::fs::write(
