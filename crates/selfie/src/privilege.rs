@@ -25,17 +25,23 @@
 
 /// How much privilege the process holds, and where it came from.
 ///
-/// The distinction between the two root cases is the whole rule.
+/// The distinction that matters is not root-vs-not. It is whether this process
+/// is running as a *different user* than the one who invoked it:
 /// [`Root`](Self::Root) is a legitimate design — a container, CI, or root
 /// managing root's own dotfiles — and refusing it would put real uses behind a
 /// flag to prevent an accident that does not happen there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Elevation {
-    /// Not root.
+    /// Running as the invoking user, who is not root.
     Unprivileged,
-    /// Root, with no sign of `sudo`.
+    /// Root, and not by way of another user's `sudo`.
     Root,
-    /// Root, reached through `sudo`.
+    /// Running as someone other than the user who invoked it, via `sudo`.
+    ///
+    /// Covers `sudo selfie` and `sudo -u alice selfie` alike. The second is not
+    /// root at all and does the same kind of damage — alice-owned files through
+    /// *your* home directory, and a deploy state your next ordinary run cannot
+    /// read.
     Sudo,
 }
 
@@ -89,12 +95,14 @@ impl SudoRefusal {
     pub fn message(&self) -> &'static str {
         match self.0 {
             WriteScope::Dotfiles => {
-                "Refusing to run under sudo: every dotfile in this run would be written as root, \
-                 including the ones under your home directory"
+                "Refusing to run under sudo: sudo switched user, so every dotfile in this run \
+                 would be written by that user rather than by you — including the ones under \
+                 your home directory"
             }
             WriteScope::Repository => {
-                "Refusing to run under sudo: this would leave root-owned objects, refs and index \
-                 entries inside a repository you own, which ordinary git then fails on"
+                "Refusing to run under sudo: sudo switched user, so this would leave objects, \
+                 refs and index entries owned by that user inside a repository you own, which \
+                 ordinary git then fails on"
             }
         }
     }
@@ -110,11 +118,11 @@ impl SudoRefusal {
             WriteScope::Dotfiles => {
                 "Re-run without sudo. selfie has no per-entry privilege scope, so a target you \
                  cannot write stays one failed entry; pass --allow-root only if you intend every \
-                 target in the run to be written as root."
+                 target in the run to be written by the user sudo switched to."
             }
             WriteScope::Repository => {
                 "Re-run without sudo. Pass --allow-root only if this repository is meant to be \
-                 root-owned."
+                 owned by the user sudo switched to."
             }
         }
     }
@@ -191,14 +199,35 @@ impl<P: Privilege> RootPolicy<P> {
 /// environment in a test, and `std::env::set_var` is `unsafe` in edition 2024
 /// and racy against every other thread in the process.
 ///
+/// Compares `SUDO_UID` against the *effective* uid rather than merely asking
+/// whether it is set. Presence alone would miss `sudo -u alice`, which is not
+/// root and does the same damage; and it would refuse a process that merely
+/// inherited the variable and is still running as the user who set it — a shell
+/// started under `sudo -u $USER`, or anything spawned from one.
+///
+/// An unparseable value is treated as `sudo`. It cannot be compared, and
+/// refusing is the safe direction; a real `sudo` always sets a decimal uid, so
+/// anything else was not written by the thing this rule is about.
+///
 /// Only the `cfg(unix)` impl and the tests call it, so a non-unix build without
 /// them would warn it dead — and clippy runs with `-D warnings`.
 #[cfg(any(unix, test))]
-fn classify(is_root: bool, under_sudo: bool) -> Elevation {
-    match (is_root, under_sudo) {
-        (false, _) => Elevation::Unprivileged,
-        (true, false) => Elevation::Root,
-        (true, true) => Elevation::Sudo,
+fn classify(euid: u32, sudo_uid: Option<&str>) -> Elevation {
+    let invoked_by_someone_else = match sudo_uid {
+        None => false,
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map(|uid| uid != euid)
+            .unwrap_or(true),
+    };
+
+    if invoked_by_someone_else {
+        Elevation::Sudo
+    } else if euid == 0 {
+        Elevation::Root
+    } else {
+        Elevation::Unprivileged
     }
 }
 
@@ -206,22 +235,25 @@ fn classify(is_root: bool, under_sudo: bool) -> Elevation {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealPrivilege;
 
-/// `SUDO_UID` is what distinguishes "someone reached for sudo to get past an
-/// `EACCES`" from "this process is root because that is the design". `doas`, `su`
-/// and `pkexec` do not set it and so are not caught; that is accepted, because
-/// sudo is what the workaround reaches for and an allowlist covering every
-/// escalation tool would still miss one. **Do not expand this into
-/// privilege-tool detection.**
+/// `SUDO_UID` is what distinguishes "someone reached for sudo" from "this process
+/// is running as this user because that is the design". `doas`, `su` and `pkexec`
+/// do not set it and so are not caught; that is accepted, because sudo is what
+/// the `EACCES` workaround reaches for and an allowlist covering every escalation
+/// tool would still miss one. **Do not expand this into privilege-tool
+/// detection.**
 ///
-/// Presence alone counts, including an empty value. Sudo sets it to a number, so
-/// an empty one is already strange; treating it as sudo refuses more, which is
-/// the safe direction.
+/// A non-UTF-8 value reaches [`classify`] as `None` rather than as a value that
+/// cannot be compared — `to_str` fails and the run is allowed. That is the one
+/// place this leans permissive, and deliberately: a uid is decimal ASCII, so a
+/// non-UTF-8 `SUDO_UID` was not written by sudo and says nothing about how this
+/// process was started.
 #[cfg(unix)]
 impl Privilege for RealPrivilege {
     fn elevation(&self) -> Elevation {
+        let sudo_uid = std::env::var_os("SUDO_UID");
         classify(
-            nix::unistd::Uid::effective().is_root(),
-            std::env::var_os("SUDO_UID").is_some(),
+            nix::unistd::Uid::effective().as_raw(),
+            sudo_uid.as_ref().and_then(|v| v.to_str()),
         )
     }
 }
@@ -304,14 +336,52 @@ mod tests {
         );
     }
 
+    const ROOT: u32 = 0;
+    const ME: u32 = 501;
+    const ALICE: u32 = 1001;
+
     #[test]
-    fn sudo_is_root_plus_sudo_uid_and_nothing_less() {
-        assert_eq!(classify(true, true), Elevation::Sudo);
-        assert_eq!(classify(true, false), Elevation::Root);
-        // SUDO_UID is inherited by anything sudo starts, so a non-root process
-        // can carry one. It is not elevation and must not be read as any.
-        assert_eq!(classify(false, true), Elevation::Unprivileged);
-        assert_eq!(classify(false, false), Elevation::Unprivileged);
+    fn sudo_is_running_as_someone_other_than_the_invoker() {
+        // The case this rule exists for.
+        assert_eq!(classify(ROOT, Some("501")), Elevation::Sudo);
+
+        // selfie-04fl: `sudo -u alice selfie apply`. Not root at all, and the
+        // reason the rule compares uids instead of asking whether SUDO_UID is
+        // set — the earlier version allowed this, writing alice-owned files
+        // through the invoker's home directory.
+        assert_eq!(classify(ALICE, Some("501")), Elevation::Sudo);
+
+        // Real root: a container, CI, or root managing root's own dotfiles.
+        assert_eq!(classify(ROOT, None), Elevation::Root);
+        assert_eq!(classify(ME, None), Elevation::Unprivileged);
+    }
+
+    // SUDO_UID is inherited by everything a sudo session starts, so a process
+    // running as the user who set it is not elevated and must not be read as
+    // such — `sudo -u $USER`, or any descendant of it. Refusing here would break
+    // ordinary use on a machine where the variable is simply present.
+    #[test]
+    fn an_inherited_sudo_uid_matching_the_current_user_is_not_elevation() {
+        assert_eq!(classify(ME, Some("501")), Elevation::Unprivileged);
+        // Root running `sudo` is still root, and its home directory is unchanged.
+        assert_eq!(classify(ROOT, Some("0")), Elevation::Root);
+    }
+
+    // Unparseable cannot be compared, so it is refused. A real sudo always writes
+    // a decimal uid; anything else was not written by the thing being detected,
+    // and refusing is the safe direction.
+    #[test]
+    fn an_uncomparable_sudo_uid_is_refused() {
+        for raw in ["", "  ", "nonsense", "-1", "501x", "99999999999999999999"] {
+            assert_eq!(
+                classify(ME, Some(raw)),
+                Elevation::Sudo,
+                "SUDO_UID={raw:?} should not have been comparable"
+            );
+        }
+
+        // Control: surrounding whitespace is not corruption.
+        assert_eq!(classify(ME, Some(" 501 ")), Elevation::Unprivileged);
     }
 
     // The bug this exists for shipped, and no test caught it -- running it under a
@@ -334,6 +404,29 @@ mod tests {
                 !repository.message().contains(forbidden),
                 "the repository refusal must not describe a dotfile run, got: {}",
                 repository.message()
+            );
+        }
+
+        // No wording may hard-code "root". The gate refuses `sudo -u alice` too,
+        // which is not root and writes alice-owned files — so naming root
+        // describes the wrong user on exactly the case selfie-04fl added.
+        //
+        // Both methods, not just `message`. Three wording defects have shipped on
+        // this type now, and the third was in `suggestion` alone, caught only
+        // because a container run printed it next to a message that was already
+        // fixed. Checking one method is what let it through.
+        //
+        // `--allow-root` is the flag's name and has to survive the check.
+        for text in [
+            dotfiles.message(),
+            dotfiles.suggestion(),
+            repository.message(),
+            repository.suggestion(),
+        ] {
+            let without_flag = text.replace("--allow-root", "<flag>");
+            assert!(
+                !without_flag.contains("root"),
+                "a refusal must not name root: sudo -u is refused too, got: {text}"
             );
         }
 

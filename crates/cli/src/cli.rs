@@ -86,10 +86,13 @@ pub struct ClapCli {
 
     /// Deploy dotfiles even when running under sudo
     ///
-    /// Without this, `apply` and the track commands refuse to run under sudo:
-    /// every dotfile in the run would be written as root, including the ones
-    /// under your home directory, and `~` may not even resolve to your home
-    /// directory once sudo has had its way with `$HOME`.
+    /// Without this, every command that writes refuses to run under sudo: the
+    /// whole run would be written by whoever sudo switched to, including the
+    /// entries under your home directory, and `~` may not even resolve to your
+    /// home directory once sudo has had its way with `$HOME`.
+    ///
+    /// `sudo -u alice` is refused on the same grounds — the damage is the same,
+    /// only the owner differs.
     ///
     /// Deliberately has no configuration-file equivalent — a setting that
     /// disabled this permanently would defeat it.

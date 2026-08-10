@@ -19,7 +19,7 @@ use selfie::{
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
-    privilege::{RealPrivilege, RootPolicy},
+    privilege::{RealPrivilege, RootPolicy, WriteScope},
     sync_service::{SyncService, service::SyncServiceImpl},
 };
 use tokio_util::sync::CancellationToken;
@@ -121,6 +121,26 @@ fn root_policy(config: &CliConfig) -> RootPolicy<RealPrivilege> {
     }
 }
 
+/// Report the sudo refusal before a handler does any work of its own.
+///
+/// **Not the gate.** The gate is in the library and refuses whatever the CLI
+/// does; this is an early exit so a handler does not do visible work it is about
+/// to throw away. Both read the same [`root_policy`], so they cannot disagree
+/// about whether to refuse — only about how far the run got first.
+///
+/// It exists because two handlers had something to do before the service was
+/// built, and both did the wrong thing under sudo: `handle_track_standalone`
+/// checked for the dotfiles directory, which on a machine where sudo resets
+/// `$HOME` resolves under `/root`, and suggested `mkdir -p /root/…` — creating
+/// the root-owned directory the refusal exists to prevent. `selfie track` ran the
+/// whole interactive prompt and discarded the answers.
+pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<i32> {
+    let refusal = root_policy(config).refusal(WriteScope::Dotfiles)?;
+    display.print_error(refusal.message());
+    display.print_suggestion(refusal.suggestion());
+    Some(1)
+}
+
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.
 ///
 /// Shared by `selfie dotfiles track` and `selfie track` (interactive).
@@ -131,6 +151,14 @@ pub(crate) async fn handle_track_standalone(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
+    // Ahead of the directory check, not after it. Under sudo on a machine whose
+    // sudoers policy resets `$HOME`, `dotfiles_directory` resolves under `/root`,
+    // the check fails, and the suggestion below tells the user to `mkdir -p` it —
+    // creating the root-owned directory the refusal exists to prevent.
+    if let Some(code) = refuse_under_sudo(config, display) {
+        return code;
+    }
+
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if !dotfiles_dir.is_dir() {
         display.print_error(format!(

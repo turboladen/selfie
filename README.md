@@ -290,7 +290,7 @@ selfie --verbose package install package-name
 
 - **Permission errors**: Check if install commands need `sudo`. Do not reach for `sudo selfie apply`
   when a dotfile target is unwritable — selfie refuses it, because the run has no per-entry
-  privilege scope and would write every `~/` entry as root too. See
+  privilege scope and would write every `~/` entry as that user too. See
   [Configuration](docs/configuration.md#running-under-sudo).
 - **Command not found**: Verify PATH includes tool installation locations
 - **Package validation fails**: Use `selfie spec validate package-name`

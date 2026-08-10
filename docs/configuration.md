@@ -278,14 +278,21 @@ selfie --no-color package list
 Every selfie command that writes refuses to run under `sudo`. `--allow-root` overrides that for the
 case where you mean it.
 
-| command                                            | why it is refused                                                                                                   |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `apply`                                            | the whole run is written as root, including the entries under your home directory                                   |
-| `track`, `dotfiles track`, `package track-dotfile` | the same, plus a spec and deploy state written as root                                                              |
-| `sync push`, `sync pull`                           | commits, fetches and merges as root, leaving root-owned objects, refs and index entries inside a repository you own |
+What is refused is running as a **different user than the one who invoked selfie** — so
+`sudo -u
+alice selfie apply` is refused too, even though it is not root. It does the same kind of
+damage, just with a different owner on the files. Running as root _without_ `sudo` — a container, a
+CI job, or root managing root's own dotfiles — is not affected and needs no flag, and neither is a
+process that merely inherited `SUDO_UID` from a session running as you.
 
-The sync case is the one that does not repair itself. A root-owned deploy-state file is replaced on
-the next successful run, because it is written from a user-owned temporary file; root-owned git
+| command                                            | why it is refused                                                                                                       |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `apply`                                            | the whole run is written by the other user, including the entries under your home directory                             |
+| `track`, `dotfiles track`, `package track-dotfile` | the same, plus a spec and deploy state you can no longer rewrite                                                        |
+| `sync push`, `sync pull`                           | commits, fetches and merges as that user, leaving objects, refs and index entries you do not own in a repository you do |
+
+The sync case is the one that does not repair itself. A deploy-state file owned by the wrong user is
+replaced on the next successful run, because it is written from a temporary file you own; git
 objects are not, and the next ordinary `git` fails on them.
 
 Read-only commands — `dotfiles drift`, `dotfiles list`, `sync status`, `package status`, everything
@@ -298,8 +305,7 @@ sudo selfie --allow-root apply
 
 It is the one flag with **no** configuration-file equivalent, deliberately — a `cli:` setting that
 turned the guard off permanently would defeat a guard whose entire value is that it fires on the run
-you did not think through. Running as root without `sudo` (a container, a CI job, or root managing
-root's own dotfiles) is not affected and needs no flag.
+you did not think through.
 
 ## Configuration Validation
 
