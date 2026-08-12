@@ -16,6 +16,9 @@
 //! JSON alike.
 
 /// How much of the secret a rendering has to reproduce to count as a leak.
+///
+/// Also written as a number in [`assert_secret_free`]'s documentation, which is
+/// what tells someone how to build a leak-test secret. Change both together.
 // A window rather than the whole value, because a truncating leak is still a
 // leak: a warning printing the first 200 bytes of a 4 KiB credential has to
 // fail. Twelve rather than eight because a short window collides with ordinary
@@ -173,9 +176,9 @@ fn excerpt(text: &str, at: usize, len: usize) -> String {
 /// # What a leak-test secret has to be
 ///
 /// A fixture value, never a real credential: a failure prints an excerpt of what
-/// matched. High-entropy, at least [`WINDOW`] bytes from its first non-whitespace
-/// byte, and — if text — [`WINDOW`] *characters* still remaining after
-/// [`squeeze`]. Count characters, not bytes: four emoji are sixteen
+/// matched. High-entropy, at least 12 bytes from its first non-whitespace byte,
+/// and — if text — 12 *characters* still remaining once whitespace and the
+/// escape pairs are removed. Count characters, not bytes: four emoji are sixteen
 /// non-whitespace bytes but four characters, and are refused.
 ///
 /// It must not read like a path, a package name, or an environment name. This is
@@ -196,7 +199,7 @@ fn excerpt(text: &str, at: usize, len: usize) -> String {
 ///   holds.
 /// - **A partial leak not starting at the secret's first non-whitespace byte.**
 ///   The tail or middle of a credential passes, as does anything shorter than
-///   [`WINDOW`].
+///   12 bytes.
 /// - **Whatever the scanned rendering itself hides.** A redacting `Debug` passes
 ///   this while the same value leaves through `Display`, serde, or a direct
 ///   write. Scan what the adapter actually emits.

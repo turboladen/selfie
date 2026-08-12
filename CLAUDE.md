@@ -39,10 +39,9 @@ the first failure. `Justfile` is the source of truth for these gates — do not 
 Passing it means the checklist passed, not that CI will be green — CI also runs `typos`,
 `cargo build`, and every feature combination of `selfie` via `cargo hack`.
 
-**Neither builds the docs.** `cargo doc` appears only in the `just docs` convenience recipe, so a
-broken intra-doc link or a rotted example fails nothing. Check it yourself with
-`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, which reports pre-existing errors today
-(selfie-udyh).
+**`just check` does not build the docs; CI does.** A broken intra-doc link fails nothing locally, so
+run `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features` before pushing a
+change to doc comments. CI's `docs` job runs exactly that.
 
 `dprint fmt` reformats every Markdown and YAML file in the repo, not just the ones you edited.
 Commit that: unformatted files anywhere are a miss, and the fix belongs in whatever PR finds it.

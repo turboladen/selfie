@@ -6,7 +6,7 @@
 //! - [`SpecService`] — file/definition operations (create, validate, update, remove, spec_info)
 //!   that work with package YAML files but never execute commands.
 //! - [`PackageService`] — runtime operations (check, audit, install, list, status) that may
-//!   execute system commands via [`CommandRunner`](crate::commands::runner::CommandRunner).
+//!   execute system commands via [`CommandRunner`].
 //!
 //! Both traits are implemented by [`PackageServiceImpl`], which coordinates between the package
 //! repository, command runner, and event streaming.

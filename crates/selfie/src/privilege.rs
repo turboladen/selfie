@@ -242,7 +242,7 @@ pub struct RealPrivilege;
 /// tool would still miss one. **Do not expand this into privilege-tool
 /// detection.**
 ///
-/// A non-UTF-8 value reaches [`classify`] as `None` rather than as a value that
+/// A non-UTF-8 value reaches `classify` as `None` rather than as a value that
 /// cannot be compared — `to_str` fails and the run is allowed. That is the one
 /// place this leans permissive, and deliberately: a uid is decimal ASCII, so a
 /// non-UTF-8 `SUDO_UID` was not written by sudo and says nothing about how this
