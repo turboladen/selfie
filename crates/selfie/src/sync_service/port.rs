@@ -1,12 +1,4 @@
-//! SyncService port (trait) for git sync operations.
-//!
-//! Defines the hexagonal architecture port for syncing selfie package specs
-//! and dotfiles via git. The [`SyncService`] trait abstracts the sync workflow,
-//! allowing different implementations and enabling testing through mocking.
-//!
-//! Push uses a two-phase architecture:
-//! - [`SyncService::prepare_push`] — query step that generates commit proposals
-//! - [`SyncService::execute_push`] — mutation step that stages, commits, and pushes
+//! Port for syncing package specs and dotfiles over git.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -37,8 +29,9 @@ pub enum SyncError {
     ///
     /// Committing and pushing as root leaves root-owned objects, refs and index
     /// entries inside a repository the user owns, which the next ordinary `git`
-    /// fails on. Unlike deploy state that does not self-heal, because nothing
-    /// later rewrites those files from a user-owned temp.
+    /// fails on. Deploy state written as root is replaced by the next successful
+    /// run, because it comes from a user-owned temporary file; git objects are
+    /// not, so this does not self-heal.
     #[error("{}. {}", .0.message(), .0.suggestion())]
     Privilege(crate::privilege::SudoRefusal),
 }
@@ -126,17 +119,13 @@ pub struct ConfirmedCommit {
     pub message: String,
 }
 
-/// Port for git sync operations (Hexagonal Architecture).
+/// Port for the sync workflow — status, push and pull — so the CLI and MCP
+/// server can drive it without knowing about git.
 ///
-/// This trait abstracts the sync workflow — status, push, and pull — so that
-/// the CLI and MCP server can consume it without knowing about git internals.
-///
-/// # Two-Phase Push
-///
-/// Push is split into a preparation phase ([`prepare_push`](Self::prepare_push))
-/// that returns proposed commits, and an execution phase
-/// ([`execute_push`](Self::execute_push)) that performs the actual git operations.
-/// This allows callers to prompt users for confirmation between phases.
+/// Push is two-phase on purpose: [`prepare_push`](Self::prepare_push) returns
+/// proposed commits without touching git state, and
+/// [`execute_push`](Self::execute_push) performs them, so a caller can ask the
+/// user to confirm in between.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait SyncService: Send + Sync {
     /// Get combined repo status and dotfile drift summary.

@@ -743,9 +743,10 @@ mod tests {
     // `git` actually produced. Everything else in this change exercises
     // `GitMessage` on strings a test wrote.
 
-    // High-entropy and shaped like nothing else in a fixture, per
-    // . A fixture value, never a real credential:
-    // `assert_secret_free` prints an excerpt of whatever matched.
+    // High-entropy and shaped like nothing else in a fixture, so it cannot
+    // collide with a path, a package name or an environment name. A fixture
+    // value, never a real credential: `assert_secret_free` prints an excerpt of
+    // whatever matched.
     const FIXTURE_TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 
     // A loopback server answering every request `401 Basic`, returning its port.

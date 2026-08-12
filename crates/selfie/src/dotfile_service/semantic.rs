@@ -1,19 +1,10 @@
-//! Semantic analysis utilities for config file deployment.
+//! Spotting config a user already added by hand, so a deploy can warn about
+//! duplicating it.
 //!
-//! When deploying config files — especially to shell profiles like `.bashrc` or
-//! `config.fish` — it's useful to understand whether the target file already
-//! contains lines related to a package. For example, a user might have manually
-//! added `eval "$(fnm env)"` to their `.zshrc` before selfie existed.
-//!
-//! This module provides two capabilities:
-//!
-//! - **Related-line scanning** ([`find_related_lines`]): searches file content
-//!   for lines mentioning a package name, enabling callers to warn users about
-//!   potential duplication before deploying a new config snippet.
-//!
-//! - **Shell config detection** ([`is_shell_config_path`]): identifies whether a
-//!   target path is a well-known shell configuration file, which signals that
-//!   extra care (and user-visible warnings) may be warranted during deployment.
+//! Someone may have put `eval "$(fnm env)"` in their `.zshrc` long before selfie
+//! existed. [`find_related_lines`] finds lines mentioning a package name, and
+//! [`is_shell_config_path`] recognizes the shell profiles where that is worth
+//! saying.
 
 /// A line in a file that is related to a package
 pub struct RelatedLine {

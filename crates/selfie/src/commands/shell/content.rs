@@ -9,8 +9,8 @@
 //! **A startup file that redirects [`CAPTURE_FD`] receives the content**, and
 //! selfie's own capture then comes up empty and fails closed. That is a known
 //! limit against an accidental collision, not a boundary against a hostile
-//! profile — one of those already owns the session. See
-//! .
+//! profile: one of those already owns the session, and could read the deployed
+//! file or wrap the provider command itself.
 
 use uuid::Uuid;
 

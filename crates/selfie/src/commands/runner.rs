@@ -30,84 +30,56 @@ pub enum OutputChunk {
     Stderr(String),
 }
 
-/// Port for command execution (Hexagonal Architecture)
+/// Port for command execution, in buffered and streaming forms.
 ///
-/// This trait abstracts command execution to allow different implementations
-/// (shell commands, mock execution, etc.) and to enable comprehensive testing.
-/// It provides both buffered and streaming execution modes with timeout support.
-///
-/// A non-zero exit is **not** an error for the `execute*` methods: it is
+/// A non-zero exit is **not** an error for the `execute*` methods. It is
 /// reported through [`CommandOutput::is_success`], so their `# Errors` sections
-/// list only the ways a command fails to run to completion.
+/// list only the ways a command fails to run to completion. Those ways are the
+/// same for all of them: the command cannot be started or dies part-way
+/// through, it times out, it is cancelled via `token`, or an output stream
+/// cannot be read to the end ([`CommandError::OutputReadFailed`]). The last
+/// includes stderr on a command whose correctness depends only on stdout — the
+/// runner reports what it could not read, and does not decide which stream a
+/// caller cared about. Each `execute*` method below names only what it adds to
+/// that set.
 ///
-/// Those methods buffer a command's entire output in memory, and nothing bounds
-/// it — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
+/// They all buffer the command's entire output in memory, and nothing bounds it
+/// — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
 /// output as well as relaying it. A size check applied by a caller, such as the
-/// dotfile content cap, therefore bounds what selfie compares and writes, not
-/// what it allocates.
+/// dotfile content cap, bounds what selfie compares and writes, not what it
+/// allocates.
+///
+/// [`is_command_available`](CommandRunner::is_command_available) is the
+/// exception to both: it runs no command.
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait CommandRunner: Send + Sync {
-    /// Check if a command executable exists on `PATH`
+    /// Whether `command` exists as a filesystem executable on `PATH`.
     ///
-    /// Tests whether the specified command can be found as a filesystem
-    /// executable on `PATH`. Shell builtins are not detected. This is
-    /// useful for checking package manager prerequisites (e.g., `brew`,
-    /// `npm`, `apt`) before attempting package installations.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The command name to check (e.g., "npm", "brew", "apt")
-    ///
-    /// # Returns
-    ///
-    /// `true` if an executable with the given name exists on `PATH`, `false` otherwise
+    /// Shell builtins are not detected. Use it to confirm a package manager is
+    /// present — `brew`, `npm`, `apt` — before trying to install with it.
     fn is_command_available(&self, command: &str) -> impl Future<Output = bool> + Send;
 
-    /// Execute a command and wait for completion
+    /// Run a command to completion, buffering its output.
     ///
-    /// Runs the specified command and waits for it to complete, collecting
-    /// all output. This is suitable for commands that don't produce large
-    /// amounts of output or don't need real-time feedback.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
+    /// For commands that produce little output and need no real-time feedback.
+    /// The timeout is whatever the implementation defaults to; use
+    /// [`execute_with_timeout`](CommandRunner::execute_with_timeout) to set one.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - Either output stream cannot be read to the end
-    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
-    ///   whose correctness depends only on stdout. The runner reports what it
-    ///   could not read; it does not decide which stream a caller cared about.
-    /// - Command execution times out (implementation-dependent default)
-    /// - The command is cancelled via `token`
+    /// [`CommandError`], for any of the failures listed on the trait.
     fn execute(
         &self,
         command: &str,
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
-    /// Execute a command with a specific timeout
-    ///
-    /// Like [`execute`](CommandRunner::execute) but with an explicit timeout.
-    /// The command will be terminated if it doesn't complete within the specified duration.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    /// * `timeout` - Maximum duration to wait for command completion
+    /// Like [`execute`](CommandRunner::execute), with an explicit timeout. The
+    /// command is terminated if it does not finish within `timeout`.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - Either output stream cannot be read to the end
-    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
-    ///   whose correctness depends only on stdout
-    /// - The command times out before completion
-    /// - The command is cancelled via `token`
+    /// [`CommandError`], for any of the failures listed on the trait.
     fn execute_with_timeout(
         &self,
         command: &str,
@@ -115,31 +87,18 @@ pub trait CommandRunner: Send + Sync {
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
-    /// Execute a command with a specific working directory and timeout
+    /// Like [`execute_with_timeout`](CommandRunner::execute_with_timeout), with
+    /// `working_dir` as the command's current directory rather than selfie's own.
     ///
-    /// Like [`execute_with_timeout`](CommandRunner::execute_with_timeout), but the
-    /// command runs with `working_dir` as its current directory rather than
-    /// inheriting selfie's own. Used where a command's meaning depends on where it
-    /// runs — dotfile content providers resolve against the package file's parent
-    /// directory, the same base repository sources resolve against.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    /// * `working_dir` - Directory to run the command in
-    /// * `timeout` - Maximum duration to wait for command completion
+    /// For commands whose meaning depends on where they run: dotfile content
+    /// providers resolve against the package file's parent directory, the same
+    /// base repository sources resolve against.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if:
-    /// - `working_dir` does not exist or is not a directory (reported as
-    ///   [`CommandError::IoError`], since the shell cannot be spawned there)
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - Either output stream cannot be read to the end
-    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
-    ///   whose correctness depends only on stdout
-    /// - The command times out before completion
-    /// - The command is cancelled via `token`
+    /// [`CommandError`], for any of the failures listed on the trait, plus
+    /// [`CommandError::IoError`] if `working_dir` does not exist or is not a
+    /// directory — the shell cannot be spawned there.
     fn execute_in_dir(
         &self,
         command: &str,
@@ -148,31 +107,19 @@ pub trait CommandRunner: Send + Sync {
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
-    /// Execute a command with streaming output
+    /// Run a command, relaying stdout and stderr through `output_sender` as they
+    /// arrive.
     ///
-    /// Runs the command and streams stdout/stderr output through the provided
-    /// channel as it becomes available. This is ideal for long-running commands
-    /// or when real-time feedback is needed.
-    ///
-    /// Chunks are delivered on a best-effort basis: an implementation may drop a
-    /// chunk rather than block when the receiver falls behind, and drops one
-    /// outright once the receiver is gone, so what arrives on the channel is not
-    /// guaranteed to be the whole output. The returned [`CommandOutput`] holds
-    /// all of it.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    /// * `timeout` - Maximum duration to wait for command completion
-    /// * `output_sender` - Channel sender to send output chunks to
+    /// For long-running commands that need real-time feedback. Chunks are
+    /// best-effort: an implementation may drop one rather than block when the
+    /// receiver falls behind, and drops it outright once the receiver is gone,
+    /// so what arrives on the channel is not guaranteed to be the whole output.
+    /// The returned [`CommandOutput`] holds all of it.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - The command times out before completion
-    /// - The command is cancelled via `token`
-    /// - Stdout or stderr cannot be captured from the child
+    /// [`CommandError`], for any of the failures listed on the trait, plus
+    /// failure to capture stdout or stderr from the child.
     fn execute_streaming(
         &self,
         command: &str,
@@ -481,22 +428,22 @@ pub enum CommandError {
     /// One of the command's output pipes could not be read to the end.
     ///
     /// Whatever had been buffered when the read failed is **not** the command's
-    /// output, so it is dropped rather than returned. Nothing else distinguishes
-    /// "the command produced this" from "the pipe failed and this is what we
-    /// got", and callers act on that output: one uses it as an executable path,
-    /// one writes it to a credentials file, and two read a verdict out of it.
+    /// output, so it is dropped rather than returned. Nothing distinguishes "the
+    /// command produced this" from "the pipe failed and this is what we got",
+    /// and callers act on that output: one uses it as an executable path, one
+    /// writes it to a credentials file, and two read a verdict out of it.
     ///
     /// Reported for stderr as well as stdout, including on commands whose
-    /// correctness depends only on stdout. Being lenient about stderr would mean
-    /// either a per-stream flag on [`CommandOutput`] — the ignorable-by-default
-    /// shape this variant exists to avoid — or splicing a selfie-authored marker
-    /// into bytes every consumer treats as the process's own, which would then be
-    /// forwarded to the CLI and the MCP server's JSON as if the command had
-    /// emitted it.
-    ///
-    /// Carries no output bytes, by construction: see the comment on
-    /// `OperationFailure::from(CommandError)`, which this variant's `Display` has
-    /// to satisfy.
+    /// correctness depends only on stdout.
+    // Being lenient about stderr would need either a per-stream flag on
+    // `CommandOutput` — the ignorable-by-default shape this variant exists to
+    // avoid — or a selfie-authored marker spliced into bytes every consumer
+    // treats as the process's own, which would then reach the CLI and the MCP
+    // server's JSON as if the command had emitted it.
+    //
+    // Carries no output bytes by construction, which
+    // `OperationFailure::from(CommandError)` depends on and this variant's
+    // `Display` has to satisfy.
     #[error("Failed reading {stream} of command '{command}': {source}")]
     OutputReadFailed {
         command: String,
@@ -540,14 +487,14 @@ pub enum CommandError {
 
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
 ///
-/// Stated as a number in `docs/package-files.md`, because a user reading a
+/// Also stated as a number in `docs/package-files.md`, because a user reading a
 /// bounded failure needs to know how much of it they are seeing. Change both
 /// together.
-/// `pub(crate)` deliberately: [`BoundedText`] is the public surface, and
-/// exporting the number would pin 2000 as API for no caller that needs it. The
-/// tradeoff is that `selfie-cli` and `selfie-mcp` can *call* [`BoundedText::bound`]
-/// but cannot assert the bound without hardcoding 2000, so a test of the limit
-/// itself belongs in this crate.
+// `pub(crate)` deliberately: `BoundedText` is the public surface, and exporting
+// the number would pin 2000 as API for no caller that needs it. The cost is
+// that `selfie-cli` and `selfie-mcp` can call `BoundedText::bound` but cannot
+// assert the bound without hardcoding 2000, so a test of the limit itself
+// belongs in this crate.
 pub(crate) const MAX_BOUNDED_BYTES: usize = 2000;
 
 /// How many input bytes survive at each end when [`BoundedText::bound`] elides.
@@ -561,47 +508,38 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 ///
 /// A command invoked with a verbose or debug flag can echo secret material to
 /// stderr, so the paths that forward such text bound it here rather than each
-/// deciding a limit. Named for the text rather than for stderr because the
-/// inputs differ: a command's stderr bytes at one site, and at another a
-/// rendered [`CommandError`], whose `Display` embeds the package file's own
-/// unbounded `command:` string. Bounding that rendered message is not the same
-/// as bounding the command: `ExecutionFailed`'s `command` field is a plain
-/// `String` and stays unbounded.
-/// Lives beside [`CommandError`] because both the dotfile resolve path and the
-/// general failure path forward the same bytes and must treat them the same way.
+/// deciding a limit. It is named for the text and not for stderr because the
+/// inputs differ: a command's stderr bytes at one site, at another a rendered
+/// [`CommandError`].
 ///
-/// # What is and is not enforced
-///
-/// The private field means [`BoundedText::bound`] is the only way to make one,
-/// so `CommandFailure::ExecutionFailed`'s `stderr` — the one field typed as
-/// `BoundedText` — cannot be given unbounded text by any struct-variant literal.
+/// The private field makes [`BoundedText::bound`] the only way to build one, so
+/// `CommandFailure::ExecutionFailed`'s `stderr` cannot be given unbounded text.
 /// **That is the only compiler-enforced site.** Callers that need a `String`
-/// (`AuditResult::Error`, `ResolveError`'s `stderr` fields) construct one and
-/// unwrap it, so at those sites the bound is still a convention — a better-named
-/// helper someone has to remember to call, not a gate. Within this one module
-/// the tuple constructor is in scope and could be called directly; every other
-/// module, in this crate and outside it, must go through `bound`.
+/// (`AuditResult::Error`, `ResolveError`'s `stderr` fields) build one and unwrap
+/// it, and there the bound is a convention someone has to remember.
 ///
-/// # Why `Debug` is derived
-///
-/// Deliberately, and unlike `ResolvedContent`. That is never forwarded, so its
-/// `Debug` is a pure exit worth closing by hand. This value is text selfie
-/// forwards on purpose, and
-/// prescribes scanning an event's `Debug` output for
-/// a secret literal. A hand-written `Debug` printing `<N bytes>` would hide
-/// forwarded stderr from that scan, so a secret that reaches stderr later would
-/// go unseen rather than caught. Blinding it would contain nothing: the text is
-/// already on its way to the terminal by design.
-///
-/// It is load-bearing today — replacing the derive fails
-/// `a_failing_check_still_reports_why_it_failed`, which reads the forwarded
-/// stderr out of `{:?}`. It does **not** guard that test's neighbor,
-/// `a_failing_check_keeps_its_stdout_out_of_the_completed_event`: that fixture
-/// puts its secret on *stdout*, which never becomes a `BoundedText`, so the
-/// derive cannot affect it and its own inline positive control is what keeps it
-/// honest. Do not read the two as each other's controls — an earlier version of
-/// this comment did, and the risk is that someone who believes it deletes that
-/// control as redundant and the leak test silently goes vacuous.
+/// Bounding a rendered message is not the same as bounding the command:
+/// `ExecutionFailed`'s `command` field is a plain `String` and stays unbounded.
+// Lives beside `CommandError` because the dotfile resolve path and the general
+// failure path forward the same bytes and must treat them the same way. Within
+// this module the tuple constructor is in scope and could be called directly;
+// every other module must go through `bound`.
+//
+// `Debug` is derived on purpose, unlike `ResolvedContent`. That is never
+// forwarded, so its `Debug` is a pure exit worth closing by hand. This is text
+// selfie forwards deliberately, and the leak tests scan an event's `Debug`
+// output for a secret literal — a hand-written `Debug` printing `<N bytes>`
+// would hide forwarded stderr from that scan, so a secret reaching stderr later
+// would go unseen rather than caught. Blinding it would contain nothing anyway:
+// the text is already on its way to the terminal by design.
+//
+// Replacing the derive fails `a_failing_check_still_reports_why_it_failed`,
+// which reads the forwarded stderr out of `{:?}`. It does not guard that test's
+// neighbor, `a_failing_check_keeps_its_stdout_out_of_the_completed_event` —
+// that fixture puts its secret on stdout, which never becomes a `BoundedText`,
+// so its own inline positive control is what keeps it honest. Do not read the
+// two as each other's controls, or someone deletes that control as redundant
+// and the leak test goes vacuous.
 #[derive(Debug, Clone)]
 pub struct BoundedText(String);
 
@@ -610,28 +548,27 @@ impl BoundedText {
     ///
     /// Keeps the first and last [`BOUNDED_END_BYTES`] and replaces what is
     /// between them with a marker naming how many bytes went. Both ends, because
-    /// a failing command puts its diagnosis at the *end*: `brew` prints pages of
-    /// `==> Downloading` and then one `Error:` line, and a head-only cut kept the
-    /// progress and dropped the reason. The head is worth keeping too - it is
-    /// where a command names what it was doing.
+    /// a failing command puts its diagnosis at the end — `brew` prints pages of
+    /// `==> Downloading` and then one `Error:` line — while the head is where a
+    /// command names what it was doing.
     ///
     /// **The bound is on the input byte count, not on the length of the string
-    /// this returns.** Invalid UTF-8 is replaced lossily and each bad byte
-    /// becomes a 3-byte `U+FFFD`, so `MAX_BOUNDED_BYTES` bytes of binary input
-    /// yield about three times that many bytes of text. What is bounded is how
-    /// much of the command's output survives, which is what the forwarding paths
-    /// need; `as_str().len() <= MAX_BOUNDED_BYTES` does not hold.
+    /// this returns.** Invalid UTF-8 decodes lossily and each bad byte becomes a
+    /// 3-byte `U+FFFD`, so `MAX_BOUNDED_BYTES` bytes of binary input yield about
+    /// three times that many bytes of text. `as_str().len() <=
+    /// MAX_BOUNDED_BYTES` does not hold; what is bounded is how much of the
+    /// command's output survives.
     ///
-    /// Cuts the bytes and then decodes, rather than slicing a `String`: a
-    /// multi-byte character straddling either cut would panic on a string slice.
-    /// There are two cuts now, and the tail's is the one that can also land
-    /// mid-character at the *start* of what it keeps.
-    ///
-    /// An input barely over the bound is returned whole. Eliding it would spend
-    /// more bytes on the marker than the elision saved, so the "bounded" form
-    /// would be longer than simply decoding everything - the comparison is
-    /// against the decoded length, since for invalid UTF-8 the decoded string is
-    /// already longer than the input no matter what this does.
+    /// An input barely over the bound is returned whole, since eliding it would
+    /// spend more bytes on the marker than the elision saved.
+    // Cuts the bytes and then decodes, rather than slicing a `String`: a
+    // multi-byte character straddling either cut would panic on a string slice.
+    // The tail's cut is the one that can also land mid-character at the start of
+    // what it keeps.
+    //
+    // The whole-input comparison is against the decoded length, because for
+    // invalid UTF-8 the decoded string is already longer than the input no
+    // matter what this does.
     #[must_use]
     pub fn bound(bytes: &[u8]) -> Self {
         // Borrowed, not allocated, whenever the input is valid UTF-8.

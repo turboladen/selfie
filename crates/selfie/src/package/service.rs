@@ -68,11 +68,7 @@ pub(crate) struct ProgressTracker {
 }
 
 impl ProgressTracker {
-    /// Create a new progress tracker for an operation with the specified number of steps
-    ///
-    /// # Arguments
-    ///
-    /// * `total_steps` - Total number of steps in the operation
+    /// Create a tracker for an operation of `total_steps` steps.
     pub(crate) fn new(total_steps: usize) -> Self {
         Self {
             current_step: 0,
@@ -80,15 +76,8 @@ impl ProgressTracker {
         }
     }
 
-    /// Advance to the next step and send a progress event
-    ///
-    /// Increments the current step counter and sends a progress event with
-    /// the provided message, enhanced with step numbers (e.g., "Installing package (2/5)").
-    ///
-    /// # Arguments
-    ///
-    /// * `sender` - Event sender for broadcasting progress updates
-    /// * `message` - Progress message to display to the user
+    /// Advance one step and emit a progress event, with the step numbers appended
+    /// to `message` — "Installing package (2/5)".
     pub(crate) async fn next(&mut self, sender: &EventSender, message: impl std::fmt::Display) {
         self.current_step += 1;
         let enhanced_message = format!("{} ({}/{})", message, self.current_step, self.total_steps);
@@ -222,14 +211,8 @@ where
     CR: CommandRunner + Clone + 'static,
     G: GitStatusProvider + Clone + 'static,
 {
-    /// Create a new package service instance
-    ///
-    /// # Arguments
-    ///
-    /// * `package_repository` - Repository implementation for package storage
-    /// * `command_runner` - Command runner implementation for executing system commands
-    /// * `git_provider` - Git status provider for file status lookups
-    /// * `config` - Application configuration
+    /// Create a package service over the given repository, command runner and git
+    /// status provider.
     pub fn new(
         package_repository: R,
         command_runner: CR,
@@ -261,23 +244,11 @@ where
         crate::package::event::create_event_stream(f)
     }
 
-    /// Execute an operation with full dependency injection and standard event handling
+    /// Run `handler` as a package operation, wrapping it in the standard event
+    /// handling: startup, environment logging, progress tracking over
+    /// `total_steps`, and completion.
     ///
-    /// This helper method provides a standardized way to execute package operations
-    /// with proper event handling, progress tracking, and dependency injection.
-    /// It handles operation startup, environment logging, and result completion.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation_type` - Type of operation being performed
-    /// * `package_name` - Name of the package being operated on
-    /// * `context` - Additional operation context (paths, target environment, etc.)
-    /// * `total_steps` - Total number of steps for progress tracking
-    /// * `handler` - Async function that performs the actual operation
-    ///
-    /// # Returns
-    ///
-    /// An event stream that emits operation progress and results
+    /// This is the shape every operation on this service takes.
     fn execute_operation_with_deps<F, Fut>(
         &self,
         operation_type: OperationType,

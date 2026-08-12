@@ -6,14 +6,7 @@ use selfie::package::event::{
 };
 use std::time::Instant;
 
-/// Collects all events from a stream for testing verification.
-/// This is the most common pattern for testing event streams in service tests.
-///
-/// # Example
-/// ```rust
-/// let stream = service.check("test-package").await;
-/// let events = collect_events(stream).await;
-/// ```
+/// Collect every event a stream produces.
 pub async fn collect_events(mut stream: EventStream) -> Vec<PackageEvent> {
     let mut events = Vec::new();
     while let Some(event) = futures::StreamExt::next(&mut stream).await {
@@ -22,15 +15,7 @@ pub async fn collect_events(mut stream: EventStream) -> Vec<PackageEvent> {
     events
 }
 
-/// Extracts the operation result from collected events.
-/// Returns the final result of the operation if found.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// let result = get_operation_result(&events);
-/// assert!(matches!(result, Some(OperationResult::Success(_))));
-/// ```
+/// The operation's final result, if the events contain a completion.
 #[must_use]
 pub fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     for event in events {
@@ -41,16 +26,7 @@ pub fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult>
     None
 }
 
-/// Counts events of a specific type for verification.
-/// Useful for asserting expected event sequences.
-///
-/// # Example
-/// ```rust
-/// let progress_count = count_events_of_type(&events, |e| {
-///     matches!(e, PackageEvent::Progress { .. })
-/// });
-/// assert_eq!(progress_count, 3);
-/// ```
+/// How many events satisfy `predicate`.
 pub fn count_events_of_type<F>(events: &[PackageEvent], predicate: F) -> usize
 where
     F: Fn(&PackageEvent) -> bool,
@@ -58,18 +34,11 @@ where
     events.iter().filter(|e| predicate(e)).count()
 }
 
-/// Helper to verify standard event sequence for successful operations.
-/// Checks for exactly one started event, at least one progress event,
-/// exactly one completed event, and that the result is successful.
+/// Assert the standard success sequence: exactly one started event, at least
+/// one progress event, exactly one completed event, and a successful result.
 ///
 /// # Panics
 /// Panics if the event sequence doesn't match expected successful operation pattern.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// assert_successful_operation(&events);
-/// ```
 pub fn assert_successful_operation(events: &[PackageEvent]) {
     // Should have exactly one started event
     assert_eq!(
@@ -99,17 +68,10 @@ pub fn assert_successful_operation(events: &[PackageEvent]) {
     );
 }
 
-/// Helper to verify standard event sequence for failed operations.
-/// Checks that the operation completed with a failure result.
+/// Assert the operation completed with a failure result.
 ///
 /// # Panics
 /// Panics if the event sequence doesn't match expected failed operation pattern.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// assert_failed_operation(&events);
-/// ```
 pub fn assert_failed_operation(events: &[PackageEvent]) {
     // Should have a completion result that is a failure
     let result = get_operation_result(events).expect("Should have an operation result");
@@ -119,14 +81,7 @@ pub fn assert_failed_operation(events: &[PackageEvent]) {
     );
 }
 
-/// Helper to verify that events contain specific progress steps.
-/// Useful for testing that operations report expected progress stages.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// assert_has_progress_steps(&events, &["Loading package", "Running check", "Complete"]);
-/// ```
+/// Assert every string in `expected_steps` appears in some progress message.
 ///
 /// # Panics
 ///
@@ -153,15 +108,7 @@ pub fn assert_has_progress_steps(events: &[PackageEvent], expected_steps: &[&str
     }
 }
 
-/// Helper to extract all error messages from events.
-/// Useful for testing specific error conditions and messages.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// let errors = get_error_messages(&events);
-/// assert!(errors.iter().any(|msg| msg.contains("Package not found")));
-/// ```
+/// The message from every error event.
 #[must_use]
 pub fn get_error_messages(events: &[PackageEvent]) -> Vec<String> {
     events
@@ -176,19 +123,11 @@ pub fn get_error_messages(events: &[PackageEvent]) -> Vec<String> {
         .collect()
 }
 
-/// Helper to assert that no error events occurred.
-/// Useful for testing that operations completed cleanly without any errors.
-///
-/// # Example
-/// ```rust
-/// let events = collect_events(stream).await;
-/// assert_no_errors(&events);
-/// ```
+/// Assert no error event occurred.
 ///
 /// # Panics
 ///
 /// Panics if `events` has errors.
-///
 pub fn assert_no_errors(events: &[PackageEvent]) {
     let error_count = count_events_of_type(events, |e| matches!(e, PackageEvent::Error { .. }));
     assert_eq!(
@@ -200,14 +139,7 @@ pub fn assert_no_errors(events: &[PackageEvent]) {
     );
 }
 
-/// Creates a test operation info for use in test events.
-/// This is a convenience function to avoid repeating operation info creation in tests.
-///
-/// # Example
-/// ```rust
-/// let operation_info = create_test_operation_info("package_check", "test-package", "test-env");
-/// let event = PackageEvent::Started { operation_info };
-/// ```
+/// Build an `OperationInfo` for constructing test events.
 #[must_use]
 pub fn create_test_operation_info(
     operation_type: &str,

@@ -1,32 +1,18 @@
-//! Selfie - A personal meta-package manager
+//! Selfie - a personal meta-package manager.
 //!
-//! The `selfie` library provides core functionality for managing packages across multiple
-//! package managers and environments. It implements a hexagonal architecture with ports
-//! and adapters to allow flexible integration with different UIs and systems.
+//! Manages packages across package managers and environments. Ports and adapters
+//! throughout: the core logic never touches a file system, a process, or a
+//! terminal directly, so a CLI and an MCP server can drive the same code and
+//! present it differently.
 //!
-//! # Architecture
-//!
-//! This library follows the Hexagonal Architecture pattern (also known as Ports and Adapters).
-//! The core business logic is isolated from external concerns like file systems, command
-//! execution, and user interfaces through well-defined interfaces (ports).
-//!
-//! # Main Components
-//!
-//! - [`package`] - Core package definitions, services, and domain logic
-//! - [`config`] - Application configuration management
-//! - [`commands`] - Command execution abstractions
-//! - [`fs`] - File system abstractions
-//! - [`privilege`] - Whether the process holds privilege it should not write with
-//! - [`validation`] - Validation types and utilities
-//!
-//! # Examples
-//!
-//! ```no_run
-//! use selfie::package::PackageService;
-//! use selfie::config::SelfieConfig;
-//!
-//! // Example usage would go here once the API is more stable
-//! ```
+//! - [`package`] — package definitions, services, and domain logic
+//! - [`dotfile_service`] — deploying dotfiles to their targets
+//! - [`sync_service`] — syncing specs and dotfiles over git
+//! - [`config`] — configuration
+//! - [`commands`] — command execution
+//! - [`fs`] — file system access
+//! - [`privilege`] — whether the process holds privilege it should not write with
+//! - [`validation`] — validation types
 
 pub mod commands;
 pub mod config;

@@ -1,23 +1,8 @@
-//! Command-line interface definitions and argument parsing
+//! The clap definitions for selfie's command line.
 //!
-//! This module defines the CLI structure using the clap crate for argument parsing.
-//! It provides a hierarchical command structure with global options and subcommands
-//! for different package management operations.
-//!
-//! # Structure
-//!
-//! The CLI follows a nested command pattern:
-//! - Global options (environment, verbosity, etc.)
-//! - Top-level commands (package, config)
-//! - Subcommands (install, check, list, etc.)
-//!
-//! # Examples
-//!
-//! ```bash
-//! selfie --environment=macos package install node
-//! selfie --verbose config validate
-//! selfie package list
-//! ```
+//! Doc comments in this file are user-visible: clap renders a field's first line
+//! as its `-h` help and the whole comment as its `--help` long help. Edit them as
+//! CLI output, not as source documentation.
 
 use std::path::PathBuf;
 
@@ -27,10 +12,6 @@ use clap_complete::engine::ArgValueCompleter;
 use crate::completers::complete_package_names;
 
 /// Selfie - A personal package manager
-///
-/// Defines the top-level command-line interface including global options
-/// that can be used with any subcommand. Global options override values
-/// from the configuration file when provided.
 #[derive(Parser, Debug)]
 #[clap(name = "selfie", author, version, about, long_about = None)]
 pub struct ClapCli {
@@ -115,7 +96,7 @@ pub(crate) enum ClapCommands {
 
     /// Deploy config files from packages to target locations
     ///
-    /// Detects conflicts and drift before writing anything.
+    /// Detects conflicts and drift for each file before writing it.
     Apply(ApplyArgs),
 
     /// Dotfile management operations — drift, list, track

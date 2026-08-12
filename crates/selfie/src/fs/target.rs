@@ -92,11 +92,6 @@ impl TargetPath {
 /// link's destination, so the writer would be looking at an ordinary file. That
 /// is why this takes a [`HomeDir`] rather than a [`FileSystem`].
 ///
-/// Canonicalization forfeits the guarantee exactly when it *succeeds*. A
-/// dangling link fails to canonicalize and so reaches the writer unresolved,
-/// which is why reintroducing it here is caught by the tests whose links resolve
-/// and not by the others.
-///
 /// Two consequences of never touching the filesystem, both intended: a symlinked
 /// *parent* directory is still followed, and `a/link/../b` becomes `a/b` rather
 /// than wherever `link` points.
@@ -107,6 +102,11 @@ impl TargetPath {
 /// instead. Callers that only compare or display a target use this one
 /// deliberately, because a spec may hold an entry the rule refuses and a
 /// comparison still has to answer.
+// Canonicalization would forfeit the guarantee exactly when it *succeeds*: a
+// dangling link fails to canonicalize and so still reaches the writer
+// unresolved. So reintroducing a resolve here is caught only by the tests whose
+// links resolve, and not by the others — do not read a green run on a
+// dangling-link fixture as covering it.
 #[must_use]
 pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> TargetPath {
     let raw = if target.starts_with('~') {
@@ -143,28 +143,25 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
 
 /// A path *inside* a directory selfie manages, taken exactly as given.
 ///
-/// The third and weakest constructor, and the only one not about a deploy target.
-/// The writers and refusal checks take a [`TargetPath`], and selfie also reads and
-/// writes paths it composed itself — `track`'s copy into the dotfiles repository,
-/// the YAML `save_package` writes, the repository files `apply` and `drift` read.
-/// Those need the same no-symlink, no-fifo treatment.
+/// The weakest of the three constructors, and the only one not about a deploy
+/// target. It promises less than the others:
 ///
-/// It promises **less** than the other two, which is why it is a separate
-/// function:
-///
-/// - No [`TargetRejection`] rule. It does not require an absolute path and does
-///   not refuse `~user/…`.
+/// - No [`TargetRejection`] rule: it neither requires an absolute path nor
+///   refuses `~user/…`.
 /// - No expansion and no normalization. A leading `~` stays a literal `~`.
-/// - It is `pub(crate)` and not re-exported, so `expand_target_path` remains the
-///   only constructor outside this crate.
+/// - No I/O, so it cannot resolve anything. What goes in is what the writer sees.
 ///
-/// **Never call this on a user-supplied deploy target.** That is
-/// [`deploy_target`]'s job, and routing one through here would drop the rule
-/// every command applies to targets. The inputs here are paths selfie built from
-/// a configured directory plus components it has already validated.
-///
-/// Deliberately takes a `&Path` and performs no I/O, so it cannot resolve
-/// anything: what goes in is what the writer sees.
+/// **Never call this on a user-supplied deploy target** — that is
+/// [`deploy_target`]'s job, and routing one through here drops the rule every
+/// command applies to targets. Its inputs are paths selfie built itself from a
+/// configured directory plus already-validated components.
+// It exists because the writers and refusal checks take a `TargetPath`, and
+// selfie also reads and writes paths it composed itself — `track`'s copy into
+// the dotfiles repository, the YAML `save_package` writes, the repository files
+// `apply` and `drift` read. Those need the same no-symlink, no-fifo treatment.
+//
+// `pub(crate)` and not re-exported, so `expand_target_path` remains the only
+// constructor reachable outside this crate.
 #[must_use]
 pub(crate) fn repository_path(path: &Path) -> TargetPath {
     TargetPath {
@@ -184,15 +181,16 @@ pub(crate) fn repository_path(path: &Path) -> TargetPath {
 /// can only be seen after expansion. They render through the same two methods
 /// because they answer the same user question.
 ///
-/// Deliberately implements neither `Display` nor `Error`, which is a departure
-/// from this repository's `thiserror` convention and is the point: a caller that
-/// could format this directly would, and each of the four sites needs the words
-/// in a different frame -- with a field path and a suggestion in the validator,
-/// after `"Skipping 'X': "` in a warning, after `"Cannot track 'X': "` in a
-/// failure. Going through [`message`](Self::message) and
-/// [`suggestion`](Self::suggestion) is what keeps those four in step. It also
-/// keeps a `{:?}` of an error out of user-facing text, which
-/// warns about for the failure types on this path.
+/// Read it through [`message`](Self::message) and
+/// [`suggestion`](Self::suggestion) — it implements neither `Display` nor
+/// `Error`, deliberately.
+// That is a departure from this repository's `thiserror` convention, and it is
+// the point: a caller that could format this directly would, and each of the
+// four sites needs the words in a different frame — with a field path and a
+// suggestion in the validator, after `"Skipping 'X': "` in a warning, after
+// `"Cannot track 'X': "` in a failure. Going through the two methods is what
+// keeps those four in step. It also keeps a `{:?}` of an error out of
+// user-facing text, which the failure types on this path must avoid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetRejection {
     /// `~user/...`. Selfie does not resolve another user's home directory.

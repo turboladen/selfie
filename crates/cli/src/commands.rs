@@ -1,23 +1,7 @@
-//! Command dispatching and routing
+//! Routing a parsed command line to the handler that serves it.
 //!
-//! This module provides the central command dispatching system for the selfie CLI.
-//! It routes parsed command-line arguments to the appropriate command handlers
-//! and manages the execution flow for different types of operations.
-//!
-//! # Architecture
-//!
-//! The dispatcher follows a hierarchical routing pattern:
-//! 1. Top-level command dispatch (spec, package, config)
-//! 2. Subcommand dispatch within each category
-//! 3. Individual command handler execution
-//!
-//! # Error Handling
-//!
-//! Commands return integer exit codes following Unix conventions:
-//! - 0: Success
-//! - 1: General error
-//! - 2: Validation/usage error
-//! - Other codes: Command-specific errors
+//! Handlers return a Unix exit code: `0` success, `1` a general error, `2` a
+//! validation or usage error.
 
 pub(crate) mod apply;
 pub(crate) mod common;

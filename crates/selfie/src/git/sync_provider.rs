@@ -1,12 +1,9 @@
-//! Git sync operations port.
+//! Git write and network operations: stage, commit, push, fetch, fast-forward,
+//! diff.
 //!
-//! Defines the [`GitSyncProvider`] trait for git write/network operations
-//! needed by the sync service (stage, commit, push, fetch, fast-forward, diff).
-//!
-//! This is separate from [`super::GitStatusProvider`] which provides read-only
-//! status for annotating UI output. Both traits are implemented by a single
-//! concrete adapter ([`super::GixGitAdapter`]), following interface segregation —
-//! each consumer only sees the methods it needs.
+//! Separate from [`super::GitStatusProvider`], which is read-only status for
+//! annotating output. One adapter ([`super::GixGitAdapter`]) implements both, so
+//! the split exists to let each consumer see only what it needs.
 
 use std::path::{Path, PathBuf};
 
@@ -33,16 +30,13 @@ pub enum GitSyncError {
     #[error("remote has diverged — resolve manually with git")]
     Diverged,
 
-    /// A git operation failed.
-    ///
-    /// Both fields are [`GitMessage`] rather than `String`, and that is what
-    /// closes this variant rather than a convention asking people to be careful.
-    /// `message` is the one that matters: it carries git's stderr, which a
-    /// non-interactive git can fill with a remote URL carrying a credential.
-    /// `operation` is a literal at every site but one — `run_git` builds it from
-    /// the argument list, so a future `run_git(root, &["push", &url])` would put
-    /// a URL there too. Typing both means one rule instead of two, and the
-    /// compiler holds it either way.
+    /// A git operation failed. Both fields are redacted and bounded by their
+    /// [`GitMessage`] type rather than by convention.
+    // `message` is the one that matters: it carries git's stderr, which a
+    // non-interactive git can fill with a remote URL carrying a credential.
+    // `operation` is a literal at every site but one — `run_git` builds it from
+    // the argument list, so a future `run_git(root, &["push", &url])` would put a
+    // URL there too. Typing both means one rule instead of two.
     #[error("{operation}: {message}")]
     OperationFailed {
         operation: GitMessage,

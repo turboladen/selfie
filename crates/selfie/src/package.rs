@@ -46,15 +46,7 @@ pub struct GetPackage {
 }
 
 impl GetPackage {
-    /// Create a new package template for the given name and directory
-    ///
-    /// This creates a basic package template with minimal configuration
-    /// that can be used as a starting point for new packages.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The package name
-    /// * `packages_directory` - The directory where package files are stored
+    /// Create a minimal package template to start a new package from.
     #[must_use]
     pub fn new(name: &str, packages_directory: &std::path::Path) -> Self {
         let file_path = packages_directory.join(format!("{name}.yml"));
@@ -67,14 +59,8 @@ impl GetPackage {
         }
     }
 
-    /// Create a `GetPackage` from an existing package and file path
-    ///
-    /// This is used when loading existing packages from the repository.
-    ///
-    /// # Arguments
-    ///
-    /// * `package` - The loaded package
-    /// * `file_path` - The path where the package file is stored
+    /// Wrap a package already loaded from the repository, with the path it came
+    /// from.
     #[must_use]
     pub fn from_existing(package: Package, file_path: PathBuf) -> Self {
         Self {
@@ -230,9 +216,9 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 /// [`shadows_field`] against a package's top-level fields.
 ///
 /// `_dotfiles:` is the case that matters: read as an anchor, the package has no
-/// dotfiles at all, so `selfie apply` deployed nothing and reported success
-/// The remedy is the same as for an entry — rename the anchor, or
-/// drop the underscore.
+/// dotfiles at all, so `selfie apply` deploys nothing and reports success. The
+/// remedy is the same as for an entry — rename the anchor, or drop the
+/// underscore.
 ///
 /// Scoped by [`KNOWN_PACKAGE_FIELDS`](crate::package::validate::KNOWN_PACKAGE_FIELDS),
 /// which deliberately **excludes** `target`. That exclusion is what keeps the
@@ -308,26 +294,27 @@ fn shadowing_top_level_keys(raw_yaml: &str) -> Vec<String> {
 
 /// A dotfile mapping from a content source to a deployment target.
 ///
-/// Exactly one of `source` or `command` is valid; `vars` accompanies only
-/// `source`. The fields stay as `Option`s rather than collapsing into an enum
-/// because `Package` is deserialized straight from YAML, and validation has to be
-/// able to observe "both set" and "neither set" in order to report them.
-/// [`content_source`](Self::content_source) is the abstraction over them.
+/// Exactly one of `source` or `command` is valid, and `vars` accompanies only
+/// `source`. [`content_source`](Self::content_source) is the abstraction over
+/// them.
 ///
-/// Every field here is optional bar `target`, so a misspelled key is silently
-/// dropped rather than caught unless something looks for it: `var:` for `vars:`
-/// would otherwise leave a template entry looking like a plain repository file
-/// and deploy the template *unrendered* — literal `{{ api_key }}` — over a
-/// credentials target, with the content recorded in deploy state and shown in
-/// diffs.
-///
-/// Unrecognized keys are therefore recorded in [`unknown_keys`](Self::unknown_keys)
-/// during deserialization, which makes [`content_source`](Self::content_source)
-/// report [`InvalidEntry::UnknownKeys`] so apply refuses the entry, and lets
-/// `Package::validate_unknown_dotfile_fields` name the key. `#[serde(deny_unknown_fields)]`
-/// cannot be used for this: it rejects `_`-prefixed YAML anchor definitions
-///, and a rejected key fails the *whole package file* to parse,
-/// taking every other dotfile and command in it down with the typo.
+/// An unrecognized key is recorded in [`unknown_keys`](Self::unknown_keys) rather
+/// than dropped, which makes `content_source` report
+/// [`InvalidEntry::UnknownKeys`] so apply refuses the entry.
+// The fields stay `Option`s rather than collapsing into an enum because
+// `Package` is deserialized straight from YAML, and validation has to observe
+// "both set" and "neither set" to report them.
+//
+// Recording unknown keys matters because every field bar `target` is optional,
+// so a misspelled one is silently dropped unless something looks for it. `var:`
+// for `vars:` would leave a template entry looking like a plain repository file
+// and deploy the template unrendered — literal `{{ api_key }}` — over a
+// credentials target, with the content recorded in deploy state and shown in
+// diffs.
+//
+// `#[serde(deny_unknown_fields)]` cannot do this: it rejects `_`-prefixed YAML
+// anchor definitions, and a rejected key fails the whole package file to parse,
+// taking every other dotfile and command in it down with the typo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DotfileEntry {
     // No `#[serde(default)]`: `Deserialize` is hand-written below and supplies its
@@ -784,14 +771,8 @@ impl Package {
         }
     }
 
-    /// Create a basic package template
-    ///
-    /// Creates a minimal package template suitable for new packages.
-    /// The template includes basic metadata and a placeholder environment.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The package name
+    /// Create a minimal package template: basic metadata and one placeholder
+    /// environment.
     #[must_use]
     pub fn new_template(name: &str) -> Self {
         let mut environments = HashMap::new();

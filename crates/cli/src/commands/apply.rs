@@ -29,30 +29,27 @@ enum RevealBody {
     Binary { incoming: usize, current: usize },
 }
 
-/// Build what `reveal` shows for a secret-bearing conflict.
-///
-/// A unified diff rather than both values in full. At context radius 3 only the
-/// changed hunks are printed, so a credentials file with one rotated token among
-/// several fields puts one line into scrollback instead of the whole file twice.
-/// The reveal warning names scrollback and session capture as the residual risk
-/// of revealing at all, so showing less of the secret is a direct reduction of
-/// the risk this feature already documents — and a diff answers the question the
-/// prompt actually poses, "rotated or hand-edited?", which the line-count summary
-/// could only approximate.
-///
-/// Note this is a property of the *reveal* path, not of the event path. Events
-/// genuinely have no diff to carry, which is why the non-revealing summary
-/// exists; here both values are already in hand, so a diff is both possible and
-/// safer than a dump.
-///
-/// **Non-UTF-8 content takes neither path.** Diffing the `from_utf8_lossy` form
-/// of a binary secret produces garbage, and writing raw bytes to a terminal can
-/// emit control sequences and mangle the session. Byte counts are honest,
-/// terminal-safe, and still answer "did it change".
-///
-/// This makes revealing smaller, not safe. A single-value secret — an SSH key
-/// blob, a bare token — is one line, so its diff shows both values in full:
-/// no saving there, and no harm either.
+/// Build what `reveal` shows for a secret-bearing conflict: a unified diff for
+/// UTF-8 content, byte counts for anything else.
+// A diff rather than both values in full. At context radius 3 only the changed
+// hunks print, so a credentials file with one rotated token among several fields
+// puts one line into scrollback instead of the whole file twice. The reveal
+// warning already names scrollback and session capture as the residual risk of
+// revealing at all, so showing less is a direct reduction of it — and a diff
+// answers the question the prompt poses, "rotated or hand-edited?", which a
+// line-count summary could only approximate.
+//
+// This is a property of the reveal path, not the event path. Events have no diff
+// to carry, which is why the non-revealing summary exists; here both values are
+// already in hand.
+//
+// Non-UTF-8 content takes neither path. Diffing the `from_utf8_lossy` form of a
+// binary secret produces garbage, and writing raw bytes to a terminal can emit
+// control sequences and mangle the session. Byte counts are honest,
+// terminal-safe, and still answer "did it change".
+//
+// This makes revealing smaller, not safe: a single-value secret — an SSH key
+// blob, a bare token — is one line, so its diff shows both values in full.
 fn reveal_body(incoming: &[u8], current: &[u8], target: &str) -> RevealBody {
     // Old is the target and new is the resolved output, matching the direction
     // the repository-file conflict path already uses.

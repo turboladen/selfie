@@ -1,8 +1,4 @@
-//! File system abstraction layer
-//!
-//! This module provides a trait-based abstraction for file system operations
-//! to enable testing and different implementations. It follows the Hexagonal
-//! Architecture pattern by defining a port for file system interactions.
+//! Port for file system operations, and the errors they report.
 
 use std::{
     io,
@@ -14,176 +10,124 @@ use thiserror::Error;
 
 use crate::fs::target::TargetPath;
 
-/// Port for file system operations (Hexagonal Architecture)
+/// Port for file system operations. Every file system interaction in the selfie
+/// library goes through it.
 ///
-/// This trait abstracts file system operations to allow for different implementations
-/// (real file system, in-memory for testing, etc.) and to enable comprehensive testing
-/// through mocking. All file system interactions in the selfie library go through
-/// this abstraction.
+/// It offers two writers and deliberately no third that follows symlinks, so
+/// "selfie never writes through a symlink" is a property of the port rather than
+/// of its call sites:
+///
+/// | | link at final component | mode | atomic |
+/// |---|---|---|---|
+/// | [`write_file_private`](FileSystem::write_file_private) | replaced | owner-only | yes |
+/// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | left alone | no |
+///
+/// Secret-bearing content takes the first; everything else takes the second.
+/// Neither follows a link at the final component, and both still follow
+/// symlinked **parent** directories — a planted directory symlink can redirect
+/// where a file lands either way.
 #[cfg_attr(feature = "with_mocks", mockall::automock)]
 pub trait FileSystem: Send + Sync {
-    /// Read a file and return its contents as a string
-    ///
-    /// Reads the entire file content and returns it as a UTF-8 string.
-    /// The file is read synchronously and the entire content is loaded into memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to read
+    /// Read a file's contents as a UTF-8 string, all of it into memory.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The file does not exist
-    /// - Permission is denied to read the file
-    /// - The file content is not valid UTF-8
-    /// - Any other IO error occurs during reading
+    /// [`FileSystemError`] if the file does not exist, permission is denied, the
+    /// content is not valid UTF-8, or any other IO error occurs.
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
-    /// Read a file and return its raw bytes
+    /// Read a file's raw bytes, imposing no encoding requirement.
     ///
-    /// Unlike [`read_file`](FileSystem::read_file), imposes no encoding
-    /// requirement. Use this wherever the content is compared or written rather
-    /// than displayed — secret-bearing dotfile content is not guaranteed to be
-    /// UTF-8, and decoding it lossily before a comparison would report two
-    /// different files as identical.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to read
+    /// Use this wherever the content is compared or written rather than
+    /// displayed. Secret-bearing dotfile content is not guaranteed to be UTF-8,
+    /// and decoding it lossily before a comparison would report two different
+    /// files as identical.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The file does not exist
-    /// - Permission is denied to read the file
-    /// - Any other IO error occurs during reading
+    /// [`FileSystemError`] if the file does not exist, permission is denied, or
+    /// any other IO error occurs.
     fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
 
-    /// Write data to a file readable only by its owner, replacing it atomically
+    /// Write a file readable only by its owner, replacing it atomically. The
+    /// writer for secret-bearing content.
     ///
-    /// Unlike [`write_file_no_follow`](FileSystem::write_file_no_follow), this creates
-    /// the file with owner-only permissions from the outset (on Unix -- see the
-    /// platform notes below) and puts it in place with a rename, so there is no window
-    /// in which the content is world-readable, no partial write if interrupted, and no
-    /// inheriting of a laxer mode from an existing file.
+    /// Owner-only from the outset and put in place with a rename, so there is no
+    /// window in which the content is world-readable, no partial write if
+    /// interrupted, and no inheriting of a laxer mode from an existing file. A
+    /// symlink at the final component is replaced rather than written through.
     ///
-    /// Intended for secret-bearing content.
+    /// Parent directories are created as needed, but only the *file* is
+    /// owner-only: created directories get the usual `0o777 & !umask`. The
+    /// content is protected; the fact that it exists is not.
     ///
-    /// Creates parent directories as needed, but only the *file* is owner-only:
-    /// created directories get the usual `0o777 & !umask`, so a directory made by this
-    /// call is typically world-listable. The content is protected; the fact that the
-    /// file exists is not.
-    ///
-    /// # Symlinks
-    ///
-    /// A symlink at the **final component** of `path` is replaced rather than written
-    /// through. Symlinked **parent** directories are still followed, so a planted
-    /// directory symlink can still redirect where the file lands.
-    ///
-    /// This applies to `path` **as given**: a resolved path names the link's
-    /// destination, so the link is never seen and the guarantee is gone. That is what
-    /// the [`TargetPath`] parameter is for -- nothing can resolve one.
-    ///
-    /// # Platform and metadata notes
-    ///
-    /// Because the file is replaced rather than modified, the new file does not
-    /// inherit the old one's extended attributes, POSIX ACLs, or SELinux label.
-    ///
-    /// On Unix the mode is `0o600` masked by the process umask, so it may be more
-    /// restrictive but never more permissive. On Windows the atomic replace still
-    /// applies, but owner-only permissions are best-effort -- the file inherits the
-    /// parent directory's ACL -- and the replace additionally fails if the target is
-    /// open in another process. On any other platform there is **no owner-only
-    /// guarantee at all**: the call may well succeed and simply create the file with
-    /// default permissions. Do not treat a non-Unix, non-Windows target as fail-safe.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the file should be written
-    /// * `data` - Data to write to the file
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FileSystemError`] if:
-    /// - The parent directory cannot be created
-    /// - The temporary file cannot be created or written
-    /// - Flushing the temporary file to disk fails, which can happen after the write
-    ///   itself succeeded (for example `ENOSPC` surfacing only at flush time)
-    /// - The rename into place fails
-    ///
-    /// Note this differs from [`write_file_no_follow`](FileSystem::write_file_no_follow),
-    /// which can still succeed on an existing file inside a read-only directory; an
-    /// atomic replace cannot, because it must create a sibling first.
-    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
-
-    /// Write data to a file, refusing a symlink at the final component
-    ///
-    /// The ordinary writer, and the only one for content that is not a credential.
-    /// Parent directories are created, an existing file is truncated and overwritten,
-    /// and its mode is left alone -- except that a symlink at the **final component**
-    /// of `path` is refused with [`FileSystemError::SymlinkedTarget`] rather than
-    /// written through. Nothing is written in that case: neither the link nor what it
-    /// points at is modified, and a dangling link's destination is not created.
-    ///
-    /// There is deliberately no plain `write_file` beside this one. Every write selfie
-    /// performs goes either here or to
-    /// [`write_file_private`](FileSystem::write_file_private), so "selfie never writes
-    /// through a symlink" is a property of the port rather than of its call sites --
-    /// a writer that followed links could not be reached, because there is not one to
-    /// reach.
-    ///
-    /// Intended for deploy targets and for the paths selfie composes inside its own
-    /// directories. A target names a path the user asked selfie to manage; writing
-    /// through a link there sends the content wherever the link points, which may be
-    /// somewhere chosen by whoever planted it.
-    ///
-    /// This is deliberately **not** [`write_file_private`](FileSystem::write_file_private),
-    /// and the two differ in more than one way. Neither writes *through* a link, but
-    /// that method **replaces** the link and succeeds, where this one **refuses** and
-    /// returns an error the caller has to handle. It also makes the file owner-only,
-    /// which is right for a credential and wrong for an ordinary dotfile.
-    ///
-    /// # Durability
-    ///
-    /// Returns only once the file's data has been flushed to disk, and makes a
-    /// best-effort attempt at the parent directory too. Callers record a successful
-    /// write as a deployment, and a record that outlives the write it describes turns
-    /// a lost deploy into a conflict blamed on the user -- so the flush is ordered
-    /// before the record rather than left to the state layer.
-    ///
-    /// The guarantee is ordering against a process or kernel crash everywhere, and
-    /// against power loss only where the filesystem honors `fsync` — macOS does not.
-    /// The directory flush is best-effort and covers only the immediate parent.
-    ///
-    /// # Symlinks
-    ///
-    /// The refusal applies to `path` **as given**. A resolved path names the link's
-    /// destination, so this method would be handed an ordinary file and write to it;
-    /// [`TargetPath`] is what keeps one from arriving here.
-    ///
-    /// Symlinked **parent** directories are still followed, so a planted directory
-    /// symlink can still redirect where the file lands. Same limitation as
-    /// [`write_file_private`](FileSystem::write_file_private).
+    /// Because the file is replaced rather than modified, it does not inherit the
+    /// old one's extended attributes, POSIX ACLs, or SELinux label.
     ///
     /// # Strength of the guarantee
     ///
-    /// On Unix a link planted concurrently is refused just the same — there is no
-    /// interval between deciding and writing. On other platforms the check precedes
-    /// the write, so a concurrent planter can win: a mitigation there, not a
-    /// guarantee.
+    /// On Unix the mode is `0o600` masked by the umask — never more permissive.
+    /// On Windows the atomic replace holds but owner-only is best-effort, the
+    /// file inheriting the parent directory's ACL, and the replace also fails if
+    /// the target is open in another process. On any other platform there is **no
+    /// owner-only guarantee at all**: the call may succeed and create the file
+    /// with default permissions. Do not treat a non-Unix, non-Windows target as
+    /// fail-safe.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError::SymlinkedTarget`] if the final component is a
-    /// symlink, or [`FileSystemError`] if:
-    /// - The parent directory cannot be created
-    /// - Permission is denied to write to the file or directory
-    /// - Any other IO error occurs during writing
+    /// [`FileSystemError`] if the parent directory cannot be created, the
+    /// temporary file cannot be created or written, the rename into place fails,
+    /// or flushing to disk fails — which can happen after the write itself
+    /// succeeded, `ENOSPC` surfacing only at flush time being the usual case.
+    ///
+    /// Unlike [`write_file_no_follow`](FileSystem::write_file_no_follow), this
+    /// cannot succeed on an existing file inside a read-only directory: an atomic
+    /// replace must create a sibling first.
+    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
+
+    /// Write a file, refusing a symlink at the final component. The ordinary
+    /// writer, and the only one for content that is not a credential.
+    ///
+    /// Parent directories are created, an existing file is truncated and
+    /// overwritten, and its mode is left alone. A symlink at the final component
+    /// is refused with [`FileSystemError::SymlinkedTarget`]: nothing is written,
+    /// neither the link nor what it points at is modified, and a dangling link's
+    /// destination is not created.
+    ///
+    /// For deploy targets and for paths selfie composes inside its own
+    /// directories. A target names a path the user asked selfie to manage, so
+    /// writing through a link there sends the content wherever the link points —
+    /// possibly somewhere chosen by whoever planted it.
+    ///
+    /// # Durability
+    ///
+    /// Returns only once the data has been flushed to disk, with a best-effort
+    /// attempt at the parent directory. Callers record a successful write as a
+    /// deployment, and a record outliving the write it describes turns a lost
+    /// deploy into a conflict blamed on the user, so the flush is ordered before
+    /// the record rather than left to the state layer.
+    ///
+    /// # Strength of the guarantee
+    ///
+    /// Durability orders against a process or kernel crash everywhere, but
+    /// against power loss only where the filesystem honors `fsync` — macOS does
+    /// not. The directory flush covers only the immediate parent.
+    ///
+    /// On Unix a link planted concurrently is refused just the same, there being
+    /// no interval between deciding and writing. On other platforms the check
+    /// precedes the write, so a concurrent planter can win: a mitigation there,
+    /// not a guarantee.
+    ///
+    /// # Errors
+    ///
+    /// [`FileSystemError::SymlinkedTarget`] if the final component is a symlink,
+    /// or [`FileSystemError`] if the parent directory cannot be created,
+    /// permission is denied, or any other IO error occurs.
     ///
     /// The refusal is exact; its *classification* is not quite. A link deleted
-    /// between the failed write and the report surfaces as an `IoError` rather than
-    /// `SymlinkedTarget`. Nothing was written either way — only the wording differs.
+    /// between the failed write and the report surfaces as an `IoError` rather
+    /// than `SymlinkedTarget`. Nothing was written either way.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
@@ -257,115 +201,64 @@ pub trait FileSystem: Send + Sync {
     /// Returns [`FileSystemError`] if the file's metadata cannot be read.
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
 
-    /// Remove a file from the file system
-    ///
-    /// Deletes the file at the specified path. This operation is irreversible.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to remove
+    /// Remove a file. Irreversible.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The file does not exist
-    /// - Permission is denied to delete the file
-    /// - The path points to a directory instead of a file
-    /// - Any other IO error occurs during deletion
+    /// [`FileSystemError`] if the file does not exist, permission is denied, the
+    /// path is a directory rather than a file, or any other IO error occurs.
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError>;
 
-    /// Check if a path exists
-    ///
-    /// Tests whether the specified path exists in the file system.
-    /// This works for both files and directories.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to check for existence
-    ///
-    /// # Returns
-    ///
-    /// `true` if the path exists, `false` otherwise
+    /// Whether `path` exists, as either a file or a directory.
     fn path_exists(&self, path: &Path) -> bool;
 
-    /// Expand a path with shell-like expansions
-    ///
-    /// Performs path expansion including tilde (~) expansion to the user's
-    /// home directory and other shell-like expansions. This is useful for
-    /// handling user-provided paths in configuration files.
-    /// Expand path with tilde (~) and environment variables
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path to expand
-    ///
-    /// # Returns
-    ///
-    /// The expanded path
+    /// Expand `~` and environment variables in a path, for user-provided paths
+    /// out of configuration files.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The home directory cannot be determined for ~ expansion
-    /// - Environment variable expansion fails
-    /// - The expanded path contains invalid characters
-    /// - Path expansion fails for any other reason
+    /// [`FileSystemError`] if the home directory cannot be determined for `~`,
+    /// an environment variable cannot be expanded, or the result contains
+    /// invalid characters.
     fn expand_path(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 
-    /// List the contents of a directory
+    /// Every entry in a directory, files and subdirectories alike, as absolute
+    /// paths.
     ///
-    /// Returns a list of all entries (files and subdirectories) in the specified
-    /// directory. The paths returned are absolute paths.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path to list
+    /// Enumeration order is the platform's and is not sorted.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The directory does not exist
-    /// - Permission is denied to read the directory
-    /// - The path is not a directory
-    /// - Any other IO error occurs during directory reading
+    /// [`FileSystemError`] if the directory does not exist, permission is
+    /// denied, the path is not a directory, or any other IO error occurs.
     fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemError>;
 
-    /// Get the canonical (absolute, resolved) path
+    /// Resolve a path to its canonical form: absolute, with symlinks and `.`/`..`
+    /// resolved.
     ///
-    /// Resolves the path to its canonical form by resolving symbolic links
-    /// and relative path components (. and ..). The result is always an
-    /// absolute path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to canonicalize
+    /// **Never call this on a deploy target.** Resolving a link hands the caller
+    /// the destination, so an onward writer sees an ordinary file and every
+    /// symlink guarantee in this port is forfeited — and forfeited precisely when
+    /// the call *succeeds*. Targets travel as [`TargetPath`], which cannot be
+    /// resolved, for that reason.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The path does not exist
-    /// - Permission is denied to access path components
-    /// - Symbolic link resolution fails
-    /// - Any other IO error occurs during canonicalization
+    /// [`FileSystemError`] if the path does not exist, permission is denied on
+    /// any component, link resolution fails, or any other IO error occurs.
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 
-    /// Get the user's configuration directory
-    ///
-    /// Returns the standard configuration directory for the current user.
-    /// This follows platform conventions (e.g., ~/.config on Unix-like systems).
+    /// The current user's configuration directory, by platform convention —
+    /// `~/.config` on Unix-like systems.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if:
-    /// - The user's home directory cannot be determined
-    /// - The configuration directory cannot be accessed
+    /// [`FileSystemError`] if the home directory cannot be determined or the
+    /// configuration directory cannot be accessed.
     fn config_dir(&self) -> Result<PathBuf, FileSystemError>;
 }
 
-/// Errors that can occur during file system operations
-///
-/// Represents all possible failure modes when interacting with the file system,
-/// providing detailed context for debugging and error handling.
+/// Every way a file system operation here can fail.
 #[derive(Error, Debug, Clone)]
 pub enum FileSystemError {
     /// General IO error occurred during file system operation
@@ -396,59 +289,43 @@ pub enum FileSystemError {
         points_to: Option<PathBuf>,
     },
 
-    /// A target that is neither absent nor a regular file
+    /// A target that is neither absent nor a regular file: a fifo, socket, device
+    /// node or directory.
     ///
-    /// A fifo, socket, device node or directory. Refused rather than written to,
-    /// and refused before it is *read*: opening a fifo blocks until the other end
-    /// is opened, so `selfie apply` hung indefinitely on one and `command_timeout`
-    /// did not bound it — that governs provider commands, not filesystem calls
+    /// Refused rather than written to, and refused before it is *read* — opening
+    /// a fifo blocks until the other end is opened, and `command_timeout` does not
+    /// bound that, governing provider commands rather than filesystem calls.
     ///
     /// `kind` names what was found, because the remedy differs: a leftover socket
-    /// is deleted, a device node in `/dev` means the target path is wrong.
+    /// is deleted, while a device node in `/dev` means the target path is wrong.
     ///
-    /// Says "resolves to" rather than "is": this is answered with a *following*
-    /// stat, so it covers a symlink pointing at a fifo as well as a bare one. A
-    /// plain symlink is reported as [`SymlinkedTarget`](Self::SymlinkedTarget)
-    /// instead — that question is asked with a non-following stat, and the two
-    /// must not be conflated.
+    /// Says "resolves to" rather than "is" because it is answered with a
+    /// *following* stat, so it covers a symlink pointing at a fifo as well as a
+    /// bare one. A plain symlink is [`SymlinkedTarget`](Self::SymlinkedTarget)
+    /// instead, asked with a non-following stat; do not conflate the two.
     #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
     IrregularTarget { path: PathBuf, kind: &'static str },
 }
 
+/// Helpers that set up common expectations, so library and CLI tests can drive
+/// real code paths without touching the disk.
+///
+/// ```rust
+/// use selfie::fs::MockFileSystem;
+/// use selfie::package::repository::yaml::YamlPackageRepository;
+/// use std::path::PathBuf;
+///
+/// let mut fs = MockFileSystem::default();
+/// let package_path = PathBuf::from("/test/packages/test-package.yml");
+///
+/// fs.mock_write_file_no_follow(&package_path);
+/// fs.mock_remove_file(&package_path);
+///
+/// let repo = YamlPackageRepository::new(fs, PathBuf::from("/test/packages"));
+/// ```
 #[cfg(feature = "with_mocks")]
 impl MockFileSystem {
-    /// # Example Usage in CLI Tests
-    ///
-    /// The mock methods are now public to enable comprehensive testing
-    /// in the CLI layer while avoiding real filesystem operations:
-    ///
-    /// ```rust
-    /// use selfie::fs::MockFileSystem;
-    /// use selfie::package::repository::yaml::YamlPackageRepository;
-    /// use std::path::PathBuf;
-    ///
-    /// let mut fs = MockFileSystem::default();
-    /// let package_path = PathBuf::from("/test/packages/test-package.yml");
-    ///
-    /// // Mock successful save operation
-    /// fs.mock_write_file_no_follow(&package_path);
-    ///
-    /// // Mock successful remove operation
-    /// fs.mock_remove_file(&package_path);
-    ///
-    /// let repo = YamlPackageRepository::new(fs, PathBuf::from("/test/packages"));
-    /// // Now test save/remove operations without touching real filesystem
-    /// ```
-    /// Set up a mock for reading a file with specific content
-    ///
-    /// Configures the mock to return the specified content when the given
-    /// path is read. This is useful for testing configuration loading and
-    /// package file parsing.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path that should trigger this mock response
-    /// * `content` - Content to return when the path is read
+    /// Return `content` whenever `path` is read.
     pub fn mock_read_file<P, S>(&mut self, path: P, content: S)
     where
         PathBuf: From<P>,
@@ -461,15 +338,7 @@ impl MockFileSystem {
             .returning(move |_| Ok(content_string.clone()));
     }
 
-    /// Set up a mock for listing directory contents
-    ///
-    /// Configures the mock to return the specified list of entries when
-    /// the given directory is listed. Useful for testing package discovery.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path that should trigger this mock response
-    /// * `entries` - List of entries to return for the directory
+    /// Return `entries` whenever `path` is listed.
     pub fn mock_list_directory<P>(&mut self, path: P, entries: &[P])
     where
         PathBuf: From<P>,
@@ -483,15 +352,7 @@ impl MockFileSystem {
             .returning(move |_| Ok(paths.clone()));
     }
 
-    /// Set up a mock for path existence checking
-    ///
-    /// Configures the mock to return a specific existence result for
-    /// the given path. Useful for testing configuration file discovery.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to mock existence for
-    /// * `exists` - Whether the path should be reported as existing
+    /// Report `path` as existing, or not, according to `exists`.
     pub fn mock_path_exists<P>(&mut self, path: P, exists: bool)
     where
         PathBuf: From<P>,
@@ -501,14 +362,7 @@ impl MockFileSystem {
             .returning(move |_| exists);
     }
 
-    /// Set up a mock for getting the configuration directory
-    ///
-    /// Configures the mock to return a specific configuration directory path.
-    /// This is useful for testing configuration loading in different environments.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Configuration directory path to return
+    /// Return `path` as the configuration directory.
     pub fn mock_config_dir_ok<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
@@ -517,16 +371,8 @@ impl MockFileSystem {
         self.expect_config_dir().return_once(|| Ok(p));
     }
 
-    /// Set up a complete mock configuration file scenario
-    ///
-    /// Configures the mock to simulate finding and reading a configuration file
-    /// in a specific directory. This sets up multiple related mocks for a complete
-    /// configuration loading test scenario.
-    ///
-    /// # Arguments
-    ///
-    /// * `config_dir` - Directory where the config file should be found
-    /// * `config_yaml` - YAML content to return when the config file is read
+    /// Set up every expectation for loading a config file: the directory, a
+    /// `config.yaml` in it holding `config_yaml`, and no `config.yml` beside it.
     pub fn mock_config_file(&mut self, config_dir: &Path, config_yaml: &str) {
         let config_dir_owned = PathBuf::from(config_dir);
         let config_path = config_dir.join("config.yaml");
@@ -539,17 +385,11 @@ impl MockFileSystem {
         self.mock_path_exists(&config_dir.join("config.yml"), false);
     }
 
-    /// Set up a mock for writing a file selfie owns
-    ///
-    /// Configures the mock to succeed when writing to the specified path.
+    /// Succeed when writing to `path`.
     ///
     /// Matches on the path *inside* the [`TargetPath`] rather than on the
     /// wrapper, because a caller has to mint one and the mint is not the thing
     /// under test.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the write should succeed
     pub fn mock_write_file_no_follow<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
@@ -560,14 +400,7 @@ impl MockFileSystem {
             .returning(|_, _| Ok(()));
     }
 
-    /// Set up a mock for removing a file
-    ///
-    /// Configures the mock to succeed when removing the specified file.
-    /// This is useful for testing package removal operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the file removal should succeed
+    /// Succeed when removing `path`.
     pub fn mock_remove_file<P>(&mut self, path: P)
     where
         PathBuf: From<P>,
@@ -578,16 +411,7 @@ impl MockFileSystem {
             .returning(|_| Ok(()));
     }
 
-    /// Set up a mock for path expansion
-    ///
-    /// Configures the mock to return a specific expanded path when
-    /// path expansion is requested. Useful for testing tilde expansion
-    /// and other path transformations.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Input path that should trigger expansion
-    /// * `output` - Expanded path to return
+    /// Expand `input` to `output`.
     pub fn mock_expand_path<P>(&mut self, input: P, output: P)
     where
         PathBuf: From<P>,
