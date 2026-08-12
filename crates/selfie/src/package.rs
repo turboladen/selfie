@@ -456,7 +456,7 @@ impl DotfileEntry {
     /// Empty for a programmatically built entry. `_`-prefixed anchor definitions
     /// are not included — they are legal — unless the name collides with a field
     /// of this entry, which is indistinguishable from a misspelling of it. See
-    /// [`shadows_dotfile_field`].
+    /// `shadows_dotfile_field`.
     pub fn unknown_keys(&self) -> &[String] {
         &self.unknown_keys
     }
@@ -821,7 +821,7 @@ impl Package {
     ///
     /// Non-empty means `selfie apply` refuses the whole package: the file cannot
     /// be read unambiguously, and the keys it does carry may not be the ones its
-    /// author meant. See [`shadows_package_field`].
+    /// author meant. See `shadows_package_field`.
     #[must_use]
     pub fn shadowing_top_level_keys(&self) -> &[String] {
         &self.shadowing_top_level_keys

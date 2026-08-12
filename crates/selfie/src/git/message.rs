@@ -26,8 +26,7 @@ const REDACTION: &str = "***";
 /// put raw git output into [`GitSyncError`](super::GitSyncError) or
 /// [`GitStatusError`](super::GitStatusError).
 ///
-/// What the redaction covers, and what it does not, is on
-/// [`redact_credentials`].
+/// What the redaction covers, and what it does not, is on `redact_credentials`.
 // `Debug` is derived on purpose, for the same reason as `BoundedText`: this is
 // text selfie forwards rather than content it holds back, and it has already
 // been redacted. Leak tests scan an event's `Debug` output for a secret, so a

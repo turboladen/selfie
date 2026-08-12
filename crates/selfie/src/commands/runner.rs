@@ -546,7 +546,7 @@ pub struct BoundedText(String);
 impl BoundedText {
     /// Bound `bytes`, keeping **both ends** and eliding the middle.
     ///
-    /// Keeps the first and last [`BOUNDED_END_BYTES`] and replaces what is
+    /// Keeps the first and last `BOUNDED_END_BYTES` and replaces what is
     /// between them with a marker naming how many bytes went. Both ends, because
     /// a failing command puts its diagnosis at the end — `brew` prints pages of
     /// `==> Downloading` and then one `Error:` line — while the head is where a
