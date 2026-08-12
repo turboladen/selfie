@@ -104,8 +104,10 @@ they are relevant rather than in every session:
 - `testing.md` — why a green test proves little here, and the mutation practice that does
 - `verification.md` — confirm before asserting; verify in a copy, never in a shared tree
 
-`verification.md` loads every session; the rest load when you touch matching files. Read the
-relevant one before working in an area rather than inferring the convention from nearby code.
+`verification.md` loads every session, and most of the rest load when you touch matching files.
+`commits.md` is the exception — it has no file type to key on, so read it before grouping a branch's
+commits or opening a PR. Read the relevant rule before working in an area rather than inferring the
+convention from nearby code.
 
 A problem found while doing other work goes in a **bead**, not a PR description or a code comment. A
 PR body is read once and buried; a bead is queryable and shows up in `bd ready`.
