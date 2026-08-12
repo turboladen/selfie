@@ -1,11 +1,17 @@
 //! Text from a git operation, redacted and bounded before it enters an error.
 //!
-//! Git's stderr reaches an AI assistant's transcript: a failed push or pull
-//! surfaces through the `selfie_sync_push` / `selfie_sync_pull` MCP tools. A
-//! remote URL can carry a credential in its userinfo component, and a
-//! non-interactive git echoes that URL when it needs a password it cannot ask
-//! for. [`GitMessage`] is the one place that text is cleaned, and its private
-//! field is what makes that the only way to build one.
+//! Git's stderr reaches an AI assistant's transcript through the
+//! `selfie_sync_push` / `selfie_sync_pull` MCP tools. A remote URL can carry a
+//! credential in its userinfo component, and a non-interactive git echoes that
+//! URL when it wants a password it cannot prompt for:
+//!
+//! ```text
+//! fatal: could not read Password for 'http://<token>@127.0.0.1:8731': terminal prompts disabled
+//! ```
+//!
+//! That shape is produced by `gh auth setup-git` and most CI documentation, and
+//! reached by any git with no tty and no askpass — which is how the MCP server
+//! runs it. [`GitMessage`] is the one place that text is cleaned.
 
 use std::borrow::Cow;
 
@@ -16,53 +22,27 @@ const REDACTION: &str = "***";
 
 /// Text from a git operation, with URL userinfo redacted and length bounded.
 ///
-/// # What this is for
+/// The field is private and both constructors clean their input, so nothing can
+/// put raw git output into [`GitSyncError`](super::GitSyncError) or
+/// [`GitStatusError`](super::GitStatusError).
 ///
-/// A remote URL of the shape `https://<token>@host/repo.git` is what
-/// `gh auth setup-git` and most CI documentation produce, and git echoes it
-/// verbatim when it wants a password and has no way to prompt:
-///
-/// ```text
-/// fatal: could not read Password for 'http://<token>@127.0.0.1:8731': terminal prompts disabled
-/// ```
-///
-/// That is reached by any non-interactive git — no tty, no working askpass —
-/// which is exactly how the MCP server runs it. Note that git *does* strip the
-/// userinfo from its `unable to access` and `Authentication failed for`
-/// messages when a password is present, so this is not the only shape worth
-/// covering but it is the one that demonstrably leaks.
-///
-/// # What is and is not enforced
-///
-/// The field is private and both constructors clean their input, so no
-/// struct-variant literal — library, adapter, or test — can put raw git output
-/// into [`GitSyncError`](super::GitSyncError) or
-/// [`GitStatusError`](super::GitStatusError). That is the whole point of the
-/// type: asks for invariants the compiler
-/// holds rather than ones a doc comment states.
-///
-/// What it covers, and what it deliberately does not, is on
+/// What the redaction covers, and what it does not, is on
 /// [`redact_credentials`].
-///
-/// # Why `Debug` is derived
-///
-/// Deliberately, and for the same reason as
-/// [`BoundedText`](crate::commands::BoundedText): this is text selfie
-/// *forwards* rather than content it holds back, and it has already been
-/// redacted. prescribes scanning an event's `Debug`
-/// output for a secret, so a hand-written `Debug` printing `<N bytes>` would
-/// hide forwarded git output from that scan — a credential arriving in a shape
-/// this does not cover would go unseen instead of caught.
+// `Debug` is derived on purpose, for the same reason as `BoundedText`: this is
+// text selfie forwards rather than content it holds back, and it has already
+// been redacted. Leak tests scan an event's `Debug` output for a secret, so a
+// hand-written `Debug` printing `<N bytes>` would hide forwarded git output
+// from that scan — a credential arriving in a shape the redactor misses would
+// go unseen instead of caught.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitMessage(String);
 
 impl GitMessage {
-    /// Clean a rendered error or a literal.
+    /// Clean a rendered error or a literal — a gix error, an `io::Error`, a
+    /// panic payload, a fixed string.
     ///
-    /// For gix errors, `io::Error`s, panic payloads and fixed strings. Cleaning
-    /// a literal is a no-op, which is why every construction site can afford to
-    /// go through here rather than deciding per site whether its input is
-    /// trusted.
+    /// Cleaning a literal is a no-op, so every construction site can go through
+    /// here rather than deciding per site whether its input is trusted.
     #[must_use]
     pub fn new(message: impl std::fmt::Display) -> Self {
         Self::clean(&message.to_string())
@@ -70,25 +50,22 @@ impl GitMessage {
 
     /// Clean a process's raw stderr bytes.
     ///
-    /// Decodes lossily, because git's stderr is not guaranteed UTF-8 and a
-    /// failure has to stay reportable either way.
+    /// Decodes lossily; git's stderr is not guaranteed UTF-8, and a failure has
+    /// to stay reportable either way.
     #[must_use]
     pub fn from_stderr(stderr: &[u8]) -> Self {
         Self::clean(&String::from_utf8_lossy(stderr))
     }
 
-    /// Redact **then** bound. The order is load-bearing, not incidental.
-    ///
-    /// [`BoundedText::bound`] keeps both ends and elides the middle. A cut
-    /// falling inside a URL would strand `https://user:TOK` in the kept head
-    /// with the `@` gone — so bounding first can *manufacture* a leak that the
-    /// redactor, run afterwards, has no anchor left to find. Redacting first
-    /// cannot fail that way: there is no credential left for the elision to
-    /// split.
-    ///
-    /// The cost is decoding the whole of stderr before bounding it. That adds
-    /// no unboundedness: `Command::output` has already buffered all of it.
     fn clean(text: &str) -> Self {
+        // Redact first, then bound. `BoundedText::bound` keeps both ends and
+        // elides the middle, so a cut falling inside a URL strands
+        // `https://user:TOK` in the kept head with the `@` gone — bounding
+        // first can manufacture a leak that the redactor then has no anchor
+        // left to find. Redacting first cannot fail that way.
+        //
+        // The cost is decoding the whole of stderr before bounding it, which
+        // adds no unboundedness: `Command::output` has already buffered it all.
         Self(BoundedText::bound(redact_credentials(text).as_bytes()).into_string())
     }
 
@@ -105,29 +82,8 @@ impl std::fmt::Display for GitMessage {
     }
 }
 
-/// Replace the userinfo component of every URL-like token in `text`.
-///
-/// # Why this is not a URL parser
-///
-/// The input is free-text stderr, not a URL, so the job is editing a span
-/// inside prose — and nothing in the dependency tree finds URLs *inside* prose.
-/// Both candidate crates would also force a parse-and-reserialize round trip
-/// that rewrites the rest of git's message; `gix-url` documents that round trip
-/// as lossy (`gix-url/src/lib.rs:227`, where the scp and `ssh://` forms
-/// collapse together) and warns against reconstructing an instance at all.
-///
-/// **`gix::Url`'s redacting `Display` is not a substitute.** Read its source,
-/// not its summary: `gix-url/src/impls.rs` clones the URL, sets
-/// `password = Some("redacted")`, and **leaves `user` untouched**. Its own docs
-/// say so — `gix-url/src/lib.rs:82-85` warns it "does not cover other risks,
-/// such as passing a personal access token as a username in an application
-/// that logs usernames". A token-as-username is the shape that actually leaks
-/// here, so using it would produce a fix that passes a `user:pass` test and
-/// leaks every personal access token. Do not "simplify" this into `gix::Url`.
-///
-/// # What is covered
-///
-/// The userinfo component, **both halves**, wherever it appears:
+/// Replace the userinfo component of every URL-like token in `text`, both
+/// halves of it, wherever it appears.
 ///
 /// | input                        | output                  |
 /// |------------------------------|-------------------------|
@@ -138,50 +94,58 @@ impl std::fmt::Display for GitMessage {
 /// | `https://u:p@ss@host/r`      | `https://***@host/r`    |
 /// | `https://user@host/a@b`      | `https://***@host/a@b`  |
 ///
-/// The last row is why the search is scoped to the authority. `rfind('@')` over
-/// the whole token would take the `@` in the *path* and render the host as
-/// `https://***b`, destroying the one part of the message worth reading.
+/// A token can hold more than one authority, and each is redacted.
+/// [`authority_starts`] gives the offsets where one may begin.
 ///
-/// **A token can hold more than one authority**, and each is redacted. Where
-/// one may begin — and, just as importantly, where this does *not* look — is
-/// [`authority_starts`]. Scoping to the first authority caused two separate
-/// leaks; scoping to `://`-introduced ones caused a third.
+/// # Not covered
 ///
-/// # What is deliberately not covered
+/// A redaction that looks complete is worse than one whose edges are known, so
+/// these are stated rather than implied. Every gap below that this function can
+/// be shown to miss is pinned by its own test; the first has no shape to write
+/// one against.
 ///
-/// Stated rather than implied, because a redaction that looks complete is worse
-/// than one whose edges are known:
+/// - A credential outside a userinfo — `Authorization: Bearer <token>`, a
+///   credential-helper echo, a `GIT_TRACE` or `GIT_CURL_VERBOSE` header dump.
+///   There is no `@` to anchor on.
+/// - Userinfo containing raw whitespace (`https://u:my pass@h/`). With the
+///   whitespace immediately before the `@` the miss is total: the token split
+///   leaves a piece holding the credential and no `@` at all, so it passes
+///   through byte for byte. A newline mid-stderr is likelier than a space.
+/// - Userinfo containing a raw `/` (`https://user:pa/ssTOKEN@host/r`). The
+///   authority is cut at that `/`, so the `@` falls outside it.
+/// - An authority introduced by a path separator —
+///   `https://host/a/b/<token>@evil:p`, and the protocol-relative
+///   `//<token>@host/r.git`.
 ///
-/// - **A credential outside a userinfo** — `Authorization: Bearer <token>`, a
-///   credential-helper echo, a `GIT_TRACE`/`GIT_CURL_VERBOSE` header dump.
-///   There is no `@` to anchor on and no general shape. Matching known token
-///   prefixes instead would be a provider allowlist that fails open for every
-///   provider not on it, while creating the impression the class is closed.
-/// - **Userinfo containing raw whitespace** (`https://u:my pass@h/`). The token
-///   split lands inside it and the head survives. **With the whitespace
-///   immediately before the `@` the miss is total, not partial** —
-///   `https://user:<token>\n@host/r` splits into a piece holding the credential
-///   and no `@` at all, so it passes through byte for byte. A newline arriving
-///   mid-stderr is a good deal more plausible than a space inside a userinfo. A
-///   URL must percent-encode either, so a valid remote cannot take this shape.
-/// - **Userinfo containing a raw `/`** (`https://user:pa/ssTOKEN@host/r`) — the
-///   authority is cut at that `/`, the `@` falls outside it, and the token
-///   passes through untouched. Also not reachable from a valid remote, but
-///   [`GitMessage::new`] wraps gix errors too, so it is not purely theoretical.
-/// - **An authority introduced by a path separator**, because `/` is not a
-///   candidate delimiter — `https://host/a/b/<token>@evil:p` and the
-///   protocol-relative `//<token>@host/r.git` both pass through untouched. This
-///   is the direct cost of keeping `https://host/a@b`'s host readable, and the
-///   two are not separable: any rule that finds the first also destroys the
-///   second. Named here rather than implied, and pinned by its own tests.
-/// - **Over-redaction, accepted.** In a token with no scheme the redaction can
-///   only start at the token itself, so everything before the `@` is treated as
-///   userinfo — `url.<token>@internal:…` loses its `url.` config-key prefix
-///   along with the credential. `git@github.com` becomes `***@github.com`
-///   and the address in git's "please tell me who you are" is redacted too.
-///   Keeping those would mean deciding some usernames are safe, which is the
-///   same fails-open allowlist refused above; it has to be refused in both
-///   directions.
+/// A valid remote must percent-encode whitespace and `/`, so the middle two are
+/// not reachable from one. [`GitMessage::new`] wraps gix errors too, which is
+/// why they are not purely theoretical.
+///
+/// Over-redaction is accepted in the other direction. With no scheme the
+/// redaction can only start at the token itself, so everything before the `@`
+/// is userinfo: `url.<token>@internal` loses its `url.` config-key prefix, and
+/// `git@github.com` becomes `***@github.com`.
+// Not a URL parser, and not `gix::Url`, for three separate reasons:
+//
+// - The input is free-text stderr, so the job is editing a span inside prose,
+//   and nothing in the dependency tree finds URLs inside prose.
+// - A parse-and-reserialize round trip rewrites the rest of git's message.
+//   `gix-url` documents that round trip as lossy — the scp and `ssh://` forms
+//   collapse together — and warns against reconstructing an instance at all.
+// - `gix::Url`'s redacting `Display` clones the URL, sets
+//   `password = Some("redacted")`, and leaves `user` untouched; its own docs
+//   warn it "does not cover other risks, such as passing a personal access
+//   token as a username". A token-as-username is the shape that actually leaks
+//   here, so reaching for it gives a fix that passes a `user:pass` test and
+//   leaks every personal access token.
+//
+// Two of the gaps above cannot be closed without opening a worse one. Matching
+// known token prefixes covers the first, but it is a provider allowlist that
+// fails open for every provider not on it while looking complete — and
+// refusing that in one direction means accepting the over-redaction in the
+// other, since keeping `git@github.com` intact means deciding some usernames
+// are safe. Making `/` a candidate delimiter covers the last, at the cost of
+// destroying every host; see `authority_starts`.
 fn redact_credentials(text: &str) -> String {
     // Without an `@` anywhere there is no userinfo to find, so the whole
     // per-token scan below can be skipped.
@@ -211,49 +175,12 @@ fn redact_credentials(text: &str) -> String {
 }
 
 /// Redact the userinfo at each candidate authority in one whitespace-delimited
-/// token, from the **earliest** candidate that reaches each `@`.
+/// token, from the earliest candidate that reaches each `@`.
 ///
 /// Surrounding punctuation is left alone, so git's single-quoted URLs survive
 /// as `'http://***@host:8731':` rather than being mangled into unreadability.
-///
-/// # Why this iterates over candidates
-///
-/// One token can hold more than one URL, and each earlier shape of this
-/// function missed a different subset. Stopping after the first authority
-/// leaked two ways:
-///
-/// - `https://host/redirect?to=https://user:TOKEN@other/repo` — the first
-///   authority (`host`) has no `@`, so the whole token came back untouched and
-///   the second URL's credential survived **in full**.
-/// - `https://proxy@host/https://user:TOKEN@real/r` — the first authority was
-///   redacted and the second forwarded.
-///
-/// Considering only `://`-introduced authorities then leaked a third way, for
-/// an authority embedded after `=` or `,`. **This does not examine every
-/// position in the token** — see [`authority_starts`] for exactly which ones it
-/// does, and [`redact_credentials`] for what that leaves uncovered.
-///
-/// # Why the earliest candidate, and not the tightest
-///
-/// Preferring the *latest* candidate that reaches an `@` would destroy less of
-/// the surrounding message — `?u=x&next=<token>@h` could lose only `<token>`.
-/// It was written that way, and it **under-redacted**: a delimiter inside the
-/// userinfo moves the start forward and emits the text before it verbatim, so
-/// `https://user:c2VjcmV0S2V5MQ==dEs9@host/r` kept fifteen of its twenty secret
-/// characters. `=` is base64 padding, so *every* base64 credential carries the
-/// delimiter by construction; this is the common case, not an exotic one.
-///
-/// It cannot be rescued by only collapsing when the skipped span "cannot be
-/// userinfo". Per RFC 3986 the userinfo grammar is
-/// `*( unreserved / pct-encoded / sub-delims / ":" )`, and `=`, `,` and `&` are
-/// all sub-delims — so `x&next=` is *legal userinfo* and byte-identical to
-/// credential material. Nothing in the string distinguishes the two. Keeping it
-/// is a guess that leaks whenever it is wrong, which is the fails-open guess
-/// this module refuses everywhere else.
-///
-/// The price is context: a query string collapses to `https://h/?u=***@evil:1`.
-/// Losing query context is a diagnostic cost; keeping it is a credential
-/// cost.
+/// Not every position in the token is examined; [`authority_starts`] has the
+/// ones that are, and [`redact_credentials`] what that leaves uncovered.
 fn redact_token(token: &str) -> Cow<'_, str> {
     // No `@`, no userinfo — and no candidate list to build.
     if !token.contains('@') {
@@ -264,13 +191,36 @@ fn redact_token(token: &str) -> Cow<'_, str> {
     // How much of `token` has already been copied into `out`.
     let mut copied_to = 0;
 
+    // Iterate over every candidate, never just the first. Stopping after the
+    // first authority leaked two ways:
+    //
+    //   https://host/redirect?to=https://user:TOKEN@other/repo
+    //     the first authority has no `@`, so the whole token came back
+    //     untouched and the second URL's credential survived in full
+    //   https://proxy@host/https://user:TOKEN@real/r
+    //     the first authority was redacted and the second forwarded
+    //
+    // Considering only `://`-introduced authorities then leaked a third way,
+    // for an authority embedded after `=` or `,`.
     for authority_start in authority_starts(token) {
-        // **Load-bearing, not defensive.** A delimiter can sit *inside* a
-        // userinfo — `=` is base64 padding, and every base64 credential ends in
-        // one — so a later candidate routinely points into a span already
-        // redacted. Skipping it is what keeps the **earliest** start, and the
-        // earliest start is the widest span: see the note below on why the
-        // narrowest is not available.
+        // A delimiter can sit inside a userinfo — `=` is base64 padding, so
+        // every base64 credential ends in one — and a later candidate then
+        // points into a span already redacted. Skipping it keeps the earliest
+        // start, which is the widest span.
+        //
+        // Preferring the latest candidate that reaches an `@` would destroy
+        // less of the message: `?u=x&next=<token>@h` could lose only the
+        // token. It was written that way and it under-redacted —
+        // `https://user:c2VjcmV0S2V5MQ==dEs9@host/r` kept fifteen of its
+        // twenty secret characters, because the delimiter inside the userinfo
+        // moved the start forward and emitted the text before it verbatim.
+        // Collapsing only when the skipped span "cannot be userinfo" does not
+        // rescue it: RFC 3986 makes `=`, `,` and `&` sub-delims, so `x&next=`
+        // is legal userinfo and byte-identical to credential material.
+        //
+        // The price is context — a query string collapses to
+        // `https://h/?u=***@evil:1`. That is a diagnostic cost where keeping
+        // it is a credential cost.
         if authority_start < copied_to {
             continue;
         }
@@ -314,40 +264,31 @@ fn redact_token(token: &str) -> Cow<'_, str> {
 }
 
 /// Every offset in `token` where an authority may begin, ascending and unique.
-///
-/// Built as one list rather than walked inline, because merging these three
-/// sequences by hand is how the previous two under-redactions happened.
-///
-/// - **The token itself**, for scp-style `user@host:path` and bare
-///   `user:pass@host`. Unconditional: gating it on the token holding no `://`
-///   anywhere missed `user@host:https://elsewhere/`, where the scheme search
-///   succeeded further along and the leading credential was never examined.
-/// - **After every `://`**, the ordinary URL case. Searching onward from each
-///   match rather than from the previous authority's *end* matters — for
-///   `https://…` the first `/` sits inside the `://` itself, so resuming past
-///   it would skip the very scheme being looked for.
-/// - **After every `=` and `,`**, which is where a credential-bearing URL gets
-///   embedded in a larger token: `url.<base>.insteadOf=<url>` is the standard
-///   way to inject one, and comma-joined values appear in config dumps. Both
-///   bytes are ASCII, so `i + 1` is always a character boundary.
-///
-///   **Both are also legal *unencoded* inside a userinfo** — RFC 3986 lists them
-///   as sub-delims, and `=` is base64 padding besides. So a candidate generated
-///   here frequently points *into* a credential rather than before one. That is
-///   harmless only because [`redact_token`] takes the earliest start and skips
-///   the rest; a rule preferring the latest start turns each of these into an
-///   under-redaction. Do not add a delimiter here without re-reading that.
-///
-/// **`/` is deliberately not a delimiter.** Adding it would make every path
-/// segment a fresh authority and rewrite `https://host/a@b` into `https://***b`,
-/// destroying the host — which
-/// `leaves_an_at_sign_in_the_path_alone_and_keeps_the_host` exists to prevent.
-/// The price is that an authority introduced by a path separator is never seen;
-/// that is named in [`redact_credentials`]'s uncovered list and pinned by its
-/// own tests rather than left to be rediscovered.
+// Built as one list rather than walked inline: merging these three sequences by
+// hand is how the previous two under-redactions happened.
+//
+// `/` is deliberately not among the delimiters. Adding it would make every path
+// segment a fresh authority and rewrite `https://host/a@b` into `https://***b`,
+// destroying the host, which
+// `leaves_an_at_sign_in_the_path_alone_and_keeps_the_host` exists to prevent.
+// The price is that an authority introduced by a path separator is never seen.
 fn authority_starts(token: &str) -> Vec<usize> {
+    // The token itself, for scp-style `user@host:path` and bare
+    // `user:pass@host`. Unconditional: gating it on the token holding no `://`
+    // anywhere missed `user@host:https://elsewhere/`, where the scheme search
+    // succeeded further along and the leading credential was never examined.
     let mut starts = vec![0];
 
+    // After every `=` and `,`, where a credential-bearing URL gets embedded in
+    // a larger token — `url.<base>.insteadOf=<url>` is the standard way to
+    // inject one, and comma-joined values appear in config dumps. Both bytes
+    // are ASCII, so `i + 1` is always a character boundary.
+    //
+    // Both are also legal unencoded inside a userinfo, being RFC 3986
+    // sub-delims, so a candidate generated here frequently points into a
+    // credential rather than before one. That is harmless only because
+    // `redact_token` takes the earliest start and skips the rest. Do not add a
+    // delimiter here without re-reading that.
     starts.extend(
         token
             .bytes()
@@ -356,6 +297,11 @@ fn authority_starts(token: &str) -> Vec<usize> {
             .map(|(i, _)| i + 1),
     );
 
+    // After every `://`, the ordinary URL case. Searching onward from each
+    // match rather than from the previous authority's end matters: for
+    // `https://…` the first `/` sits inside the `://` itself, so resuming past
+    // it would skip the very scheme being looked for.
+    //
     // Each step advances at least three bytes, so this terminates.
     let mut from = 0;
     while let Some(i) = token[from..].find("://") {
@@ -378,16 +324,16 @@ mod tests {
     use crate::commands::runner::MAX_BOUNDED_BYTES;
     use test_common::assert_secret_free;
 
-    /// High-entropy, 24 characters, and shaped like nothing else in a fixture —
-    /// refuses a secret that reads like a path, a
-    /// package name, or an environment name.
+    // High-entropy, 24 characters, and shaped like nothing else in a fixture, so
+    // it cannot read as a path, a package name or an environment name and match
+    // one of those instead of a leak.
     const TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 
-    /// A credential that **contains the candidate delimiters**, which [`TOKEN`]
-    /// does not. Base64 pads with `=`, so a very large class of real tokens
-    /// carries one by construction — and a rule preferring the tightest span
-    /// emits everything before that `=` verbatim. No test using `TOKEN` alone
-    /// can see that class; thirteen mutations sailed through the gap.
+    // A credential that **contains the candidate delimiters**, which [`TOKEN`]
+    // does not. Base64 pads with `=`, so a very large class of real tokens
+    // carries one by construction — and a rule preferring the tightest span
+    // emits everything before that `=` verbatim. No test using `TOKEN` alone
+    // can see that class; thirteen mutations sailed through the gap.
     const TOKEN_WITH_DELIMITERS: &str = "c2VjcmV0S2V5,MQ==dEs9Zx";
 
     // ─── Redaction: the shapes that must be covered ─────────────────────────
@@ -724,8 +670,8 @@ mod tests {
     // It did, until the mutation for this test was run.
     #[test]
     fn bounding_cannot_split_a_credential_because_redaction_runs_first() {
-        /// The window `assert_secret_free` scans for, spelled out because the
-        /// placement below is arithmetic on it rather than a round number.
+        // The window `assert_secret_free` scans for, spelled out because the
+        // placement below is arithmetic on it rather than a round number.
         const SCAN_WINDOW: usize = 12;
         const URL_PREFIX: &str = "https://user:";
 

@@ -1036,7 +1036,7 @@ mod tests {
 
     // ─── infer_package_name tests ────────────────────────────────────────────
 
-    /// Create a temp dir with YAML spec files for testing infer_package_name.
+    // Create a temp dir with YAML spec files for testing infer_package_name.
     fn repo_with_specs(specs: &[&str]) -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().to_path_buf();
@@ -1625,8 +1625,8 @@ mod credential_egress_tests {
 
     const FIXTURE_TOKEN: &str = "Zk9qP2mW7xR4tL6vB1nH3jD5";
 
-    /// git 2.50.1's own output for a non-interactive fetch whose remote URL
-    /// carries a token as its username.
+    // git 2.50.1's own output for a non-interactive fetch whose remote URL
+    // carries a token as its username.
     fn leaky_git_stderr() -> String {
         format!(
             "fatal: could not read Password for 'http://{FIXTURE_TOKEN}@127.0.0.1:8731': \
@@ -1634,18 +1634,18 @@ mod credential_egress_tests {
         )
     }
 
-    /// Which git call fails.
+    // Which git call fails.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailAt {
         RepoStatus,
         Push,
     }
 
-    /// A `GitSyncProvider` that fails one operation with git's real leaky
-    /// stderr, cleaned exactly as `run_git` cleans it.
-    ///
-    /// Hand-written rather than `MockGitSyncProvider` because `SyncServiceImpl`
-    /// requires `Clone`, which mockall does not generate.
+    // A `GitSyncProvider` that fails one operation with git's real leaky
+    // stderr, cleaned exactly as `run_git` cleans it.
+    //
+    // Hand-written rather than `MockGitSyncProvider` because `SyncServiceImpl`
+    // requires `Clone`, which mockall does not generate.
     #[derive(Clone)]
     struct GitFailingWith {
         fail_at: FailAt,
@@ -1712,7 +1712,7 @@ mod credential_egress_tests {
         }
     }
 
-    /// Never called: neither `prepare_push` nor `execute_push` touches it.
+    // Never called: neither `prepare_push` nor `execute_push` touches it.
     #[derive(Clone)]
     struct UnusedDotfileService;
 

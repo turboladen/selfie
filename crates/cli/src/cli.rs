@@ -1,23 +1,8 @@
-//! Command-line interface definitions and argument parsing
+//! The clap definitions for selfie's command line.
 //!
-//! This module defines the CLI structure using the clap crate for argument parsing.
-//! It provides a hierarchical command structure with global options and subcommands
-//! for different package management operations.
-//!
-//! # Structure
-//!
-//! The CLI follows a nested command pattern:
-//! - Global options (environment, verbosity, etc.)
-//! - Top-level commands (package, config)
-//! - Subcommands (install, check, list, etc.)
-//!
-//! # Examples
-//!
-//! ```bash
-//! selfie --environment=macos package install node
-//! selfie --verbose config validate
-//! selfie package list
-//! ```
+//! Doc comments in this file are user-visible: clap renders a field's first line
+//! as its `-h` help and the whole comment as its `--help` long help. Edit them as
+//! CLI output, not as source documentation.
 
 use std::path::PathBuf;
 
@@ -27,17 +12,10 @@ use clap_complete::engine::ArgValueCompleter;
 use crate::completers::complete_package_names;
 
 /// Selfie - A personal package manager
-///
-/// Defines the top-level command-line interface including global options
-/// that can be used with any subcommand. Global options override values
-/// from the configuration file when provided.
 #[derive(Parser, Debug)]
 #[clap(name = "selfie", author, version, about, long_about = None)]
 pub struct ClapCli {
     /// Override the target environment from configuration file
-    ///
-    /// Specifies which environment configuration to use for package operations.
-    /// This overrides the environment setting in the config file.
     ///
     /// Example: --environment=macos, --environment=linux
     #[clap(long, short = 'e', global = true)]
@@ -46,7 +24,6 @@ pub struct ClapCli {
     /// Override the package directory from configuration file
     ///
     /// Specifies the directory where package definition files are located.
-    /// This overrides the `package_directory` setting in the config file.
     ///
     /// Example: --package-directory=/path/to/packages
     #[clap(long, short = 'p', global = true)]
@@ -54,8 +31,7 @@ pub struct ClapCli {
 
     /// Override the dotfiles directory from configuration file
     ///
-    /// Specifies the directory containing dotfile source files for `selfie apply`.
-    /// This overrides the `dotfiles_directory` setting in the config file.
+    /// Specifies the directory for dotfile source files used by `selfie apply`.
     ///
     /// Example: --dotfiles-directory=/path/to/dotfiles
     #[clap(long, global = true)]
@@ -63,8 +39,7 @@ pub struct ClapCli {
 
     /// Override the state directory from configuration file
     ///
-    /// Specifies the directory for deploy state tracking (checksums, drift detection).
-    /// This overrides the `state_directory` setting in the config file.
+    /// Specifies the directory for deploy state tracking: checksums, drift detection.
     ///
     /// Example: --state-directory=/path/to/state
     #[clap(long, global = true)]
@@ -105,10 +80,6 @@ pub struct ClapCli {
 }
 
 /// Top-level commands available in the selfie CLI
-///
-/// The CLI is organized into main command categories that group related
-/// operations together. Each command category has its own subcommands
-/// and specific options.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ClapCommands {
     /// Spec (definition) operations — create, edit, remove, validate, info
@@ -125,20 +96,17 @@ pub(crate) enum ClapCommands {
 
     /// Deploy config files from packages to target locations
     ///
-    /// Deploys configuration files defined in package YAML files to their
-    /// target locations on the system. Detects conflicts and drift.
+    /// Detects conflicts and drift for each file before writing it.
     Apply(ApplyArgs),
 
     /// Dotfile management operations — drift, list, track
     ///
-    /// Commands for inspecting and managing dotfiles across packages.
-    /// Use `selfie apply` to deploy dotfiles; use `selfie dotfiles` to
-    /// inspect drift, list tracked files, and track new ones.
+    /// Inspects rather than deploys: use `selfie apply` to deploy dotfiles, and
+    /// these to inspect drift, list tracked files, and track new ones.
     Dotfiles(DotfilesCommands),
 
     /// Git sync operations — status, push, pull
     ///
-    /// Commands for syncing package specs and dotfiles via git.
     /// Generates per-package conventional commits automatically.
     Sync(SyncCommands),
 

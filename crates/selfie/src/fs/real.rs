@@ -731,7 +731,7 @@ mod private_write_tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Names of everything in `dir`, for asserting that no temporary file survived.
+    // Names of everything in `dir`, for asserting that no temporary file survived.
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -827,9 +827,9 @@ mod private_write_tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777
         }
 
-        /// The security property, asserted the only way that cannot flake: the
-        /// umask may restrict the mode further than the 0o600 we request, but it
-        /// can never loosen it, so group and other bits must be clear.
+        // The security property, asserted the only way that cannot flake: the
+        // umask may restrict the mode further than the 0o600 we request, but it
+        // can never loosen it, so group and other bits must be clear.
         fn assert_owner_only(path: &Path) {
             assert_eq!(
                 mode_of(path) & 0o077,
@@ -1282,24 +1282,24 @@ mod irregular_targets {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    /// A `TargetPath` for `path`, unresolved as the type requires.
+    // A `TargetPath` for `path`, unresolved as the type requires.
     fn tp(path: &Path) -> TargetPath {
         crate::fs::target::expand_target_path(&RealFileSystem, path.to_str().unwrap())
     }
 
-    /// A fifo, and a scoped temp dir to keep it in.
+    // A fifo, and a scoped temp dir to keep it in.
     fn fifo_in(dir: &Path) -> PathBuf {
         let path = dir.join("target");
         nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
         path
     }
 
-    /// Run a blocking filesystem call with a deadline.
-    ///
-    /// Returns `None` if it did not finish, which is how a regression that
-    /// reintroduces the hang reports itself as a test failure. The blocked thread
-    /// is left behind deliberately: it cannot be cancelled, and the process is
-    /// about to end.
+    // Run a blocking filesystem call with a deadline.
+    //
+    // Returns `None` if it did not finish, which is how a regression that
+    // reintroduces the hang reports itself as a test failure. The blocked thread
+    // is left behind deliberately: it cannot be cancelled, and the process is
+    // about to end.
     fn with_deadline<T, F>(f: F) -> Option<T>
     where
         F: FnOnce() -> T + Send + 'static,

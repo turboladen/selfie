@@ -50,12 +50,8 @@ pub struct ShellCommandRunner {
 }
 
 impl ShellCommandRunner {
-    /// Create a new shell command runner
-    ///
-    /// # Arguments
-    ///
-    /// * `shell` - Path to the shell executable (e.g., "/bin/sh", "/bin/bash")
-    /// * `default_timeout` - Default timeout for command execution
+    /// Create a runner that invokes `shell` — `/bin/sh`, `/bin/bash` — without
+    /// sourcing a login profile.
     ///
     /// # Examples
     ///
@@ -260,43 +256,14 @@ impl ShellCommandRunner {
 }
 
 impl CommandRunner for ShellCommandRunner {
-    /// Check if a command executable exists on `PATH`
-    ///
-    /// Uses the `which` crate to perform a native PATH lookup without
-    /// spawning a subprocess. This checks for filesystem executables
-    /// only — shell builtins (e.g., `cd`, `test`) will not be found.
-    /// This is the appropriate check for package manager prerequisites
-    /// like `brew`, `npm`, or `apt`.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The command name to check (e.g., "npm", "git", "python")
-    ///
-    /// # Returns
-    ///
-    /// `true` if an executable with the given name exists on `PATH`, `false` otherwise
+    // `which` does a native PATH lookup without spawning a subprocess, which is
+    // also why it finds filesystem executables and not shell builtins.
     async fn is_command_available(&self, command: &str) -> bool {
         which::which(command).is_ok()
     }
 
-    /// Execute a command using the default timeout
-    ///
-    /// Runs the specified shell command and waits for completion, using
-    /// the default timeout configured for this runner instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - Either output stream cannot be read to the end
-    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
-    ///   whose correctness depends only on stdout
-    /// - The command times out (exceeds default timeout)
-    /// - The command is cancelled via `token`
+    // The trait leaves the default timeout to the implementation; this one uses
+    // whatever the runner was built with.
     async fn execute(
         &self,
         command: &str,
@@ -306,26 +273,6 @@ impl CommandRunner for ShellCommandRunner {
             .await
     }
 
-    /// Execute a command with a specific timeout
-    ///
-    /// Runs the specified shell command and waits for completion within
-    /// the given timeout duration. The command will be terminated if it
-    /// doesn't complete in time.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    /// * `timeout` - Maximum duration to wait for completion
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - Either output stream cannot be read to the end
-    ///   ([`CommandError::OutputReadFailed`]) — **including stderr**, on a command
-    ///   whose correctness depends only on stdout
-    /// - The command times out before completion
-    /// - The command is cancelled via `token`
     async fn execute_with_timeout(
         &self,
         command: &str,
@@ -342,18 +289,6 @@ impl CommandRunner for ShellCommandRunner {
         .await
     }
 
-    /// Execute a command in a specific working directory
-    ///
-    /// Identical to [`execute_with_timeout`](CommandRunner::execute_with_timeout)
-    /// except that the child's current directory is `working_dir`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] if the command cannot be started (including when
-    /// `working_dir` does not exist), fails part-way through, has either output
-    /// stream fail to read to the end ([`CommandError::OutputReadFailed`] —
-    /// **including stderr**, on a command whose correctness depends only on
-    /// stdout), times out, or is cancelled.
     async fn execute_in_dir(
         &self,
         command: &str,
@@ -371,31 +306,8 @@ impl CommandRunner for ShellCommandRunner {
         .await
     }
 
-    /// Execute a command with streaming output processing
-    ///
-    /// Runs the command and streams stdout/stderr output through the provided
-    /// channel as it becomes available. This allows real-time processing of
-    /// command output, which is useful for long-running commands or when
-    /// providing user feedback.
-    ///
-    /// A chunk is dropped rather than blocking the read loop when the receiver
-    /// falls behind, and dropped outright once the receiver is gone, so the
-    /// channel is best-effort; the returned [`CommandOutput`] always holds the
-    /// whole output.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The shell command to execute
-    /// * `timeout` - Maximum duration to wait for completion
-    /// * `output_sender` - Channel sender each chunk of output is sent to
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] if:
-    /// - The command cannot be started, or fails part-way through (IO error)
-    /// - The command times out before completion
-    /// - The command is cancelled via `token`
-    /// - Output stream handling fails
+    // Drops a chunk rather than blocking the read loop when the receiver falls
+    // behind, which is the best-effort delivery the trait allows for.
     async fn execute_streaming(
         &self,
         command: &str,
@@ -607,30 +519,29 @@ where
 /// Run a child to completion while both its pipes drain, or report the first
 /// thing that went wrong.
 ///
-/// Generic over the three futures rather than taking a child, so a read failure
-/// — which no real child can be made to produce on demand — is testable.
-///
-/// `try_join3` polls all three concurrently, which is what avoids the ~64KB
-/// pipe-buffer deadlock, and returns the first error. Returning early matters
-/// because the pipe reads are the only thing draining the child: waiting on
-/// `wait()` after a read has failed blocks until the caller's timeout and reports
-/// a read failure as a timeout.
-///
-/// A failed read is an error here rather than an empty buffer beside a successful
-/// status, because a command can exit 0 while the pipe carrying its answer fails,
-/// and callers act on that output — one uses it as an executable path, one writes
-/// it to a credentials file.
-///
-/// **Do not read the pipes in a `tokio::spawn`.** That makes a
-/// [`JoinError`](tokio::task::JoinError) reachable, and its `Display` renders the
-/// panic payload of the task holding this command's bytes, into
-/// [`CommandError::OutputReadFailed`] and on to `PackageEvent::Completed`, the
-/// CLI and the MCP server's JSON. Reading inline leaves nothing to leak.
-///
 /// # Errors
 ///
-/// Returns [`CommandError::OutputReadFailed`] naming the pipe that failed, or
+/// [`CommandError::OutputReadFailed`] naming the pipe that failed, or
 /// [`CommandError::IoError`] if waiting on the child itself failed.
+// Generic over the three futures rather than taking a child, so a read failure —
+// which no real child can be made to produce on demand — is testable.
+//
+// `try_join3` polls all three concurrently, which is what avoids the ~64KB
+// pipe-buffer deadlock, and returns the first error. Returning early matters
+// because the pipe reads are the only thing draining the child: waiting on
+// `wait()` after a read has failed blocks until the caller's timeout, and
+// reports a read failure as a timeout.
+//
+// A failed read is an error rather than an empty buffer beside a successful
+// status, because a command can exit 0 while the pipe carrying its answer fails,
+// and callers act on that output — one uses it as an executable path, one writes
+// it to a credentials file.
+//
+// Do not read the pipes in a `tokio::spawn`. That makes a `JoinError` reachable,
+// and its `Display` renders the panic payload of the task holding this command's
+// bytes into `CommandError::OutputReadFailed`, and on to
+// `PackageEvent::Completed`, the CLI and the MCP server's JSON. Reading inline
+// leaves nothing to leak.
 async fn collect<S, O, E>(
     wait: S,
     stdout: O,
@@ -672,32 +583,29 @@ where
 /// `lossy(a) + lossy(b) == lossy(a + b)` for any two consecutive frames. That is
 /// what makes it safe to decode each frame on its own and relay it.
 ///
-/// Note it is **not** the stronger "a frame never ends inside a character". A
-/// frame can end inside an *invalid* sequence, at the boundary of its maximal
-/// subpart — `[0x61, 0xF4]` followed by `0xF5` yields a frame of just `[0xF4]`.
-/// That costs nothing, because `0xF4` decodes to one `U+FFFD` framed alone or
-/// with its neighbours. What never happens is a *valid* character being split,
-/// which is the case that would turn one character into two `U+FFFD`.
-///
-/// The boundary rule is `std`'s, not this module's: [`std::str::from_utf8`]
-/// reports both how far the input was valid ([`Utf8Error::valid_up_to`]) and
-/// whether the trailing bytes were merely *incomplete* or genuinely *invalid*
-/// ([`Utf8Error::error_len`]). This is the ~15-line adapter from that onto
-/// [`Decoder`]; it does not parse UTF-8 itself.
-///
-/// Framing at a fixed byte count instead — which is what the read loop this
-/// replaced did, at 1024 bytes — splits any multi-byte character straddling the
-/// cut into **two** `U+FFFD`s, one at the end of a chunk and one at the start of
-/// the next. Both halves then reach the terminal and the MCP server's JSON,
-/// because the relayed chunk is decoded here and nothing downstream can undo it.
-///
-/// Yields the **raw bytes**, not a `String`, so the same frames can be
-/// accumulated byte-exactly into [`CommandOutput`] while only the relayed copy
-/// is decoded. Yielding text would make a command's captured stdout lossy under
-/// streaming and byte-exact everywhere else.
-///
-/// [`Utf8Error::valid_up_to`]: std::str::Utf8Error::valid_up_to
-/// [`Utf8Error::error_len`]: std::str::Utf8Error::error_len
+/// Yields raw bytes rather than a `String`, so the same frames can be
+/// accumulated byte-exactly into [`CommandOutput`] while only the relayed copy is
+/// decoded.
+// Not the stronger "a frame never ends inside a character". A frame can end
+// inside an invalid sequence, at the boundary of its maximal subpart —
+// `[0x61, 0xF4]` followed by `0xF5` yields a frame of just `[0xF4]`. That costs
+// nothing, because `0xF4` decodes to one `U+FFFD` framed alone or with its
+// neighbours. What never happens is a valid character being split, which is the
+// case that would turn one character into two `U+FFFD`.
+//
+// The boundary rule is `std`'s, not this module's: `str::from_utf8` reports both
+// how far the input was valid (`Utf8Error::valid_up_to`) and whether the
+// trailing bytes were merely incomplete or genuinely invalid
+// (`Utf8Error::error_len`). This is the adapter from that onto `Decoder`; it
+// does not parse UTF-8 itself.
+//
+// Framing at a fixed byte count instead — which the read loop this replaced did,
+// at 1024 bytes — splits any multi-byte character straddling the cut into two
+// `U+FFFD`s, one ending a chunk and one starting the next. Both halves reach the
+// terminal and the MCP server's JSON, because the relayed chunk is decoded here
+// and nothing downstream can undo it. Yielding text would likewise make a
+// command's captured stdout lossy under streaming and byte-exact everywhere
+// else.
 struct Utf8Boundary;
 
 impl Utf8Boundary {
@@ -722,20 +630,15 @@ impl Utf8Boundary {
 impl Decoder for Utf8Boundary {
     type Item = Bytes;
 
-    /// Required to be [`From<std::io::Error>`], so it cannot be [`Infallible`].
-    ///
-    /// **Nothing here constructs one**, and that is load-bearing rather than
-    /// incidental: this error would become [`CommandError::OutputReadFailed`]'s
-    /// `source`, whose `Display` reaches `PackageEvent::Completed`, the CLI and
-    /// the MCP server's JSON — and it is the one place on the streaming path
-    /// where a constructible error and the process's raw bytes are in scope
-    /// together. Should a fallible case ever be added here, its message must be
-    /// a fixed `&'static str` and must never embed `src`.
-    ///
-    /// `decode_returns_ok_for_every_input` asserts the stronger property the
-    /// code has today: there is no input for which this returns `Err` at all.
-    ///
-    /// [`Infallible`]: std::convert::Infallible
+    // `Decoder` requires `From<std::io::Error>`, so this cannot be `Infallible`.
+    // Nothing here constructs one, and that matters: such an error would become
+    // `CommandError::OutputReadFailed`'s `source`, whose `Display` reaches
+    // `PackageEvent::Completed`, the CLI and the MCP server's JSON — and this is
+    // the one place on the streaming path where a constructible error and the
+    // process's raw bytes are in scope together. If a fallible case is ever
+    // added, its message must be a fixed `&'static str` and must never embed
+    // `src`. `decode_returns_ok_for_every_input` pins the stronger property the
+    // code has today: no input makes this return `Err` at all.
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Bytes>, Self::Error> {
@@ -783,25 +686,21 @@ where
 
 /// Drain `frames` while the child runs, and give back its exit status.
 ///
-/// # Why `try_join!` and not `join!`
-///
-/// The pump is the only thing draining the pipes, and a child blocked writing
-/// to a full one cannot exit until something does. So a `join!` — which waits
-/// for *both* — turns a read failure into a wait for the entire remaining
-/// timeout, then reports it as [`CommandError::Timeout`]: a prompt and
-/// correctly-typed failure replaced by a slow and wrong one. `try_join!`
-/// returns the read failure as soon as it happens, and the caller kills the
-/// child it left behind.
-///
-/// The success path still requires both: the status *and* both pipes at EOF.
-/// That is what avoids the ~64KB pipe-buffer deadlock, and it is also why a
-/// grandchild holding the pipe open runs out the timeout rather than hanging
-/// past it — there is no phase here that the deadline does not cover.
-///
 /// # Errors
 ///
-/// Returns [`CommandError::OutputReadFailed`] naming the pipe that failed, or
+/// [`CommandError::OutputReadFailed`] naming the pipe that failed, or
 /// [`CommandError::IoError`] if waiting on the child itself failed.
+// `try_join!`, not `join!`. The pump is the only thing draining the pipes, and a
+// child blocked writing to a full one cannot exit until something does — so a
+// `join!`, which waits for both, turns a read failure into a wait for the entire
+// remaining timeout and then reports it as `CommandError::Timeout`. `try_join!`
+// returns the read failure as soon as it happens, and the caller kills the child
+// it left behind.
+//
+// The success path still requires both: the status and both pipes at EOF. That
+// is what avoids the ~64KB pipe-buffer deadlock, and it is why a grandchild
+// holding the pipe open runs out the timeout rather than hanging past it. No
+// phase here escapes the deadline.
 async fn drain_and_wait<S>(
     child: &mut tokio::process::Child,
     frames: S,
@@ -872,10 +771,10 @@ mod tests {
         CancellationToken::new()
     }
 
-    /// An `AsyncRead` that yields `bytes` and then fails.
-    ///
-    /// Stands in for a pipe that dies part-way through, which cannot be provoked
-    /// reliably from a real child process.
+    // An `AsyncRead` that yields `bytes` and then fails.
+    //
+    // Stands in for a pipe that dies part-way through, which cannot be provoked
+    // reliably from a real child process.
     struct FailingReader {
         bytes: Vec<u8>,
         fail: bool,
@@ -889,7 +788,7 @@ mod tests {
             }
         }
 
-        /// The control: the same bytes, then a clean EOF.
+        // The control: the same bytes, then a clean EOF.
         fn clean(bytes: &[u8]) -> Self {
             Self {
                 bytes: bytes.to_vec(),
@@ -920,18 +819,18 @@ mod tests {
         }
     }
 
-    /// A pipe that read to the end, for driving [`collect`].
+    // A pipe that read to the end, for driving [`collect`].
     async fn read_ok(bytes: &'static [u8]) -> std::io::Result<Vec<u8>> {
         Ok(bytes.to_vec())
     }
 
-    /// A pipe that died part-way through.
+    // A pipe that died part-way through.
     async fn read_failed() -> std::io::Result<Vec<u8>> {
         Err(std::io::Error::other("pipe died"))
     }
 
-    /// A child whose `wait()` itself failed, which must stay distinguishable
-    /// from a pipe that failed.
+    // A child whose `wait()` itself failed, which must stay distinguishable
+    // from a pipe that failed.
     async fn wait_failed() -> std::io::Result<std::process::ExitStatus> {
         Err(std::io::Error::other("wait died"))
     }
@@ -1101,33 +1000,33 @@ mod tests {
 
     // ---- T5: the deadlock this shape exists to avoid -------------------------
 
-    /// Writes well past the ~64KB pipe buffer on **both** streams.
-    ///
-    /// Shared by the buffered and streaming deadlock tests so the two cannot
-    /// drift into measuring different amounts of output.
+    // Writes well past the ~64KB pipe buffer on **both** streams.
+    //
+    // Shared by the buffered and streaming deadlock tests so the two cannot
+    // drift into measuring different amounts of output.
     const BOTH_PIPES_PAST_THE_BUFFER: &str = "for i in $(seq 1 4000); do \
          echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
          echo 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >&2; \
          done";
 
-    /// 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
-    /// ASCII.
-    ///
-    /// The `é` straddles the 1024-byte boundary the old read loop cut on. The
-    /// `0xFF` is what makes a byte-exactness assertion able to fail: a *valid*
-    /// character that gets split still round-trips through
-    /// `String::from_utf8_lossy(..).as_bytes()` byte for byte, so a fixture
-    /// without an invalid byte cannot detect output that was decoded before it
-    /// was captured.
-    /// **Octal, not `\\xNN`.** Hex escapes are a bash/BSD extension; POSIX
-    /// specifies `\\ooo`, and `/bin/sh` is dash on Debian and Ubuntu, whose
-    /// `printf` emits `\\xc3` as five literal characters. That made this fixture
-    /// produce no split character at all and the test fail for a reason having
-    /// nothing to do with the decoder.
+    // 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
+    // ASCII.
+    //
+    // The `é` straddles the 1024-byte boundary the old read loop cut on. The
+    // `0xFF` is what makes a byte-exactness assertion able to fail: a *valid*
+    // character that gets split still round-trips through
+    // `String::from_utf8_lossy(..).as_bytes()` byte for byte, so a fixture
+    // without an invalid byte cannot detect output that was decoded before it
+    // was captured.
+    // **Octal, not `\\xNN`.** Hex escapes are a bash/BSD extension; POSIX
+    // specifies `\\ooo`, and `/bin/sh` is dash on Debian and Ubuntu, whose
+    // `printf` emits `\\xc3` as five literal characters. That made this fixture
+    // produce no split character at all and the test fail for a reason having
+    // nothing to do with the decoder.
     const SPLIT_CHARACTER: &str = "printf 'a%.0s' $(seq 1 1023); printf '\\303\\251'; \
          printf '\\377'; printf 'b%.0s' $(seq 1 100)";
 
-    /// Exactly what [`SPLIT_CHARACTER`] writes to stdout.
+    // Exactly what [`SPLIT_CHARACTER`] writes to stdout.
     fn split_character_bytes() -> Vec<u8> {
         let mut expected = vec![b'a'; 1023];
         expected.extend_from_slice("é".as_bytes());
@@ -1203,26 +1102,26 @@ mod tests {
         );
     }
 
-    /// Is a process whose command line contains `marker` still running?
-    ///
-    /// **The marker has to be the command the shell execs**, not a comment
-    /// beside it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30`
-    /// and the comment is gone, so `pgrep -f marker` finds nothing whether or not
-    /// the child was killed — a test written that way passes either way. An
-    /// unusual sleep duration is the marker instead: it survives the exec because
-    /// it *is* the exec'd command.
-    ///
-    /// **The callers run it through `exec`, and that is load-bearing.** What the
-    /// runner promises is that it kills its *direct child*; what this function
-    /// observes is that no process is running the marker. Those are the same
-    /// claim only when the shell has replaced itself with the marker rather than
-    /// forking it. Replacing itself is what `exec` is specified to do, so this
-    /// holds on every POSIX shell — whereas relying on a shell to *choose* to
-    /// exec a lone command makes the test depend on an optimization. `bash` and
-    /// `dash` differ there, which is how a version of this without `exec` passed
-    /// on macOS and failed on Ubuntu, reporting a grandchild the runner never
-    /// promised to kill (that leak is real, tracked separately, and deliberately
-    /// out of scope here).
+    // Is a process whose command line contains `marker` still running?
+    //
+    // **The marker has to be the command the shell execs**, not a comment
+    // beside it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30`
+    // and the comment is gone, so `pgrep -f marker` finds nothing whether or not
+    // the child was killed — a test written that way passes either way. An
+    // unusual sleep duration is the marker instead: it survives the exec because
+    // it *is* the exec'd command.
+    //
+    // **The callers run it through `exec`, and that is load-bearing.** What the
+    // runner promises is that it kills its *direct child*; what this function
+    // observes is that no process is running the marker. Those are the same
+    // claim only when the shell has replaced itself with the marker rather than
+    // forking it. Replacing itself is what `exec` is specified to do, so this
+    // holds on every POSIX shell — whereas relying on a shell to *choose* to
+    // exec a lone command makes the test depend on an optimization. `bash` and
+    // `dash` differ there, which is how a version of this without `exec` passed
+    // on macOS and failed on Ubuntu, reporting a grandchild the runner never
+    // promised to kill (that leak is real, tracked separately, and deliberately
+    // out of scope here).
     fn a_process_matching(marker: &str) -> bool {
         let found = std::process::Command::new("pgrep")
             // `-x` anchors: the whole command line must be the marker, so an
@@ -1235,8 +1134,8 @@ mod tests {
         !found.stdout.is_empty()
     }
 
-    /// Kill anything left over, so a failing assertion does not also leak a
-    /// process into the developer's session.
+    // Kill anything left over, so a failing assertion does not also leak a
+    // process into the developer's session.
     fn kill_processes_matching(marker: &str) {
         let _ = std::process::Command::new("pkill")
             .args(["-x", "-f", &marker.replace('.', "\\.")])
@@ -1670,8 +1569,8 @@ mod tests {
     // end-to-end version of these can pass without the boundary ever being
     // crossed. Feeding hand-split slices is the only way to be sure it was.
 
-    /// Push `pieces` through one decoder in order, as a pipe would deliver them,
-    /// and collect the frames it chose to emit.
+    // Push `pieces` through one decoder in order, as a pipe would deliver them,
+    // and collect the frames it chose to emit.
     fn decode_pieces(pieces: &[&[u8]]) -> Vec<Vec<u8>> {
         let mut decoder = Utf8Boundary;
         let mut buf = BytesMut::new();
@@ -1837,7 +1736,7 @@ mod tests {
 
     // ---- What the pump does with the frames ----------------------------------
 
-    /// A child that will not exit on its own, for the read-failure test below.
+    // A child that will not exit on its own, for the read-failure test below.
     fn sleeping_child() -> tokio::process::Child {
         Command::new(ShellCommandRunner::default_shell())
             .arg("-c")
@@ -2109,14 +2008,14 @@ mod content_tests {
         CancellationToken::new()
     }
 
-    /// Write a stand-in shell into `dir` and return its path.
-    ///
-    /// `before` is written when the shell starts, as a profile banner is. `after`
-    /// is written from an `EXIT` trap, as a profile's own trap would be.
-    /// `background` is written by a detached child a fraction of a second later,
-    /// as an update checker started by a profile does — the case no boundary
-    /// drawn in the output stream can catch, because it depends on timing rather
-    /// than on position.
+    // Write a stand-in shell into `dir` and return its path.
+    //
+    // `before` is written when the shell starts, as a profile banner is. `after`
+    // is written from an `EXIT` trap, as a profile's own trap would be.
+    // `background` is written by a detached child a fraction of a second later,
+    // as an update checker started by a profile does — the case no boundary
+    // drawn in the output stream can catch, because it depends on timing rather
+    // than on position.
     fn noisy_shell(dir: &Path, before: &str, after: &str, background: bool) -> PathBuf {
         let mut body = String::from("#!/bin/sh\n");
         if !before.is_empty() {
@@ -2136,15 +2035,15 @@ mod content_tests {
         path
     }
 
-    /// A runner whose shell is noisy in every way at once.
+    // A runner whose shell is noisy in every way at once.
     fn noisy_runner(dir: &Path) -> ShellCommandRunner {
         let shell = noisy_shell(dir, "LEADBANNER", "TRAILCHATTER", true);
         ShellCommandRunner::new(shell.to_str().unwrap(), TIMEOUT)
     }
 
-    /// A command that takes long enough for the backgrounded writer to land in
-    /// the middle of it. Without the wait the race is won by accident and the
-    /// test passes for the wrong reason.
+    // A command that takes long enough for the backgrounded writer to land in
+    // the middle of it. Without the wait the race is won by accident and the
+    // test passes for the wrong reason.
     fn slow_secret() -> String {
         format!("sleep 0.6; printf '%s' '{SECRET}'")
     }
@@ -2384,7 +2283,7 @@ mod content_tests {
         );
     }
 
-    /// A stand-in shell whose startup does `redirect` before running its `-c`.
+    // A stand-in shell whose startup does `redirect` before running its `-c`.
     fn shell_redirecting(dir: &Path, name: &str, redirect: &str) -> PathBuf {
         let path = dir.join(name);
         test_common::write_executable(

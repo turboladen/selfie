@@ -1,19 +1,8 @@
-//! Pure deployment decision logic.
+//! Deciding what to do with each config file: checksumming, path resolution, and
+//! turning a [`DriftType`] plus target existence into a [`DeployDecision`].
 //!
-//! This module contains the stateless, side-effect-free functions that the
-//! service layer delegates to when deciding what to do with each config file.
-//! Keeping this logic separate from I/O makes it straightforward to test every
-//! combination of drift state and target existence without touching the
-//! filesystem.
-//!
-//! The three concerns here are:
-//!
-//! - **Checksumming** — SHA-256 hashes used to detect whether source or target
-//!   files have changed since the last deploy.
-//! - **Path resolution** — joining a config source's relative path against the
-//!   configured base directory.
-//! - **Decision routing** — given a [`DriftType`] and whether the target exists,
-//!   produce a [`DeployDecision`] that the caller can act on.
+//! Everything here is pure, which is what lets every combination of drift state
+//! and target existence be tested without touching a filesystem.
 
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;

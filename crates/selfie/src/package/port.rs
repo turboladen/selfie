@@ -16,58 +16,30 @@ use crate::{
     package::{GetPackage, Package},
 };
 
-/// Port for package repository operations (Hexagonal Architecture)
-///
-/// This trait abstracts package storage and retrieval operations to allow
-/// different implementations and enable comprehensive testing through mocking.
-/// It provides the core operations needed for package discovery, loading,
-/// and validation.
-///
-/// Implementations might include:
-/// - YAML file-based repositories
-/// - Database-backed repositories
-/// - Remote repository clients
-/// - In-memory repositories for testing
+/// Port for package storage: discovering, loading, saving and removing package
+/// definitions.
 #[cfg_attr(feature = "with_mocks", mockall::automock)]
 pub trait PackageRepository: Send + Sync {
-    /// Get a package by name from the repository
+    /// Load a package by name, with every environment configuration, dependency
+    /// and piece of metadata it declares.
     ///
-    /// Loads a complete package definition including all environment configurations,
-    /// dependencies, and metadata. The package is identified by its name, which
-    /// should correspond to the package file name (without extension).
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The package name to load
-    ///
-    /// # Returns
-    ///
-    /// The complete package definition with all configurations
+    /// The name corresponds to the package file's name without its extension.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageRepoError`] if:
-    /// - No package with the given name exists
-    /// - Multiple packages with the same name are found
-    /// - The package definition file is malformed
-    /// - File system access fails
+    /// [`PackageRepoError`] if no package by that name exists, if several do, if
+    /// the definition is malformed, or if file system access fails.
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError>;
 
-    /// Read a file that a package refers to but does not contain
+    /// Read a file a package refers to but does not contain, such as a dotfile
+    /// template whose contents validation inspects.
     ///
-    /// Resolved relative to the package file's own directory — the same base
-    /// `dotfiles` sources resolve against. Used for dotfile templates, whose
-    /// contents validation inspects.
+    /// `relative_path` resolves against `package_path`'s parent directory — the
+    /// same base `dotfiles` sources resolve against.
     ///
-    /// This lives on the repository because the repository owns access to package
-    /// storage. Validation operates on an already-loaded [`Package`] and has no
-    /// file system of its own.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_path` - Path to the package's own YAML file
-    /// * `relative_path` - Path of the referenced file, relative to that YAML's
-    ///   parent directory
+    /// It lives on the repository because the repository owns access to package
+    /// storage; validation works on an already-loaded [`Package`] and has no file
+    /// system of its own.
     ///
     /// # Errors
     ///
@@ -79,38 +51,22 @@ pub trait PackageRepository: Send + Sync {
         relative_path: &str,
     ) -> Result<String, FileSystemError>;
 
-    /// List all available packages in the package directory
-    ///
-    /// Discovers and attempts to load all package definition files in the
-    /// configured package directory. Returns both successfully loaded packages
-    /// and any parse errors encountered, allowing the caller to handle
-    /// partial failures gracefully.
-    ///
-    /// # Returns
-    ///
-    /// A collection containing both valid packages and parse errors
+    /// Load every package definition in the configured directory, returning the
+    /// ones that parsed **and** the errors from the ones that did not, so a
+    /// caller can carry on past a single bad file.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageListError`] if:
-    /// - The package directory cannot be accessed
-    /// - Directory listing fails
-    /// - Critical file system errors occur
+    /// [`PackageListError`] if the package directory cannot be accessed or
+    /// listed.
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError>;
 
-    /// Get a list of all valid package names in the repository
-    ///
-    /// Extracts just the names of successfully parseable packages from the
-    /// repository. This is useful for operations that only need package names
-    /// rather than full package definitions.
-    ///
-    /// # Returns
-    ///
-    /// A vector of valid package names
+    /// The names of the packages that parse, for callers that do not need the
+    /// definitions themselves.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageListError`] if the underlying list operation fails
+    /// [`PackageListError`] if the underlying listing fails.
     fn available_packages(&self) -> Result<Vec<String>, PackageListError> {
         let list_packages_output = self.list_packages()?;
 
@@ -120,90 +76,37 @@ pub trait PackageRepository: Send + Sync {
             .collect())
     }
 
-    /// Find package files that match the given name
-    ///
-    /// Searches for package definition files that correspond to the given
-    /// package name. This is useful for package discovery and resolving
-    /// ambiguities when multiple files might match.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The package name to search for
-    ///
-    /// # Returns
-    ///
-    /// A vector of file paths that match the package name
+    /// Every package file matching `name`. More than one is how an ambiguous
+    /// package name is detected.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageListError`] if:
-    /// - The package directory cannot be accessed
-    /// - File system operations fail
+    /// [`PackageListError`] if the package directory cannot be accessed.
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError>;
 
-    /// Save a package to the specified file path
-    ///
-    /// Serializes the package and writes it to the given path. This method
-    /// handles all file system operations through the repository's abstraction
-    /// layer, enabling proper testing and mocking.
-    ///
-    /// # Arguments
-    ///
-    /// * `package` - The package to save
-    /// * `path` - The file path where the package should be saved
-    ///
-    /// # Returns
-    ///
-    /// Success if the package was saved successfully
+    /// Serialize a package and write it to `path`.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageRepoError`] if:
-    /// - The package cannot be serialized to YAML
-    /// - The target directory doesn't exist or isn't writable
-    /// - File system operations fail
+    /// [`PackageRepoError`] if the package cannot be serialized to YAML, or if
+    /// the target directory does not exist or cannot be written to.
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
 
-    /// Remove a package from the repository
-    ///
-    /// Deletes the package definition file from the file system. This operation
-    /// is irreversible and should only be performed after appropriate user confirmation.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the package to remove
-    ///
-    /// # Returns
-    ///
-    /// Success if the package was removed successfully
+    /// Delete a package's definition file. Irreversible, so confirm with the user
+    /// before calling it.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageRepoError`] if:
-    /// - The package does not exist
-    /// - Permission is denied to delete the file
-    /// - File system operations fail
+    /// [`PackageRepoError`] if the package does not exist, permission is denied,
+    /// or the deletion otherwise fails.
     fn remove_package(&self, name: &str) -> Result<(), PackageRepoError>;
 
-    /// Find packages that depend on the specified target package
-    ///
-    /// Searches through all packages in the repository to identify which ones
-    /// list the target package as a dependency in any of their environments.
-    /// This is useful for dependency analysis before removing packages.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_package` - Name of the package to find dependents for
-    ///
-    /// # Returns
-    ///
-    /// A vector of packages that depend on the target package
+    /// Every package listing `target_package` as a dependency in any of its
+    /// environments, so a caller can say what a removal would break.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageRepoError`] if:
-    /// - The package listing operation fails
-    /// - File system access fails
+    /// [`PackageRepoError`] if the package listing fails.
     fn find_dependent_packages(
         &self,
         target_package: &str,
@@ -257,20 +160,16 @@ pub enum PackageRepoError {
 
     /// Refused to write a package file because of what is at its path.
     ///
-    /// Carries its own wording rather than rendering the
-    /// [`FileSystemError`] that produced it, and that is the entire reason it
-    /// exists. Both refusal variants say **"target"** in their `Display` --
-    /// `SymlinkedTarget` renders "target is a symlink", `IrregularTarget`
-    /// renders "target resolves to a …" -- because both were written for a
-    /// dotfile *target*, the path selfie deploys **out** to. A package file is
-    /// the opposite direction: selfie is writing **into** its own repository,
-    /// and telling a user their "target" is a symlink when they ran
-    /// `selfie spec update` names a thing that is not in the sentence they typed.
-    ///
-    /// So this must never say "target", and the test
-    /// `a_refused_package_path_does_not_call_it_a_target` holds that.
-    /// Everything that is not a refusal keeps the plain
+    /// Carries its own wording, which **must never say "target"**. Anything that
+    /// is not a refusal keeps the plain
     /// [`FileSystemError`](Self::FileSystemError) passthrough.
+    // Both `FileSystemError` refusal variants say "target" in their `Display` —
+    // "target is a symlink", "target resolves to a …" — because both were written
+    // for a dotfile target, the path selfie deploys out to. A package file is the
+    // opposite direction: selfie writing into its own repository. Telling a user
+    // their "target" is a symlink when they ran `selfie spec update` names a
+    // thing that is not in the sentence they typed.
+    // `a_refused_package_path_does_not_call_it_a_target` holds this.
     #[error(
         "refusing to write {path}: {reason}. \
          Remove what is at that path, or choose another name."
@@ -430,15 +329,9 @@ impl ListPackagesOutput {
         self.0.iter().filter_map(|maybe_p| maybe_p.as_ref().ok())
     }
 
-    /// Find a specific package by name
+    /// Find a package by name among the ones that parsed.
     ///
-    /// Searches through the valid packages to find one with the specified name.
-    /// Returns `None` if no package with that name was found or if the package
-    /// failed to parse.
-    ///
-    /// # Arguments
-    ///
-    /// * `package_name` - Name of the package to find
+    /// `None` covers both "no such package" and "it failed to parse".
     #[must_use]
     pub fn get(&self, package_name: &str) -> Option<&Package> {
         self.0.iter().find_map(|maybe_p| match maybe_p {

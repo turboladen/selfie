@@ -43,17 +43,11 @@ impl ValidationResult {
 }
 
 impl SelfieConfig {
-    /// Perform comprehensive validation of the application configuration
+    /// Validate every configuration field: environment name, package directory,
+    /// the optional directories, and the command timeout.
     ///
-    /// Validates all configuration fields including environment name,
-    /// package directory path, optional directories, and command timeout
-    /// to ensure they are valid and usable.
-    ///
-    /// # Returns
-    ///
-    /// A [`ValidationResult`] containing any issues found during validation.
-    /// The result includes both errors (which prevent the configuration from
-    /// being used) and warnings (which indicate potential problems).
+    /// The [`ValidationResult`] separates errors, which stop the configuration
+    /// being used, from warnings, which flag a potential problem.
     #[must_use]
     pub fn validate(&self) -> ValidationResult {
         let mut issues = Vec::new();

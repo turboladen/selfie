@@ -16,41 +16,39 @@
 //! JSON alike.
 
 /// How much of the secret a rendering has to reproduce to count as a leak.
-///
-/// A window rather than the whole value, because a *truncating* leak is still a
-/// leak: a warning printing the first 200 bytes of a 4 KiB credential has to
-/// fail. Twelve rather than eight because a short window collides with ordinary
-/// fixture data — `test-env` matches `package_name: "test-env-pkg"`. Widening
-/// raises that bar without removing it, which is why [`assert_secret_free`]
-/// states what a leak-test secret has to look like.
-///
-/// **It measures two different windows, and a description naming only one is
-/// describing half the scan.** The byte needle takes twelve *bytes* from
-/// [`anchor`], before normalization, keeping interior whitespace — those render
-/// as `32` or `10` and must stay contiguous with their neighbors. The text
-/// needle takes twelve *characters* after [`squeeze`]. The two coincide only for
-/// whitespace-free ASCII carrying no `\n`, `\r` or `\t` pair — necessary and not
-/// sufficient on whitespace alone, because the escape pairs go too:
-/// `ab\ncdefghijkl` is fourteen pure-ASCII bytes with no whitespace and its
-/// windows still cover different spans.
+// A window rather than the whole value, because a truncating leak is still a
+// leak: a warning printing the first 200 bytes of a 4 KiB credential has to
+// fail. Twelve rather than eight because a short window collides with ordinary
+// fixture data — `test-env` matches `package_name: "test-env-pkg"`. Widening
+// raises that bar without removing it, which is why `assert_secret_free` states
+// what a leak-test secret has to look like.
+//
+// It measures two different windows, and a description naming only one is
+// describing half the scan. The byte needle takes twelve bytes from `anchor`,
+// before normalization, keeping interior whitespace — those render as `32` or
+// `10` and must stay contiguous with their neighbors. The text needle takes
+// twelve characters after `squeeze`. The two coincide only for whitespace-free
+// ASCII carrying no `\n`, `\r` or `\t` pair; whitespace alone is necessary and
+// not sufficient, because the escape pairs go too. `ab\ncdefghijkl` is fourteen
+// pure-ASCII bytes with no whitespace and its windows still cover different
+// spans.
 const WINDOW: usize = 12;
 
 /// How much context to show around a match, in each direction.
 const EXCERPT_CONTEXT: usize = 60;
 
 /// Collapse renderings that differ only in layout onto one form.
-///
-/// `{:#?}` puts each byte on its own line, and a pretty rendering formatted
-/// *into* a string field arrives with those newlines escaped. Dropping both, and
-/// all ASCII whitespace, lets one needle cover every layout.
-///
-/// **Idempotent, and it has to be.** Applied to needle and haystack alike, it
-/// only puts the two in the same space if both reach the same *depth*. One pass
-/// does not: deleting a space can bring a `\` against an `n` and *create* an
-/// escape pair the next pass deletes. Mismatched depths failed both ways — a
-/// needle degenerating to empty, where `find("")` matches every haystack, and an
-/// over-normalized needle missing a whole credential sitting verbatim in an
-/// event. Iterating to a fixpoint makes the depth equal whatever a caller does.
+// `{:#?}` puts each byte on its own line, and a pretty rendering formatted into
+// a string field arrives with those newlines escaped. Dropping both, and all
+// ASCII whitespace, lets one needle cover every layout.
+//
+// Idempotent, and it has to be. Applied to needle and haystack alike, it only
+// puts the two in the same space if both reach the same depth, and one pass does
+// not: deleting a space can bring a `\` against an `n` and create an escape pair
+// the next pass deletes. Mismatched depths failed both ways — a needle
+// degenerating to empty, where `find("")` matches every haystack, and an
+// over-normalized needle missing a whole credential sitting verbatim in an
+// event. Iterating to a fixpoint makes the depth equal whatever a caller does.
 fn squeeze(text: &str) -> String {
     let mut current = squeeze_once(text);
     loop {
@@ -63,11 +61,10 @@ fn squeeze(text: &str) -> String {
 }
 
 /// One normalization pass.
-///
-/// Every step is a **deletion**, so a pass is either the identity or strictly
-/// shorter, and [`squeeze`]'s loop terminates. Non-lengthening alone would not
-/// be enough — a length-preserving rewrite like `.replace("xy", "yx")` never
-/// lengthens and never converges. Keep this function deletions-only.
+// Every step is a deletion, so a pass is either the identity or strictly
+// shorter, and `squeeze`'s loop terminates. Non-lengthening alone would not be
+// enough: a length-preserving rewrite like `.replace("xy", "yx")` never lengthens
+// and never converges. Keep this function deletions-only.
 fn squeeze_once(text: &str) -> String {
     text.replace("\\n", "")
         .replace("\\r", "")
@@ -78,16 +75,15 @@ fn squeeze_once(text: &str) -> String {
 }
 
 /// The secret from its first non-whitespace byte.
-///
-/// Leading whitespace is not distinctive enough to spend a window on, and does
-/// not survive [`squeeze`] anyway. The invariant is the general one: **the guard
-/// has to measure the same string the search uses.** Windowing before squeezing,
-/// or checking one normalization and searching another, both yield an empty
-/// needle — and `find("")` matches every haystack at offset 0.
-///
-/// Only *leading* whitespace is skipped. Interior whitespace renders as `32` or
-/// `10` in a byte array, so dropping it would leave the byte needle no longer a
-/// contiguous substring of the leaked rendering.
+// Leading whitespace is not distinctive enough to spend a window on, and does
+// not survive `squeeze` anyway. The invariant is the general one: the guard has
+// to measure the same string the search uses. Windowing before squeezing, or
+// checking one normalization and searching another, both yield an empty needle,
+// and `find("")` matches every haystack at offset 0.
+//
+// Only leading whitespace is skipped. Interior whitespace renders as `32` or
+// `10` in a byte array, so dropping it would leave the byte needle no longer a
+// contiguous substring of the leaked rendering.
 fn anchor(secret: &[u8]) -> &[u8] {
     let start = secret
         .iter()
@@ -97,11 +93,10 @@ fn anchor(secret: &[u8]) -> &[u8] {
 }
 
 /// Every rendering of `secret` this module can recognize, each labeled for the
-/// failure message.
-///
-/// Needles come back **already normalized**, in exactly the form
-/// [`assert_secret_free`] searches with. Normalizing again at the call site is
-/// what let the guard below measure one string while the search used another.
+/// failure message, already normalized into the form `assert_secret_free`
+/// searches with.
+// Normalizing again at the call site is what let the guard below measure one
+// string while the search used another.
 fn needles(secret: &[u8]) -> Vec<(&'static str, String)> {
     let anchored = anchor(secret);
     assert!(
@@ -151,11 +146,10 @@ fn needles(secret: &[u8]) -> Vec<(&'static str, String)> {
 }
 
 /// A bounded window of `text` around a match at `at`.
-///
-/// The haystack can be a whole event stream or tracing buffer, and dumping it on
-/// every failure buries the finding. The excerpt necessarily reproduces the
-/// matched material, which is one more reason a leak test's secret has to be a
-/// fixture value and never a real credential.
+// The haystack can be a whole event stream or tracing buffer, and dumping it on
+// every failure buries the finding. The excerpt necessarily reproduces the
+// matched material, which is one more reason a leak test's secret has to be a
+// fixture value and never a real credential.
 fn excerpt(text: &str, at: usize, len: usize) -> String {
     let mut start = at.saturating_sub(EXCERPT_CONTEXT);
     while !text.is_char_boundary(start) {
@@ -191,40 +185,46 @@ fn excerpt(text: &str, at: usize, len: usize) -> String {
 ///
 /// # What this cannot see
 ///
-/// So that it is not over-trusted — says to assume
-/// there is a fourth leak path, and this closes one rendering, not the class.
+/// A passing scan is a floor, not a proof. Assume there is another egress this
+/// does not reach: it closes one rendering, not the class.
 ///
-/// - **`String::from_utf8_lossy` of non-UTF-8 content — treat it as uncovered.**
-///   Replacement characters are neither the bytes nor the text, so the byte
-///   needle can never match a lossy rendering; only the text needle can, and only
-///   while the readable prefix still holds [`WINDOW`] characters after
-///   [`squeeze`]. Pinned both ways by
-///   `catches_a_text_leak_of_an_ascii_prefixed_binary_secret` and
-///   `a_lossy_rendering_escapes_a_whitespace_heavy_readable_prefix`.
-/// - **Normalization is not context-free.** [`squeeze`] deletes `\n`, `\r` and
-///   `\t` wherever they occur, so a backslash ending the text *around* a leak can
-///   splice with an `n` opening the leak: the pair goes from the haystack but not
-///   the needle, and the match is lost. Rare, and why this scan is a floor rather
-///   than a proof.
-/// - **Normalization bridges.** Dropping whitespace fuses what it separated, so a
-///   needle can span two words never adjacent: `deploytokena1b2` matches
-///   `Info { message: "deploy token a1b2 requested" }`. Only whitespace goes —
-///   punctuation between `Debug` fields still separates them. Runs opposite to
-///   the bullet above: that one loses a match, this one invents one.
+/// - **`String::from_utf8_lossy` of non-UTF-8 content.** Treat it as uncovered.
 /// - **Any rendering other than text and `Debug`-of-bytes**: base64, hex,
-///   percent-encoding, JSON `\u` escapes, compression. Nothing here encodes
-///   dotfile content today; add the form if something starts to.
-/// - **`Debug` escapes other than `\n`, `\r`, `\t`.** A secret containing `"` or
-///   `\` renders as `\"` or `\\`, which [`squeeze`] leaves alone, so the text
-///   needle breaks across the escape. The byte needle is unaffected.
-/// - **A partial leak not starting at the secret's first non-whitespace byte** —
-///   the tail or middle of a credential passes, as does anything shorter than
+///   percent-encoding, JSON `\u` escapes, compression.
+/// - **`Debug` escapes other than `\n`, `\r`, `\t`.** A secret containing `"`
+///   or `\` breaks the text needle across the escape; the byte needle still
+///   holds.
+/// - **A partial leak not starting at the secret's first non-whitespace byte.**
+///   The tail or middle of a credential passes, as does anything shorter than
 ///   [`WINDOW`].
-/// - **Whatever the scanned rendering itself hides.** `ResolvedContent`'s
-///   redacting `Debug` passes this while the same value could still leave through
-///   `Display`, serde, or a direct write. Scan what the adapter actually emits.
+/// - **Whatever the scanned rendering itself hides.** A redacting `Debug` passes
+///   this while the same value leaves through `Display`, serde, or a direct
+///   write. Scan what the adapter actually emits.
 /// - **Egress nothing scans at all**: `println!`, `eprintln!`, `dbg!`, files
 ///   other than the target, the network.
+///
+/// - **Normalization itself, in both directions.** Collapsing layout can splice
+///   a `\` in the surrounding text onto an `n` opening the leak and lose the
+///   match, and dropping whitespace can fuse words that were never adjacent and
+///   invent one.
+// Why each gap is where it is:
+//
+// - Lossy rendering: replacement characters are neither the bytes nor the text,
+//   so the byte needle can never match one. Only the text needle can, and only
+//   while the readable prefix still holds WINDOW characters after `squeeze`.
+//   Pinned both ways by `catches_a_text_leak_of_an_ascii_prefixed_binary_secret`
+//   and `a_lossy_rendering_escapes_a_whitespace_heavy_readable_prefix`.
+// - Normalization is not context-free, and loses matches: `squeeze` deletes
+//   `\n`, `\r` and `\t` wherever they occur, so a backslash ending the text
+//   around a leak can splice with an `n` opening the leak. The pair goes from
+//   the haystack but not the needle, and the match is lost.
+// - Normalization also bridges, and invents matches: dropping whitespace fuses
+//   what it separated, so a needle can span two words never adjacent —
+//   `deploytokena1b2` matches `Info { message: "deploy token a1b2 requested" }`.
+//   Only whitespace goes; punctuation between `Debug` fields still separates
+//   them. This runs opposite to the bullet above, which loses a match.
+// - New encodings: nothing here encodes dotfile content today. Add the form if
+//   something starts to.
 #[track_caller]
 pub fn assert_secret_free(haystack: &str, secret: impl AsRef<[u8]>, context: &str) {
     let squeezed = squeeze(haystack);
@@ -268,11 +268,11 @@ mod tests {
 
     const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
-    /// Eight newlines, then content. Windowing before squeezing left this with an
-    /// empty text needle, and `contains("")` fails every assertion.
+    // Eight newlines, then content. Windowing before squeezing left this with an
+    // empty text needle, and `contains("")` fails every assertion.
     const LEADING_WHITESPACE: &str = "\n\n\n\n\n\n\n\nhunter2-DO-NOT-LEAK";
 
-    /// A `Started` event carries no content at all, and must never be reported.
+    // A `Started` event carries no content at all, and must never be reported.
     const CONTENT_FREE_EVENT: &str = "Started { operation_info: OperationInfo { \
          operation_type: DotfileApply, package_name: \"\", environment: \"test\" } }";
 

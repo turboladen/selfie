@@ -1,44 +1,9 @@
-//! Event processing utilities for CLI commands
+//! Turning a library [`EventStream`] into terminal output, the same way for every
+//! CLI command.
 //!
-//! This module provides a reusable event processor that can handle package events
-//! from the selfie library and present them consistently across different CLI commands.
-//!
-//! # Usage
-//!
-//! ## Event Processing with Custom Handlers
-//!
-//! All commands use `process_events` which allows custom handling
-//! of specific events while providing default behavior for standard events:
-//!
-//! ```rust,ignore
-//! async fn handle_command_with_custom_progress(
-//!     display: DisplayManager,
-//!     event_stream: EventStream
-//! ) -> i32 {
-//!     let processor = EventProcessor::new(display);
-//!
-//!     processor.process_events(event_stream, |event| {
-//!         match event {
-//!             PackageEvent::Progress { percent_complete, step, total_steps, message, .. } => {
-//!                 // Custom progress handling
-//!                 println!("[{:.0}%] Step {}/{}: {}",
-//!                     percent_complete * 100.0, step, total_steps, message);
-//!                 true // Handled - continue processing
-//!             }
-//!             PackageEvent::Warning { message, .. } => {
-//!                 // Custom warning handling
-//!                 eprintln!("Warning: {}", message);
-//!                 true // Handled - continue processing
-//!             }
-//!             _ => false, // Use default handling for other events
-//!         }
-//!     }).await
-//! }
-//! ```
-//!
-//! The custom handler should return:
-//! - `true` to continue processing after handling the event (skip default handling)
-//! - `false` to use the default handling for the event
+//! Every command goes through [`EventProcessor::process_events`], passing a
+//! handler that returns `true` for an event it rendered itself and `false` to
+//! take the default rendering.
 
 use futures::StreamExt;
 use selfie::package::{

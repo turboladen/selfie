@@ -938,10 +938,10 @@ mod tests {
         );
     }
 
-    /// Parses a fixture rather than building one: a *malformed* entry cannot be
-    /// constructed programmatically — `DotfileEntry::new` only produces valid
-    /// ones — so testing how a refused entry is reported means parsing YAML, as
-    /// the repository does.
+    // Parses a fixture rather than building one: a *malformed* entry cannot be
+    // constructed programmatically — `DotfileEntry::new` only produces valid
+    // ones — so testing how a refused entry is reported means parsing YAML, as
+    // the repository does.
     fn entry(yaml: &str) -> selfie::package::DotfileEntry {
         serde_saphyr::from_str(yaml).expect("fixture must parse")
     }

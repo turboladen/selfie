@@ -44,19 +44,20 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 ///
 /// # Lexical, and a symlink defeats it
 ///
-/// A link inside `base_dir` passes while pointing outside. Watch the
-/// linked-*directory* form: with `packages/myapp -> /elsewhere`, `symlink_metadata`
-/// on the source path reports a regular file, so checking only the final component
-/// would not catch it. Both forms are pinned by
-/// `a_symlinked_source_escapes_the_containment_guard`.
-///
-/// Accepted — escaping needs a hostile package repository, which can already run
-/// arbitrary commands via a dotfile's `command:`. Being lexical is also what lets
-/// this work on paths that do not exist yet.
-///
-/// Do not call `std::fs` from here: that takes the library around its own port, and
-/// a `symlink_metadata` walk adds a check-then-read race. A non-racy option is
-/// real fix (`openat2`'s `RESOLVE_BENEATH`, kernel-enforced on Linux).
+/// A link inside `base_dir` passes while pointing outside, including the
+/// linked-*directory* form: with `packages/myapp -> /elsewhere`,
+/// `symlink_metadata` on the source path reports a regular file. Being lexical
+/// is also what lets this work on paths that do not exist yet.
+// Both forms are pinned by `a_symlinked_source_escapes_the_containment_guard`,
+// which asserts the escape succeeds — strengthening the guard means deleting
+// that test and this paragraph together.
+//
+// The gap is accepted: escaping needs a hostile package repository, which can
+// already run arbitrary commands through a dotfile's `command:`.
+//
+// Do not call `std::fs` from here. That takes the library around its own port,
+// and a `symlink_metadata` walk adds a check-then-read race. The non-racy fix is
+// `openat2`'s `RESOLVE_BENEATH`, kernel-enforced, and Linux-only.
 #[must_use]
 pub(crate) fn is_within(path: &Path, base_dir: &Path) -> bool {
     match (std::path::absolute(path), std::path::absolute(base_dir)) {

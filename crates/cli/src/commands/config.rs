@@ -93,7 +93,7 @@ mod tests {
         CliConfig::new(test_config(), CliSection::default())
     }
 
-    /// Creates a mock filesystem that returns a valid config file.
+    // Creates a mock filesystem that returns a valid config file.
     fn mock_fs_with_valid_config() -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         let config_dir = Path::new("/home/test/.config/selfie");

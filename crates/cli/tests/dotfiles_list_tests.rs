@@ -11,7 +11,7 @@ pub mod common;
 
 use common::{SELFIE_ENV, get_command_with_test_config, setup_default_test_config};
 
-/// Write a package whose single dotfile is refused, and one that is not.
+// Write a package whose single dotfile is refused, and one that is not.
 fn write_packages(base: &tempfile::TempDir) {
     let packages = base.path().join("packages");
     std::fs::create_dir_all(packages.join("creds")).unwrap();

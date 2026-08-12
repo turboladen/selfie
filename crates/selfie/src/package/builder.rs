@@ -14,33 +14,21 @@ pub struct PackageBuilder {
 }
 
 impl PackageBuilder {
-    /// Create a new package builder with the specified name
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The package name (required)
+    /// Set the package name. Required.
     #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
     }
 
-    /// Set the package homepage URL
-    ///
-    /// # Arguments
-    ///
-    /// * `homepage` - The homepage URL for the package
+    /// Set the package homepage URL.
     #[must_use]
     pub fn homepage(mut self, homepage: &str) -> Self {
         self.homepage = Some(homepage.to_string());
         self
     }
 
-    /// Set the package description
-    ///
-    /// # Arguments
-    ///
-    /// * `description` - Optional description of the package
+    /// Set the package description.
     #[must_use]
     pub fn description(mut self, description: &str) -> Self {
         self.description = Some(description.to_string());
@@ -111,11 +99,7 @@ pub struct EnvironmentConfigBuilder {
     dotfiles: Vec<DotfileEntry>,
 }
 impl EnvironmentConfigBuilder {
-    /// Create a new environment configuration builder
-    ///
-    /// # Arguments
-    ///
-    /// * `install_command` - The command to install the package
+    /// Set the command that installs the package in this environment.
     #[must_use]
     pub fn install<T: AsRef<str>>(mut self, install: T) -> Self {
         self.install = install.as_ref().to_string();

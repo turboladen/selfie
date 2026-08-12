@@ -29,7 +29,7 @@ use selfie::{
 const CHECK_CMD: &str = "check-pkg";
 const INSTALL_CMD: &str = "install-pkg";
 
-/// A one-package service whose commands answer from `runner`.
+// A one-package service whose commands answer from `runner`.
 fn service(temp: &TempDir, runner: FakeCommandRunner) -> impl PackageService {
     let package_dir = temp.path().to_path_buf();
     std::fs::write(
@@ -68,13 +68,13 @@ fn completed(events: &[PackageEvent]) -> &OperationResult {
         .expect("the operation should complete")
 }
 
-/// The verdict a check reported, as carried by its own event.
-///
-/// `create_operation_result` turns `CheckResult::Error` into an
-/// `OperationResult::Failure`, so the `Completed` event cannot distinguish "the
-/// check said not-installed" from "selfie could not read what the check said" —
-/// both are failures there. This event is where the distinction survives, so it
-/// is what the tests below assert on.
+// The verdict a check reported, as carried by its own event.
+//
+// `create_operation_result` turns `CheckResult::Error` into an
+// `OperationResult::Failure`, so the `Completed` event cannot distinguish "the
+// check said not-installed" from "selfie could not read what the check said" —
+// both are failures there. This event is where the distinction survives, so it
+// is what the tests below assert on.
 fn check_verdict(events: &[PackageEvent]) -> &CheckResult {
     events
         .iter()

@@ -1,28 +1,9 @@
-//! Package operation event system
+//! How a package operation reports what it is doing.
 //!
-//! This module provides the event-driven interface for package operations in the selfie library.
-//! It implements a streaming event system that allows real-time monitoring of package operations
-//! including progress updates, log messages, and results.
-//!
-//! # Architecture
-//!
-//! The event system follows a publisher-subscriber pattern where:
-//! - Operations publish events through [`EventSender`]
-//! - Consumers receive events through [`EventStream`]
-//! - Events carry rich context including operation metadata and results
-//!
-//! # Event Types
-//!
-//! - [`PackageEvent::Started`] - Operation has begun
-//! - [`PackageEvent::Progress`] - Progress update with step information
-//! - [`PackageEvent::Completed`] - Operation finished with result
-//! - [`PackageEvent::Trace`], [`PackageEvent::Debug`], [`PackageEvent::Warning`] - Log messages
-//!
-//! # Usage
-//!
-//! Events are emitted by package service operations and consumed by UI layers
-//! to provide real-time feedback to users. The stream-based approach allows
-//! for non-blocking operation monitoring and flexible UI implementations.
+//! An operation emits [`PackageEvent`]s as it runs; a UI layer consumes the
+//! stream and decides how to show them. That is what lets the CLI print progress
+//! to a terminal while the MCP server collects the same events into JSON, with
+//! neither choice reaching into the library.
 
 pub mod error;
 pub mod metadata;
@@ -107,15 +88,8 @@ pub(crate) struct EventSender {
 }
 
 impl EventSender {
-    /// Create a new event sender with operation context
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - Channel sender for transmitting events
-    /// * `operation_type` - Type of operation being performed
-    /// * `package_name` - Name of the package being operated on
-    /// * `environment` - Environment context for the operation
-    /// * `context` - Additional operation context
+    /// Create an event sender that stamps every event with this operation's
+    /// context.
     pub(crate) fn new_with_context(
         tx: mpsc::Sender<PackageEvent>,
         operation_type: OperationType,
@@ -135,15 +109,10 @@ impl EventSender {
         Self { operation_info, tx }
     }
 
-    /// Send an event through the channel
+    /// Send an event to every consumer on the stream.
     ///
-    /// Transmits the event to all consumers listening on the event stream.
-    /// Channel send errors are silently ignored as they typically indicate
-    /// that the consumer has disconnected.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The package event to send
+    /// A send error is ignored: it means the consumer has disconnected, which is
+    /// not a failure of the operation being reported.
     pub(crate) async fn send(&self, event: PackageEvent) {
         let _ = self.tx.send(event).await;
     }
@@ -210,15 +179,8 @@ impl EventSender {
         .await;
     }
 
-    /// Send a log message at the specified level
-    ///
-    /// Emits a log event with the appropriate tracing level and event type.
-    /// This method handles the conversion from log levels to specific event variants.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - The log level for the message
-    /// * `message` - The log message content
+    /// Emit `message` as both a tracing record and the event variant matching
+    /// `level`.
     pub(crate) async fn send_log(&self, level: LogLevel, message: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
         let message = message.to_string();
@@ -629,28 +591,7 @@ pub struct OperationInfo {
     pub timestamp: Instant,
 }
 
-/// Additional context that operations might need
-///
-/// This provides a way to pass operation-specific data that doesn't belong
-/// in the core `OperationInfo` but is useful for certain operations.
-///
-/// # Examples
-///
-/// For package validation with a specific file path:
-/// ```rust,ignore
-/// let context = OperationContext {
-///     package_path: Some(PathBuf::from("/path/to/package.yml")),
-///     target_environment: None,
-/// };
-/// ```
-///
-/// For cross-environment operations:
-/// ```rust,ignore
-/// let context = OperationContext {
-///     package_path: None,
-///     target_environment: Some("production".to_string()),
-/// };
-/// ```
+/// Operation-specific data that does not belong on [`OperationInfo`].
 #[derive(Debug, Clone, Default)]
 pub struct OperationContext {
     /// Package file path (used by validate, create operations)

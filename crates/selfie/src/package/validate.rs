@@ -171,18 +171,11 @@ impl ValidationResult {
 }
 
 impl Package {
-    /// Perform all basic domain validations
+    /// Check the package against every known rule: required fields, URL formats,
+    /// environment configurations, command syntax.
     ///
-    /// Validates the package definition against all known validation rules,
-    /// including required fields, URL formats, environment configurations,
-    /// and command syntax. Returns a comprehensive validation result that
-    /// can be used to provide user feedback.
-    ///
-    /// # Arguments
-    ///
-    /// * `current_env` - The current environment name to use for validation context
-    ///
-    /// All validation issues are collected and returned in the `ValidationResult` structure.
+    /// `current_env` is the environment the checks are made relative to. Every
+    /// issue found is collected rather than stopping at the first.
     #[must_use]
     pub fn validate(&self, current_env: &str) -> ValidationResult {
         let mut issues = Vec::new();
@@ -322,15 +315,7 @@ impl Package {
     /// - Contains invalid characters
     /// - Starts or ends with special characters
     fn validate_name(&self) -> Result<(), ValidationIssue> {
-        /// Check if a string is a valid package name
-        ///
-        /// # Arguments
-        ///
-        /// * `name` - The package name to validate
-        ///
-        /// # Returns
-        ///
-        /// `true` if the name is valid, `false` otherwise
+        /// Whether `name` is usable as a package name.
         fn is_valid_package_name(name: &str) -> bool {
             // Package names should only contain alphanumeric chars, hyphens, and underscores
             !name.is_empty()
@@ -384,16 +369,10 @@ impl Package {
         }
     }
 
-    /// Validate environment configurations and content
+    /// Check that environments are properly configured: that `current_env` is
+    /// defined, and that install commands are present.
     ///
-    /// Checks that environments are properly configured, including whether
-    /// the current environment is defined and that install commands are present.
-    ///
-    /// # Arguments
-    ///
-    /// * `current_env` - The current environment name to validate against
-    ///
-    /// All validation issues are collected and returned as a vector of `ValidationIssue`.
+    /// Every issue found is collected rather than stopping at the first.
     pub(crate) fn validate_environments_contents(&self, current_env: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -637,33 +616,30 @@ impl Package {
         issues
     }
 
-    /// Note how many commands `selfie apply` will run for this package's dotfiles.
+    /// Note how many commands `selfie apply` will run for this package's
+    /// dotfiles.
     ///
-    /// `selfie apply` executes commands taken from the package file, rather than
-    /// only copying data out of it. That makes a package directory code, not
-    /// data, for anyone deciding whether to trust one — and it matters more as
-    /// package directories are shared or overlaid. It has to be visible rather
-    /// than implicit.
-    ///
-    /// Informational, not a warning: a package using `vars` correctly would warn
-    /// on every validation, which is how warnings come to be ignored.
-    ///
-    /// Counts the worst case across environments rather than summing
-    /// [`Package::dotfiles_with_scope`], which lists a shared entry *and* each
-    /// environment that overrides it. Summing that would report three commands
-    /// for a single provider entry overridden on two machines, which overstates
-    /// what any one `selfie apply` runs.
-    ///
-    /// Counts what each entry **declares**, read from its fields. **Not
-    /// [`DotfileEntry::command_count`]**, which answers apply's question and
-    /// returns zero for an entry apply would refuse: an undeployable entry still
-    /// *contains* a command to review, and correcting the defect — which
-    /// validation reports in the same breath — is enough to make it run. A notice
-    /// that appears only once a package is already deployable is no use to someone
-    /// deciding whether to trust it.
-    ///
-    /// The two counts agree for every valid entry, and
-    /// `declared_and_deployable_command_counts_agree` holds them to it.
+    /// Informational rather than a warning, and it counts the worst case across
+    /// environments rather than the sum.
+    // `selfie apply` executes commands taken from the package file rather than
+    // only copying data out of it, which makes a package directory code and not
+    // data for anyone deciding whether to trust one. That has to be visible
+    // rather than implicit, and it matters more as package directories are
+    // shared or overlaid.
+    //
+    // Informational, because a package using `vars` correctly would warn on
+    // every validation, which is how warnings come to be ignored.
+    //
+    // Worst case, not a sum over `Package::dotfiles_with_scope`, which lists a
+    // shared entry and each environment that overrides it. Summing would report
+    // three commands for one provider entry overridden on two machines.
+    //
+    // Counts what each entry declares, read from its fields — not
+    // `DotfileEntry::command_count`, which answers apply's question and returns
+    // zero for an entry apply would refuse. An undeployable entry still contains
+    // a command to review, and fixing the defect validation reports in the same
+    // breath is enough to make it run. The two counts agree for every valid
+    // entry, and `declared_and_deployable_command_counts_agree` holds them to it.
     fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
         // What the entry declares: a whole-file `command`, plus one per binding.
         // A malformed entry carrying both is counted honestly as both.
@@ -706,23 +682,20 @@ impl Package {
     /// can fetch each file through the repository and hand the contents to
     /// [`validate_template_vars`].
     ///
-    /// Selects on what the entry *looks like* — a `source` to read, plus at least
-    /// one name to check — reading those fields directly. **Do not route this
-    /// through [`DotfileEntry::content_source`].** That answers apply's question,
-    /// may this entry be deployed, and a defect which makes an entry undeployable
-    /// would then suppress this check for every other var in the same entry,
-    /// reporting one problem in a file that has two. Validation has to report
-    /// everything wrong at once: a validator that reveals defects a round at a
-    /// time invites the half-finished edit it exists to catch, in a tool that
-    /// writes to real environment configs.
-    /// [`validate_dotfile_entry`](Self::validate_dotfile_entry) reads the same
-    /// fields directly, for the same reason.
-    ///
-    /// So unknown keys and a redundant `command` are not disqualifying — neither
-    /// stops the cross-check being meaningful, and each is reported on its own
-    /// account. `command` with `vars` and no `source` is excluded, having no
-    /// template to read, as is a `source` whose only bindings arrived under a
-    /// colliding anchor, which leaves `vars` empty.
+    /// Selects on what the entry looks like: a `source` to read plus at least one
+    /// name to check. Unknown keys and a redundant `command` are not
+    /// disqualifying. An entry with `command` and `vars` but no `source` is
+    /// excluded, having no template to read, as is one whose bindings all arrived
+    /// under a colliding anchor and left `vars` empty.
+    // Reads those fields directly. Do not route this through
+    // `DotfileEntry::content_source`: that answers apply's question, may this
+    // entry be deployed, so one defect making an entry undeployable would
+    // suppress this check for every other var in the same entry and report one
+    // problem in a file that has two. Validation has to report everything wrong
+    // at once — a validator revealing defects a round at a time invites the
+    // half-finished edit it exists to catch, in a tool that writes to real
+    // environment configs. `validate_dotfile_entry` reads the same fields
+    // directly, for the same reason.
     #[must_use]
     pub fn template_dotfiles(&self) -> Vec<TemplateReference<'_>> {
         // A `source` to read plus at least one name to check.
@@ -916,10 +889,10 @@ mod tests {
         Package::validate_dotfile_entry(&entry_from_yaml(yaml), "dotfiles[0]")
     }
 
-    /// Parse a whole package file the way the repository does.
-    ///
-    /// Deliberately not `PackageBuilder`: a built package has no unrecognized
-    /// keys to find, so a builder-based fixture would pass whatever the check did.
+    // Parse a whole package file the way the repository does.
+    //
+    // Deliberately not `PackageBuilder`: a built package has no unrecognized
+    // keys to find, so a builder-based fixture would pass whatever the check did.
     fn package_from_yaml(yaml: &str) -> Package {
         serde_saphyr::from_str(yaml).expect("package should parse")
     }
@@ -1833,11 +1806,11 @@ dotfiles:
         assert!(result.issues().has_errors());
     }
 
-    /// A package built from raw YAML, so `raw_yaml` is populated.
-    ///
-    /// `PackageBuilder` cannot be used for these: it never sets `raw_yaml`, so
-    /// `validate_unknown_fields` returns early and the test passes without
-    /// looking at anything.
+    // A package built from raw YAML, so `raw_yaml` is populated.
+    //
+    // `PackageBuilder` cannot be used for these: it never sets `raw_yaml`, so
+    // `validate_unknown_fields` returns early and the test passes without
+    // looking at anything.
     fn package_with_raw_yaml(yaml: &str) -> Package {
         let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
         package.set_source(

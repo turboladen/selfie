@@ -2297,7 +2297,7 @@ mod tests {
             .build()
     }
 
-    /// A state file that exists and reads back as `content`.
+    // A state file that exists and reads back as `content`.
     fn filesystem_holding(content: &str) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), true);

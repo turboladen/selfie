@@ -4,35 +4,13 @@ use crate::constants::{SERVICE_TEST_ENV, TEST_ENV};
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 
-/// Creates a standard test package file with install and check commands.
-/// This is the most commonly used package file in service tests.
-///
-/// # Example
-/// ```rust
-/// let temp_dir = TempDir::new().unwrap();
-/// let package_path = create_test_package_file(&temp_dir, "my-package");
-/// ```
+/// Create a package file with both an install and a check command.
 #[must_use]
 pub fn create_test_package_file(dir: &TempDir, name: &str) -> PathBuf {
     create_package_file_with_check(dir, name, true)
 }
 
-/// Creates a test package file with optional check command.
-/// Gives you control over whether the package has a check command defined.
-///
-/// # Arguments
-/// * `dir` - Temporary directory to create the package file in
-/// * `name` - Name of the package
-/// * `has_check` - Whether to include a check command
-///
-/// # Example
-/// ```rust
-/// // Package with check command
-/// let with_check = create_package_file_with_check(&temp_dir, "pkg1", true);
-///
-/// // Package without check command
-/// let no_check = create_package_file_with_check(&temp_dir, "pkg2", false);
-/// ```
+/// Create a package file, with a check command or without one.
 ///
 /// # Panics
 ///
@@ -63,14 +41,7 @@ environments:
     file_path
 }
 
-/// Creates an invalid package file for error testing.
-/// Contains malformed YAML that should cause parsing errors.
-///
-/// # Example
-/// ```rust
-/// let invalid_path = create_invalid_package_file(&temp_dir, "broken-package");
-/// // This file will cause YAML parsing errors when loaded
-/// ```
+/// Create a package file holding malformed YAML, for exercising parse failures.
 ///
 /// # Panics
 ///
@@ -185,10 +156,7 @@ pub fn create_service_install_test_package_file(dir: &TempDir, name: &str) -> Pa
 ///
 /// Uses `InstallFlow` behavior (check fails before install, succeeds after).
 ///
-/// # Arguments
-/// * `dir` - Temporary directory to create the package file in
-/// * `name` - Name of the package
-/// * `deps` - List of dependency package names
+/// `deps` names the packages this one depends on.
 #[must_use]
 pub fn create_service_test_package_file_with_deps(
     dir: &TempDir,

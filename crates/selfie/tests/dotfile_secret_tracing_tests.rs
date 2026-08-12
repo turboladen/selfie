@@ -41,7 +41,7 @@ impl Privilege for Unprivileged {
 
 const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
-/// A `MakeWriter` that appends every emitted record to a shared buffer.
+// A `MakeWriter` that appends every emitted record to a shared buffer.
 #[derive(Clone, Default)]
 struct CaptureWriter {
     buffer: Arc<Mutex<Vec<u8>>>,

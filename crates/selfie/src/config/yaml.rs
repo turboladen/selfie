@@ -19,11 +19,7 @@ pub struct YamlLoader<'a, F: FileSystem> {
 }
 
 impl<'a, F: FileSystem> YamlLoader<'a, F> {
-    /// Create a new YAML configuration loader
-    ///
-    /// # Arguments
-    ///
-    /// * `fs` - File system abstraction for reading configuration files
+    /// Create a loader that reads configuration through `fs`.
     #[must_use]
     pub fn new(fs: &'a F) -> Self {
         Self { fs }

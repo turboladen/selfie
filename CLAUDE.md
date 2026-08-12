@@ -92,6 +92,8 @@ Detailed instructions live in `.claude/rules/`, scoped by the files they apply t
 they are relevant rather than in every session:
 
 - `architecture.md` — hexagonal design, key abstractions, boundary rules, MCP server, Rust gotchas
+- `comments.md` — a doc comment answers the caller, a body comment the next maintainer
+- `commits.md` — one commit per problem solved; squash on the branch, not with the merge button
 - `domain.md` — what packages, environments and dotfiles are; configuration keys
 - `secrets.md` — handling credential-bearing dotfile content; egress, permissions, path rules
 - `testing.md` — why a green test proves little here, and the mutation practice that does
