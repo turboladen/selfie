@@ -26,6 +26,10 @@ These are cheap, they apply everywhere, and each one is here because skipping it
 - **Your context's copy of `CLAUDE.md` and `.claude/rules/*` is a snapshot from session start**, not
   the tree, and subagents inherit it. Four agents reported a CLAUDE.md claim corrected hours earlier
   by a merged PR. Before calling any doc or rule stale, read it: `git show <ref>:<path>`.
+- **A pipeline reports its _last_ command's status, so `&&` after one proves nothing.**
+  `git switch main | tail -2 && git commit …` runs the commit even when the switch failed, because
+  `tail` succeeded — that is how a beads commit landed on a feature branch here. Never pipe a
+  command whose failure has to stop the chain.
 - A check whose pass condition is **"exited non-zero"** proves almost nothing: nearly every failure
   mode satisfies it, including never reaching the code under test. The sudo-refusal check passed on
   a run that died on a missing config file. Assert on the specific output as well as the status.
