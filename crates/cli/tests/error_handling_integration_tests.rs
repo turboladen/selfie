@@ -3,7 +3,7 @@ pub mod common;
 use std::{fs, io::Write};
 
 use common::{
-    SELFIE_ENV, add_package, get_command, get_command_with_test_config, setup_default_test_config,
+    SELFIE_ENV, add_package, get_command, sandboxed_command, setup_default_test_config,
     setup_test_config,
 };
 use predicates::prelude::*;
@@ -56,7 +56,7 @@ command_timeout: 30
 "#;
 
     let temp_dir = setup_test_config(yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()
@@ -73,7 +73,7 @@ command_timeout: 30
 "#;
 
     let temp_dir = setup_test_config(yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()
@@ -93,7 +93,7 @@ fn test_package_directory_not_found_error() {
     let packages_dir = temp_dir.path().join("packages");
     fs::remove_dir_all(&packages_dir).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     cmd.assert()
@@ -114,7 +114,7 @@ command_timeout: 30
     );
 
     let temp_dir = setup_test_config(&yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     cmd.assert()
@@ -135,7 +135,7 @@ fn test_package_file_invalid_yaml_error() {
     let invalid_package_path = packages_dir.join("invalid-package.yaml");
     fs::write(&invalid_package_path, "name: test\nversion: [unclosed").unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     cmd.assert()
@@ -156,7 +156,7 @@ name: "incomplete-package"
     let invalid_package_path = packages_dir.join("incomplete-package.yaml");
     fs::write(&invalid_package_path, invalid_yaml).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Package parses but has no matching environment — list succeeds but
@@ -173,7 +173,7 @@ name: "incomplete-package"
 fn test_package_not_found_error() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "nonexistent-package"]);
 
     cmd.assert().failure().stderr(predicate::str::contains(
@@ -197,7 +197,7 @@ environments:
     let invalid_package_path = packages_dir.join("invalid-package.yaml");
     fs::write(&invalid_package_path, invalid_yaml).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "validate", "invalid-package"]);
 
     cmd.assert()
@@ -223,7 +223,7 @@ fn test_package_check_command_failure() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "failing-check-package"]);
 
     cmd.assert().failure().stderr(predicate::str::contains(
@@ -245,7 +245,7 @@ fn test_package_check_command_timeout() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "timeout-package"]);
 
     cmd.assert().success(); // Timeout test is unreliable in CI environments
@@ -265,7 +265,7 @@ fn test_package_install_missing_environment_error() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "wrong-env-package"]);
 
     cmd.assert()
@@ -326,7 +326,7 @@ fn test_invalid_flag_combination_error() {
 fn test_environment_override_error() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["-e", "nonexistent-env", "package", "list"]);
 
     // Should succeed but show packages don't have the environment
@@ -337,7 +337,7 @@ fn test_environment_override_error() {
 fn test_invalid_package_directory_override_error() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["-p", "/dev/null/nonexistent", "package", "list"]);
 
     cmd.assert()
@@ -372,7 +372,7 @@ fn test_duplicate_package_names_error() {
     fs::write(packages_dir.join("duplicate-v1.yaml"), yaml1).unwrap();
     fs::write(packages_dir.join("duplicate-v2.yaml"), yaml2).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "duplicate-package"]);
 
     cmd.assert()
@@ -418,7 +418,7 @@ fn test_config_file_read_permission_denied() {
 fn test_empty_package_name_error() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", ""]);
 
     cmd.assert()
@@ -430,7 +430,7 @@ fn test_empty_package_name_error() {
 fn test_package_name_with_special_characters() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "package/with/slashes"]);
 
     cmd.assert()
@@ -443,7 +443,7 @@ fn test_very_long_package_name_error() {
     let temp_dir = setup_default_test_config();
     let long_name = "a".repeat(1000);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", &long_name]);
 
     cmd.assert()
@@ -467,7 +467,7 @@ fn test_large_number_of_invalid_packages() {
         fs::write(&path, invalid_yaml).unwrap();
     }
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should handle all invalid packages gracefully
@@ -492,7 +492,7 @@ fn test_broken_terminal_output_handling() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should succeed even if output handling has issues
@@ -536,7 +536,7 @@ fn test_partial_package_directory_corruption() {
     .unwrap();
     fs::write(packages_dir.join("backup.bak"), "old config").unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should list valid packages and report errors for invalid ones
@@ -579,7 +579,7 @@ environments:
 "#;
     fs::write(packages_dir.join("invalid-data.yaml"), invalid_data).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should show the working package and report all errors

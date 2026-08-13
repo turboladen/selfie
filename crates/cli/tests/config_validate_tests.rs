@@ -1,12 +1,12 @@
 pub mod common;
 
-use common::{get_command_with_test_config, setup_default_test_config, setup_test_config};
+use common::{sandboxed_command, setup_default_test_config, setup_test_config};
 
 #[test]
 fn test_validate_valid_config() {
     // Valid config using default test config (creates real directories)
     let temp_dir = setup_default_test_config();
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()
@@ -23,7 +23,7 @@ package_directory: "/test/packages"
 "#;
 
     let temp_dir = setup_test_config(yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()
@@ -40,7 +40,7 @@ package_directory: "relative/path"
 "#;
 
     let temp_dir = setup_test_config(yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()
@@ -59,7 +59,7 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
     );
 
     let temp_dir = setup_test_config(&yaml);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
     cmd.assert()

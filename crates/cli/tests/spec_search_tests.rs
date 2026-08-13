@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{SELFIE_ENV, add_package, get_command_with_test_config, setup_default_test_config};
+use common::{SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -22,7 +22,7 @@ fn test_spec_search_by_name() {
         .build();
     add_package(&temp_dir, &other);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "ripgrep"]);
 
     cmd.assert()
@@ -49,7 +49,7 @@ fn test_spec_search_by_description() {
         .build();
     add_package(&temp_dir, &other);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "runtime"]);
 
     cmd.assert()
@@ -69,7 +69,7 @@ fn test_spec_search_case_insensitive() {
         .build();
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "RIPGREP"]);
 
     cmd.assert()
@@ -87,7 +87,7 @@ fn test_spec_search_no_matches() {
         .build();
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "nonexistent"]);
 
     cmd.assert()
@@ -99,7 +99,7 @@ fn test_spec_search_no_matches() {
 fn test_spec_search_empty_directory() {
     let temp_dir = setup_default_test_config();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "anything"]);
 
     cmd.assert()
@@ -119,7 +119,7 @@ fn test_spec_search_matches_across_environments() {
         .build();
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "search", "apt-tool"]);
 
     cmd.assert()

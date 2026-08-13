@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{add_package, get_command_with_test_config, setup_default_test_config};
+use common::{add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -15,7 +15,7 @@ fn test_package_list_empty() {
     let packages_dir = temp_dir.path().join("packages");
     fs::create_dir_all(&packages_dir).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should succeed but not list any packages
@@ -36,7 +36,7 @@ fn test_package_list_single_package() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     cmd.assert()
@@ -68,7 +68,7 @@ fn test_package_list_multiple_packages() {
         add_package(&temp_dir, package);
     }
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should list only packages relevant to current environment (package-a and package-b)
@@ -105,7 +105,7 @@ fn test_package_list_with_invalid_yaml() {
 
     fs::write(invalid_path, invalid_yaml).unwrap();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should show the valid package but report error for invalid one
@@ -143,7 +143,7 @@ fn test_package_list_different_environments() {
         add_package(&temp_dir, package);
     }
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should show only packages relevant to current environment
@@ -169,7 +169,7 @@ fn test_package_list_with_no_color_flag() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["--no-color", "package", "list"]);
 
     // Should not contain ANSI color codes
@@ -193,7 +193,7 @@ fn test_package_list_shows_status() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should contain the package name and a status indicator
@@ -215,7 +215,7 @@ fn test_package_list_shows_no_check_status() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should show the package name and "No check" status
@@ -234,7 +234,7 @@ fn test_package_list_non_existent_directory() {
     fs::remove_dir_all(&packages_dir).unwrap();
     // fs::remove_dir_all(&packages_dir).ok();
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     // Should fail with appropriate error about missing directory
@@ -267,7 +267,7 @@ fn test_package_list_all_flag_environment_ordering() {
         add_package(&temp_dir, package);
     }
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list", "--all"]);
 
     let output = cmd.assert().success().get_output().stdout.clone();
@@ -328,7 +328,7 @@ fn test_package_list_all_flag_shows_all_packages() {
     }
 
     // Test default behavior (only relevant packages)
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     let output = cmd.assert().success().get_output().stdout.clone();
@@ -338,7 +338,7 @@ fn test_package_list_all_flag_shows_all_packages() {
     assert!(!output_str.contains("different-env-package"));
 
     // Test --all flag behavior (all packages)
-    let mut cmd_all = get_command_with_test_config(&temp_dir);
+    let mut cmd_all = sandboxed_command(&temp_dir);
     cmd_all.args(["package", "list", "--all"]);
 
     let output_all = cmd_all.assert().success().get_output().stdout.clone();
@@ -375,7 +375,7 @@ fn test_package_list_all_flag_not_relevant_status() {
     add_package(&temp_dir, &package_not_relevant);
     add_package(&temp_dir, &package_no_check);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list", "--all"]);
 
     let output = cmd.assert().success().get_output().stdout.clone();
@@ -424,7 +424,7 @@ fn test_package_list_default_behavior_filters_by_environment() {
     add_package(&temp_dir, &package_no_check);
     add_package(&temp_dir, &package_with_check);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     let output = cmd.assert().success().get_output().stdout.clone();
@@ -472,7 +472,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
         add_package(&temp_dir, &package);
     }
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
     cmd.assert()

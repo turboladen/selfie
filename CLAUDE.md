@@ -12,6 +12,7 @@ cargo build                                    # Build all crates
 cargo test                                     # Run all tests
 cargo test -p selfie-cli                       # Test CLI only
 cargo run -- <args>                            # Run the CLI (from workspace root)
+just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
 cargo clippy --all-targets -- -D warnings      # Lint, CI form (see below)
 cargo fmt --check                              # Check formatting
 dprint fmt                                     # Format Markdown/YAML (CI checks this)
@@ -29,6 +30,23 @@ Two gate commands come with a catch:
   with an error naming a crate you did not touch. `.claude/rules/architecture.md` explains the
   mechanism. The command compiles today. It did not before PR #67, which is why older instructions
   prescribe a `--features with_mocks` flag that is now unnecessary.
+
+### Running the binary by hand
+
+`cargo run -- <args>` reads **your** config and writes **your** home directory. Path flags do not
+close every route: a `~` dotfile target resolves against `HOME` whatever you pass, and so does the
+deploy-state fallback whenever no `state_directory` is configured and no `--state-directory`. Use
+`just sandbox-run <args>`, which mints a throwaway `HOME`, and `sandboxed_command` in
+`crates/cli/tests/common.rs` for tests. Neither sandboxes **execution** — `install`, `check` and
+`audit` commands, and any `command:` dotfile source, still run for real on this machine, so fixtures
+must use inert commands such as `true` or `echo`.
+
+`just sandbox-run` mints a **new** `HOME` per invocation and never reuses one, and leaves it behind
+under `TMPDIR` for inspection — the accumulation is deliberate, not a leak to report. Nothing
+carries over between calls: `just sandbox-run apply` followed by `just sandbox-run dotfiles drift`
+reads an empty deploy state, because the second run is a different machine as far as selfie is
+concerned. One invocation runs exactly one selfie command, arguments passed through verbatim, so to
+watch state change, drive the binary against the printed sandbox directory yourself.
 
 ### Pre-commit checklist
 
