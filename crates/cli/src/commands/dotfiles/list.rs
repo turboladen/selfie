@@ -4,14 +4,11 @@
 //! all dotfile mappings defined across packages and the standalone dotfiles
 //! directory. This is a fast, file-only operation — no commands are executed.
 
-use selfie::{
-    fs::real::RealFileSystem,
-    package::{Package, port::PackageRepository, repository::yaml::YamlPackageRepository},
-};
+use selfie::package::{Package, port::PackageRepository};
 use tracing::info;
 
 use crate::{
-    commands::common::{create_formatted_table, create_package_repository},
+    commands::common::{create_formatted_table, create_package_repository, dotfiles_repository},
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
 };
@@ -96,9 +93,7 @@ fn collect_packages_with_dotfiles(
         .collect();
 
     // Add standalone dotfiles repository if the directory exists
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if dotfiles_dir.is_dir() {
-        let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+    if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
         match load_dotfile_packages(&dotfiles_repo, display, "dotfiles") {
             Ok(dotfile_pkgs) => {
                 packages.extend(

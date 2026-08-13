@@ -20,7 +20,7 @@ pub(crate) async fn handle_pull(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_sync_service(config, cancellation_token);
+    let service = create_sync_service(config, display, cancellation_token);
 
     let event_stream = service.pull().await;
 

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::common::{self, create_package_repository},
+    commands::common::{self, create_package_repository, dotfiles_repository},
     config::CliConfig,
     display_manager::DisplayManager,
 };
@@ -54,8 +54,13 @@ pub(crate) async fn handle_track(
 
     let repo = create_package_repository(config);
 
+    // Shared with the namespace check below.
+    let dotfiles_repo = dotfiles_repository(config, display);
+
     // Check if this file is already tracked anywhere
-    if let Some((pkg_name, tracked_target)) = find_existing_tracker(file, config) {
+    if let Some((pkg_name, tracked_target)) =
+        find_existing_tracker(file, config, dotfiles_repo.as_ref())
+    {
         display.print_info(format!(
             "Already tracking '{tracked_target}' in spec '{pkg_name}'"
         ));
@@ -79,12 +84,6 @@ pub(crate) async fn handle_track(
         }
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
-            let dotfiles_dir = config.selfie_config().dotfiles_directory();
-            let dotfiles_repo = if dotfiles_dir.is_dir() {
-                Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
-            } else {
-                None
-            };
             if let Err(e) = namespace::validate_unique_name(name, &repo, dotfiles_repo.as_ref()) {
                 display.print_error(format!("Cannot use name '{name}': {e}"));
                 return 1;
@@ -187,23 +186,28 @@ fn suggest_name(file_path: &str) -> String {
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
-fn find_existing_tracker(file: &str, config: &CliConfig) -> Option<(String, String)> {
+fn find_existing_tracker(
+    file: &str,
+    config: &CliConfig,
+    dotfiles_repo: Option<&YamlPackageRepository<RealFileSystem>>,
+) -> Option<(String, String)> {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
 
-    let repos: Vec<YamlPackageRepository<RealFileSystem>> = [
-        Some(config.selfie_config().package_directory().to_path_buf()),
-        {
-            let d = config.selfie_config().dotfiles_directory().to_path_buf();
-            d.is_dir().then_some(d)
-        },
-    ]
-    .into_iter()
-    .flatten()
-    .map(|dir| YamlPackageRepository::new(RealFileSystem, dir))
-    .collect();
+    // Takes the dotfiles repository rather than building its own, so that a
+    // missing directory is reported by the caller once. Dropping it silently
+    // made an already-tracked file look untracked, and the run that followed
+    // tracked it a second time.
+    let package_repo = YamlPackageRepository::new(
+        RealFileSystem,
+        config.selfie_config().package_directory().to_path_buf(),
+    );
+    let repos: Vec<&YamlPackageRepository<RealFileSystem>> = [Some(&package_repo), dotfiles_repo]
+        .into_iter()
+        .flatten()
+        .collect();
 
-    for repo in &repos {
+    for repo in repos {
         if let Ok(output) = repo.list_packages() {
             for pkg in output.valid_packages() {
                 for (_scope, entry) in pkg.dotfiles_with_scope() {

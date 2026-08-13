@@ -31,7 +31,7 @@ pub(crate) async fn handle_push(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_sync_service(config, cancellation_token);
+    let service = create_sync_service(config, display, cancellation_token);
     let use_colors = config.use_colors();
 
     let options = PushOptions {

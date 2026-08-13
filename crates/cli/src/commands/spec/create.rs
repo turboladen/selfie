@@ -5,7 +5,6 @@ use selfie::{
         EnvironmentConfig, SpecService,
         event::{OperationResult, OperationSuccess, PackageEvent},
         port::PackageRepository,
-        repository::yaml::YamlPackageRepository,
     },
 };
 use std::{collections::HashMap, path::PathBuf};
@@ -135,16 +134,11 @@ fn get_valid_package_name(
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
 
-    // Build an optional dotfiles repo for namespace validation
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    let dotfiles_repo = if dotfiles_dir.is_dir() {
-        Some(YamlPackageRepository::new(
-            selfie::fs::real::RealFileSystem,
-            dotfiles_dir,
-        ))
-    } else {
-        None
-    };
+    // Build an optional dotfiles repo for namespace validation. `spec create`
+    // writes into the *package* directory and has no refusal of its own, so this
+    // is the one namespace check that proceeds to a write when the dotfiles
+    // directory is not there.
+    let dotfiles_repo = common::dotfiles_repository(config, display);
 
     loop {
         // Check namespace conflict (packages + dotfiles directories)

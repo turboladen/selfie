@@ -90,6 +90,18 @@ impl SelfieConfig {
         })
     }
 
+    /// The dotfiles directory as the user configured it, or `None` when the
+    /// sibling default applies.
+    ///
+    /// Use this, not [`dotfiles_directory`](Self::dotfiles_directory), to decide
+    /// whether a missing directory is worth reporting: a configured path that
+    /// does not exist is a mistake, an absent default is the ordinary state of
+    /// anyone who keeps no standalone dotfiles.
+    #[must_use]
+    pub fn configured_dotfiles_directory(&self) -> Option<&PathBuf> {
+        self.dotfiles_directory.as_ref()
+    }
+
     /// Get the deploy state directory path.
     ///
     /// `None` means no directory was configured, and deploy state falls back to
