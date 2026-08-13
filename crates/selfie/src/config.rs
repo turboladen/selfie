@@ -92,7 +92,8 @@ impl SelfieConfig {
 
     /// Get the deploy state directory path.
     ///
-    /// Defaults to `~/.config/selfie`. Can be overridden in config.
+    /// `None` means no directory was configured, and deploy state falls back to
+    /// `~/.local/state/selfie`.
     #[must_use]
     pub fn state_directory(&self) -> Option<&PathBuf> {
         self.state_directory.as_ref()
