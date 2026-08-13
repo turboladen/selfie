@@ -1745,6 +1745,7 @@ impl OperationFailure {
                 crate::package::port::PackageError::PackageNotFound { .. }
                     | crate::package::port::PackageError::MultiplePackagesFound { .. }
                     | crate::package::port::PackageError::ParseError { .. }
+                    | crate::package::port::PackageError::UnreadableFile { .. }
                     | crate::package::port::PackageError::PackageAlreadyExists { .. }
             )
         )
@@ -2432,6 +2433,7 @@ mod tests {
                 PackageError::PackageNotFound { .. }
                 | PackageError::MultiplePackagesFound { .. }
                 | PackageError::ParseError { .. }
+                | PackageError::UnreadableFile { .. }
                 | PackageError::PackageAlreadyExists { .. } => "package",
             }
         }

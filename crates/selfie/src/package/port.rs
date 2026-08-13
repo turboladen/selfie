@@ -239,8 +239,21 @@ pub enum PackageError {
         packages_path: PathBuf,
         /// The specific file that failed to parse
         failed_file: PathBuf,
-        /// File size for debugging
-        file_size_bytes: u64,
+        #[source]
+        source: PackageParseError,
+    },
+
+    /// Package definition file exists but selfie refused to read it
+    ///
+    /// Separate from [`ParseError`](Self::ParseError) because nothing was
+    /// parsed: the file was never opened. Saying "parse error" for a fifo sends
+    /// the reader to inspect YAML syntax in a file that has none.
+    #[error("Cannot read package `{name}` from {}: {source}", packages_path.display())]
+    UnreadableFile {
+        name: String,
+        packages_path: PathBuf,
+        /// The specific file that could not be read
+        failed_file: PathBuf,
         #[source]
         source: PackageParseError,
     },
@@ -311,6 +324,16 @@ impl ListPackagesOutput {
     #[must_use]
     pub fn from_packages(packages: Vec<Package>) -> Self {
         Self(packages.into_iter().map(Ok).collect())
+    }
+
+    /// Create a `ListPackagesOutput` from a mix of loaded packages and failures.
+    // The field is `pub(crate)`, so without this a test outside the library can
+    // only build an output in which nothing failed -- which is exactly the case
+    // that cannot catch a caller dropping the failures silently.
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
+    pub fn from_results(results: Vec<Result<Package, PackageParseError>>) -> Self {
+        Self(results)
     }
 
     /// Get all package loading results (both successes and failures)
@@ -385,6 +408,44 @@ pub enum PackageParseError {
         #[source]
         source: Arc<crate::fs::filesystem::FileSystemError>,
     },
+
+    /// The package file is a fifo, socket or device node rather than a regular file
+    ///
+    /// Reading one blocks until a writer arrives, so it is refused before the
+    /// read rather than reported after it.
+    // The only variant here whose message omits the path, deliberately: it is
+    // always rendered beside one. `InvalidPackageInfo` carries `path` as its own
+    // field for both renderers, and every site that warns about a skipped file
+    // goes through `skipped_spec_warning`, which prefixes
+    // "Skipping package file {path}: ". The one exception is
+    // `PackageError::UnreadableFile`, which names the package and the directory
+    // instead of the file -- unambiguous, since a spec file is `<name>.yml` in
+    // that directory. Self-naming would double the path in `package list`, whose
+    // rows are already labeled with the filename.
+    #[error(
+        "the package file is a {kind}, not a regular file. Replace it with a regular file or remove it from the package directory."
+    )]
+    IrregularFile {
+        package_path: PathBuf,
+        kind: &'static str,
+    },
+
+    /// Some other refusal from the filesystem port, worded for a read
+    ///
+    /// Carries a `reason` rather than the [`FileSystemError`] itself.
+    // Every refusal variant's own `Display` names a *target* and says selfie
+    // will not **write** through it, having been written for the deploy side.
+    // Rendering one here would report a write refusal on a read path, and would
+    // print the path a second time.
+    //
+    // Reached only if `irregular_target_refusal` ever returns something other
+    // than `IrregularTarget`. It exists so that growth fails closed with
+    // sensible wording rather than falling through to the read.
+    #[error("selfie will not read the package file: {reason}")]
+    RefusedFile {
+        package_path: PathBuf,
+        reason: String,
+    },
 }
 
 impl PackageParseError {
@@ -397,7 +458,9 @@ impl PackageParseError {
         match self {
             PackageParseError::YamlParse { package_path, .. }
             | PackageParseError::IoError { package_path, .. }
-            | PackageParseError::FileSystemError { package_path, .. } => package_path,
+            | PackageParseError::FileSystemError { package_path, .. }
+            | PackageParseError::IrregularFile { package_path, .. }
+            | PackageParseError::RefusedFile { package_path, .. } => package_path,
         }
     }
 }

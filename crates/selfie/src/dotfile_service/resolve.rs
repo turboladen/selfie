@@ -585,7 +585,7 @@ mod tests {
         // refuse. Stated rather than defaulted, because a mock with no
         // expectation panics rather than answering, and because these tests are
         // about resolution and not about the guard.
-        fs.expect_irregular_target_refusal().returning(|_| None);
+        fs.mock_no_irregular_files();
         fs.expect_read_file()
             .returning(move |_| Ok(body.to_string()));
         fs
@@ -950,7 +950,7 @@ mod tests {
         let mut fs = MockFileSystem::default();
         // Absent, not irregular: the guard passes and the *read* is what fails,
         // which is the distinction this test is about.
-        fs.expect_irregular_target_refusal().returning(|_| None);
+        fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
             Err(crate::fs::filesystem::FileSystemError::IoError(
                 std::sync::Arc::new(std::io::Error::new(

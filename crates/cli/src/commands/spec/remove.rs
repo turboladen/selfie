@@ -224,6 +224,7 @@ mod tests {
     #[test]
     fn test_remove_package_with_dependencies_mock_fs() {
         let mut mock_fs = MockFileSystem::default();
+        mock_fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
         let target_path = package_dir.join("target-package.yml");
