@@ -1,7 +1,9 @@
+pub mod diagnostics;
 pub mod loader;
 pub mod validate;
 pub mod yaml;
 
+pub use self::diagnostics::{IgnoredKey, LoadedConfig};
 pub use self::loader::ConfigLoadError;
 pub use self::yaml::YamlLoader;
 

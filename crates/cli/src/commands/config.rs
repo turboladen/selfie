@@ -15,7 +15,7 @@ pub(crate) fn handle_validate(
 
     // Load the raw on-disk config (without CLI overrides) so that validation
     // catches issues that would be masked by flags like --environment.
-    let raw_config = match YamlLoader::new(fs).load_config() {
+    let loaded = match YamlLoader::new(fs).load_config() {
         Ok(c) => c,
         Err(e) => {
             display.print_error(format!("Failed to load configuration: {e}"));
@@ -23,7 +23,14 @@ pub(crate) fn handle_validate(
         }
     };
 
-    let result = raw_config.validate();
+    // Covers the ignored keys as well as the settings.
+    let result = loaded.validate();
+
+    // `main` suppresses notices for this command, so both halves are reported
+    // here. They print as notices because only the library builds a
+    // `ValidationIssue`.
+    let cli_notices = crate::config::cli_section(&loaded).notices;
+    let raw_config = loaded.config();
 
     if result.issues().has_errors() {
         display.print_error("Validation failed.");
@@ -34,16 +41,23 @@ pub(crate) fn handle_validate(
             .add_validation_errors(&result.issues().errors())
             .add_validation_warnings(&result.issues().warnings())
             .print();
+        crate::config::report_config_notices(&cli_notices, display);
         1
-    } else if result.issues().has_warnings() {
-        let mut table_reporter = ValidationTableReporter::new(display.use_colors());
-        table_reporter
-            .setup(vec!["Category", "Field", "Message", "Suggestion"])
-            .add_validation_warnings(&result.issues().warnings())
-            .print();
-        0
     } else {
-        display.print_success("Configuration is valid.");
+        if result.issues().has_warnings() {
+            let mut table_reporter = ValidationTableReporter::new(display.use_colors());
+            table_reporter
+                .setup(vec!["Category", "Field", "Message", "Suggestion"])
+                .add_validation_warnings(&result.issues().warnings())
+                .print();
+        }
+        crate::config::report_config_notices(&cli_notices, display);
+
+        // Only when nothing at all was reported, `cli:` notices included.
+        if !result.issues().has_warnings() && cli_notices.is_empty() {
+            display.print_success("Configuration is valid.");
+        }
+
         report_with_style(display, "environment:", raw_config.environment());
         report_with_style(
             display,

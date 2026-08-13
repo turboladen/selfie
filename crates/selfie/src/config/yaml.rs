@@ -7,8 +7,11 @@ use config::FileFormat;
 
 use crate::{config::SelfieConfig, fs::FileSystem};
 
-use super::loader::{
-    ConfigLoadError, ConfigLoader, irregular_config_refusal, unresolvable_config_refusal,
+use super::{
+    diagnostics::{FRONTEND_SECTIONS, LoadedConfig, library_ignored_keys},
+    loader::{
+        ConfigLoadError, ConfigLoader, irregular_config_refusal, unresolvable_config_refusal,
+    },
 };
 
 /// YAML-based configuration loader implementation
@@ -43,7 +46,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// - YAML content is malformed or invalid
     /// - Required configuration fields are missing
     /// - Configuration field types are incorrect
-    fn load_config(&self) -> Result<SelfieConfig, ConfigLoadError> {
+    fn load_config(&self) -> Result<LoadedConfig, ConfigLoadError> {
         let config_paths = match self.find_config_file_paths() {
             Ok(paths) => paths,
             Err(ConfigLoadError::NotFound { searched }) => {
@@ -94,8 +97,26 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // Build the config
         let config = builder.build()?;
 
-        // Convert to our type
-        let mut selfie_config: SelfieConfig = config.try_deserialize()?;
+        // Lift out each frontend's section *before* deserializing, so a frontend
+        // reads its own settings from this parse instead of opening the file
+        // again with a different YAML library.
+        let sections: std::collections::BTreeMap<String, config::Value> = FRONTEND_SECTIONS
+            .iter()
+            .filter_map(|name| {
+                config
+                    .get::<config::Value>(name)
+                    .ok()
+                    .map(|value| ((*name).to_string(), value))
+            })
+            .collect();
+
+        // Every key it did not consume, rather than dropping them.
+        // `serde_ignored` wraps the deserializer, so the set is serde's own
+        // answer and cannot go stale when a field is added here.
+        let mut ignored_paths = Vec::new();
+        let mut selfie_config: SelfieConfig =
+            serde_ignored::deserialize(config, |path| ignored_paths.push(path.to_string()))?;
+        let ignored_keys = library_ignored_keys(ignored_paths);
 
         // Special handling for ~ expansion on path fields
         if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
@@ -115,7 +136,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
             selfie_config.state_directory = Some(expanded);
         }
 
-        Ok(selfie_config)
+        Ok(LoadedConfig::new(selfie_config, ignored_keys, sections))
     }
 
     /// Find configuration file paths in standard locations
@@ -309,7 +330,7 @@ mod tests {
             fs.mock_expand_path(&package_dir, &package_dir);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap();
+            let config = loader.load_config().unwrap().into_config();
 
             // Check the loaded values
             assert_eq!(config.environment, "test-env");
@@ -354,7 +375,7 @@ mod tests {
             fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap();
+            let config = loader.load_config().unwrap().into_config();
 
             // Check basic settings
             assert_eq!(config.environment, "test-env");
@@ -459,7 +480,7 @@ mod tests {
             fs.mock_expand_path(Path::new("~/packages"), &expanded_path);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap();
+            let config = loader.load_config().unwrap().into_config();
 
             assert_eq!(config.package_directory, expanded_path);
         }
@@ -485,7 +506,7 @@ mod tests {
             fs.mock_expand_path(Path::new("/test/packages"), Path::new("/test/packages"));
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap();
+            let config = loader.load_config().unwrap().into_config();
 
             // Check defaults were properly applied
             assert_eq!(config.environment, "test-env");
@@ -743,6 +764,217 @@ mod tests {
                 result.unwrap_err(),
                 ConfigLoadError::NotFound { .. }
             ));
+        }
+
+        // The wording and filtering have their own tests beside the types. These
+        // drive the real loader instead, because what they pin is the behavior of
+        // `serde_ignored` over the `config` crate's deserializer -- which keys it
+        // reports, and in what shape.
+        fn ignored_keys_for(config_yaml: &str) -> Vec<String> {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_file(config_dir, config_yaml);
+            fs.mock_expand_path("/test/packages", "/test/packages");
+
+            YamlLoader::new(&fs)
+                .load_config()
+                .unwrap()
+                .ignored_keys()
+                .iter()
+                .map(|k| k.key().to_string())
+                .collect()
+        }
+
+        #[test]
+        fn a_stale_key_is_reported_by_the_loader() {
+            let keys = ignored_keys_for(
+                r#"
+                environment: "test-env"
+                package_directory: "/test/packages"
+                configs_directory: "/test/configs"
+            "#,
+            );
+
+            assert_eq!(keys, vec!["configs_directory".to_string()]);
+        }
+
+        // The trap. `cli:` is another frontend's section and the library must
+        // stay silent about it, or every user sees a warning on every run.
+        // This also pins the shape the filter depends on: an ignored subtree is
+        // reported as its root, so `cli` never arrives as `cli.verbose`.
+        #[test]
+        fn a_valid_cli_section_produces_no_diagnostics() {
+            let keys = ignored_keys_for(
+                r#"
+                environment: "test-env"
+                package_directory: "/test/packages"
+                dotfiles_directory: "/test/dotfiles"
+                state_directory: "/test/state"
+                command_timeout: 120
+                stop_on_error: false
+                max_concurrency: 4
+                cli:
+                  verbose: true
+                  use_colors: false
+            "#,
+            );
+
+            assert!(keys.is_empty(), "expected no diagnostics, got: {keys:?}");
+        }
+
+        #[test]
+        fn a_nested_frontend_key_is_not_reported() {
+            let keys = ignored_keys_for(
+                r#"
+                environment: "test-env"
+                package_directory: "/test/packages"
+                cli:
+                  deeply:
+                    nested: 1
+            "#,
+            );
+
+            assert!(keys.is_empty(), "expected no diagnostics, got: {keys:?}");
+        }
+
+        // Validation must not stop at the first problem.
+        #[test]
+        fn two_ignored_keys_are_both_reported_by_the_loader() {
+            let mut keys = ignored_keys_for(
+                r#"
+                environment: "test-env"
+                package_directory: "/test/packages"
+                configs_directory: "/test/configs"
+                totally_bogus: 1
+            "#,
+            );
+            keys.sort();
+
+            assert_eq!(
+                keys,
+                vec!["configs_directory".to_string(), "totally_bogus".to_string()]
+            );
+        }
+
+        // The control: a file using every setting selfie has must produce
+        // nothing, or the diagnostic is just noise with extra steps.
+        #[test]
+        fn a_config_using_every_setting_produces_no_diagnostics() {
+            let keys = ignored_keys_for(
+                r#"
+                environment: "test-env"
+                package_directory: "/test/packages"
+                dotfiles_directory: "/test/dotfiles"
+                state_directory: "/test/state"
+                command_timeout: 120
+                stop_on_error: false
+                max_concurrency: 4
+            "#,
+            );
+
+            assert!(keys.is_empty(), "expected no diagnostics, got: {keys:?}");
+        }
+
+        // The `cli:` section comes back from the parse the library already did,
+        // so a frontend never opens the file a second time with a second YAML
+        // library. These pin what that hands back.
+        #[derive(Debug, serde::Deserialize)]
+        struct FakeSection {
+            #[serde(default)]
+            verbose: bool,
+        }
+
+        fn load_section(config_yaml: &str) -> Result<Option<(bool, Vec<String>)>, ConfigLoadError> {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_file(config_dir, config_yaml);
+            fs.mock_expand_path("/test/packages", "/test/packages");
+
+            let loaded = YamlLoader::new(&fs).load_config().unwrap();
+            Ok(loaded
+                .frontend_section::<FakeSection>("cli")?
+                .map(|section| {
+                    let keys = section
+                        .ignored_keys()
+                        .iter()
+                        .map(|k| k.key().to_string())
+                        .collect();
+                    (section.value().verbose, keys)
+                }))
+        }
+
+        const BASE: &str = "environment: \"test-env\"\npackage_directory: \"/test/packages\"\n";
+
+        #[test]
+        fn a_frontend_section_is_read_from_the_library_s_own_parse() {
+            let (verbose, ignored) = load_section(&format!("{BASE}cli:\n  verbose: true\n"))
+                .unwrap()
+                .unwrap();
+
+            assert!(verbose);
+            assert!(ignored.is_empty());
+        }
+
+        // Rooted at the section, so the key is `verbos`, not `cli.verbos`.
+        #[test]
+        fn an_unknown_key_inside_a_section_is_reported_relative_to_it() {
+            let (_, ignored) = load_section(&format!("{BASE}cli:\n  verbos: true\n"))
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(ignored, vec!["verbos".to_string()]);
+        }
+
+        // A dotted top-level key is **path syntax** to the `config` crate, not a
+        // key whose name contains a dot: `"cli.verbose": true` is merged into the
+        // `cli` table and read as that section's `verbose`. So it is consumed
+        // rather than ignored, at either level.
+        //
+        // Worth pinning because the obvious reading is the opposite one, and
+        // because it is why a top-level key can no longer be mistaken for one
+        // inside a section: reading the section from this same parse means there
+        // is no second, differently-parsed view to disagree with.
+        #[test]
+        fn a_dotted_top_level_key_is_merged_into_the_section() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_file(config_dir, &format!("{BASE}\"cli.verbose\": true\n"));
+            fs.mock_expand_path("/test/packages", "/test/packages");
+
+            let loaded = YamlLoader::new(&fs).load_config().unwrap();
+            let section = loaded
+                .frontend_section::<FakeSection>("cli")
+                .unwrap()
+                .expect("the dotted key creates the section");
+
+            assert!(section.value().verbose, "it is read as the section's key");
+            assert!(
+                loaded.ignored_keys().is_empty(),
+                "and so is not reported at the top level, got: {:?}",
+                loaded.ignored_keys()
+            );
+        }
+
+        // An empty section is a legitimate thing to write. It parses as null, and
+        // deserializing a struct from null fails — so it is treated as absent
+        // rather than reported as malformed.
+        #[test]
+        fn an_empty_section_reads_as_absent() {
+            assert!(load_section(&format!("{BASE}cli:\n")).unwrap().is_none());
+        }
+
+        #[test]
+        fn a_missing_section_reads_as_absent() {
+            assert!(load_section(BASE).unwrap().is_none());
+        }
+
+        // `cli: true` is not an empty section — it is a value of the wrong shape,
+        // and the frontend needs to hear about it. It was invisible to both the
+        // library (which filters the section out as another frontend's) and the
+        // CLI (which could not parse it and quietly used defaults).
+        #[test]
+        fn a_section_of_the_wrong_shape_is_an_error() {
+            assert!(load_section(&format!("{BASE}cli: true\n")).is_err());
         }
 
         #[test]

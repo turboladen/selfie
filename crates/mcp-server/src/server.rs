@@ -12,7 +12,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use selfie::{
     commands::ShellCommandRunner,
-    config::SelfieConfig,
+    config::{IgnoredKey, SelfieConfig},
     dotfile_service::{port::ApplyOptions, service::DotfileServiceImpl},
     fs::RealFileSystem,
     git::GixGitAdapter,
@@ -50,6 +50,11 @@ pub struct SelfieServer {
     dotfile_service: Arc<ConcreteDotfileService>,
     sync_service: Arc<ConcreteSyncService>,
     config: SelfieConfig,
+    /// Keys the configuration file carried that selfie did not use.
+    ///
+    /// Reported through `selfie_config_get` rather than only logged: an
+    /// assistant driving this server usually cannot see stderr.
+    ignored_config_keys: Vec<IgnoredKey>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -232,7 +237,11 @@ pub struct SyncPushParam {
 
 #[tool_router]
 impl SelfieServer {
-    pub fn new(service: ConcreteService, config: SelfieConfig) -> Self {
+    pub fn new(
+        service: ConcreteService,
+        config: SelfieConfig,
+        ignored_config_keys: Vec<IgnoredKey>,
+    ) -> Self {
         let repo =
             YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
         // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
@@ -273,6 +282,7 @@ impl SelfieServer {
             dotfile_service: Arc::new(dotfile_service),
             sync_service: Arc::new(sync_service),
             config,
+            ignored_config_keys,
         }
     }
 
@@ -612,6 +622,17 @@ impl SelfieServer {
             "environment": self.config.environment(),
             "package_directory": self.config.package_directory().display().to_string(),
             "command_timeout_secs": self.config.command_timeout().as_secs(),
+            // Always present, empty when the file is clean, so a consumer can
+            // read the same shape every time.
+            "ignored_config_keys": self
+                .ignored_config_keys
+                .iter()
+                .map(|ignored| serde_json::json!({
+                    "key": ignored.key(),
+                    "message": ignored.message(),
+                    "suggestion": ignored.suggestion(),
+                }))
+                .collect::<Vec<_>>(),
         });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&config_data).unwrap_or_default(),

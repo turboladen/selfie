@@ -12,10 +12,10 @@
 
 use std::path::PathBuf;
 
-use selfie::config::SelfieConfig;
+use selfie::config::{IgnoredKey, LoadedConfig, SelfieConfig};
 use serde::Deserialize;
 
-use crate::cli::ClapCli;
+use crate::{cli::ClapCli, display_manager::DisplayManager};
 
 /// CLI-specific settings from the `cli:` section of the config file.
 #[derive(Debug, Clone, Deserialize)]
@@ -40,11 +40,94 @@ impl Default for CliSection {
     }
 }
 
-/// Wrapper for deserializing just the `cli:` section from the config file.
-#[derive(Deserialize)]
-struct RawCliFile {
-    #[serde(default)]
-    cli: CliSection,
+/// Something in the configuration file selfie read and did not use.
+///
+/// Rendered once, before the command runs. Carries both halves so the CLI
+/// renders library diagnostics and its own the same way.
+#[derive(Debug)]
+pub(crate) struct ConfigNotice {
+    message: String,
+    suggestion: String,
+}
+
+impl ConfigNotice {
+    fn from_ignored_key(ignored: &IgnoredKey) -> Self {
+        Self {
+            message: ignored.message(),
+            suggestion: ignored.suggestion(),
+        }
+    }
+
+    /// A key inside `cli:` that the CLI does not read.
+    ///
+    /// Its own wording rather than the library's: the library cannot know what
+    /// this section accepts, and each frontend reports only its own keys.
+    fn unknown_cli_key(key: &str) -> Self {
+        Self {
+            message: format!("`cli.{key}` is not a recognized CLI setting. Selfie ignored it."),
+            suggestion: format!(
+                "Remove `{key}` from the `cli:` section, or check it against the configuration guide."
+            ),
+        }
+    }
+
+    /// A `cli:` section that is present but cannot be read.
+    ///
+    /// Not fatal: the library loaded the file, so the run is usable with default
+    /// CLI settings.
+    fn unreadable_cli_section(error: &impl std::fmt::Display) -> Self {
+        Self {
+            message: format!(
+                "The `cli:` section could not be read ({error}). Selfie used the default CLI settings."
+            ),
+            suggestion:
+                "Make `cli:` a mapping, for example `cli:` followed by an indented `verbose: true`."
+                    .to_string(),
+        }
+    }
+}
+
+/// The `cli:` section, plus anything in the file the CLI did not use.
+#[derive(Debug, Default)]
+pub(crate) struct CliSectionLoad {
+    pub(crate) section: CliSection,
+    pub(crate) notices: Vec<ConfigNotice>,
+}
+
+/// Render the library's ignored keys as notices this crate can print.
+pub(crate) fn library_config_notices(ignored: &[IgnoredKey]) -> Vec<ConfigNotice> {
+    ignored.iter().map(ConfigNotice::from_ignored_key).collect()
+}
+
+/// Print every notice once, before the command runs.
+// One warning, so the whole notice goes to stderr. `print_suggestion` writes to
+// stdout, which would put it in redirected command output.
+pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayManager) {
+    for notice in notices {
+        display.print_warning(format!("{} {}", notice.message, notice.suggestion));
+    }
+}
+
+/// The `cli:` section, taken from the parse the library already did.
+///
+/// Returns the defaults and a notice when the section is present but is not a
+/// mapping.
+pub(crate) fn cli_section(loaded: &LoadedConfig) -> CliSectionLoad {
+    match loaded.frontend_section::<CliSection>("cli") {
+        Ok(Some(section)) => CliSectionLoad {
+            notices: section
+                .ignored_keys()
+                .iter()
+                .map(|ignored| ConfigNotice::unknown_cli_key(ignored.key()))
+                .collect(),
+            section: section.value(),
+        },
+        Ok(None) => CliSectionLoad::default(),
+        Err(error) => CliSectionLoad {
+            section: CliSection::default(),
+            notices: vec![ConfigNotice::unreadable_cli_section(&error)],
+        },
+    }
 }
 
 /// Complete CLI configuration: library config + CLI-specific settings.
@@ -156,36 +239,6 @@ impl ClapCli {
         config.allow_sudo = self.allow_sudo;
         config
     }
-}
-
-/// Load the CLI section from the config file.
-///
-/// Reads the same config file the library uses, but only deserializes
-/// the `cli:` section. Unknown keys are ignored.
-/// If anything fails, just use defaults - the library already validated the file.
-pub(crate) fn load_cli_section(fs: &impl selfie::fs::FileSystem) -> CliSection {
-    let Ok(config_dir) = fs.config_dir() else {
-        return CliSection::default();
-    };
-
-    let yaml_path = config_dir.join("config.yaml");
-    let yml_path = config_dir.join("config.yml");
-
-    let config_path = if fs.path_exists(&yaml_path) {
-        yaml_path
-    } else if fs.path_exists(&yml_path) {
-        yml_path
-    } else {
-        return CliSection::default();
-    };
-
-    let Ok(contents) = fs.read_file(&config_path) else {
-        return CliSection::default();
-    };
-
-    serde_saphyr::from_str::<RawCliFile>(&contents)
-        .map(|raw| raw.cli)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -369,22 +422,19 @@ mod tests {
 
     #[test]
     fn test_cli_section_deserialization() {
-        let yaml = r#"
-            cli:
-              verbose: true
-              use_colors: false
-        "#;
-        let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
-        assert!(raw.cli.verbose);
-        assert!(!raw.cli.use_colors);
+        let yaml = "verbose: true\nuse_colors: false\n";
+        let cli: CliSection = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cli.verbose);
+        assert!(!cli.use_colors);
     }
 
     #[test]
     fn test_cli_section_deserialization_defaults() {
-        let yaml = "environment: test\n";
-        let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
-        assert!(!raw.cli.verbose);
-        assert!(raw.cli.use_colors);
+        // An empty section: every field takes its own default, and `use_colors`
+        // stays true rather than falling to `bool::default()`.
+        let cli: CliSection = serde_saphyr::from_str("{}").unwrap();
+        assert!(!cli.verbose);
+        assert!(cli.use_colors);
     }
 
     // Parsed directly rather than through `FakeArgs`: the flag is global, so the
@@ -411,11 +461,10 @@ mod tests {
     // opening the route.
     #[test]
     fn a_config_file_cannot_turn_the_sudo_guard_off() {
-        let yaml = "cli:\n  allow_sudo: true\n";
-        let raw: RawCliFile = serde_saphyr::from_str(yaml).unwrap();
+        let cli: CliSection = serde_saphyr::from_str("allow_sudo: true\n").unwrap();
 
         let args = ClapCli::parse_from(["selfie", "apply"]);
-        let config = args.build_cli_config(default_selfie_config(), raw.cli);
+        let config = args.build_cli_config(default_selfie_config(), cli);
 
         assert!(!config.allow_sudo());
     }

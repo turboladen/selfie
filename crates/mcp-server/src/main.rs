@@ -50,13 +50,23 @@ async fn async_main() -> Result<()> {
         .init();
 
     let fs = RealFileSystem;
-    let config = YamlLoader::new(&fs).load_config()?;
+    let loaded = YamlLoader::new(&fs).load_config()?;
 
     tracing::warn!(
         "Config loaded: environment={}, package_directory={}",
-        config.environment(),
-        config.package_directory().display()
+        loaded.config().environment(),
+        loaded.config().package_directory().display()
     );
+
+    // Also carried into `selfie_config_get` below. stderr from an MCP server is
+    // often invisible to the assistant driving it, so the tool response is where
+    // a warning actually gets read.
+    for ignored in loaded.ignored_keys() {
+        tracing::warn!("{} {}", ignored.message(), ignored.suggestion());
+    }
+
+    let ignored_keys = loaded.ignored_keys().to_vec();
+    let config = loaded.into_config();
 
     let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
     // Use a login shell so the user's PATH includes tools like ~/.cargo/bin,
@@ -75,7 +85,7 @@ async fn async_main() -> Result<()> {
         CancellationToken::new(),
     );
 
-    let mcp_server = server::SelfieServer::new(service, config);
+    let mcp_server = server::SelfieServer::new(service, config, ignored_keys);
 
     let (stdin, stdout) = stdio();
     let service = mcp_server.serve((stdin, stdout)).await?;

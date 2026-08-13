@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
-    config::SelfieConfig,
+    config::diagnostics::LoadedConfig,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
 };
 
@@ -26,7 +26,10 @@ pub trait ConfigLoader: Send + Sync {
     /// - File system access fails
     /// - The configuration file is not a regular file
     /// - Configuration file content is invalid
-    fn load_config(&self) -> Result<SelfieConfig, ConfigLoadError>;
+    ///
+    /// A successful load may still carry diagnostics: see
+    /// [`LoadedConfig::ignored_keys`].
+    fn load_config(&self) -> Result<LoadedConfig, ConfigLoadError>;
 
     /// Find possible configuration file paths
     ///
@@ -36,10 +39,8 @@ pub trait ConfigLoader: Send + Sync {
     /// # Errors
     ///
     /// [`ConfigLoadError::NotFound`] naming the directory that was searched, or
-    /// a [`ConfigLoadError::FileSystemError`] when there is no such directory to
-    /// search. Those are different failures and used to arrive as one, reported
-    /// against a `~/.config/selfie` that may not be where selfie would have
-    /// looked.
+    /// [`ConfigLoadError::FileSystemError`] when there is no such directory to
+    /// search.
     fn find_config_file_paths(&self) -> Result<Vec<std::path::PathBuf>, ConfigLoadError>;
 }
 
@@ -128,10 +129,7 @@ pub(crate) fn unresolvable_config_refusal<F: FileSystem>(
 /// is safe to ask about the very path that would hang.
 ///
 /// `None` for a regular file and for a path that does not exist.
-// `pub(crate)` because the file is opened in exactly one place. The CLI used to
-// read it a second time for the `cli:` section and needed this too; it now takes
-// that section from the library's own parse, so there is one reader and one
-// guard rather than two that could drift.
+// `pub(crate)`: the config file is opened in exactly one place.
 pub(crate) fn irregular_config_refusal<F: FileSystem>(
     fs: &F,
     path: &Path,
