@@ -308,10 +308,27 @@ same run.
 
 Six things this order does not mean:
 
-**A configuration file is still required.** The flags override individual settings in the file; they
-do not replace it. So `selfie -p /path/to/packages package list` still fails with
-`No configuration file found in locations: …` when there is no config file to override. Create one,
-or point `SELFIE_CONFIG_DIR` at a directory that has one.
+**A configuration file is optional, but two settings are not.** With no config file anywhere selfie
+searched, it runs from the flags alone — `environment` and `package_directory` have no default, so
+those two must be supplied:
+
+```bash
+selfie --environment macos --package-directory ~/selfie/packages package list
+```
+
+Everything else keeps its default, so a flags-only run and a two-key config file produce the same
+settings: `dotfiles_directory` falls back to a sibling of the package directory and
+`state_directory` to `~/.local/state/selfie`. Supply neither flag and selfie names **both**, along
+with the directory it searched.
+
+This applies only to a file that is **absent**. A config file that exists but cannot be read, cannot
+be parsed, or is not a regular file is still an error — the flags do not paper over a file you are
+in the middle of editing.
+
+Nor do flags fill _gaps_ in a file that exists. A configuration file must carry both `environment`
+and `package_directory` itself; a file holding only a `cli:` section fails even with both flags
+supplied. Flags override settings that are present and stand in for a file that is not there — they
+are not merged into a partial one. Making them merge is tracked separately.
 
 **The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
 colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
@@ -344,9 +361,11 @@ Only `--package-directory` fails loudly, and the other two fail differently from
 
 **`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
 what is on disk and applies no overrides, so that a flag cannot hide a problem in the file it is
-masking. Passing `-p` and reading back the file's `package_directory` is expected — it is not the
-flag being ignored. Use `selfie package list`, which prints the package directory it actually read,
-to see the effective value.
+masking. It therefore still fails when there is no config file at all, even on a run that would
+otherwise succeed from flags — there is no file for it to report on. Passing `-p` and reading back
+the file's `package_directory` is expected — it is not the flag being ignored. Use
+`selfie package list`, which prints the package directory it actually read, to see the effective
+value.
 
 **Two paths are not covered by any flag.** A dotfile `target` beginning with `~`, and the
 deploy-state fallback used when no `state_directory` is configured, both resolve against `HOME`.

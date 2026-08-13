@@ -20,7 +20,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use display_manager::DisplayManager;
 use selfie::{
-    config::{YamlLoader, loader::ConfigLoader},
+    config::{ConfigLoadError, YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
 use tokio_util::sync::CancellationToken;
@@ -96,19 +96,40 @@ async fn main() -> anyhow::Result<()> {
 
     // Load and process configuration
     let (config, notices) = {
-        let loaded = YamlLoader::new(&fs).load_config()?;
-        // From the same parse, not a second read of the same file.
-        let cli_load = crate::config::cli_section(&loaded);
+        // A missing file is not a failure when the flags carry what it would
+        // have. Every *other* load error still is — in particular a config file
+        // that is not a regular one, which must not be mistaken for an absent
+        // one and silently replaced by the flags.
+        let (selfie_config, mut notices, cli_load) = match YamlLoader::new(&fs).load_config() {
+            Ok(loaded) => {
+                let notices = crate::config::library_config_notices(loaded.ignored_keys());
+                // From the same parse, not a second read of the same file.
+                let cli_load = crate::config::cli_section(&loaded);
+                (loaded.into_config(), notices, cli_load)
+            }
+            Err(ConfigLoadError::NotFound { searched }) => {
+                debug!(
+                    "No configuration file in {}; building from flags",
+                    searched.display()
+                );
+                // No file, so no `cli:` section to read and nothing to report.
+                (
+                    args.config_from_flags(searched)?,
+                    Vec::new(),
+                    crate::config::CliSectionLoad::default(),
+                )
+            }
+            Err(other) => return Err(other.into()),
+        };
 
         // Both halves, rendered together below. The library reports top-level
         // keys and the CLI reports what is inside `cli:`; neither can see the
         // other's, which is why they are collected here rather than at either
         // source.
-        let mut notices = crate::config::library_config_notices(loaded.ignored_keys());
         notices.extend(cli_load.notices);
 
         (
-            args.build_cli_config(loaded.into_config(), cli_load.section),
+            args.build_cli_config(selfie_config, cli_load.section),
             notices,
         )
     };
