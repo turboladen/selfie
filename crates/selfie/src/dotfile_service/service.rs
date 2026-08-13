@@ -12,14 +12,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::{BoundedText, CommandRunner},
+    commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
         resolve::{ResolvedContent, check_resolvable, resolve_content},
-        state::{DeployState, DriftType},
+        state::{DeployState, DriftType, ParseFailure},
     },
     fs::{
         filesystem::{FileSystem, FileSystemError},
@@ -285,11 +285,6 @@ fn load_deploy_state<F: FileSystem>(
         }
     };
 
-    // `from_str` would attach a source snippet to a parse error, which `Display`
-    // then renders: serde-saphyr 0.0.29's `Options::default()` is
-    // `with_snippet: true`, and its horizontal crop only engages above a 16 KiB
-    // window or a 4 KiB line, so an ordinary state file is quoted verbatim.
-    //
     // This message reaches an `EventSender` and from there the MCP server's JSON.
     // No credential can be in it -- secret-bearing entries record nothing at all
     // (ADR-0003) -- but the file names every repository-file dotfile selfie
@@ -297,16 +292,14 @@ fn load_deploy_state<F: FileSystem>(
     // `save_deploy_state` writes it owner-only. That is a reconnaissance aid, and
     // reporting a parse failure is no reason to read it back out.
     //
-    // What this suppresses is the *snippet*, and only that. It is not a guarantee
-    // that no file content reaches the message, and do not restate it as one: an
-    // error whose own text interpolates a scalar still carries it, and the
-    // duplicate-key error interpolates the **key**, which in this file is a
-    // dotfile source path. `a_duplicate_key_still_reaches_the_message` pins that
-    // residual as a fact rather than leaving it to be rediscovered. Closing it
-    // means scrubbing the rendered error rather than choosing options, which is
-    // selfie-flka.
+    // `ParseFailure` is what keeps the file's *text* out: serde-saphyr's own
+    // `Display` interpolates parsed content into several messages, and the
+    // duplicate-key one quotes the key, which in this file is a dotfile source
+    // path. It still reports a line and column, which are derived from the file
+    // and disclose two lengths; the reasoning for accepting that is on the type.
     //
-    // `bound` then caps whatever survives. Its length is not selfie's to choose.
+    // Suppressing the snippet keeps the cropped source windows out of the error
+    // value, so a `Display` call added anywhere on this path cannot render them.
     let options = serde_saphyr::options! { with_snippet: false };
     match serde_saphyr::from_str_with_options(&content, options) {
         Ok(state) => (state, None),
@@ -315,7 +308,7 @@ fn load_deploy_state<F: FileSystem>(
             Some(format!(
                 "Cannot parse deploy state '{}': {}; {IGNORED}",
                 path.display(),
-                BoundedText::bound(e.to_string().as_bytes())
+                ParseFailure::of(&e)
             )),
         ),
     }
@@ -2305,6 +2298,35 @@ mod tests {
         fs
     }
 
+    // Text that must never reach a message. `KEY` is shaped like the dotfile
+    // source path a real state file keys on; `VALUE` like a checksum. Both are
+    // distinctive enough that a `contains` cannot match selfie's own wording.
+    const KEY: &str = "zzz-recon-marker/id_rsa.conf";
+    const VALUE: &str = "zzz-value-marker-9c1f";
+
+    // The malformed shapes, built once. Each test below picks the shapes whose
+    // error class it is about, so a fixture written slightly differently in two
+    // places cannot make two tests disagree about what they cover.
+    fn duplicate_key(key: &str) -> String {
+        format!(
+            "deployed:\n  {key}:\n    source_checksum: a\n    deployed_checksum: a\n    \
+             deployed_at: b\n  {key}:\n    source_checksum: c\n    deployed_checksum: c\n    \
+             deployed_at: d\n"
+        )
+    }
+
+    fn entry_is_a_scalar(key: &str, value: &str) -> String {
+        format!("deployed:\n  {key}: {value}\n")
+    }
+
+    fn entry_is_missing_a_field(key: &str, value: &str) -> String {
+        format!("deployed:\n  {key}:\n    source_checksum: {value}\n")
+    }
+
+    fn unclosed_bracket(key: &str, value: &str) -> String {
+        format!("{key}: [unclosed {value}\n")
+    }
+
     const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
          deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
 
@@ -2416,86 +2438,291 @@ mod tests {
         );
     }
 
-    // A parse failure does not render a source snippet.
+    // The duplicate-key leak, now closed.
     //
-    // serde-saphyr renders one in a parse error's `Display` by default, and this
-    // message reaches an event stream and the MCP server's JSON. The file holds no
-    // credentials, but it names every repository-file dotfile on the machine —
-    // which is why `save_deploy_state` writes it owner-only.
+    // The assertion is inverted from the one it replaces, which asserted the key
+    // *did* reach the message. serde-saphyr interpolates a duplicated key into
+    // that error's own text, which no snippet option governs.
     //
-    // The marker sits on the line the parse fails at, so a rendered snippet would
-    // certainly contain it. This is a *scanner* error, which is the class the
-    // snippet suppression fully covers — see the test below for the class it does
-    // not.
+    // The controls below are part of the assertion: an inverted `contains` passes
+    // just as well against an empty message or an unreached branch.
     #[test]
-    fn a_parse_failure_does_not_render_a_source_snippet() {
-        const MARKER: &str = "zzz-recon-marker/config.conf";
-        let fs = filesystem_holding(&format!("{MARKER}: [unclosed\n"));
-
-        let (_, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        let warning = warning.expect("a corrupt state file must be reported");
-        assert!(
-            !warning.contains(MARKER),
-            "the state file's contents were quoted into the message: {warning}"
-        );
-        // Controls: the report still happened, and still names the file, so this
-        // cannot pass by the message being empty or the branch not being reached.
-        assert!(
-            warning.contains(STATE_FILE) && warning.contains("Cannot parse"),
-            "the message must still identify the file and the condition: {warning}"
-        );
-    }
-
-    // The residual the snippet suppression does **not** cover, pinned as a fact.
-    //
-    // `DuplicateMappingKey`'s text interpolates the key itself
-    // (`message_formatters.rs`), so no option suppresses it — and in this file the
-    // keys are dotfile source paths. `DuplicateKeyPolicy::Error` is the default, so
-    // this is reachable in production, not a contrived shape.
-    //
-    // Asserted in the direction it actually behaves rather than aspirationally: the
-    // key **is** in the message today. Closing that means scrubbing the rendered
-    // error, which is selfie-flka. If this test ever fails because the key stopped
-    // appearing, selfie-flka was fixed and this should become its regression test
-    // rather than being deleted.
-    #[test]
-    fn a_duplicate_key_still_reaches_the_message() {
-        const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
-        let fs = filesystem_holding(&format!(
-            "deployed:\n  {MARKER}:\n    source_checksum: a\n    deployed_checksum: a\n    \
-             deployed_at: \"x\"\n  {MARKER}:\n    source_checksum: b\n    deployed_checksum: b\n    \
-             deployed_at: \"y\"\n"
-        ));
+    fn a_duplicate_key_does_not_reach_the_message() {
+        let fs = filesystem_holding(&duplicate_key(KEY));
 
         let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
 
         assert!(state.entries().is_empty());
         let warning = warning.expect("a duplicated key must still be reported");
         assert!(
-            warning.contains(MARKER),
-            "if the key no longer appears, selfie-flka is fixed -- see this test's \
-             documentation before changing it: {warning}"
+            !warning.contains(KEY),
+            "the duplicated key was quoted into the message: {warning}"
+        );
+        // `contains("line")` would pass on "at line , column " and on "line 0,
+        // column 0" -- the sentinel the classifier's own guard exists to drop --
+        // so the coordinates are asserted exactly.
+        assert!(
+            warning.contains(STATE_FILE)
+                && warning.contains("Cannot parse")
+                && warning.contains("a key is listed twice")
+                && warning.contains("at line 6, column 3"),
+            "the message must still identify the file, the condition and where: {warning}"
         );
     }
 
-    // The bound engages on an error selfie does not control the length of.
+    // The malformed shapes a deploy state file can take, scanned for their own
+    // content.
     //
-    // A duplicated **explicit** key (`? <key>`) carries the whole key into the
-    // message, and an explicit key is not subject to YAML's 1024-byte simple-key
-    // limit — which is why the plain `key:` form cannot reach the bound and why an
-    // earlier version of this work recorded the bound as untestable.
+    // Not every arm of `ParseFailure::of` has a row, and the uncovered set is
+    // worth stating exactly, since a partial list reads as a complete one:
+    // `MergeKeyNotAllowed`, the unbalanced-container group, the two alias groups
+    // and `Eof` have no row; `InvalidScalar` and `IndentationError` cannot fire
+    // at all here -- every field of this type is a `String`, and `require_indent`
+    // is left at its default.
+    //
+    // The row a hand-written table misses is "duplicate key that is itself an
+    // alias": the duplicated text never appears literally at the duplication
+    // site, and the error quotes it anyway.
+    //
+    // Its two neighbours are weaker than their names suggest, and the difference
+    // is worth keeping straight. Both fail at line 3, inside the anchor's own
+    // mapping, so the duplicate is caught before `deployed: *a` is ever reached
+    // and neither actually exercises expansion. They are kept as the shapes a
+    // reader would write to test anchors and merges, not as two more mechanisms.
+    //
+    // Shapes that parse successfully are deliberately absent: each row asserts a
+    // warning was produced, so a shape that stops erroring would be reported as
+    // clean instead of being caught.
+    //
+    // Each row names the condition it should produce, so a row that drifts to a
+    // different error class fails instead of passing for the wrong reason.
+    //
+    // These rows are also what pins the absence of a source snippet. Every marker
+    // sits on the line its parse fails at, so a snippet returning to the rendered
+    // error would quote it and fail the scan below, whatever the error class.
     #[test]
-    fn an_unbounded_parse_error_is_cut_to_the_bound() {
+    fn no_malformed_state_file_shape_quotes_its_contents() {
+        const DUPLICATE: &str = "a key is listed twice";
+        const WRONG_SHAPE: &str = "the file has the wrong shape";
+        const UNPARSABLE: &str = "the file is not valid YAML";
+
+        let entry = "{source_checksum: x, deployed_checksum: y, deployed_at: z}";
+        // YAML escapes, so the key this builds is ordinary UTF-8 text holding
+        // U+00FF and U+00FE -- non-ASCII, not raw bytes.
+        let non_ascii_key = format!("\"{KEY}\\xff\\xfe\"");
+
+        let shapes: Vec<(&str, String, &str)> = vec![
+            ("duplicate key", duplicate_key(KEY), DUPLICATE),
+            (
+                "duplicate key inside an anchor",
+                format!("anchor: &a\n  {KEY}: 1\n  {KEY}: 2\ndeployed: *a\n"),
+                DUPLICATE,
+            ),
+            (
+                "duplicate key through a merge key",
+                format!("anchor: &a\n  {KEY}: 1\n  {KEY}: 2\ndeployed:\n  <<: *a\n"),
+                DUPLICATE,
+            ),
+            (
+                "duplicate key that is itself an alias",
+                format!("anchor: &a {KEY}\ndeployed:\n  *a : {entry}\n  *a : {entry}\n"),
+                DUPLICATE,
+            ),
+            (
+                "duplicate key holding non-ASCII characters",
+                duplicate_key(&non_ascii_key),
+                DUPLICATE,
+            ),
+            (
+                "entry is a scalar",
+                entry_is_a_scalar(KEY, VALUE),
+                WRONG_SHAPE,
+            ),
+            (
+                "field is a sequence",
+                format!(
+                    "deployed:\n  {KEY}:\n    source_checksum:\n      - {VALUE}\n    \
+                     deployed_checksum: a\n    deployed_at: b\n"
+                ),
+                WRONG_SHAPE,
+            ),
+            (
+                "field is null",
+                format!(
+                    "deployed:\n  {KEY}:\n    source_checksum: ~\n    deployed_checksum: a\n    \
+                     deployed_at: b\n"
+                ),
+                "a value is empty where text is required",
+            ),
+            (
+                "entry is missing a field",
+                entry_is_missing_a_field(KEY, VALUE),
+                "an entry is missing the field",
+            ),
+            (
+                "deployed is a scalar",
+                format!("deployed: {VALUE}\n"),
+                WRONG_SHAPE,
+            ),
+            ("top level is a scalar", format!("{VALUE}\n"), WRONG_SHAPE),
+            ("unclosed bracket", unclosed_bracket(KEY, VALUE), UNPARSABLE),
+            (
+                "tab indentation",
+                format!("deployed:\n\t{KEY}: {VALUE}\n"),
+                UNPARSABLE,
+            ),
+            (
+                "unknown anchor",
+                format!("deployed: *{KEY}\n"),
+                "the file refers to an anchor it never defines",
+            ),
+            (
+                "merge key against a scalar",
+                format!("deployed:\n  {KEY}:\n    <<: {VALUE}\n"),
+                "a merge key does not refer to a mapping or a list of mappings",
+            ),
+            (
+                "!!binary that is not base64",
+                format!(
+                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"@@@@\"\n    \
+                     deployed_checksum: a\n    deployed_at: b\n"
+                ),
+                "a !!binary value is not valid base64",
+            ),
+            (
+                "!!binary that is not text",
+                format!(
+                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"//8=\"\n    \
+                     deployed_checksum: a\n    deployed_at: b\n"
+                ),
+                "a !!binary value is not text",
+            ),
+            (
+                "more than one document",
+                format!("deployed: {{}}\n---\ndeployed: {VALUE}\n"),
+                "the file holds more than one YAML document",
+            ),
+        ];
+
+        for (name, yaml, condition) in shapes {
+            let fs = filesystem_holding(&yaml);
+
+            let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
+
+            assert!(
+                state.entries().is_empty(),
+                "{name}: state was not discarded"
+            );
+            let warning = warning.unwrap_or_else(|| {
+                panic!("{name}: stopped being an error, so this row no longer tests anything")
+            });
+            assert!(
+                !warning.contains(KEY) && !warning.contains(VALUE),
+                "{name}: the file's contents were quoted into the message: {warning}"
+            );
+            assert!(
+                warning.contains("Cannot parse") && warning.contains(STATE_FILE),
+                "{name}: a malformed file must say so, and name itself: {warning}"
+            );
+            assert!(
+                warning.contains(condition),
+                "{name}: this row now reports a different condition, so it no \
+                 longer covers the class it was added for: {warning}"
+            );
+        }
+    }
+
+    // The classification survives, so the message is worth reading.
+    //
+    // Three failures a user fixes differently must not render alike. Compared
+    // with the location cut off, because the three fixtures fail at three
+    // different places: comparing whole messages, every kind could collapse to
+    // one string and the differing line numbers would still tell them apart.
+    #[test]
+    fn a_parse_failure_names_its_condition() {
+        let condition = |yaml: &str| {
+            let fs = filesystem_holding(yaml);
+            let warning = load_deploy_state(&fs, &config_with_state_dir())
+                .1
+                .expect("a corrupt state file must be reported");
+            let at = warning
+                .find(" at line ")
+                .unwrap_or_else(|| panic!("a parse failure must say where it happened: {warning}"));
+            warning[..at].to_string()
+        };
+
+        let duplicate = condition(&duplicate_key("a/b.conf"));
+        let wrong_shape = condition(&entry_is_a_scalar("a/b.conf", "scalar"));
+        let unparsable = condition(&unclosed_bracket("a/b.conf", "x"));
+
+        assert_ne!(duplicate, wrong_shape);
+        assert_ne!(wrong_shape, unparsable);
+        assert_ne!(duplicate, unparsable);
+    }
+
+    // The two classes that forward the library's own `&'static str`.
+    //
+    // Those strings are the deserializer's vocabulary, not the file's -- the field
+    // name comes from this crate's own derive, and "mapping start" names a YAML
+    // event. Checked here rather than taken on the type's word, which is the same
+    // trust the rest of this work withholds.
+    #[test]
+    fn no_passed_through_text_carries_input() {
+        for (yaml, expected) in [
+            (entry_is_a_scalar(KEY, VALUE), "expected mapping start"),
+            (entry_is_missing_a_field(KEY, VALUE), "deployed_checksum"),
+        ] {
+            let fs = filesystem_holding(&yaml);
+
+            let warning = load_deploy_state(&fs, &config_with_state_dir())
+                .1
+                .expect("a corrupt state file must be reported");
+
+            assert!(
+                warning.contains(expected),
+                "the library's own text stopped being forwarded, so this test no \
+                 longer proves anything about it: {warning}"
+            );
+            assert!(
+                !warning.contains(KEY) && !warning.contains(VALUE),
+                "forwarded library text carried the file's content: {warning}"
+            );
+        }
+    }
+
+    // A key selfie does not control the length of does not grow the message.
+    //
+    // An explicit key (`? <key>`) is not subject to YAML's 1024-byte simple-key
+    // limit, so it can be arbitrarily long. Nothing is forwarded, so nothing
+    // needs bounding.
+    #[test]
+    fn a_huge_duplicate_key_does_not_grow_the_message() {
         let key = "k".repeat(2500);
         let fs = filesystem_holding(&format!("? {key}\n: 1\n? {key}\n: 2\n"));
 
         let (_, warning) = load_deploy_state(&fs, &config_with_state_dir());
 
         let warning = warning.expect("a duplicated key must be reported");
+        // Control: if this fixture stops producing a duplicate-key error, the
+        // huge-key path goes untested and everything below still passes.
         assert!(
-            warning.contains("bytes elided"),
-            "an error longer than the bound was forwarded whole: {} bytes",
+            warning.contains("a key is listed twice"),
+            "this fixture no longer exercises the huge-key path: {warning}"
+        );
+        // Neither assertion below is redundant, and the numbers are why. The
+        // invariant message measures 142 bytes against the 300-byte bound, so a
+        // leak of up to ~158 bytes of the key would satisfy the length check
+        // alone; the scan is what catches those. The scan in turn only fires on
+        // 32 consecutive key bytes, so the length check is what catches a long
+        // leak that somehow broke the run up. A fragment shorter than 32 bytes
+        // slips both -- the exact residual, and the reason to keep the pair.
+        assert!(
+            !warning.contains(&"k".repeat(32)),
+            "the key reached the message: {warning}"
+        );
+        assert!(
+            warning.len() < 300,
+            "the message grew with the file's content: {} bytes",
             warning.len()
         );
     }

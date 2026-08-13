@@ -5621,8 +5621,12 @@ mod deploy_state_diagnostics {
             .collect()
     }
 
+    fn write_state_file(dirs: &TestDirs, contents: &str) {
+        std::fs::write(dirs.state_dir.join("deploy-state.yml"), contents).unwrap();
+    }
+
     fn corrupt_the_state_file(dirs: &TestDirs) {
-        std::fs::write(dirs.state_dir.join("deploy-state.yml"), CORRUPT).unwrap();
+        write_state_file(dirs, CORRUPT);
     }
 
     fn a_package_with_one_dotfile(dirs: &TestDirs) {
@@ -5721,6 +5725,74 @@ mod deploy_state_diagnostics {
         .await;
 
         assert_reports_the_corrupt_file(&events);
+    }
+
+    // That the warning carries none of the file by the time it is an event.
+    //
+    // A clean return from `load_deploy_state` says nothing about what reaches an
+    // adapter: the warning travels as a `PackageEvent`, and the MCP server turns
+    // that into JSON.
+    //
+    // **`Debug` is not a superset of what egresses, so do not read the sweep
+    // below as a boundary guarantee.** This crate ships deliberately redacting
+    // `Debug` impls -- `ResolvedContent` and `ContentOutput` both print a byte
+    // count instead of their contents -- so state-file text arriving on an event
+    // behind one of those would render redacted and the sweep would pass. And the
+    // real exit is `event_to_json` in the MCP server, which reads
+    // `Warning { message }` as a typed field rather than through `Debug` at all.
+    //
+    // So the sweep is a cheap net, and the assertion that matches the egress is
+    // the one on the message itself -- the same field `event_to_json` forwards.
+    //
+    // The fixture is a duplicated key, because that is the one error class whose
+    // own text quotes the file. A scanner error would pass this against any
+    // implementation.
+    #[tokio::test]
+    async fn no_event_carries_the_state_file_contents() {
+        const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
+
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        write_state_file(
+            &dirs,
+            &format!(
+                "deployed:\n  {MARKER}:\n    source_checksum: a\n    deployed_checksum: a\n    \
+                 deployed_at: b\n  {MARKER}:\n    source_checksum: c\n    \
+                 deployed_checksum: c\n    deployed_at: d\n"
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        // Controls: the file really was parsed and the failure really was
+        // reported, so this cannot pass by the state file never having been read
+        // -- and it was reported as a *duplicate key*, since the comment above is
+        // only true while that is the class this fixture produces.
+        assert_reports_the_corrupt_file(&events);
+        assert!(
+            state_warnings(&events)[0].contains("a key is listed twice"),
+            "this fixture no longer produces the one class whose text quotes the \
+             file, so it would pass against any implementation: {:?}",
+            state_warnings(&events)
+        );
+
+        // The one that matches the egress: every warning message, as the field
+        // the MCP server reads.
+        for message in warnings(&events) {
+            assert!(
+                !message.contains(MARKER),
+                "a warning message carried the state file's contents: {message}"
+            );
+        }
+
+        // The cheap net over everything else, with the limits above understood.
+        for event in &events {
+            let rendered = format!("{event:?}");
+            assert!(
+                !rendered.contains(MARKER),
+                "an event carried the state file's contents: {rendered}"
+            );
+        }
     }
 
     // The silence that must survive: a first run has no state file and says so
