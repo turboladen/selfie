@@ -222,8 +222,14 @@ impl EventProcessor {
                                 "Package directory not found: {}",
                                 path.display()
                             ));
+                            // `selfie config` requires a subcommand and has only
+                            // one, `validate`, so it is not a way to set the
+                            // directory — naming it here sends a reader whose
+                            // directory is already missing to a usage error.
+                            // The global flag is per-run and the file is the
+                            // durable fix, so both are named.
                             self.display.print_suggestion(format!(
-                                "Create the directory with 'mkdir -p {}' or set a different path with 'selfie config --package-directory <path>'",
+                                "Create the directory with 'mkdir -p {}', edit 'package_directory' in your config file, or name another for this run with the global flag: 'selfie --package-directory <path> …'",
                                 path.display()
                             ));
                         }

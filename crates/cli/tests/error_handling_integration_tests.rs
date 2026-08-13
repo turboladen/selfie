@@ -340,9 +340,17 @@ fn test_invalid_package_directory_override_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["-p", "/dev/null/nonexistent", "package", "list"]);
 
+    // The suggestion goes to stdout and the message to stderr, so asserting one
+    // stream leaves the other unchecked. Both are asserted here, and the
+    // suggestion is also asserted for what it must *not* name: `selfie config`
+    // takes a subcommand, so it cannot set the directory.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains("Package directory not found"))
+        .stdout(predicate::str::contains(
+            "selfie --package-directory <path>",
+        ))
+        .stdout(predicate::str::contains("selfie config --package-directory").not());
 }
 
 // =============================================================================
