@@ -179,6 +179,9 @@ mod tests {
         fs.mock_config_dir_ok(config_dir);
         fs.mock_path_exists(&config_dir.join("config.yaml"), false);
         fs.mock_path_exists(&config_dir.join("config.yml"), false);
+        // Nothing there at all, not a link that fails to resolve — the loader
+        // asks before it concludes the file is absent.
+        fs.expect_symlink_refusal().returning(|_| None);
 
         let result = handle_validate(&config, &display, &fs);
         assert_eq!(result, 1);

@@ -7,7 +7,9 @@ use config::FileFormat;
 
 use crate::{config::SelfieConfig, fs::FileSystem};
 
-use super::loader::{ConfigLoadError, ConfigLoader};
+use super::loader::{
+    ConfigLoadError, ConfigLoader, irregular_config_refusal, unresolvable_config_refusal,
+};
 
 /// YAML-based configuration loader implementation
 ///
@@ -44,9 +46,16 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     fn load_config(&self) -> Result<SelfieConfig, ConfigLoadError> {
         let config_paths = match self.find_config_file_paths() {
             Ok(paths) => paths,
-            Err(searched) => {
+            Err(ConfigLoadError::NotFound { searched }) => {
+                // "Nothing there" and "there, but the link goes nowhere" are
+                // different answers, and `path_exists` follows so it cannot tell
+                // them apart on its own.
+                if let Some(refusal) = unresolvable_config_refusal(self.fs, &searched) {
+                    return Err(refusal);
+                }
                 return Err(ConfigLoadError::NotFound { searched });
             }
+            Err(other) => return Err(other),
         };
 
         if config_paths.len() > 1 {
@@ -70,6 +79,13 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         let mut builder = config::Config::builder();
 
         let config_path = &config_paths[0];
+
+        // Before the read, not after it. `find_config_file_paths` selects a path
+        // with `path_exists`, which a fifo satisfies, and reading one blocks
+        // until a writer arrives.
+        if let Some(refusal) = irregular_config_refusal(self.fs, config_path) {
+            return Err(refusal);
+        }
 
         let file_contents = self.fs.read_file(config_path)?;
 
@@ -112,14 +128,14 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// Returns the searched directory path if:
     /// - The user's configuration directory cannot be determined
     /// - No configuration files are found in the search location
-    fn find_config_file_paths(&self) -> Result<Vec<PathBuf>, PathBuf> {
+    fn find_config_file_paths(&self) -> Result<Vec<PathBuf>, ConfigLoadError> {
         let mut paths = Vec::new();
 
-        let config_dir = self.fs.config_dir().map_err(|_| {
-            // When config_dir fails, we can't determine a search path
-            // Return a generic path to indicate the search location
-            PathBuf::from("~/.config/selfie")
-        })?;
+        // Not "no configuration file found in ~/.config/selfie": there is no
+        // directory to search, and naming one selfie never looked in sends the
+        // user to the wrong place. `SELFIE_CONFIG_DIR` and `XDG_CONFIG_HOME`
+        // both move it.
+        let config_dir = self.fs.config_dir()?;
 
         let first_yaml = config_dir.join("config.yaml");
         let second_yaml = config_dir.join("config.yml");
@@ -132,7 +148,9 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         }
 
         if paths.is_empty() {
-            return Err(config_dir);
+            return Err(ConfigLoadError::NotFound {
+                searched: config_dir,
+            });
         }
 
         Ok(paths)
@@ -182,8 +200,37 @@ mod tests {
         fs.mock_path_exists(&config_path, true);
         fs.mock_path_exists(&config_dir.join("config.yml"), false);
         fs.mock_read_file(config_path, config_yaml);
+        mock_regular_file(&mut fs);
 
         (fs, home_dir.into())
+    }
+
+    // The loader asks this immediately before the read, so any fixture whose
+    // config file is an ordinary one needs it. `mock_config_file` includes it;
+    // fixtures that build the expectations by hand call this.
+    fn mock_regular_file(fs: &mut MockFileSystem) {
+        fs.expect_irregular_target_refusal().returning(|_| None);
+    }
+
+    // Answer the dangling-link question with "no". Needed by any fixture that
+    // reaches the not-found path, which is where that question is asked.
+    fn mock_no_symlinks(fs: &mut MockFileSystem) {
+        fs.expect_symlink_refusal().returning(|_| None);
+    }
+
+    // Every expectation for finding a config file, and none for reading it.
+    // A read attempt then fails the test on an unexpected call, which is what
+    // pins that the guard runs *before* the read rather than after it.
+    fn mock_config_path_without_read(
+        fs: &mut MockFileSystem,
+        config_dir: &Path,
+        refusal: FileSystemError,
+    ) {
+        fs.mock_config_dir_ok(config_dir);
+        fs.mock_path_exists(config_dir.join("config.yaml"), true);
+        fs.mock_path_exists(config_dir.join("config.yml"), false);
+        fs.expect_irregular_target_refusal()
+            .return_once(move |_| Some(refusal));
     }
 
     mod find_config_file_paths {
@@ -238,10 +285,12 @@ mod tests {
             let loader = YamlLoader::new(&fs);
             let result = loader.find_config_file_paths();
 
-            // Should return error when config dir can't be found
-            assert!(result.is_err());
-            let searched_path = result.unwrap_err();
-            assert_eq!(searched_path, PathBuf::from("~/.config/selfie"));
+            // "There is no directory to search" — not "no file found in
+            // ~/.config/selfie", which names somewhere selfie never looked.
+            assert!(matches!(
+                result.unwrap_err(),
+                ConfigLoadError::FileSystemError(FileSystemError::HomeDirNotFound)
+            ));
         }
     }
 
@@ -275,6 +324,7 @@ mod tests {
             fs.mock_path_exists(config_dir, true);
             fs.mock_path_exists(config_dir.join("config.yaml"), false);
             fs.mock_path_exists(config_dir.join("config.yml"), false);
+            mock_no_symlinks(&mut fs);
 
             let loader = YamlLoader::new(&fs);
 
@@ -431,6 +481,7 @@ mod tests {
             fs.mock_path_exists(&config_path, true);
             fs.mock_path_exists(&config_dir.join("config.yml"), false);
             fs.mock_read_file(&config_path, minimal_yaml);
+            mock_regular_file(&mut fs);
             fs.mock_expand_path(Path::new("/test/packages"), Path::new("/test/packages"));
 
             let loader = YamlLoader::new(&fs);
@@ -481,6 +532,7 @@ mod tests {
             // Mock invalid YAML content
             let invalid_yaml = "invalid: yaml: content: [";
             fs.mock_read_file(&config_path, invalid_yaml);
+            mock_regular_file(&mut fs);
 
             let loader = YamlLoader::new(&fs);
             let result = loader.load_config();
@@ -503,6 +555,8 @@ mod tests {
             fs.mock_config_dir_ok(&config_dir);
             fs.mock_path_exists(&config_path, true);
             fs.mock_path_exists(&config_dir.join("config.yml"), false);
+
+            mock_regular_file(&mut fs);
 
             // Mock filesystem error when reading file
             fs.expect_read_file()
@@ -533,17 +587,162 @@ mod tests {
             // Mock config_dir failing
             fs.expect_config_dir()
                 .return_once(|| Err(FileSystemError::HomeDirNotFound));
+            mock_no_symlinks(&mut fs);
 
             let loader = YamlLoader::new(&fs);
             let result = loader.load_config();
 
-            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ConfigLoadError::FileSystemError(FileSystemError::HomeDirNotFound)
+            ));
+        }
+
+        // A fifo at the config path wedged every command: they all load
+        // configuration first, and opening a fifo blocks until a writer arrives.
+        // No `read_file` expectation is registered here on purpose -- if the
+        // guard moves after the read, mockall fails the test on the unexpected
+        // call. That is the assertion; the returned error is the secondary one.
+        #[test]
+        fn a_fifo_config_is_refused_without_reading_it() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            mock_config_path_without_read(
+                &mut fs,
+                config_dir,
+                FileSystemError::IrregularTarget {
+                    path: config_dir.join("config.yaml"),
+                    kind: "named pipe (fifo)",
+                },
+            );
+
+            let result = YamlLoader::new(&fs).load_config();
+
             match result.unwrap_err() {
-                ConfigLoadError::NotFound { searched } => {
-                    assert_eq!(searched, PathBuf::from("~/.config/selfie"));
+                ConfigLoadError::IrregularFile { path, kind } => {
+                    assert_eq!(path, config_dir.join("config.yaml"));
+                    assert_eq!(kind, "named pipe (fifo)");
                 }
-                other => panic!("Expected ConfigLoadError::NotFound, got: {other:?}"),
+                other => panic!("Expected IrregularFile, got: {other:?}"),
             }
+        }
+
+        #[test]
+        fn a_socket_config_is_refused_without_reading_it() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            mock_config_path_without_read(
+                &mut fs,
+                config_dir,
+                FileSystemError::IrregularTarget {
+                    path: config_dir.join("config.yaml"),
+                    kind: "socket",
+                },
+            );
+
+            let result = YamlLoader::new(&fs).load_config();
+
+            assert!(matches!(
+                result.unwrap_err(),
+                ConfigLoadError::IrregularFile { kind: "socket", .. }
+            ));
+        }
+
+        // The refusal must not read as "there is no config file". A fix that
+        // skipped irregular files during discovery instead of refusing them
+        // would produce exactly that, and would look like a pass on the variant
+        // check alone.
+        #[test]
+        fn a_fifo_config_is_not_reported_as_missing() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            mock_config_path_without_read(
+                &mut fs,
+                config_dir,
+                FileSystemError::IrregularTarget {
+                    path: config_dir.join("config.yaml"),
+                    kind: "named pipe (fifo)",
+                },
+            );
+
+            let message = YamlLoader::new(&fs).load_config().unwrap_err().to_string();
+
+            assert!(message.contains("not a regular file"), "got: {message}");
+            assert!(message.contains("named pipe (fifo)"), "got: {message}");
+            assert!(
+                !message.contains("No configuration file found"),
+                "got: {message}"
+            );
+        }
+
+        // The `other` arm of `irregular_config_refusal` fails closed. Nothing
+        // reaches it today, so only a mock can drive it -- and a wildcard that
+        // let the value through would un-guard the read.
+        #[test]
+        fn an_unexpected_refusal_kind_is_still_fatal() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            mock_config_path_without_read(&mut fs, config_dir, FileSystemError::HomeDirNotFound);
+
+            let result = YamlLoader::new(&fs).load_config();
+
+            assert!(matches!(
+                result.unwrap_err(),
+                ConfigLoadError::FileSystemError(FileSystemError::HomeDirNotFound)
+            ));
+        }
+
+        // A config file symlinked into a dotfiles repository that has not been
+        // checked out yet. `path_exists` follows, so discovery answers "absent" —
+        // and the file is right there. Reported as absent it becomes either an
+        // error naming a directory the file is in, or, once flags can stand in
+        // for a missing file, a silent run with the user's configuration ignored.
+        #[test]
+        fn a_dangling_config_symlink_is_not_reported_as_absent() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_dir_ok(config_dir);
+            fs.mock_path_exists(config_dir.join("config.yaml"), false);
+            fs.mock_path_exists(config_dir.join("config.yml"), false);
+            fs.expect_symlink_refusal().returning(|target| {
+                target
+                    .path()
+                    .ends_with("config.yaml")
+                    .then(|| FileSystemError::SymlinkedTarget {
+                        path: target.path().to_path_buf(),
+                        points_to: Some(PathBuf::from("/not/checked/out/config.yaml")),
+                    })
+            });
+
+            let message = YamlLoader::new(&fs).load_config().unwrap_err().to_string();
+
+            assert!(
+                message.contains("does not resolve"),
+                "the link must be named as unresolvable, got: {message}"
+            );
+            assert!(
+                !message.contains("No configuration file found"),
+                "a link that is present must not be reported as absent, got: {message}"
+            );
+        }
+
+        // The other control: nothing there at all is still plain `NotFound`, not
+        // an unresolvable link.
+        #[test]
+        fn an_empty_config_directory_is_still_reported_as_not_found() {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_dir_ok(config_dir);
+            fs.mock_path_exists(config_dir.join("config.yaml"), false);
+            fs.mock_path_exists(config_dir.join("config.yml"), false);
+            mock_no_symlinks(&mut fs);
+
+            let result = YamlLoader::new(&fs).load_config();
+
+            assert!(matches!(
+                result.unwrap_err(),
+                ConfigLoadError::NotFound { .. }
+            ));
         }
 
         #[test]

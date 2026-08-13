@@ -373,6 +373,11 @@ impl MockFileSystem {
 
     /// Set up every expectation for loading a config file: the directory, a
     /// `config.yaml` in it holding `config_yaml`, and no `config.yml` beside it.
+    ///
+    /// The file is an ordinary regular one. A test that needs the configuration
+    /// path *refused* sets [`expect_irregular_target_refusal`] itself.
+    ///
+    /// [`expect_irregular_target_refusal`]: MockFileSystem::expect_irregular_target_refusal
     pub fn mock_config_file(&mut self, config_dir: &Path, config_yaml: &str) {
         let config_dir_owned = PathBuf::from(config_dir);
         let config_path = config_dir.join("config.yaml");
@@ -381,6 +386,9 @@ impl MockFileSystem {
             .return_once(|| Ok(config_dir_owned));
         self.mock_path_exists(&config_path, true);
         self.mock_read_file(&config_path, config_yaml);
+        // The loader asks this immediately before the read, so a fixture without
+        // it fails on an unexpected call rather than on anything it means to test.
+        self.expect_irregular_target_refusal().returning(|_| None);
 
         self.mock_path_exists(&config_dir.join("config.yml"), false);
     }
