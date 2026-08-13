@@ -3118,9 +3118,21 @@ mod secret_bearing {
             rendered.contains("creds.yml"),
             "the warning must name the file, got: {events:?}"
         );
+        // The reason, not an adjective: the wording is shared with every command
+        // that skips a spec file, and a fifo is not unparsable.
         assert!(
-            rendered.contains("unparsable"),
+            rendered.contains("YAML parsing error"),
             "the warning must say why it was skipped, got: {events:?}"
+        );
+        // Exactly once. `YamlParse` names the file in its own `Display`, so the
+        // shared warning must not prefix it again -- and this is the only half of
+        // that decision anything pins. Without it, collapsing
+        // `skipped_spec_warning` back to unconditional prefixing passes the whole
+        // suite, which is the behavior this change exists to remove.
+        assert_eq!(
+            rendered.matches("creds.yml").count(),
+            1,
+            "the file must be named exactly once, got: {events:?}"
         );
     }
 

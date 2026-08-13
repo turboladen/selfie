@@ -86,7 +86,10 @@ fn collect_packages_with_dotfiles(
     display: &DisplayManager,
 ) -> Result<Vec<(Package, DotfileOrigin)>, i32> {
     let repo = create_package_repository(config);
-    let raw = load_dotfile_packages(&repo, display, "packages")?;
+    let (raw, skipped) = load_dotfile_packages(&repo, display, "packages")?;
+    for warning in skipped {
+        display.print_warning(warning);
+    }
     let mut packages: Vec<(Package, DotfileOrigin)> = raw
         .into_iter()
         .map(|p| (p, DotfileOrigin::Packages))
@@ -95,7 +98,10 @@ fn collect_packages_with_dotfiles(
     // Add standalone dotfiles repository if the directory exists
     if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
         match load_dotfile_packages(&dotfiles_repo, display, "dotfiles") {
-            Ok(dotfile_pkgs) => {
+            Ok((dotfile_pkgs, dotfile_skipped)) => {
+                for warning in dotfile_skipped {
+                    display.print_warning(warning);
+                }
                 packages.extend(
                     dotfile_pkgs
                         .into_iter()
@@ -140,18 +146,31 @@ fn print_base_directories(
     }
 }
 
-/// Load packages from a single repository, filtering to those with dotfiles.
+/// Load packages from a single repository, filtering to those with dotfiles,
+/// along with a warning for every spec file that could not be loaded.
+// The warnings are returned rather than printed so they can be asserted:
+// `print_warning` goes to stderr, which a unit test cannot observe, and the
+// dropped-silently case is the whole reason this reports anything at all.
 fn load_dotfile_packages(
     repo: &impl PackageRepository,
     display: &DisplayManager,
     label: &str,
-) -> Result<Vec<Package>, i32> {
+) -> Result<(Vec<Package>, Vec<String>), i32> {
     match repo.list_packages() {
-        Ok(output) => Ok(output
-            .valid_packages()
-            .filter(|p| !p.dotfiles_with_scope().is_empty())
-            .cloned()
-            .collect()),
+        Ok(output) => {
+            let skipped = output
+                .invalid_packages()
+                .map(selfie::package::service::skipped_spec_warning)
+                .collect();
+
+            let packages = output
+                .valid_packages()
+                .filter(|p| !p.dotfiles_with_scope().is_empty())
+                .cloned()
+                .collect();
+
+            Ok((packages, skipped))
+        }
         Err(e) => {
             display.print_error(format!("Failed to load {label}: {e}"));
             Err(1)
@@ -193,11 +212,12 @@ mod tests {
         });
 
         let display = DisplayManager::new(false);
-        let result = load_dotfile_packages(&repo, &display, "test").unwrap();
+        let (packages, skipped) = load_dotfile_packages(&repo, &display, "test").unwrap();
 
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name(), "starship");
-        assert_eq!(result[1].name(), "alacritty");
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name(), "starship");
+        assert_eq!(packages[1].name(), "alacritty");
+        assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
     #[test]
@@ -211,9 +231,64 @@ mod tests {
         });
 
         let display = DisplayManager::new(false);
-        let result = load_dotfile_packages(&repo, &display, "test").unwrap();
+        let (packages, skipped) = load_dotfile_packages(&repo, &display, "test").unwrap();
 
-        assert!(result.is_empty());
+        assert!(packages.is_empty());
+        assert!(skipped.is_empty(), "got: {skipped:?}");
+    }
+
+    // `valid_packages` drops a spec file that could not be loaded, so before the
+    // shared warning this command listed the dotfiles it could read and said
+    // nothing about the file it could not -- indistinguishable from a package
+    // that genuinely declares no dotfiles.
+    #[test]
+    fn test_load_names_a_package_file_it_could_not_read() {
+        use selfie::package::port::PackageParseError;
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_results(vec![
+                Ok(make_package_with_dotfiles("starship")),
+                Err(PackageParseError::IrregularFile {
+                    package_path: "/test/packages/ghost.yml".into(),
+                    kind: "named pipe (fifo)",
+                }),
+            ]))
+        });
+
+        let display = DisplayManager::new(false);
+        let (packages, skipped) = load_dotfile_packages(&repo, &display, "packages").unwrap();
+
+        // The readable package still comes back: reporting the skipped file must
+        // not cost the caller the rest of the listing.
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name(), "starship");
+
+        assert_eq!(skipped.len(), 1, "the unreadable file must be reported");
+        assert!(skipped[0].contains("ghost.yml"), "got: {}", skipped[0]);
+        assert!(
+            skipped[0].contains("named pipe (fifo)"),
+            "got: {}",
+            skipped[0]
+        );
+    }
+
+    // The control for the test above: an ordinary listing reports nothing
+    // skipped, so a `skipped` that is never empty would fail here.
+    #[test]
+    fn test_load_reports_nothing_skipped_for_a_clean_listing() {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_packages(vec![
+                make_package_with_dotfiles("starship"),
+            ]))
+        });
+
+        let display = DisplayManager::new(false);
+        let (packages, skipped) = load_dotfile_packages(&repo, &display, "packages").unwrap();
+
+        assert_eq!(packages.len(), 1);
+        assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
     #[test]

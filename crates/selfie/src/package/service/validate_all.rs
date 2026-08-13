@@ -44,11 +44,7 @@ where
     // Emit warnings for invalid (unparsable) package files
     for invalid in &invalid_packages {
         sender
-            .send_warning(format!(
-                "Skipping invalid package file {}: {}",
-                invalid.package_path().display(),
-                invalid
-            ))
+            .send_warning(super::skipped_spec_warning(invalid))
             .await;
     }
 

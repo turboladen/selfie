@@ -162,10 +162,7 @@ where
         let note_unparsable = |output: &crate::package::port::ListPackagesOutput,
                                warnings: &mut Vec<String>| {
             for invalid in output.invalid_packages() {
-                warnings.push(format!(
-                    "Skipping unparsable package file {}: {invalid}",
-                    invalid.package_path().display()
-                ));
+                warnings.push(crate::package::service::skipped_spec_warning(invalid));
             }
         };
 
