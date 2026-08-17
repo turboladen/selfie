@@ -5,7 +5,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, get_command_with_test_config, setup_default_test_config};
+use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // Reported from the spec, not from the argument. The two differ exactly here:
 // the spec holds `~/…` and the caller names the same file absolutely, which is
@@ -35,7 +35,7 @@ fn already_tracking_names_the_target_the_spec_holds() {
     .unwrap();
 
     let absolute = config.join("config");
-    let output = get_command_with_test_config(&temp)
+    let output = sandboxed_command(&temp)
         .env("HOME", &home)
         .args(["track", absolute.to_str().unwrap()])
         .output()

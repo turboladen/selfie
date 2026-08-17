@@ -9,7 +9,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, get_command_with_test_config, setup_default_test_config};
+use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // Write a package whose single dotfile is refused, and one that is not.
 fn write_packages(base: &tempfile::TempDir) {
@@ -48,7 +48,7 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
     let temp = setup_default_test_config();
     write_packages(&temp);
 
-    let output = get_command_with_test_config(&temp)
+    let output = sandboxed_command(&temp)
         .args(["dotfiles", "list"])
         .output()
         .unwrap();

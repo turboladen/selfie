@@ -52,8 +52,10 @@ selfie spec edit my-package
 If `EDITOR` is not set, the `selfie spec edit` command will fail with an error message instructing
 you to set this environment variable.
 
-If no configuration file is found, selfie will create a default configuration at
-`~/.config/selfie/config.yml`.
+If no configuration file is found, selfie does **not** create one. Every command that needs
+configuration fails with `No configuration file found in locations: …`, and command-line flags do
+not substitute for the file — see [Command-Line Overrides](#command-line-overrides). Write
+`~/.config/selfie/config.yaml` yourself, or point `SELFIE_CONFIG_DIR` at a directory that has one.
 
 ## Basic Configuration
 
@@ -81,12 +83,6 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # Directory for deploy state tracking (default: ~/.local/state/selfie)
 state_directory: ~/.local/state/selfie
 
-# Verbosity level (default: false)
-verbose: false
-
-# Use colored output (default: true)
-use_colors: true
-
 # Command timeout in seconds (default: 60)
 command_timeout: 300
 
@@ -95,7 +91,18 @@ stop_on_error: true
 
 # Maximum concurrent operations (default: number of CPUs)
 max_concurrency: 4
+
+# Presentation settings, read only from this section
+cli:
+  # Verbosity level (default: false)
+  verbose: false
+
+  # Use colored output (default: true)
+  use_colors: true
 ```
+
+`verbose` and `use_colors` are read **only** from the `cli:` section. At the top level they are
+unknown keys, which selfie drops without a warning — the setting simply does nothing.
 
 ## Required Settings
 
@@ -166,9 +173,11 @@ Package dotfiles live alongside their package YAML in `package_directory` instea
 #### `state_directory`
 
 Path where selfie stores deploy state (checksums of deployed files, used for conflict and drift
-detection). Defaults to `~/.local/state/selfie`, following the
+detection). Defaults to `~/.local/state/selfie` — the location the
 [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/)
-(`XDG_STATE_HOME`).
+gives for `XDG_STATE_HOME`. Only the path is taken from the specification; the variable itself is
+never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` here, or pass
+`--state-directory`, to put the state file elsewhere.
 
 ```yaml
 state_directory: ~/.local/state/selfie
@@ -196,20 +205,25 @@ what selfie manages — see
 
 ### Global Behavior
 
-#### `verbose`
+#### `cli.verbose`
 
-Enable verbose output by default.
+Print the extra per-step detail that `--verbose` prints. Lives under `cli:`, not at the top level.
 
 ```yaml
-verbose: true
+cli:
+  verbose: true
 ```
 
-#### `use_colors`
+It does **not** turn on the `DEBUG` log lines: the tracing level is chosen from the `--verbose` flag
+alone, before the configuration file is read, so those come only from passing the flag.
 
-Control colored output.
+#### `cli.use_colors`
+
+Control colored output. Lives under `cli:`, not at the top level.
 
 ```yaml
-use_colors: false
+cli:
+  use_colors: false
 ```
 
 #### `command_timeout`
@@ -257,7 +271,11 @@ the same OS.
 
 ## Command-Line Overrides
 
-All configuration options can be overridden via command-line flags:
+Settings are resolved in this order, highest first:
+
+1. Command-line flags
+2. The configuration file
+3. Built-in defaults
 
 ```bash
 # Override environment
@@ -266,12 +284,63 @@ selfie --environment=linux package install node
 # Override package directory
 selfie --package-directory=/path/to/packages package list
 
+# Override the dotfiles and deploy-state directories
+selfie --dotfiles-directory=/path/to/dotfiles --state-directory=/path/to/state apply
+
 # Enable verbose mode
 selfie --verbose package install docker
 
 # Disable colors
 selfie --no-color package list
 ```
+
+These flags are global, so they work on either side of the subcommand:
+`selfie -p /path/to/packages package list` and `selfie package list -p /path/to/packages` are the
+same run.
+
+Six things this order does not mean:
+
+**A configuration file is still required.** The flags override individual settings in the file; they
+do not replace it. So `selfie -p /path/to/packages package list` still fails with
+`No configuration file found in locations: …` when there is no config file to override. Create one,
+or point `SELFIE_CONFIG_DIR` at a directory that has one.
+
+**The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
+colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
+cannot be overridden from the command line — edit the file. `--verbose` is also the wider of the
+two: it selects the `DEBUG` tracing level as well, which `cli: verbose: true` does not, because the
+tracing level is chosen from the flag before the file is read.
+
+**`SELFIE_CONFIG_DIR` and the path flags do not compete.** The variable chooses _which file_ is
+read; the flags override _fields_ in whatever file that was. Setting both is normal, and the flag
+still wins for the field it names.
+
+**A flag value is not processed the way the same value in the file is.** `~` is expanded for the
+path settings in the configuration file; a flag value is used exactly as typed. Your shell expands a
+bare `~/packages`, but neither bash nor zsh expands `--package-directory=~/packages`, so that form
+reaches selfie as the literal string and fails with `Package directory not found: ~/packages` even
+though the identical value works in the file. Use the separated form (`-p ~/packages`) or an
+absolute path. Flag values also skip the absolute-path check `selfie config validate` applies to the
+file.
+
+Only `--package-directory` fails loudly, and the other two fail differently from each other:
+
+- `--state-directory='~/state'` **creates a directory literally named `~`** in the current working
+  directory and reports success, so `selfie --state-directory='~/state' apply -y` exits 0 having
+  written its deploy state somewhere nobody will look for it.
+- `--dotfiles-directory='~/dotfiles'` creates nothing. The directory does not exist, so the
+  standalone dotfiles repository is dropped without a message: every standalone dotfile disappears
+  from `selfie dotfiles list` and is silently skipped by `selfie apply`, which still reports
+  success.
+
+**`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
+what is on disk and applies no overrides, so that a flag cannot hide a problem in the file it is
+masking. Passing `-p` and reading back the file's `package_directory` is expected — it is not the
+flag being ignored. Use `selfie package list`, which prints the package directory it actually read,
+to see the effective value.
+
+**Two paths are not covered by any flag.** A dotfile `target` beginning with `~`, and the
+deploy-state fallback used when no `state_directory` is configured, both resolve against `HOME`.
 
 ## Running Under `sudo`
 

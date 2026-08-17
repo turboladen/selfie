@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{SELFIE_ENV, add_package, get_command_with_test_config, setup_default_test_config};
+use common::{SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -18,7 +18,7 @@ fn test_package_install() {
         .build();
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "test-package"]);
 
     cmd.assert().success().stdout(predicate::str::contains(
@@ -48,7 +48,7 @@ fn test_failing_recommend_does_not_fail_parent_install() {
         .build();
     add_package(&temp_dir, &broken);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "parent-pkg"]);
 
     // Parent should succeed even though recommend failed.
@@ -83,7 +83,7 @@ fn test_no_recommends_flag_skips_recommends() {
         .build();
     add_package(&temp_dir, &rec);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "skip-rec-pkg", "--no-recommends"]);
 
     // Should succeed without any recommend output

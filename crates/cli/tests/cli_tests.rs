@@ -1,8 +1,6 @@
 pub mod common;
 
-use common::{
-    SELFIE_ENV, add_package, get_command, get_command_with_test_config, setup_default_test_config,
-};
+use common::{SELFIE_ENV, add_package, get_command, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -69,7 +67,7 @@ fn test_cli_verbose_flag() {
 #[test]
 fn test_cli_no_color() {
     let temp_dir = setup_default_test_config();
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["--no-color", "config", "validate"]);
     cmd.assert().success();
 }
@@ -80,7 +78,7 @@ fn test_cli_no_color() {
 #[test]
 fn test_cli_config_validate() {
     let temp_dir = setup_default_test_config();
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
     cmd.assert().success();
 }
@@ -95,7 +93,7 @@ fn test_cli_package_list() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
     cmd.assert().success();
 }
@@ -110,7 +108,7 @@ fn test_cli_spec_info() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "test-package"]);
     cmd.assert().success();
 }
@@ -129,7 +127,7 @@ fn test_cli_package_check() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "test-package"]);
     cmd.assert().success();
 }
@@ -146,7 +144,7 @@ fn test_cli_package_install() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "test-package"]);
     cmd.assert().success();
 }
@@ -165,7 +163,7 @@ fn test_cli_package_status() {
 
     add_package(&temp_dir, &package);
 
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "status", "test-package"]);
     cmd.assert().success();
 }
@@ -173,7 +171,7 @@ fn test_cli_package_status() {
 #[test]
 fn test_cli_spec_create() {
     let temp_dir = setup_default_test_config();
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "create", "test-package"]);
     cmd.assert().success();
 }
@@ -181,7 +179,7 @@ fn test_cli_spec_create() {
 #[test]
 fn test_cli_spec_remove_not_found() {
     let temp_dir = setup_default_test_config();
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "remove", "nonexistent-package"]);
     cmd.assert()
         .failure()
@@ -198,7 +196,7 @@ fn test_cli_spec_validate() {
         .build();
 
     add_package(&temp_dir, &package);
-    let mut cmd = get_command_with_test_config(&temp_dir);
+    let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "validate", "test-package"]);
     cmd.assert().success();
 }

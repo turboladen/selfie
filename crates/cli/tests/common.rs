@@ -63,25 +63,61 @@ pub fn add_package(base_dir: &TempDir, package: &Package) {
     fs::write(package_path, yaml).unwrap();
 }
 
-// Helper function to get a command instance with environment variables pointing to our test config
+/// A `selfie` command whose every path lookup lands inside `temp_dir`.
+///
+/// Use this for any test that runs the binary. Each variable closes a different
+/// route to the developer's own files, so they are set together:
+///
+/// `config_dir` takes `SELFIE_CONFIG_DIR` when it is set, and otherwise asks
+/// etcetera for `choose_app_strategy` — the XDG strategy on every platform
+/// except Windows, so `$XDG_CONFIG_HOME/selfie` and then `$HOME/.config/selfie`.
+/// All three are set rather than only the first, so the sandbox still holds if
+/// a caller clears `SELFIE_CONFIG_DIR` or that resolution order changes.
+///
+/// - `SELFIE_CONFIG_DIR` is the route selfie takes today.
+/// - `XDG_CONFIG_HOME` and `HOME` are the next two, in that order.
+/// - `HOME` additionally decides where a `~` dotfile target is written and
+///   where deploy state goes when no `state_directory` is configured, so it is
+///   load-bearing even when the config file is found by the first route.
+/// - `EDITOR` is removed rather than set, so `spec edit` takes its "not set"
+///   branch instead of launching the developer's editor under captured stdio.
+///   The environment is inherited, so leaving it alone is not neutral.
+///
+/// It does **not** sandbox execution: `install`, `check`, `audit` and any
+/// `command:` dotfile source run for real on this machine, through a login
+/// shell that still sources `/etc/profile`. Nor does it sandbox the network or
+/// the developer's credentials — the rest of the environment is inherited, so
+/// `sync push` and `sync pull` reach the real remote with the real
+/// `SSH_AUTH_SOCK` and any `GIT_*` variables in scope; only `~/.gitconfig`
+/// moves with `HOME`. Fixtures must use inert commands such as `true` or
+/// `echo`. `SHELL` is pinned for determinism, not safety.
+///
 /// # Panics
 ///
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
-pub fn get_command_with_test_config(temp_dir: &TempDir) -> Command {
+pub fn sandboxed_command(temp_dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin(SELFIE_BIN_NAME).unwrap();
 
-    // Override the config directory location
-    // This assumes we can add a CLI flag or env var to override the config directory
+    cmd.env("HOME", temp_dir.path());
+    cmd.env("XDG_CONFIG_HOME", temp_dir.path().join(".config"));
     cmd.env(
         "SELFIE_CONFIG_DIR",
         temp_dir.path().join(".config").join("selfie"),
     );
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("EDITOR");
 
     cmd
 }
 
-// Helper function to get a command instance
+/// A `selfie` command with no sandbox at all.
+///
+/// Only for runs that exit before any config, `HOME` or `EDITOR` lookup: a clap
+/// usage error, `--help`, or a caller that sets its own `SELFIE_CONFIG_DIR`.
+/// Anything reaching a command handler wants [`sandboxed_command`], or it reads
+/// the developer's own config and writes their home directory.
+///
 /// # Panics
 ///
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
