@@ -97,9 +97,9 @@ async fn main() -> anyhow::Result<()> {
     // Load and process configuration
     let (config, notices) = {
         // A missing file is not a failure when the flags carry what it would
-        // have. Every *other* load error still is — in particular a config file
-        // that is not a regular one, which must not be mistaken for an absent
-        // one and silently replaced by the flags.
+        // have supplied. Every other load error still is. In particular, a
+        // config file that exists but is a fifo, socket or device node must not
+        // be treated as absent and silently replaced by the flags.
         let (selfie_config, mut notices, cli_load) = match YamlLoader::new(&fs).load_config() {
             Ok(loaded) => {
                 let notices = crate::config::library_config_notices(loaded.ignored_keys());
