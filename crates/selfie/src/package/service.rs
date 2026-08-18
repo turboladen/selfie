@@ -64,20 +64,21 @@ use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 ///
 /// `pub` rather than `pub(crate)`: the CLI and the MCP server both call
 /// `list_packages` directly in places, and they need the same sentence.
-// Those adapters were among the three callers that stayed silent while this
-// lived in a loop copied per caller: two callers had one and three did not.
+// One shared function rather than a loop per caller, so every command names a
+// skipped file the same way and no caller can quietly omit it.
 //
-// Neither "invalid" nor "unparsable", which the two copies used -- they did not
-// agree with each other either. A fifo is neither: it was never opened, let
-// alone parsed.
+// The wording avoids both "invalid" and "unparsable". A fifo is neither: it was
+// never opened, let alone parsed.
 #[must_use]
 pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String {
     use super::port::PackageParseError as E;
 
     // Matched rather than always prefixing the path, because half the variants
     // already name the file in their own `Display` and the other half
-    // deliberately do not. Prefixing unconditionally produced "Skipping package
-    // file /x/bad.yml: YAML parsing error reading package file `/x/bad.yml`: …".
+    // deliberately do not. Prefixing every variant would render "Skipping
+    // package file /x/bad.yml: YAML parsing error reading package file
+    // `/x/bad.yml`: …", naming the path twice.
+    //
     // Exhaustive on purpose: a new variant has to declare which half it is in.
     match invalid {
         E::YamlParse { .. } | E::IoError { .. } | E::FileSystemError { .. } => {

@@ -1108,10 +1108,10 @@ mod tests {
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
-    // The listing failing outright was swallowed by an `if let Ok(output)` with
-    // no `else`, so an unreadable package directory produced
-    // `{"status": "success", "total": 0}` -- indistinguishable from a directory
-    // that genuinely holds no dotfiles.
+    // A listing that fails outright must be reported. An `if let Ok(output)`
+    // with no `else` would answer an unreadable package directory with
+    // `{"status": "success", "total": 0}`, which the assistant cannot tell from
+    // a directory that genuinely holds no dotfiles.
     #[test]
     fn a_failed_listing_is_reported_rather_than_swallowed() {
         use selfie::package::port::PackageListError;

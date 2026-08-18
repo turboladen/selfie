@@ -237,10 +237,10 @@ mod tests {
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
-    // `valid_packages` drops a spec file that could not be loaded, so before the
-    // shared warning this command listed the dotfiles it could read and said
-    // nothing about the file it could not -- indistinguishable from a package
-    // that genuinely declares no dotfiles.
+    // `valid_packages` drops a spec file that could not be loaded, so without the
+    // shared warning this command would list the dotfiles it could read and say
+    // nothing about the file it could not, which the user cannot tell from a
+    // package that genuinely declares no dotfiles.
     #[test]
     fn test_load_names_a_package_file_it_could_not_read() {
         use selfie::package::port::PackageParseError;
