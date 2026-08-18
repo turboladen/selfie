@@ -2438,11 +2438,10 @@ mod tests {
         );
     }
 
-    // The duplicate-key leak, now closed.
+    // A duplicated key must not reach the message.
     //
-    // The assertion is inverted from the one it replaces, which asserted the key
-    // *did* reach the message. serde-saphyr interpolates a duplicated key into
-    // that error's own text, which no snippet option governs.
+    // serde-saphyr interpolates a duplicated key into that error's own text, and
+    // no snippet option governs it, so the classifier has to keep it out.
     //
     // The controls below are part of the assertion: an inverted `contains` passes
     // just as well against an empty message or an unreached branch.
@@ -2690,7 +2689,7 @@ mod tests {
         }
     }
 
-    // A key selfie does not control the length of does not grow the message.
+    // A key whose length selfie does not control must not grow the message.
     //
     // An explicit key (`? <key>`) is not subject to YAML's 1024-byte simple-key
     // limit, so it can be arbitrarily long. Nothing is forwarded, so nothing

@@ -104,7 +104,8 @@ impl DeployEntry {
     }
 }
 
-/// Why a deploy state file could not be parsed, named without quoting it.
+/// Reports why a deploy state file could not be parsed, without quoting the
+/// file.
 ///
 /// Renders the failure class and the line and column. The class is a fixed
 /// string; the location is a pair of numbers. Neither carries the file's text.
@@ -167,15 +168,16 @@ impl ParseFailure {
         // variant; the message just gets less specific.
         let (kind, detail) = match error {
             E::DuplicateMappingKey { .. } => ("a key is listed twice", None),
-            // Each of these reads as one sentence with its detail appended, so
-            // the library's noun keeps the grammar selfie's phrasing sets up.
+            // Each kind below is worded so the library's own noun can follow it
+            // directly: "the file has the wrong shape, expected" and "mapping
+            // start" read as a single sentence.
             E::Unexpected { expected, .. } => {
                 ("the file has the wrong shape, expected", Some(*expected))
             }
             E::SerdeMissingField { field, .. } => ("an entry is missing the field", Some(*field)),
-            // Unreachable while every field of a state file is a `String`, and
-            // kept so that stops being true quietly rather than by falling to the
-            // catch-all.
+            // Unreachable while every field of a state file is a `String`. It is
+            // kept so that if that stops being true, the error is classified here
+            // rather than falling silently to the catch-all.
             E::InvalidScalar { ty, .. } => ("a value is not a valid", Some(*ty)),
             E::NullIntoString { .. } => ("a value is empty where text is required", None),
             // The hint this variant carries is content-free but names

@@ -5727,7 +5727,7 @@ mod deploy_state_diagnostics {
         assert_reports_the_corrupt_file(&events);
     }
 
-    // That the warning carries none of the file by the time it is an event.
+    // The warning must carry none of the file by the time it reaches an event.
     //
     // A clean return from `load_deploy_state` says nothing about what reaches an
     // adapter: the warning travels as a `PackageEvent`, and the MCP server turns
