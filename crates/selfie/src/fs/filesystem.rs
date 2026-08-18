@@ -374,8 +374,9 @@ impl MockFileSystem {
     /// Set up every expectation for loading a config file: the directory, a
     /// `config.yaml` in it holding `config_yaml`, and no `config.yml` beside it.
     ///
-    /// The file is an ordinary regular one. A test that needs the configuration
-    /// path *refused* sets [`expect_irregular_target_refusal`] itself.
+    /// The mocked file behaves like a normal file, so the irregular-file guard
+    /// refuses nothing. A test that needs the configuration path refused sets
+    /// [`expect_irregular_target_refusal`] itself.
     ///
     /// [`expect_irregular_target_refusal`]: MockFileSystem::expect_irregular_target_refusal
     pub fn mock_config_file(&mut self, config_dir: &Path, config_yaml: &str) {
