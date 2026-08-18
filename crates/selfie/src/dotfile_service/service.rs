@@ -1513,7 +1513,7 @@ where
             //
             // `Skip` is excluded because an in-sync target is not written to, and
             // what is not written cannot be refused. That branch is not inert: an
-            // untracked entry is recorded as deployed below — but no longer for a
+            // untracked entry is recorded as deployed below, except for a
             // symlinked target.
             //
             // The record is about content, not about who wrote it — selfie did not
@@ -1596,9 +1596,9 @@ where
                     // narrower, in fact, since nothing intervenes. Do not read it as
                     // "can never manufacture one": the race is small, not absent.
                     //
-                    // `unmanaged` answers the same question the record condition
-                    // used to ask inline, so this is one `symlink_refusal` call
-                    // rather than two, and drift reads the same function.
+                    // `unmanaged` answers the record condition's question too, so
+                    // this is one `symlink_refusal` call and drift reads the same
+                    // function.
                     if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
                         deploy_state.record_deployment(source, &source_checksum);
                     }

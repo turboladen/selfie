@@ -1076,12 +1076,11 @@ mod tests {
         // selfie-b7mv, the buffered half — the same shape as the streaming test
         // above, and the reason this bead is not closed by either commit alone.
         //
-        // The timeout and cancellation arms used to live *inside* a `select!`
-        // that `child.wait()` could win. A grandchild inheriting the stdout pipe
-        // keeps it open after the shell exits, so `wait()` returned in
-        // milliseconds and the reads that followed had no deadline at all: the
-        // command ran ~8s against a 2s budget and was then reported as `Ok`. The
-        // budget was not merely exceeded, it was unenforced, and the caller was
+        // The timeout and cancellation arms must not sit inside a `select!` that
+        // `child.wait()` can win. A grandchild inheriting the stdout pipe keeps it
+        // open after the shell exits, so `wait()` returns in milliseconds and the
+        // reads that follow would have no deadline at all: the command runs to
+        // completion against an unenforced budget, and the caller is
         // told the command had succeeded.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
@@ -1891,8 +1890,8 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_character_spanning_a_read_is_not_relayed_as_replacement_characters() {
         // The user-visible half of the decoder tests above, through the real
-        // adapter: one 'é' used to arrive as two U+FFFD, in the terminal and in
-        // the MCP server's JSON alike.
+        // adapter: a character split across two reads must not arrive as two
+        // U+FFFD, in the terminal or in the MCP server's JSON.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let (tx, mut rx) = tokio::sync::mpsc::channel(10_000);
@@ -2355,9 +2354,9 @@ mod content_tests {
 
     #[tokio::test]
     async fn an_unusable_shell_reports_what_the_wrapper_said_about_it() {
-        // The wrapper turns what used to be a spawn failure into a non-zero exit
-        // with the diagnosis on stderr. Reporting absent markers here instead
-        // would leave the user with no idea their `$SHELL` is the problem.
+        // The wrapper turns a spawn failure into a non-zero exit with the
+        // diagnosis on stderr. Reporting absent markers instead would leave the
+        // user with no idea their `$SHELL` is the problem.
         let dir = tempfile::tempdir().unwrap();
         let runner = ShellCommandRunner::new("/nonexistent/shell", TIMEOUT);
 
@@ -2380,8 +2379,8 @@ mod content_tests {
 
     #[tokio::test]
     async fn the_command_cannot_write_to_the_capture_descriptor() {
-        // Closed in the recipe, so a command can no longer address the descriptor
-        // its own output travels on.
+        // Closed in the recipe, so a command cannot address the descriptor its
+        // own output travels on.
         let dir = tempfile::tempdir().unwrap();
         let runner = noisy_runner(dir.path());
 

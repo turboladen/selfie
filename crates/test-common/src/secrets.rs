@@ -98,8 +98,8 @@ fn anchor(secret: &[u8]) -> &[u8] {
 /// Every rendering of `secret` this module can recognize, each labeled for the
 /// failure message, already normalized into the form `assert_secret_free`
 /// searches with.
-// Normalizing again at the call site is what let the guard below measure one
-// string while the search used another.
+// Normalized here, not at the call site: doing it twice would let the guard
+// below measure one string while the search used another.
 fn needles(secret: &[u8]) -> Vec<(&'static str, String)> {
     let anchored = anchor(secret);
     assert!(

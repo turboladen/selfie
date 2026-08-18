@@ -723,10 +723,8 @@ pub enum OperationSuccess {
         /// Entries there was correctly nothing to do for: already in sync, or a
         /// dry run declining to act.
         ///
-        /// Distinct from `refused_count`, and the distinction is the point. A
-        /// refused entry counted here is indistinguishable from one that needed
-        /// no work, which is how `selfie apply` came to report success for a run
-        /// that deployed nothing.
+        /// Distinct from `refused_count`: an entry counted here needed no work,
+        /// which is not the same as one selfie declined to touch.
         skipped_count: usize,
         conflict_count: usize,
         /// What selfie was asked to deploy and did not — refusals and failures
@@ -823,8 +821,8 @@ pub enum CommandFailure {
     /// [`BoundedText`](crate::commands::BoundedText) type is what bounds it: the
     /// newtype's field is private, so no struct-variant literal — here, in an
     /// adapter, or in a test — can put unbounded text in this field. That makes
-    /// this the one stderr-forwarding site the compiler enforces rather than the
-    /// convention it used to be. Do not add a `stdout` field back.
+    /// this the one stderr-forwarding site the compiler enforces. Do not add a
+    /// `stdout` field back.
     ExecutionFailed {
         command: String,
         exit_code: Option<i32>,

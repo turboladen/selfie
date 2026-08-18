@@ -718,9 +718,9 @@ fn tp(path: &Path) -> TargetPath {
 ///
 /// The six tests directly below all still pass against a naive `create_dir_all` +
 /// `fs::write`, so they guard against gross breakage rather than against the defects
-/// this method exists to fix. Named as that pair rather than as a method: the port
-/// no longer has a following writer to compare against, and the comparison is with
-/// the implementation someone might reach for, not with an API that exists.
+/// this method exists to fix. Named as that pair rather than as a method: the
+/// comparison is with the implementation someone might reach for, not with an API
+/// the port offers.
 ///
 /// Everything in `unix` is load-bearing: temporarily swapping this implementation
 /// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that

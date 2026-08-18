@@ -387,7 +387,7 @@ mod tests {
         unknown_field: "this should be ignored"
     "#;
 
-        // Deserialization should succeed since we no longer deny unknown fields
+        // Unknown fields are ignored, not denied.
         let result: Result<SelfieConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_ok());
         let config = result.unwrap();

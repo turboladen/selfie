@@ -411,10 +411,8 @@ mod tests {
         // which is not root and writes alice-owned files — so naming root
         // describes the wrong user on exactly the case selfie-04fl added.
         //
-        // Both methods, not just `message`. Three wording defects have shipped on
-        // this type now, and the third was in `suggestion` alone, caught only
-        // because a container run printed it next to a message that was already
-        // fixed. Checking one method is what let it through.
+        // Both methods, not just `message`: a defect in `suggestion` alone is
+        // invisible to a test that only reads `message`.
         //
         // The override flag is named `--allow-sudo` rather than `--allow-root`
         // for this same reason, so nothing here needs an exemption.

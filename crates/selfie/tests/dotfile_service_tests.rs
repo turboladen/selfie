@@ -1934,11 +1934,11 @@ mod secret_bearing {
     // ---- A provider or binding whose output could not be read (selfie-ql8m) ----
     //
     // The harm is not "resolve returns an error" — it is a truncated credential
-    // reaching a file. A short read used to be indistinguishable from a short
-    // command: the `MAX_CONTENT_BYTES` cap is a maximum, so a prefix sails under
-    // it, and for a var binding a prefix is also still non-empty. So these assert
-    // the filesystem, and each has a control proving the same fixture *does*
-    // write when the read succeeds.
+    // reaching a file. A short read looks like a short command: the
+    // `MAX_CONTENT_BYTES` cap is a maximum, so a prefix sails under it, and for a
+    // var binding a prefix is still non-empty. So these assert the filesystem, and
+    // each has a control proving the same fixture *does* write when the read
+    // succeeds.
 
     #[tokio::test]
     async fn a_provider_whose_output_could_not_be_read_writes_no_target() {
@@ -4517,10 +4517,8 @@ mod symlinked_targets {
 
     // The user is never asked a question whose answer cannot be honored.
     //
-    // A conflict on a symlinked target used to reach the interactive resolver,
-    // which showed a diff and asked whether to overwrite — and then refused the
-    // write whichever way the user answered. The refusal is settled before the
-    // resolver is consulted, so the prompt never happens.
+    // The refusal for a symlinked target is settled before the resolver is
+    // consulted, so a prompt that could not be honored either way never happens.
     #[tokio::test]
     async fn a_conflicting_symlinked_target_is_refused_without_prompting() {
         use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
@@ -4860,11 +4858,10 @@ mod target_expansion {
     // Two spellings of one file that differ through a symlinked directory no
     // longer compare equal.
     //
-    // Duplicate detection in `dotfiles track` compares expanded paths, so it now
-    // misses this case where canonicalizing used to catch it. Recorded because it
-    // is the regression most likely to tempt someone into putting `expand_path`
-    // back — which would reopen selfie-4m9. Fix it by comparing differently, not
-    // by resolving here.
+    // Duplicate detection in `dotfiles track` compares expanded paths, so it
+    // misses this case. Recorded because it is what tempts someone into putting
+    // `expand_path` back, which would reopen selfie-4m9. Fix it by comparing
+    // differently, not by resolving here.
     #[test]
     fn paths_differing_through_a_symlinked_directory_no_longer_match() {
         let temp = TempDir::new().unwrap();
@@ -4884,10 +4881,10 @@ mod target_expansion {
 // What `dotfiles drift` and `dotfiles track` say about a symlinked target, and
 // what the lexical containment guard does not say about a symlinked source.
 //
-// `apply` refuses to write through a symlinked target (selfie-4m9). These cover the
-// two commands that used to be silent about it and the guard that documents a limit
-// it has to keep. Unix-only: `MockFileSystem` has no filesystem behind it, so none
-// of this is observable through it. Everything runs inside a `TempDir`.
+// `apply` refuses to write through a symlinked target (selfie-4m9). These cover
+// the other two commands and the guard's documented limit. Unix-only:
+// `MockFileSystem` has no filesystem behind it, so none of this is observable
+// through it. Everything runs inside a `TempDir`.
 #[cfg(unix)]
 mod symlink_consistency {
     use super::*;
@@ -4997,13 +4994,13 @@ mod symlink_consistency {
         );
     }
 
-    // D4. What the state file no longer claims, seen from the command that reads it.
+    // D4. What the state file does not claim, seen from the command that reads it.
     //
     // The fresh-machine sequence in selfie-phnh: a config already symlinked into
     // place by another tool, matching the repository file, and `apply` run once.
-    // The entry stays `not tracked` because nothing was recorded — where it used to
-    // settle to `none`, so drift reported the target as in sync on a machine selfie
-    // had never deployed to and could not deploy to.
+    // The entry stays `not tracked` because nothing was recorded. Settling to
+    // `none` would report the target as in sync on a machine selfie has never
+    // deployed to and cannot deploy to.
     //
     // Still no refusal *reason* here, which is deliberate and is the parity D5
     // pins: `apply` is silent about this entry, so drift is too. Making both speak
@@ -5450,8 +5447,8 @@ mod target_rule {
         );
     }
 
-    // selfie-hkhb: the diagnostic for `~user/…` used to restate the absoluteness
-    // rule, for a path that visibly starts with `~`.
+    // The diagnostic for `~user/…` must not restate the absoluteness rule, for a
+    // path that visibly starts with `~`.
     #[tokio::test]
     async fn tracking_a_named_user_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5584,8 +5581,8 @@ mod target_rule {
         );
     }
 
-    // Drift refuses in apply's words. The two used to differ, so the same spec
-    // defect read as two problems depending on which command found it.
+    // Drift refuses in apply's words, so one spec defect does not read as two
+    // problems depending on which command found it.
     #[tokio::test]
     async fn drift_refuses_a_target_in_applies_words() {
         let dirs = TestDirs::new();

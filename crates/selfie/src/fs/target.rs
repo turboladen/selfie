@@ -212,9 +212,8 @@ impl TargetRejection {
     /// only [`deploy_target`]'s post-expansion check can see it.
     #[must_use]
     pub fn of(target: &str) -> Option<Self> {
-        // A bare `~` and a `~/…` are the supported forms. Testing
-        // `starts_with('~')` alone is what let `~alice/.gemrc` through the
-        // validator and into a spec that then silently failed to deploy.
+        // A bare `~` and a `~/…` are the supported forms. `starts_with('~')`
+        // alone would admit `~alice/.gemrc`, which cannot deploy.
         if target == "~" || target.starts_with("~/") {
             return None;
         }
@@ -504,10 +503,9 @@ mod tests {
         );
     }
 
-    // selfie-hkhb: the refusal for `~user/…` used to be the absolute-path
-    // message, which describes a rule the input visibly satisfies -- it starts
-    // with `~`. Naming the unsupported form is the fix, so a message that
-    // reverts to restating absoluteness has to fail here.
+    // The refusal for `~user/…` must name the unsupported form. Restating the
+    // absoluteness rule describes a rule the input visibly satisfies -- it starts
+    // with `~` -- so a message that does that has to fail here.
     #[test]
     fn the_named_user_refusal_does_not_restate_the_absoluteness_rule() {
         let message = TargetRejection::NamedUserHome.message();
