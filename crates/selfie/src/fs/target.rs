@@ -307,16 +307,12 @@ pub fn deploy_target<H: HomeDir + ?Sized>(
 // The form of `target` to record in a spec: `~`-relative when it names a path
 // under the home directory, so the entry means the same file on another machine.
 //
-// The inverse of `expand_target_path`, and the reason a tracked entry matches a
-// hand-written one. A target outside the home directory is left absolute:
-// `/etc/nginx.conf` names the same file everywhere already.
+// The inverse of `expand_target_path`. A target outside the home directory is
+// left absolute -- `/etc/nginx.conf` names the same file everywhere.
 //
-// Returns `target` unchanged when there is no home directory to measure against,
-// since an unexpandable `~` is not something a recorded path can carry.
-//
-// Home is taken as `expand_path` gives it, which canonicalizes. A `$HOME` with a
-// symlinked component that the caller names unresolved therefore fails to match
-// and records absolute -- today's behavior, not a regression.
+// Returns `target` unchanged when there is no home directory to measure against.
+// Home is taken as `expand_path` gives it, which canonicalizes, so a `$HOME` with
+// a symlinked component named unresolved records absolute.
 #[must_use]
 pub(crate) fn portable_target<H: HomeDir + ?Sized>(home_dir: &H, target: &str) -> String {
     let Ok(home) = home_dir.home() else {
@@ -364,17 +360,13 @@ fn collapse_home(home: &Path, expanded: &Path) -> String {
 
 // The deploy state file's path.
 //
-// The second of the three constructors, and weaker than `expand_target_path`:
-// the configured branch joins `state_dir` exactly as given, so what comes back is
-// only as unresolved as what the caller was configured with, and
-// `SelfieConfigBuilder::state_directory` accepts any `PathBuf`. `repository_path`
-// is weaker still — it applies no rule at all.
+// Weaker than `expand_target_path`: the configured branch joins `state_dir`
+// exactly as given, so what comes back is only as unresolved as the caller was
+// configured with.
 //
-// The fallback expands `~` alone rather than the whole path because
-// `expand_path` canonicalizes, and a canonicalized state path lets
-// `write_file_private` replace whatever a planted symlink points at instead of
-// the link. Creating the directory first so canonicalization succeeds would
-// remove the availability problem and keep the security one.
+// The fallback expands `~` alone rather than the whole path, because
+// `expand_path` canonicalizes and a canonicalized state path lets
+// `write_file_private` replace what a planted symlink points at.
 pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
     home: &H,
     state_dir: Option<&Path>,
@@ -515,30 +507,15 @@ mod tests {
     }
 
     // The textual rule and the whole rule must agree on every target, or a spec
-    // passes `selfie spec validate` and then fails to deploy -- selfie-jlum
-    // exactly.
+    // passes `selfie spec validate` and then fails to deploy (selfie-jlum).
     //
-    // What this can and cannot catch, measured rather than assumed. It catches
-    // `of` wrongly *accepting* a form expansion cannot make absolute: the
-    // post-expansion re-check then refuses it and the two sides disagree.
-    // Restoring the pre-fix `starts_with('~')` acceptance fails this test;
-    // deleting the `NamedUserHome` arm does **not** -- that downgrades `~alice`
-    // to `Relative`, both sides still refuse it, and they still agree.
-    // `a_named_user_target_is_refused_by_name` is what catches the downgrade, by
-    // asserting *which* rejection comes back.
+    // Catches `of` wrongly *accepting* a form expansion cannot make absolute.
+    // It does not catch `of` wrongly rejecting a good form -- both sides then
+    // agree on "refused" -- so the accept assertions in
+    // `an_absolute_target_and_a_tilde_target_are_accepted` cover that, and
+    // `a_named_user_target_is_refused_by_name` catches a downgrade to `Relative`.
     //
-    // It does not catch `of` wrongly *rejecting* a good form either, because the
-    // early return makes both sides say "refused" in agreement; the accept
-    // assertions in `an_absolute_target_and_a_tilde_target_are_accepted` cover
-    // that. Nor `deploy_target` dropping the `of` call entirely -- for every row
-    // here the re-check alone reproduces the same split.
-    //
-    // `NoHome` is excluded by construction: a home directory is mocked here, and
-    // it is machine state rather than something a spec can be wrong about.
-    //
-    // `../x` is here to pin the agreement, not to describe what normalization
-    // does with a leading `..` -- see selfie-girj, which is why this comment does
-    // not say.
+    // `../x` pins the agreement, not what normalization does with `..`.
     #[test]
     fn the_textual_rule_and_the_deploy_rule_agree() {
         // `KnownHome` rather than a mock: `mock_expand_path` is `return_once`, and

@@ -3,15 +3,10 @@
 // These tests verify dotfile deployment operations using real filesystem
 // and repository implementations with temporary directories.
 //
-// ## Directory layout
-//
-// Source paths resolve relative to the YAML file's parent directory, so:
-//
-// - Package dotfiles: YAML lives in `packages/`, source files in `packages/<name>/`
-// - Standalone dotfiles: YAML lives in `dotfiles/`, source files in `dotfiles/<name>/`
-//
-// This is why most tests create source files under `dirs.package_dir` — the
-// package YAML files are there, so that's the resolution base.
+// Source paths resolve relative to the YAML file's parent directory:
+// package dotfiles live in `packages/<name>/`, standalone ones in
+// `dotfiles/<name>/`. That is why most tests create source files under
+// `dirs.package_dir`.
 
 use std::path::PathBuf;
 
@@ -3516,14 +3511,12 @@ mod secret_bearing {
         // A runner that records the token it is **handed** and cancels the token
         // the service was **built with**.
         //
-        // Those being two different things is the entire mechanism, and it is not
-        // self-evident. `resolve_content` takes one `&CancellationToken` and
-        // reuses that same reference for every command of an entry — so a fake
-        // that cancelled the token it was *handed* would cancel a placeholder
-        // just as readily as the real one, and every assertion below would hold
-        // with the bug still in place. Holding an independent clone of the real
-        // token means `observed` differs between the two worlds: the second call
-        // sees `true` only if what reached the runner *is* the service's token.
+        // Those being two different things is the entire mechanism.
+        // `resolve_content` reuses one `&CancellationToken` for every command of
+        // an entry, so a fake that cancelled the token it was handed would cancel
+        // a placeholder just as readily, and every assertion below would hold with
+        // the bug in place. An independent clone of the real token makes
+        // `observed` differ between the two worlds.
         #[derive(Clone, Debug)]
         struct TokenObservingRunner {
             // The token the service was constructed with.
@@ -3714,19 +3707,16 @@ mod secret_bearing {
 
         // ── The token has to reach the runner ────────────────────────────────
 
-        // The discriminating test: proves the *service's* token is what a
-        // provider command is run with.
+        // The discriminating test: proves the *service's* token is what a provider
+        // command is run with.
         //
         // Two `vars` rather than two entries on purpose. `resolve_content` loops
-        // over an entry's bindings with no cancellation check between them, so
-        // the second command is dispatched with whatever token was threaded and
-        // nothing else can intercept it. Two *entries* would be caught by the
-        // between-entries guard in `handle_apply` and would prove nothing about
-        // what the runner received.
+        // over an entry's bindings with no cancellation check between them, so the
+        // second command is dispatched with whatever token was threaded. Two
+        // entries would be caught by the between-entries guard instead.
         //
-        // This does lean on that absence of a guard inside the `vars` loop. If
-        // one is ever added there, this test stops discriminating and starts
-        // passing for the wrong reason — rewrite it rather than trusting it.
+        // If a guard is ever added inside the `vars` loop, this stops
+        // discriminating and starts passing for the wrong reason -- rewrite it.
         #[tokio::test]
         async fn the_live_token_reaches_the_command_runner() {
             let dirs = TestDirs::new();
@@ -3769,23 +3759,13 @@ mod secret_bearing {
         // The third window: cancellation landing *between two bindings*.
         //
         // Neither guard in `handle_apply` covers this. The between-entries guard
-        // has already run for this entry, and the `Failed`-arm guard has not
-        // been reached — `resolve_content` is midway through the entry's `vars`,
-        // and it iterates them with no cancellation check of its own (the same
-        // absence `the_live_token_reaches_the_command_runner` relies on).
+        // has already run, the `Failed`-arm guard has not been reached, and
+        // `resolve_content` iterates `vars` with no cancellation check.
         //
-        // What closes it is the runner: `ShellCommandRunner::run_buffered`
-        // checks the token before spawning and returns `Cancelled`, which
-        // becomes a resolve failure and lands in the `Failed` arm, where
-        // cancellation is read before `stop_on_error`. So the window is covered,
-        // but only because a live token reaches the runner — which is the very
-        // thing this unit fixed. Before it, the fresh token was never cancelled,
-        // so the pre-spawn check could never fire and the second binding would
-        // have run happily after the user pressed Ctrl+C.
-        //
-        // The fake models that pre-spawn refusal explicitly rather than
-        // inheriting it, because a test double that answers a cancelled token
-        // with success would show this window as closed when it is not.
+        // What closes it is the runner: `run_buffered` checks the token before
+        // spawning and returns `Cancelled`, which becomes a resolve failure and
+        // lands in the `Failed` arm. The fake models that pre-spawn refusal
+        // explicitly, so it cannot show the window closed when it is not.
         #[tokio::test]
         async fn a_cancellation_between_two_bindings_is_reported_honestly() {
             let dirs = TestDirs::new();
@@ -3925,24 +3905,16 @@ mod secret_bearing {
             );
         }
 
-        // The fourth window: cancellation arriving once the *last* entry has
+        // The fourth window: cancellation arriving once the last entry has
         // started, where the loop's guard can never run again.
         //
-        // This is the case the three-entry test below sets up deliberately to
-        // avoid — "with the provider last, the loop ends on its own and the
-        // guard is never reached". That sentence describes a real hole, and this
-        // is the follow-up it was owed.
+        // Distinct from the other three because nothing fails here -- the command
+        // succeeds despite the cancellation, so no failure arm is reached and no
+        // guard is left to run. Without the post-loop check the run reports
+        // `Success` for a run the user interrupted, which for a provider entry
+        // means a credential on disk with nothing mentioning Ctrl+C.
         //
-        // Distinct from the other three because nothing *fails* here: the
-        // command succeeds despite the cancellation, so no failure arm is
-        // reached and no guard is left to run. Without the post-loop check the
-        // run reports `Success` for a run the user interrupted — and for a
-        // provider entry that means a credential on disk with nothing in the
-        // stream mentioning Ctrl+C at all.
-        //
-        // The target is asserted **present** on purpose. Cancelling does not
-        // unwrite a file that was already written; the fix is to stop reporting
-        // the run as clean, not to pretend the write did not happen.
+        // The target is asserted present on purpose: cancelling does not unwrite.
         #[tokio::test]
         async fn a_cancellation_during_the_last_entry_is_still_reported() {
             let dirs = TestDirs::new();
@@ -3980,15 +3952,12 @@ mod secret_bearing {
         // Cancelling must not discard the record of what was already deployed.
         //
         // The run breaks out of the loop rather than returning, so deploy state
-        // still reaches disk. Returning early would leave the files in place
-        // with no record of them, and the next drift check would report
-        // correctly-deployed files as untracked.
+        // still reaches disk. Returning early would leave files in place with no
+        // record, and the next drift check would report them as untracked.
         //
-        // Three entries, because the invariant needs an entry *after* the
-        // cancelling one: with the provider last, the loop ends on its own and
-        // the guard is never reached. Not a dry run, because dry runs skip
-        // saving state entirely — which would make the assertion pass for a
-        // reason that has nothing to do with cancellation.
+        // Three entries, because the invariant needs one *after* the cancelling
+        // entry. Not a dry run, because dry runs skip saving state entirely --
+        // which would make the assertion pass for an unrelated reason.
         #[tokio::test]
         async fn a_cancelled_apply_still_records_what_it_already_deployed() {
             let dirs = TestDirs::new();
@@ -4583,23 +4552,14 @@ mod symlinked_targets {
 
     // The writer refuses on its own, with the hoisted check taken out of the way.
     //
-    // This is the TOCTOU defense, and it is the half of the fix that nothing else
-    // observes. With the check in `handle_apply` doing its job, reverting
-    // `perform_deploy` to a following write — `fs::write`, since the port no longer
-    // offers one — fails **no other test in the workspace**; measured at 787 passing
-    // either way, when the port still had a `write_file` to revert to. So without
-    // this test a future reader can find the writer redundant, delete it, see a
-    // green suite, and have removed the only protection against a link planted
-    // *during* an apply.
+    // This is the TOCTOU defense, and the half of the fix nothing else observes:
+    // with the `handle_apply` check in place, reverting `perform_deploy` to a
+    // following write fails no other test in the workspace. Without this test a
+    // reader can find the writer redundant, delete it, and see a green suite.
     //
-    // Blinding `symlink_refusal` reproduces that race deterministically: the check
-    // sees nothing, the write goes ahead, and `O_NOFOLLOW` has to catch it. No
-    // sleeping, no threads, no flakiness.
-    //
-    // `auto_accept` is load-bearing. Without it a differing target takes the
-    // conflict branch and never reaches `perform_deploy`, so a weaker version of
-    // this test — one that only checked the victim file was untouched — would pass
-    // without exercising the writer at all.
+    // Blinding `symlink_refusal` reproduces the race deterministically.
+    // `auto_accept` is load-bearing: without it a differing target takes the
+    // conflict branch and never reaches `perform_deploy`.
     #[tokio::test]
     async fn the_writer_refuses_even_when_the_check_is_blinded() {
         use selfie::config::SelfieConfigBuilder;
@@ -5002,9 +4962,8 @@ mod symlink_consistency {
     // `none` would report the target as in sync on a machine selfie has never
     // deployed to and cannot deploy to.
     //
-    // Still no refusal *reason* here, which is deliberate and is the parity D5
-    // pins: `apply` is silent about this entry, so drift is too. Making both speak
-    // is a separate question from what the state file claims.
+    // Still no refusal *reason*, which is the parity D5 pins: `apply` is silent
+    // about this entry, so drift is too.
     #[tokio::test]
     async fn drift_no_longer_calls_a_never_deployed_symlinked_target_in_sync() {
         let dirs = TestDirs::new();
@@ -5261,16 +5220,13 @@ mod symlink_consistency {
     // The containment guard is lexical, so a symlink inside the package directory
     // escapes it. Recorded as an executable fact rather than only as prose.
     //
-    // **This test asserts a limitation, and it is meant to fail if the limitation is
-    // removed.** Anyone who makes the guard symlink-aware should delete it together
-    // with the paragraph on `crate::paths::is_within` that it pins — the two must not
-    // be able to disagree.
+    // **This test asserts a limitation and is meant to fail if the limitation is
+    // removed.** Anyone making the guard symlink-aware should delete it together
+    // with the `crate::paths::is_within` paragraph it pins.
     //
-    // Both forms are covered because they are not equally visible. With a symlinked
-    // **file** the escape is at the final component. With a symlinked **directory**
-    // it is not: `symlink_metadata` on the full source path reports a regular file,
-    // asserted below, so a guard that inspected only the final component would report
-    // containment with complete confidence and let this through unchanged.
+    // Both forms are covered because a symlinked **directory** puts the escape
+    // off the final component: `symlink_metadata` on the full source path reports
+    // a regular file, so a final-component guard would let it through.
     #[tokio::test]
     async fn a_symlinked_source_escapes_the_containment_guard() {
         // A symlinked file inside the package directory.
@@ -5344,17 +5300,14 @@ mod symlink_consistency {
 
 // The one target rule, as each command applies it.
 //
-// Four beads, two of them disagreements between enforcement sites and two of
-// them defects within one: `selfie spec validate` accepting what apply refuses
-// (selfie-jlum) and track accepting what apply refuses (selfie-q9t3); apply's
-// own refusal describing a rule the input satisfies (selfie-hkhb) and two of its
-// entry-level refusals returning different outcomes (selfie-m5dv).
-// `deploy_target` is the reconciled rule and these are the commands' side of it.
+// Four beads: `spec validate` accepting what apply refuses (selfie-jlum), track
+// accepting what apply refuses (selfie-q9t3), apply's refusal describing a rule
+// the input satisfies (selfie-hkhb), and two entry-level refusals returning
+// different outcomes (selfie-m5dv). `deploy_target` is the reconciled rule.
 //
-// Unix-only for the same reason `symlink_consistency` is: everything here runs
-// against a real filesystem inside a `TempDir`. Nothing creates a
-// CWD-relative fixture — a relative target is refused before anything stats it,
-// which is the property under test.
+// Unix-only because everything runs against a real filesystem in a `TempDir`.
+// Nothing creates a CWD-relative fixture -- a relative target is refused before
+// anything stats it, which is the property under test.
 #[cfg(unix)]
 mod target_rule {
     use super::*;
@@ -5368,21 +5321,16 @@ mod target_rule {
         create_package_with_dotfiles(&dirs.package_dir, "myapp", &[("myapp/config.toml", target)]);
     }
 
-    // selfie-q9t3: track had no absoluteness guard at all, so a relative target
-    // resolved against the process working directory, was recorded, and was then
-    // refused by every later apply.
+    // selfie-q9t3: track had no absoluteness guard, so a relative target resolved
+    // against the process working directory, was recorded, and was refused by
+    // every later apply.
     //
-    // Deleting the guard makes this fail: `path_exists` is then reached, finds
-    // nothing CWD-relative, and the failure becomes "Target file does not exist:
-    // …". The negative assertion discriminates rather than passing vacuously.
+    // Deleting the guard makes this fail with "Target file does not exist", so
+    // the negative assertion discriminates rather than passing vacuously.
     //
-    // It does **not** prove the guard's position relative to `symlink_refusal`.
-    // That returns `None` for any path that does not exist, so only a
-    // CWD-relative symlink fixture could observe the difference, and no test
-    // here may create one. Against that check the guard sits ahead on argument —
-    // it touches no filesystem, and both `symlink_refusal` and `path_exists`
-    // stat a relative path against the process working directory — not because a
-    // test holds it there.
+    // It does not prove the guard's position relative to `symlink_refusal`, which
+    // returns `None` for any path that does not exist. The guard sits ahead on
+    // argument, not because a test holds it there.
     #[tokio::test]
     async fn tracking_a_relative_target_is_refused() {
         let dirs = TestDirs::new();
@@ -5407,17 +5355,14 @@ mod target_rule {
 
     // The refusal lands before every write, as the symlink refusal does.
     //
-    // **This test did not fail under any mutation run against it** — moving the
-    // guard below the three writes, deleting it outright, and moving it below
-    // `symlink_refusal` all left it green, while the test above caught the first
-    // two. The reason is the fixture: a relative target does not exist, so
-    // `path_exists` returns early and nothing is written whether the guard ran or
-    // not, and a fixture that did exist would have to be created relative to the
-    // process working directory, which no test here may do.
+    // **This test did not fail under any mutation run against it** -- moving the
+    // guard below the writes, deleting it, and moving it below `symlink_refusal`
+    // all left it green. The fixture is why: a relative target does not exist, so
+    // `path_exists` returns early and nothing is written either way.
     //
-    // Kept deliberately, as documentation rather than enforcement: it names the
-    // spec, source copy and deploy-state record that a refusal must not leave
-    // behind. Do not read it as proof that it does not.
+    // Kept as documentation rather than enforcement: it names the spec, source
+    // copy and deploy-state record a refusal must not leave behind. Do not read
+    // it as proof that it does not.
     #[tokio::test]
     async fn a_refused_relative_track_writes_nothing() {
         let dirs = TestDirs::new();
@@ -5738,24 +5683,14 @@ mod deploy_state_diagnostics {
 
     // The warning must carry none of the file by the time it reaches an event.
     //
-    // A clean return from `load_deploy_state` says nothing about what reaches an
-    // adapter: the warning travels as a `PackageEvent`, and the MCP server turns
-    // that into JSON.
+    // **`Debug` is not a superset of what egresses, so do not read the sweep below
+    // as a boundary guarantee.** This crate ships deliberately redacting `Debug`
+    // impls, so state-file text arriving behind one would render redacted and the
+    // sweep would pass. The real exit is `event_to_json`, which reads
+    // `Warning { message }` as a typed field rather than through `Debug`.
     //
-    // **`Debug` is not a superset of what egresses, so do not read the sweep
-    // below as a boundary guarantee.** This crate ships deliberately redacting
-    // `Debug` impls -- `ResolvedContent` and `ContentOutput` both print a byte
-    // count instead of their contents -- so state-file text arriving on an event
-    // behind one of those would render redacted and the sweep would pass. And the
-    // real exit is `event_to_json` in the MCP server, which reads
-    // `Warning { message }` as a typed field rather than through `Debug` at all.
-    //
-    // So the sweep is a cheap net, and the assertion that matches the egress is
-    // the one on the message itself -- the same field `event_to_json` forwards.
-    //
-    // The fixture is a duplicated key, because that is the one error class whose
-    // own text quotes the file. A scanner error would pass this against any
-    // implementation.
+    // The assertion that matches the egress is the one on the message itself, and
+    // the fixture is a duplicated key -- the one class whose text quotes the file.
     #[tokio::test]
     async fn no_event_carries_the_state_file_contents() {
         const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
@@ -6251,14 +6186,12 @@ environments:
 // Targets that are neither absent nor a regular file.
 //
 // A fifo target hung `selfie apply` forever and a device node was written to
-// (selfie-qwj3). The hang is the reason every test here has a deadline: reaching
-// the unguarded path does not fail a test, it wedges it, and a wedged test is
-// scored as neither pass nor fail.
+// (selfie-qwj3). The hang is why every test here has a deadline: reaching the
+// unguarded path wedges a test rather than failing it.
 //
-// `flavor = "multi_thread"` is load-bearing. The service does its work in a
-// `tokio::spawn`ed task, so on the default current-thread runtime a blocking
-// `read` inside that task stalls the whole runtime — including the timer, which
-// then never fires and the timeout never returns.
+// `flavor = "multi_thread"` is load-bearing. The service works in a spawned
+// task, so on a current-thread runtime a blocking `read` stalls the whole
+// runtime including the timer, which then never fires.
 #[cfg(unix)]
 mod irregular_targets {
     use super::*;
@@ -6452,17 +6385,14 @@ mod irregular_targets {
 
 // The permanent `not tracked` drift line for a target selfie will never manage.
 //
-// An untracked dotfile whose target is a symlink and whose contents already
-// match is `Skip`: apply writes nothing, refuses nothing, and records nothing —
-// selfie did not write it and never will. So `detect_drift` keeps answering
-// `NotTracked` and `dotfiles drift` keeps listing it, forever, with nothing
-// saying why (selfie-ktha).
+// An untracked dotfile whose target is a symlink and whose contents already match
+// is `Skip`: apply writes nothing, refuses nothing, records nothing. So
+// `detect_drift` keeps answering `NotTracked` and `dotfiles drift` keeps listing
+// it forever with nothing saying why (selfie-ktha).
 //
-// Both commands now say the same sentence in the channel each already uses:
-// apply on its skip line, drift on its drift line. Neither raises a warning it
-// did not raise before, which is what keeps
-// `an_in_sync_symlinked_target_is_left_alone_and_not_reported` and
-// `drift_says_nothing_about_an_in_sync_symlinked_target` passing unmodified.
+// Both commands say the same sentence in the channel each already uses, raising
+// no warning that did not exist, which is what keeps the two in-sync tests
+// passing unmodified.
 #[cfg(unix)]
 mod unmanageable_symlink_reason {
     use super::*;
@@ -6577,19 +6507,15 @@ mod unmanageable_symlink_reason {
         );
     }
 
-    // A *tracked* symlinked target gets no reason, and that boundary is
-    // deliberate.
+    // A *tracked* symlinked target gets no reason, and that boundary is deliberate.
     //
     // Found by mutation: widening the condition from `NotTracked` to include
-    // `None` failed nothing, because every other fixture here varies the
-    // symlink axis — plain file versus link — and none varies the drift type.
-    // So the scoping this function documents was not enforced by anything.
+    // `None` failed nothing, because every other fixture varies the symlink axis
+    // and none varies the drift type.
     //
-    // An entry that was deployed and whose target later became a symlink is
-    // selfie-v7py: it produces **no drift line at all**, so there is no
-    // permanent complaint to explain and nothing here should speak. Whoever
-    // fixes v7py will have to change this test on purpose, which is the point
-    // of it.
+    // An entry deployed and later symlinked is selfie-v7py: it produces no drift
+    // line at all, so there is nothing here that should speak. Whoever fixes
+    // v7py has to change this test on purpose.
     #[tokio::test]
     async fn a_tracked_symlinked_target_is_outside_this_reason() {
         let dirs = TestDirs::new();
@@ -6656,18 +6582,12 @@ mod unmanageable_symlink_reason {
 // The copy `track` makes *into* the repository must not follow a symlink at its
 // destination either.
 //
-// Distinct from every refusal above, which is about the dotfile **target** --
-// the path selfie deploys out to. These are about the path selfie composes for
-// itself from `dotfiles_directory`/`package_directory` plus a name, and writes
-// the user's file into.
+// Distinct from every refusal above, which concerns the dotfile target. These
+// are about the path selfie composes for itself and writes the user's file into.
 //
-// Every fixture here plants a **dangling** link on purpose. A link to an
-// existing file is caught by the `path_exists` check that already guards these
-// writes ("Source file already exists"); a dangling one returns `false` from
-// that check -- it follows the link and finds nothing -- so it passes the guard
-// and reaches the write. That is the case a plain `fs::write` follows, and the
-// only one these tests could fail on before the fix.
-// selfie-yw7i
+// Every fixture plants a **dangling** link on purpose. A link to an existing
+// file is caught by the `path_exists` guard; a dangling one returns `false`
+// there, passes the guard, and reaches the write. selfie-yw7i
 #[cfg(unix)]
 mod repository_writes_do_not_follow_symlinks {
     use super::*;
@@ -6811,27 +6731,13 @@ mod repository_writes_do_not_follow_symlinks {
 
 // Sources that are neither absent nor a regular file.
 //
-// The `irregular_targets` module above is about a dotfile *target* -- the path
-// selfie writes out to. This is the identical defect on the other side of the
-// copy: a fifo, socket or device node committed into the **repository** is read
-// as a source, and reading a fifo blocks until a writer arrives exactly as
-// reading one as a target does.
+// The `irregular_targets` module above covers the dotfile *target*. This is the
+// same defect on the other side of the copy: a fifo committed into the
+// repository is read as a source, and reading one blocks until a writer arrives.
 //
-// Reachable in practice even though git cannot store a fifo: a local `mkfifo` in
-// the dotfiles directory, a restored backup, or a filesystem-level copy all
-// produce one.
-//
-// Four reads, not one. `handle_apply` deploys from the source;
-// `handle_check_drift` checksums it; `resolve_content`'s `Template` arm reads it
-// on the **secret-bearing** path, since a `source:` + `vars:` entry resolves its
-// template from an ordinary repository file; and `read_referenced_file` reads
-// that same template for `selfie spec validate`. The last one is covered by
-// `a_fifo_template_is_refused_by_validate` in the repository tests.
-//
-// `flavor = "multi_thread"` and the deadline are load-bearing for the same
-// reason the target-side module gives: the blocking read sits in a spawned task,
-// so on a current-thread runtime the timer never fires.
-// selfie-lwv5, the source-side sibling of selfie-qwj3
+// Four reads, not one: `handle_apply`, `handle_check_drift`, `resolve_content`'s
+// `Template` arm, and `read_referenced_file`. `flavor = "multi_thread"` is
+// load-bearing -- the blocking read sits in a spawned task. selfie-lwv5
 #[cfg(unix)]
 mod irregular_sources {
     use super::*;

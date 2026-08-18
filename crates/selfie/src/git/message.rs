@@ -124,27 +124,16 @@ impl std::fmt::Display for GitMessage {
 /// redaction can only start at the token itself, so everything before the `@`
 /// is userinfo: `url.<token>@internal` loses its `url.` config-key prefix, and
 /// `git@github.com` becomes `***@github.com`.
-// Not a URL parser, and not `gix::Url`, for three separate reasons:
+// Not a URL parser, and not `gix::Url`:
 //
-// - The input is free-text stderr, so the job is editing a span inside prose,
-//   and nothing in the dependency tree finds URLs inside prose.
-// - A parse-and-reserialize round trip rewrites the rest of git's message.
-//   `gix-url` documents that round trip as lossy — the scp and `ssh://` forms
-//   collapse together — and warns against reconstructing an instance at all.
-// - `gix::Url`'s redacting `Display` clones the URL, sets
-//   `password = Some("redacted")`, and leaves `user` untouched; its own docs
-//   warn it "does not cover other risks, such as passing a personal access
-//   token as a username". A token-as-username is the shape that actually leaks
-//   here, so reaching for it gives a fix that passes a `user:pass` test and
-//   leaks every personal access token.
+// - The input is free-text stderr, so the job is editing a span inside prose.
+// - A parse-and-reserialize round trip rewrites the rest of git's message, and
+//   `gix-url` documents that round trip as lossy.
+// - `gix::Url`'s redacting `Display` blanks `password` and leaves `user`
+//   untouched. A token-as-username is the shape that leaks here, so it gives a
+//   fix that passes a `user:pass` test and leaks every access token.
 //
-// Two of the gaps above cannot be closed without opening a worse one. Matching
-// known token prefixes covers the first, but it is a provider allowlist that
-// fails open for every provider not on it while looking complete — and
-// refusing that in one direction means accepting the over-redaction in the
-// other, since keeping `git@github.com` intact means deciding some usernames
-// are safe. Making `/` a candidate delimiter covers the last, at the cost of
-// destroying every host; see `authority_starts`.
+// The remaining gaps cannot be closed without opening a worse one: see below.
 fn redact_credentials(text: &str) -> String {
     // Without an `@` anywhere there is no userinfo to find, so the whole
     // per-token scan below can be skipped.
@@ -191,35 +180,26 @@ fn redact_token(token: &str) -> Cow<'_, str> {
     let mut copied_to = 0;
 
     // Iterate over every candidate, never just the first. Stopping after the
-    // first authority leaked two ways:
+    // first authority leaks two ways:
     //
     //   https://host/redirect?to=https://user:TOKEN@other/repo
-    //     the first authority has no `@`, so the whole token came back
-    //     untouched and the second URL's credential survived in full
+    //     first authority has no `@`, so the second URL's credential survives
     //   https://proxy@host/https://user:TOKEN@real/r
-    //     the first authority was redacted and the second forwarded
+    //     first authority redacted, second forwarded
     //
-    // Considering only `://`-introduced authorities then leaked a third way,
-    // for an authority embedded after `=` or `,`.
+    // Considering only `://`-introduced authorities leaks a third way, for one
+    // embedded after `=` or `,`.
     for authority_start in authority_starts(token) {
-        // A delimiter can sit inside a userinfo — `=` is base64 padding, so
-        // every base64 credential ends in one — and a later candidate then
-        // points into a span already redacted. Skipping it keeps the earliest
-        // start, which is the widest span.
+        // A delimiter can sit inside a userinfo -- `=` is base64 padding -- and a
+        // later candidate then points into a span already redacted. Skipping it
+        // keeps the earliest start, which is the widest span.
         //
-        // Preferring the latest candidate that reaches an `@` would destroy
-        // less of the message: `?u=x&next=<token>@h` could lose only the
-        // token. It was written that way and it under-redacted —
-        // `https://user:c2VjcmV0S2V5MQ==dEs9@host/r` kept fifteen of its
-        // twenty secret characters, because the delimiter inside the userinfo
-        // moved the start forward and emitted the text before it verbatim.
-        // Collapsing only when the skipped span "cannot be userinfo" does not
-        // rescue it: RFC 3986 makes `=`, `,` and `&` sub-delims, so `x&next=`
-        // is legal userinfo and byte-identical to credential material.
+        // Preferring the latest candidate that reaches an `@` destroys less of the
+        // message but under-redacts: a delimiter inside the userinfo moves the
+        // start forward and emits the text before it verbatim. RFC 3986 makes `=`,
+        // `,` and `&` sub-delims, so that span is legal userinfo.
         //
-        // The price is context — a query string collapses to
-        // `https://h/?u=***@evil:1`. That is a diagnostic cost where keeping
-        // it is a credential cost.
+        // The price is context, which is a diagnostic cost, not a credential one.
         if authority_start < copied_to {
             continue;
         }
@@ -655,18 +635,15 @@ mod tests {
         );
     }
 
-    // The ordering invariant, and the reason [`GitMessage::clean`] redacts
-    // first. The credential straddles the elision cut, so a bound-then-redact
-    // implementation keeps the start of the token in the head — with the `@`
-    // in the elided middle, leaving the redactor nothing to anchor on.
-    // Redacting first cannot fail that way.
+    // The ordering invariant, and why [`GitMessage::clean`] redacts first. The
+    // credential straddles the elision cut, so bound-then-redact keeps the start
+    // of the token in the head with the `@` in the elided middle, leaving the
+    // redactor nothing to anchor on.
     //
-    // **The fixture has to be placed, not guessed.** `assert_secret_free`
-    // matches a twelve-character window, so the cut has to fall exactly twelve
-    // characters into the token: any later and the whole credential lands in
-    // the elided middle, the scan finds nothing, and the test passes under a
-    // bound-then-redact implementation while appearing to assert the opposite.
-    // It did, until the mutation for this test was run.
+    // The fixture has to be placed, not guessed: `assert_secret_free` matches a
+    // twelve-character window, so the cut must fall exactly twelve characters
+    // into the token. Any later and the whole credential lands in the elided
+    // middle, and the test passes under bound-then-redact while appearing not to.
     #[test]
     fn bounding_cannot_split_a_credential_because_redaction_runs_first() {
         // The window `assert_secret_free` scans for, spelled out because the

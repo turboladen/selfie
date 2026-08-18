@@ -282,21 +282,16 @@ fn load_deploy_state<F: FileSystem>(
         }
     };
 
-    // This message reaches an `EventSender` and from there the MCP server's JSON.
-    // No credential can be in it -- secret-bearing entries record nothing at all
-    // (ADR-0003) -- but the file names every repository-file dotfile selfie
-    // manages on this machine, with a checksum behind each, which is why
-    // `save_deploy_state` writes it owner-only. That is a reconnaissance aid, and
-    // reporting a parse failure is no reason to read it back out.
+    // This message reaches the MCP server's JSON. No credential can be in it --
+    // secret-bearing entries record nothing (ADR-0003) -- but the file names every
+    // repository-file dotfile on the machine, each with a checksum, which is why
+    // `save_deploy_state` writes it owner-only.
     //
-    // `ParseFailure` is what keeps the file's *text* out: serde-saphyr's own
-    // `Display` interpolates parsed content into several messages, and the
-    // duplicate-key one quotes the key, which in this file is a dotfile source
-    // path. It still reports a line and column, which are derived from the file
-    // and disclose two lengths; the reasoning for accepting that is on the type.
-    //
-    // Suppressing the snippet keeps the cropped source windows out of the error
-    // value, so a `Display` call added anywhere on this path cannot render them.
+    // `ParseFailure` is what keeps the file's text out: serde-saphyr's `Display`
+    // interpolates parsed content into several messages, and the duplicate-key one
+    // quotes the key, which here is a dotfile source path. It still reports a line
+    // and column; the reasoning for accepting that is on the type. Suppressing the
+    // snippet keeps the cropped source windows out of the value.
     let options = serde_saphyr::options! { with_snippet: false };
     match serde_saphyr::from_str_with_options(&content, options) {
         Ok(state) => (state, None),
@@ -1049,18 +1044,13 @@ fn track_refusal(refusal: &FileSystemError) -> String {
 
 // Both track handlers word a refused copy *into* the dotfiles repository.
 //
-// Destructures rather than rendering the `FileSystemError`, and that is the whole
-// point of the function. Every variant here says **"target"** in its `Display` --
-// they were written for a dotfile target, the path selfie deploys out to. This
-// path is the reverse: selfie is copying the user's file **in**, to a path it
-// composed itself from the dotfiles directory. Interpolating the error would
-// answer a question about the target when the problem is in the repository, and
-// send the user to inspect the wrong file. `a_refused_repository_write_does_not_
-// call_it_a_target` holds that.
+// Destructures rather than rendering the `FileSystemError`: every variant says
+// "target" in its `Display`, meaning the path selfie deploys out to. This path is
+// the reverse -- selfie is copying the user's file in, to a path it composed --
+// so interpolating the error would send the user to inspect the wrong file.
 //
-// The remedy differs from `track_refusal`'s for the same reason: "track the path
-// it points to" is advice about a target, and there is no target involved here.
-// What the user can actually do is clear the repository path or pick another name.
+// The remedy differs from `track_refusal`'s for the same reason: what the user
+// can do here is clear the repository path or pick another name.
 fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> String {
     let what = match refusal {
         FileSystemError::SymlinkedTarget { points_to, .. } => match points_to {
@@ -1087,19 +1077,14 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
 
 // Why selfie will not read a file out of its own repository.
 //
-// Reading a fifo blocks until a writer arrives, exactly as writing one blocks
-// until a reader does -- so a fifo committed into the dotfiles directory hangs
-// `selfie apply` and `dotfiles drift` with no timeout, since `command_timeout`
-// governs provider commands rather than filesystem calls (selfie-lwv5).
+// Reading a fifo blocks until a writer arrives, so one committed into the
+// dotfiles directory hangs `selfie apply` and `dotfiles drift` with no timeout --
+// `command_timeout` governs provider commands, not filesystem calls (selfie-lwv5).
 //
-// Returns the reason only. The three read sites frame it differently -- two warn
-// and skip, one fails a template resolve -- so the frame belongs to the caller
-// and only the wording is shared, the same split `TargetRejection::message` uses.
+// Returns the reason only; the three read sites frame it differently.
 //
-// Worded for a *source*, not a target. `IrregularTarget`'s own `Display` says
-// "target resolves to a …", which describes the path selfie deploys out to; here
-// the problem is a file in the repository the user syncs between machines, and
-// the remedy is to replace it rather than to name a different target.
+// Worded for a *source*. `IrregularTarget`'s own `Display` describes a deploy
+// target, and here the problem is a file in the repository the user syncs.
 pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
     match refusal {
         FileSystemError::IrregularTarget { kind, .. } => {
@@ -1277,18 +1262,15 @@ where
             continue;
         }
 
-        // Refuse the whole package before asking what dotfiles it has, because
-        // the answer is not trustworthy: `_dotfiles:` reads as a YAML anchor, so
-        // the list comes back empty and the `is_empty` check below would skip the
-        // package in silence — a successful run that deployed nothing
-        // (selfie-g199).
+        // Refuse the whole package before asking what dotfiles it has: `_dotfiles:`
+        // reads as a YAML anchor, so the list comes back empty and the `is_empty`
+        // check below would skip the package in silence (selfie-g199).
         //
         // Whole-package rather than per-entry, unlike the entry-level rule this
         // mirrors: the ambiguity is in the file's top level, so there is no entry
-        // to attach it to, and the entries it does have may not be the ones its
-        // author wrote.
+        // to attach it to.
         //
-        // Empty for a programmatically built package, so nothing here fires for a
+        // Empty for a programmatically built package, so nothing fires for a
         // caller that never had raw YAML.
         let shadowing = package.shadowing_top_level_keys();
         if !shadowing.is_empty() {
@@ -1506,40 +1488,14 @@ where
             };
 
             // Refuse a symlinked target before anything acts on the decision, so a
-            // dry run reports what a real apply would do and an interactive resolver
-            // is never asked to settle a conflict whose answer cannot be honored.
-            // This also lands ahead of the conflict branch's diff, so the link
-            // destination's content is never rendered for display.
+            // dry run previews what a real apply would do, an interactive resolver
+            // is never asked a question whose answer cannot be honored, and the
+            // link destination is never rendered in a diff.
             //
-            // `Skip` is excluded because an in-sync target is not written to, and
-            // what is not written cannot be refused. That branch is not inert: an
-            // untracked entry is recorded as deployed below, except for a
-            // symlinked target.
-            //
-            // The record is about content, not about who wrote it — selfie did not
-            // write any already-in-sync target — and for an ordinary target it costs
-            // nothing: the next repository edit makes the entry differ,
-            // `deploy_decision` answers `Deploy`, the write succeeds, and
-            // `perform_deploy` advances the entry. For a symlinked target the refusal
-            // fires on that same edit — which was always true, and is why this record
-            // looked free — but the entry never advances past it. `detect_drift` then
-            // answers `None` forever for a path selfie will never write, and `dotfiles
-            // drift` calls it in sync (selfie-phnh). That asymmetry is why the
-            // suppression below is narrow: only the symlinked case is a claim selfie
-            // cannot make good on.
-            //
-            // What this check uniquely provides is the *preview* and the *un-asked
-            // prompt*: deleting it fails those two tests and no others. Not the
-            // warning -- `perform_deploy` emits the same text through
-            // `refusal_warning`, so on the plain deploy path the user is told either
-            // way. This check only gets there first.
-            //
-            // The writer's own `O_NOFOLLOW` refusal sits behind it as the TOCTOU
-            // defense, reachable only when a link is planted in between, so removing
-            // *that* changes nothing an ordinary test can observe while deleting the
-            // only protection against a link planted mid-apply.
-            // `the_writer_refuses_even_when_the_check_is_blinded` is the tripwire for
-            // that half; neither layer is redundant.
+            // `Skip` is excluded: an in-sync target is not written to. Recording one
+            // as deployed would let `detect_drift` answer `None` forever for a path
+            // selfie will never write (selfie-phnh), so the suppression below covers
+            // only the symlinked case. `write_file_no_follow` holds the TOCTOU half.
             if !matches!(decision, DeployDecision::Skip(_))
                 && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
@@ -1577,28 +1533,16 @@ where
                     }
                 }
                 DeployDecision::Skip(reason) => {
-                    // If this was an untracked file that's already in sync, record
-                    // the state so future runs see DriftType::None — unless the
-                    // target is a symlink. See the refusal check above for why that
-                    // one case is excluded.
+                    // Record an untracked but in-sync entry so future runs see
+                    // `DriftType::None`, unless the target is a symlink.
                     //
-                    // Deciding a state mutation on `symlink_refusal` reads against
-                    // its own documentation, which calls it advisory and racy and
-                    // says never to gate a write on it. It is not gating a write:
-                    // nothing is written on this path at all, and where this path
-                    // does write -- `perform_deploy` -- the refusal is
-                    // `write_file_no_follow`'s, in the kernel, and stays there.
+                    // Gating this on `symlink_refusal` is safe despite its
+                    // advisory-and-racy documentation, because nothing is
+                    // written here. Where this path does write, `perform_deploy`
+                    // relies on `write_file_no_follow`'s kernel refusal.
                     //
-                    // A stale answer here omits an entry the next run re-evaluates
-                    // from scratch. It can manufacture one only through a link
-                    // planted in the window between this check and the record, and
-                    // that is the same window the check above already lives with --
-                    // narrower, in fact, since nothing intervenes. Do not read it as
-                    // "can never manufacture one": the race is small, not absent.
-                    //
-                    // `unmanaged` answers the record condition's question too, so
-                    // this is one `symlink_refusal` call and drift reads the same
-                    // function.
+                    // A stale answer omits an entry the next run re-evaluates.
+                    // The window that could manufacture one is small, not absent.
                     if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
                         deploy_state.record_deployment(source, &source_checksum);
                     }
@@ -1770,17 +1714,14 @@ where
             let source = match entry.content_source() {
                 Ok(ContentSource::RepoFile(source)) => source,
 
-                // Secret-bearing entries hold no deploy state, so there is nothing
-                // to compare against. Resolving them here would run the user's
-                // commands — leaking content into a read-only operation and
-                // prompting for authentication from a command that should never
-                // need it.
+                // Secret-bearing entries hold no deploy state, so there is
+                // nothing to compare against, and resolving them here would run
+                // the user's commands: leaking content into a read-only
+                // operation and prompting for authentication.
                 //
-                // They are reported as unverifiable rather than counted as drift.
-                // Counting them would make `selfie dotfiles drift` — and the sync
-                // status that reads it — permanently dirty on any machine with one
-                // provider-sourced dotfile. ADR-0003 calls for identifying them
-                // rather than inventing a drift classification for them.
+                // Reported as unverifiable rather than counted as drift.
+                // Counting them would leave `dotfiles drift` permanently dirty
+                // on any machine with one provider-sourced dotfile (ADR-0003).
                 Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
                     sender
                         .send_dotfile_skipped(
@@ -2469,33 +2410,13 @@ mod tests {
     // The malformed shapes a deploy state file can take, scanned for their own
     // content.
     //
-    // Not every arm of `ParseFailure::of` has a row, and the uncovered set is
-    // worth stating exactly, since a partial list reads as a complete one:
-    // `MergeKeyNotAllowed`, the unbalanced-container group, the two alias groups
-    // and `Eof` have no row; `InvalidScalar` and `IndentationError` cannot fire
-    // at all here -- every field of this type is a `String`, and `require_indent`
-    // is left at its default.
+    // The uncovered arms of `ParseFailure::of` are worth naming, since a partial
+    // list reads as a complete one: `MergeKeyNotAllowed`, the unbalanced-container
+    // group, the two alias groups and `Eof` have no row, and `InvalidScalar` and
+    // `IndentationError` cannot fire while every field here is a `String`.
     //
-    // The row a hand-written table misses is "duplicate key that is itself an
-    // alias": the duplicated text never appears literally at the duplication
-    // site, and the error quotes it anyway.
-    //
-    // Its two neighbours are weaker than their names suggest, and the difference
-    // is worth keeping straight. Both fail at line 3, inside the anchor's own
-    // mapping, so the duplicate is caught before `deployed: *a` is ever reached
-    // and neither actually exercises expansion. They are kept as the shapes a
-    // reader would write to test anchors and merges, not as two more mechanisms.
-    //
-    // Shapes that parse successfully are deliberately absent: each row asserts a
-    // warning was produced, so a shape that stops erroring would be reported as
-    // clean instead of being caught.
-    //
-    // Each row names the condition it should produce, so a row that drifts to a
-    // different error class fails instead of passing for the wrong reason.
-    //
-    // These rows are also what pins the absence of a source snippet. Every marker
-    // sits on the line its parse fails at, so a snippet returning to the rendered
-    // error would quote it and fail the scan below, whatever the error class.
+    // Every marker sits on the line its parse fails at, so a returning snippet
+    // would quote it and fail the scan below.
     #[test]
     fn no_malformed_state_file_shape_quotes_its_contents() {
         const DUPLICATE: &str = "a key is listed twice";

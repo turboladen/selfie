@@ -522,24 +522,14 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 /// `ExecutionFailed`'s `command` field is a plain `String` and stays unbounded.
 // Lives beside `CommandError` because the dotfile resolve path and the general
 // failure path forward the same bytes and must treat them the same way. Within
-// this module the tuple constructor is in scope and could be called directly;
-// every other module must go through `bound`.
+// this module the tuple constructor is in scope; every other module goes through
+// `bound`.
 //
-// `Debug` is derived on purpose, unlike `ResolvedContent`. That is never
-// forwarded, so its `Debug` is a pure exit worth closing by hand. This is text
-// selfie forwards deliberately, and the leak tests scan an event's `Debug`
-// output for a secret literal — a hand-written `Debug` printing `<N bytes>`
-// would hide forwarded stderr from that scan, so a secret reaching stderr later
-// would go unseen rather than caught. Blinding it would contain nothing anyway:
-// the text is already on its way to the terminal by design.
-//
-// Replacing the derive fails `a_failing_check_still_reports_why_it_failed`,
-// which reads the forwarded stderr out of `{:?}`. It does not guard that test's
-// neighbor, `a_failing_check_keeps_its_stdout_out_of_the_completed_event` —
-// that fixture puts its secret on stdout, which never becomes a `BoundedText`,
-// so its own inline positive control is what keeps it honest. Do not read the
-// two as each other's controls, or someone deletes that control as redundant
-// and the leak test goes vacuous.
+// `Debug` is derived on purpose, unlike `ResolvedContent`. The leak tests scan an
+// event's `Debug` output for a secret literal, so a hand-written `Debug` printing
+// `<N bytes>` would hide forwarded stderr from that scan. Replacing the derive
+// fails `a_failing_check_still_reports_why_it_failed`. It does not guard that
+// test's neighbor, which carries its own inline positive control.
 #[derive(Debug, Clone)]
 pub struct BoundedText(String);
 
