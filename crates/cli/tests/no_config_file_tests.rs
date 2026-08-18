@@ -1,12 +1,11 @@
-//! Running selfie on a machine with no configuration file.
+//! These tests run selfie on a machine with no configuration file.
 //!
-//! Fresh-machine bootstrap, containers and CI all start without one, and every
-//! command used to fail with "No configuration file found" even when the flags
-//! carried everything the file would have.
+//! Fresh-machine bootstrap, containers and CI all start without one, so every
+//! command has to work when the flags carry everything the file would have.
 //!
-//! These drive the real binary, because the property is about `main`'s handling
-//! of one specific load error — a unit test over the builder would pass whether
-//! or not anything reached it.
+//! They drive the real binary, because the property is about how `main` handles
+//! one specific load error. A unit test over the builder would pass whether or
+//! not anything reached it.
 
 use std::time::Duration;
 
@@ -202,7 +201,8 @@ fn the_optional_directories_keep_their_defaults() {
     );
 
     assert!(ok, "expected success, got:\n{combined}");
-    // Found through the sibling default, with no `--dotfiles-directory` given.
+    // The dotfiles directory is found through the sibling default, because no
+    // `--dotfiles-directory` flag is given.
     assert!(
         combined.contains("starship"),
         "the sibling dotfiles directory must still be found, got:\n{combined}"
@@ -267,11 +267,12 @@ fn an_empty_required_flag_counts_as_missing() {
     );
 }
 
-// The interaction the two commits were designed around: a configuration file
-// that is present as a link going nowhere, on a run that supplies every flag.
-// Absent, the flags stand in; unresolvable, they must not — otherwise the user
-// is told nothing and their configuration is silently ignored, which is the
-// failure the dangling-link guard exists to prevent.
+// A configuration file that is present as a link going nowhere, on a run that
+// supplies every flag.
+//
+// When the file is absent the flags stand in for it. When it is present but
+// unresolvable they must not, because the user would be told nothing while
+// selfie silently ignored the configuration they have.
 #[cfg(unix)]
 #[test]
 fn a_dangling_config_symlink_is_still_fatal_when_every_flag_is_supplied() {

@@ -206,10 +206,11 @@ impl CliConfig {
     }
 }
 
-/// Why selfie cannot run without a configuration file.
+/// The error returned when neither a configuration file nor the command-line
+/// flags supplied every required setting.
 ///
-/// Two settings have no default and no fallback, so a run with neither a file
-/// nor the matching flags has nothing to work from.
+/// `environment` and `package_directory` have no default and no fallback, so a
+/// run that supplies neither has nothing to work from.
 #[derive(Debug)]
 pub(crate) struct MissingRequiredSettings {
     searched: PathBuf,
@@ -271,9 +272,9 @@ impl ClapCli {
             return Err(MissingRequiredSettings { searched, missing });
         }
 
-        // Through the builder, which applies exactly the defaults the file path
-        // applies -- `command_timeout`, `max_concurrency`, `stop_on_error`, and
-        // `None` for the two optional directories so they keep their fallbacks.
+        // The builder applies exactly the defaults the file path applies:
+        // `command_timeout`, `max_concurrency`, `stop_on_error`, and `None` for
+        // the two optional directories so they keep their fallbacks.
         //
         // `build_cli_config` overwrites both of these a moment later, from the
         // same flags — so the values set here are replaced by identical ones,
