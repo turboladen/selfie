@@ -581,10 +581,10 @@ mod tests {
 
     fn fs_with_template(body: &'static str) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
-        // An ordinary regular file: the guard ahead of the read finds nothing to
-        // refuse. Stated rather than defaulted, because a mock with no
-        // expectation panics rather than answering, and because these tests are
-        // about resolution and not about the guard.
+        // The guard that runs ahead of the read refuses nothing, so the read
+        // goes through. This is stated explicitly rather than left to a default,
+        // because a mock with no expectation panics instead of answering, and
+        // because these tests are about resolution rather than about the guard.
         fs.mock_no_irregular_files();
         fs.expect_read_file()
             .returning(move |_| Ok(body.to_string()));
