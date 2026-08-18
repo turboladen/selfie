@@ -95,15 +95,42 @@ async fn main() -> anyhow::Result<()> {
     let fs = RealFileSystem;
 
     // Load and process configuration
-    let config = {
-        let selfie_config = YamlLoader::new(&fs).load_config()?;
-        let cli_section = crate::config::load_cli_section(&fs);
-        args.build_cli_config(selfie_config, cli_section)
+    let (config, notices) = {
+        let loaded = YamlLoader::new(&fs).load_config()?;
+        // From the same parse, not a second read of the same file.
+        let cli_load = crate::config::cli_section(&loaded);
+
+        // Both halves, rendered together below. The library reports top-level
+        // keys and the CLI reports what is inside `cli:`; neither can see the
+        // other's, which is why they are collected here rather than at either
+        // source.
+        let mut notices = crate::config::library_config_notices(loaded.ignored_keys());
+        notices.extend(cli_load.notices);
+
+        (
+            args.build_cli_config(loaded.into_config(), cli_load.section),
+            notices,
+        )
     };
 
     debug!("Final config: {:#?}", &config);
 
     let display = DisplayManager::new(config.use_colors());
+
+    // After `display` exists, so the warnings honor `--no-color`, and before
+    // dispatch, so they are not buried under a command's own output.
+    //
+    // Skipped for `config validate`, which reports the same keys itself as rows
+    // in its table. Printing here as well showed every ignored key twice, in two
+    // formats, in the one command whose entire job is reporting them.
+    if !matches!(
+        args.command,
+        cli::ClapCommands::Config(cli::ConfigCommands {
+            command: cli::ConfigSubcommands::Validate
+        })
+    ) {
+        crate::config::report_config_notices(&notices, &display);
+    }
 
     // Set up graceful shutdown: first SIGINT/SIGTERM cancels in-flight operations,
     // second signal forces immediate exit.

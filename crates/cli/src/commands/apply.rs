@@ -230,10 +230,9 @@ pub(crate) async fn handle_apply(
         })),
     };
 
-    // Built by the shared constructor rather than assembled here. This function
-    // used to duplicate it line for line, which is how apply ended up running
-    // provider commands under a different shell than install and check.
-    let service = create_dotfile_service(config, cancellation_token);
+    // The shared constructor, so apply runs provider commands under the same
+    // shell as install and check.
+    let service = create_dotfile_service(config, display, cancellation_token);
 
     let event_stream = if let Some(name) = &args.name {
         info!("Applying dotfiles for package: {}", name);

@@ -28,7 +28,7 @@ pub(crate) async fn handle_drift(
 ) -> i32 {
     info!("Checking dotfile drift");
 
-    let service = create_dotfile_service(config, cancellation_token);
+    let service = create_dotfile_service(config, display, cancellation_token);
     let event_stream = service.check_drift().await;
 
     let display_for_handler = display.clone();

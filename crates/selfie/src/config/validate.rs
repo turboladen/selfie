@@ -77,6 +77,33 @@ impl SelfieConfig {
     }
 }
 
+impl super::diagnostics::LoadedConfig {
+    /// Validate the settings **and** report anything in the file selfie ignored.
+    ///
+    /// Ignored keys are warnings rather than errors: the file still describes a
+    /// usable configuration, but it is not valid.
+    #[must_use]
+    pub fn validate(&self) -> ValidationResult {
+        let mut result = self.config().validate();
+
+        let mut issues = result.issues.all_issues().to_vec();
+        issues.extend(self.ignored_keys().iter().map(|ignored| {
+            // `Advisory`, not `InvalidValue`: an ignored key is not a bad value,
+            // and every other category names a kind of mistake. The level stays
+            // `warning` so a file carrying one is not reported as valid.
+            ValidationIssue::warning(
+                ValidationErrorCategory::Advisory,
+                ignored.key(),
+                &ignored.message(),
+                Some(&ignored.suggestion()),
+            )
+        }));
+
+        result.issues = issues.into();
+        result
+    }
+}
+
 /// Errors that can occur during configuration validation
 ///
 /// These errors represent specific validation failures that can be

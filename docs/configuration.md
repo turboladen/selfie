@@ -101,8 +101,8 @@ cli:
   use_colors: true
 ```
 
-`verbose` and `use_colors` are read **only** from the `cli:` section. At the top level they are
-unknown keys, which selfie drops without a warning — the setting simply does nothing.
+`verbose` and `use_colors` are read **only** from the `cli:` section. Written at the top level they
+are ignored — selfie says so on every run, but the setting does nothing.
 
 ## Required Settings
 
@@ -165,6 +165,14 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # If package_directory is ~/.selfie/packages,
 # dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
+
+If you **set** this and the directory does not exist, selfie says so and carries on without your
+standalone dotfiles — they are simply absent from `apply`, `dotfiles drift` and `dotfiles list`, and
+a new spec's name is not checked against them. If you do **not** set it and the default sibling does
+not exist, selfie says nothing: that is the ordinary state of a setup with no standalone dotfiles.
+
+`dotfiles track` is the exception. It copies the file _into_ that directory, so it refuses rather
+than warning.
 
 Standalone dotfiles live here with their source files colocated alongside their YAML definitions.
 Package dotfiles live alongside their package YAML in `package_directory` instead. See
@@ -307,9 +315,10 @@ or point `SELFIE_CONFIG_DIR` at a directory that has one.
 
 **The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
 colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
-cannot be overridden from the command line — edit the file. `--verbose` is also the wider of the
-two: it selects the `DEBUG` tracing level as well, which `cli: verbose: true` does not, because the
-tracing level is chosen from the flag before the file is read.
+cannot be overridden from the command line — edit the file. Written at the top level instead of
+under `cli:` they are ignored entirely, and selfie reports them. `--verbose` is also the wider of
+the two: it selects the `DEBUG` tracing level as well, which `cli: verbose: true` does not, because
+the tracing level is chosen from the flag before the file is read.
 
 **`SELFIE_CONFIG_DIR` and the path flags do not compete.** The variable chooses _which file_ is
 read; the flags override _fields_ in whatever file that was. Setting both is normal, and the flag
@@ -396,22 +405,35 @@ This checks:
 
 ## Troubleshooting
 
-### Unknown Configuration Fields
+### Ignored Configuration Keys
 
 ```
-Error: Configuration contains unknown fields
+⚠ `configs_directory` was renamed to `dotfiles_directory` and is no longer read. Selfie ignored it.
 ```
 
-**Solution:** Check field names against supported options:
+Selfie loads a configuration file that contains keys it does not recognize, and reports each one
+before the command runs. This is a **warning, not an error** — the rest of the file is still used
+and the command still runs. A key that was renamed says what replaced it; anything else is reported
+as unrecognized.
 
-```bash
-# Validate configuration
-selfie config validate
+`selfie config validate` lists the same keys and does not call such a file valid.
 
-# Supported fields: environment, package_directory, dotfiles_directory,
-# state_directory, verbose, use_colors, command_timeout, stop_on_error,
-# max_concurrency
+**Solution:** rename or remove the key. Supported top-level keys are `environment`,
+`package_directory`, `dotfiles_directory`, `state_directory`, `command_timeout`, `stop_on_error` and
+`max_concurrency`; `verbose` and `use_colors` go under `cli:`.
+
+A stray key under `cli:` is reported as `cli.<key>`. A `cli:` section that is not a mapping —
+`cli: true` — is reported too, and selfie falls back to the default CLI settings for that run. An
+empty `cli:` is fine and says nothing.
+
+### Configuration File Is Not a Regular File
+
 ```
+Error: …/config.yaml: the configuration file is a named pipe (fifo), not a regular file.
+```
+
+Selfie refuses a configuration file that is not a regular file. Replace it with a regular file or
+remove it.
 
 ### EDITOR Environment Variable Not Set
 
