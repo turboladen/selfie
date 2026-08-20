@@ -20,38 +20,29 @@
 /// Also written as a number in [`assert_secret_free`]'s documentation, which is
 /// what tells someone how to build a leak-test secret. Change both together.
 // A window rather than the whole value, because a truncating leak is still a
-// leak: a warning printing the first 200 bytes of a 4 KiB credential has to
-// fail. Twelve rather than eight because a short window collides with ordinary
-// fixture data — `test-env` matches `package_name: "test-env-pkg"`. Widening
-// raises that bar without removing it, which is why `assert_secret_free` states
-// what a leak-test secret has to look like.
+// leak. Twelve rather than eight because a short window collides with ordinary
+// fixture data -- `test-env` matches `package_name: "test-env-pkg"`.
 //
-// It measures two different windows, and a description naming only one is
-// describing half the scan. The byte needle takes twelve bytes from `anchor`,
-// before normalization, keeping interior whitespace — those render as `32` or
-// `10` and must stay contiguous with their neighbors. The text needle takes
-// twelve characters after `squeeze`. The two coincide only for whitespace-free
-// ASCII carrying no `\n`, `\r` or `\t` pair; whitespace alone is necessary and
-// not sufficient, because the escape pairs go too. `ab\ncdefghijkl` is fourteen
-// pure-ASCII bytes with no whitespace and its windows still cover different
-// spans.
+// It measures two different windows. The byte needle takes twelve bytes from
+// `anchor` before normalization, keeping interior whitespace. The text needle
+// takes twelve characters after `squeeze`. The two coincide only for
+// whitespace-free ASCII carrying no `\n`, `\r` or `\t` pair -- `ab\ncdefghijkl`
+// is fourteen pure-ASCII bytes with no whitespace and its windows differ.
 const WINDOW: usize = 12;
 
 /// How much context to show around a match, in each direction.
 const EXCERPT_CONTEXT: usize = 60;
 
 /// Collapse renderings that differ only in layout onto one form.
-// `{:#?}` puts each byte on its own line, and a pretty rendering formatted into
-// a string field arrives with those newlines escaped. Dropping both, and all
-// ASCII whitespace, lets one needle cover every layout.
+// `{:#?}` puts each byte on its own line, and a pretty rendering formatted into a
+// string field arrives with those newlines escaped. Dropping both, and all ASCII
+// whitespace, lets one needle cover every layout.
 //
 // Idempotent, and it has to be. Applied to needle and haystack alike, it only
 // puts the two in the same space if both reach the same depth, and one pass does
 // not: deleting a space can bring a `\` against an `n` and create an escape pair
-// the next pass deletes. Mismatched depths failed both ways — a needle
-// degenerating to empty, where `find("")` matches every haystack, and an
-// over-normalized needle missing a whole credential sitting verbatim in an
-// event. Iterating to a fixpoint makes the depth equal whatever a caller does.
+// the next pass deletes. Mismatched depths failed both ways -- a needle
+// degenerating to empty, and one missing a credential sitting verbatim.
 fn squeeze(text: &str) -> String {
     let mut current = squeeze_once(text);
     loop {
@@ -98,8 +89,8 @@ fn anchor(secret: &[u8]) -> &[u8] {
 /// Every rendering of `secret` this module can recognize, each labeled for the
 /// failure message, already normalized into the form `assert_secret_free`
 /// searches with.
-// Normalizing again at the call site is what let the guard below measure one
-// string while the search used another.
+// Normalized here, not at the call site: doing it twice would let the guard
+// below measure one string while the search used another.
 fn needles(secret: &[u8]) -> Vec<(&'static str, String)> {
     let anchored = anchor(secret);
     assert!(
@@ -213,43 +204,28 @@ fn excerpt(text: &str, at: usize, len: usize) -> String {
 // Why each gap is where it is:
 //
 // - Lossy rendering: replacement characters are neither the bytes nor the text,
-//   so the byte needle can never match one. Only the text needle can, and only
-//   while the readable prefix still holds WINDOW characters after `squeeze`.
-//   Pinned both ways by `catches_a_text_leak_of_an_ascii_prefixed_binary_secret`
-//   and `a_lossy_rendering_escapes_a_whitespace_heavy_readable_prefix`.
-// - Normalization is not context-free, and loses matches: `squeeze` deletes
-//   `\n`, `\r` and `\t` wherever they occur, so a backslash ending the text
-//   around a leak can splice with an `n` opening the leak. The pair goes from
-//   the haystack but not the needle, and the match is lost.
-// - Normalization also bridges, and invents matches: dropping whitespace fuses
-//   what it separated, so a needle can span two words never adjacent —
-//   `deploytokena1b2` matches `Info { message: "deploy token a1b2 requested" }`.
-//   Only whitespace goes; punctuation between `Debug` fields still separates
-//   them. This runs opposite to the bullet above, which loses a match.
-// - New encodings: nothing here encodes dotfile content today. Add the form if
-//   something starts to.
+//   so only the text needle can match, and only while the readable prefix holds
+//   WINDOW characters after `squeeze`.
+// - Normalization loses matches: `squeeze` deletes `\n`, `\r` and `\t` anywhere,
+//   so a backslash ending the text around a leak can splice with an `n` opening
+//   it. The pair goes from the haystack but not the needle.
+// - Normalization also bridges: dropping whitespace fuses what it separated, so a
+//   needle can span two words never adjacent. Punctuation still separates.
 #[track_caller]
 pub fn assert_secret_free(haystack: &str, secret: impl AsRef<[u8]>, context: &str) {
     let squeezed = squeeze(haystack);
 
     for (form, needle) in needles(secret.as_ref()) {
-        // `needles` guarded the length of exactly this string. Re-normalizing
-        // here is a no-op now that `squeeze` reaches a fixpoint, and this
-        // assertion is what keeps that true rather than assumed. Two defenses
-        // stand behind the same failure — a silent miss — and either catches it
-        // alone: the fixpoint, and building needles pre-normalized so both sides
-        // are squeezed to the same depth. They are **independent as detection
-        // strategies but coupled through this assert**, which encodes the
-        // fixpoint's invariant (the needle is already a fixpoint) rather than the
-        // other's (both sides at equal depth). Break the fixpoint and this fires
-        // before the scan can run, so the pair is not a free fallback.
+        // `needles` guarded the length of exactly this string. Re-normalizing here
+        // is a no-op now that `squeeze` reaches a fixpoint, and this assertion is
+        // what keeps that true rather than assumed.
         //
-        // Concretely, in a debug build that turns a leak test into this
-        // assertion rather than a `secret leaked into ...` report. That is
-        // deliberate: it names the broken invariant instead of leaving you to
-        // trace a scan result back to it. If you are here from a
-        // `should_panic(expected = "as text")` test failing on this message, the
-        // normalization is what broke, not the test.
+        // Two defenses stand behind the same silent miss -- the fixpoint, and
+        // building needles pre-normalized -- and this assert encodes the first.
+        // Break the fixpoint and it fires before the scan runs.
+        //
+        // If you are here from a `should_panic(expected = "as text")` test failing
+        // on this message, the normalization broke, not the test.
         debug_assert_eq!(
             squeeze(&needle),
             needle,

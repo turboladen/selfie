@@ -114,23 +114,15 @@ impl DeployEntry {
 /// reach a caller. **It is not a guarantee that nothing about the file escapes**
 /// — see the note beside the struct for what the location discloses.
 // What the location discloses, which is why the doc above stops short of an
-// absolute:
+// absolute.
 //
 // Both numbers are derived from the file. The column is an offset into the
-// offending line, so it encodes that line's layout: for `  <key>: <value>` a
-// type mismatch reports `len(key) + 5`, and a reader who knows the shape
-// recovers the key's length exactly. The line number is weaker but the same
-// kind of thing -- entries here are four lines each, so a failure at line 41
-// says roughly ten dotfiles precede it. Bytes do not escape; two lengths do.
+// offending line, so it encodes that line's layout: for `  <key>: <value>` a type
+// mismatch reports `len(key) + 5`, giving away the key's length. The line number
+// is weaker but the same kind of thing. Bytes do not escape; two lengths do.
 //
-// Accepted, because a location is what makes the message actionable, and the
-// alternative -- a class with no coordinates -- is not usefully better: the
-// file is owner-only and an attacker who can read it does not need the warning.
-//
-// Do not restate any of this as "nothing the file contained". A comment at this
-// site already warned against that restatement once; the change that removed
-// the warning went on to make the claim, in a `///`, where it was harder to
-// see.
+// Accepted, because a location is what makes the message actionable and the file
+// is owner-only. Do not restate this as "nothing the file contained".
 pub(super) struct ParseFailure {
     kind: &'static str,
     detail: Option<&'static str>,
@@ -152,20 +144,16 @@ impl ParseFailure {
         // the half that would make the collapse look intermittent.
         let error = error.without_snippet();
 
-        // Every arm yields `&'static str`, so no arm can carry a key, a value or
-        // a tag out of the error. `Box::leak` of a formatted string is also
-        // `&'static str` and would compile, so this stops an accidental leak and
-        // not a deliberate one.
+        // Every arm yields `&'static str`, so no arm can carry a key, a value or a
+        // tag out of the error. `Box::leak` of a formatted string would also
+        // compile, so this stops an accidental leak, not a deliberate one.
         //
-        // The three `Some` arms forward the library's own `&'static str`, which is
-        // the deserializer's vocabulary rather than the file's: the field names
-        // come from this file's own derives, and "expected mapping start" names a
-        // YAML event. `no_passed_through_text_carries_input` holds them to that.
+        // The three `Some` arms forward the deserializer's own vocabulary rather
+        // than the file's; `no_passed_through_text_carries_input` holds them to it.
         //
         // `serde_saphyr::Error` is `#[non_exhaustive]`, so the catch-all is
-        // required, and a variant added by a future release lands there instead
-        // of rendering whatever it interpolates. Nothing announces such a
-        // variant; the message just gets less specific.
+        // required and a future variant lands there rather than rendering whatever
+        // it interpolates.
         let (kind, detail) = match error {
             E::DuplicateMappingKey { .. } => ("a key is listed twice", None),
             // Each kind below is worded so the library's own noun can follow it

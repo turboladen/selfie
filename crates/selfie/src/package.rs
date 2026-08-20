@@ -301,20 +301,16 @@ fn shadowing_top_level_keys(raw_yaml: &str) -> Vec<String> {
 /// An unrecognized key is recorded in [`unknown_keys`](Self::unknown_keys) rather
 /// than dropped, which makes `content_source` report
 /// [`InvalidEntry::UnknownKeys`] so apply refuses the entry.
-// The fields stay `Option`s rather than collapsing into an enum because
-// `Package` is deserialized straight from YAML, and validation has to observe
-// "both set" and "neither set" to report them.
+// The fields stay `Option`s rather than collapsing into an enum because `Package`
+// is deserialized straight from YAML, and validation has to observe "both set"
+// and "neither set" to report them.
 //
-// Recording unknown keys matters because every field bar `target` is optional,
-// so a misspelled one is silently dropped unless something looks for it. `var:`
-// for `vars:` would leave a template entry looking like a plain repository file
-// and deploy the template unrendered — literal `{{ api_key }}` — over a
-// credentials target, with the content recorded in deploy state and shown in
-// diffs.
+// Recording unknown keys matters because every field bar `target` is optional, so
+// a misspelled one is silently dropped. `var:` for `vars:` would deploy a
+// template unrendered -- literal `{{ api_key }}` -- over a credentials target.
 //
-// `#[serde(deny_unknown_fields)]` cannot do this: it rejects `_`-prefixed YAML
-// anchor definitions, and a rejected key fails the whole package file to parse,
-// taking every other dotfile and command in it down with the typo.
+// `deny_unknown_fields` cannot do this: it rejects `_`-prefixed anchors, and a
+// rejected key fails the whole package file to parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DotfileEntry {
     // No `#[serde(default)]`: `Deserialize` is hand-written below and supplies its
@@ -407,17 +403,15 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                         "target" => once!(target, "target"),
                         _ => {
                             map.next_value::<IgnoredAny>()?;
-                            // `_`-prefixed keys are YAML anchor definitions
-                            // (`_anchor: &a …`), not data. Allowing them is the
-                            // whole reason this is not `deny_unknown_fields`, and
-                            // it matches the rule already applied to a package's
-                            // top-level keys.
+                            // `_`-prefixed keys are YAML anchor definitions, not
+                            // data. Allowing them is why this is not
+                            // `deny_unknown_fields`, matching the rule already
+                            // applied to top-level keys.
                             //
-                            // The exception is an anchor whose name collides with
-                            // a field of this entry: `_vars:` cannot be told apart
-                            // from a typo for `vars:`, and treating it as an anchor
-                            // deploys the template unrendered with the bindings
-                            // absent. See `shadows_dotfile_field`.
+                            // The exception is an anchor colliding with a field of
+                            // this entry: `_vars:` cannot be told apart from a typo
+                            // for `vars:`, and treating it as an anchor deploys the
+                            // template unrendered. See `shadows_dotfile_field`.
                             if !key.starts_with('_') || shadows_dotfile_field(&key) {
                                 unknown_keys.push(key);
                             }
@@ -1335,16 +1329,13 @@ vars: {}
 
     // Keeps `KNOWN_DOTFILE_FIELDS` in sync with what `DotfileEntry` serializes.
     //
-    // Two fixtures, not one: every field but `target` is `skip_serializing_if`,
-    // so a single entry can never emit all four keys and a one-fixture version
-    // would silently stop covering `command` or `vars`.
-    // `_dotfiles` is refused at the top level; `_target` is not.
+    // Two fixtures, not one: every field but `target` is `skip_serializing_if`, so
+    // a single entry can never emit all four keys and a one-fixture version would
+    // silently stop covering `command` or `vars`.
     //
-    // The second half is the load-bearing one. `docs/package-files.md`
-    // documents `_target: &target …` as the way to share a path between
-    // entries, and it stays legal only because `target` is not a top-level
-    // field. Adding `"target"` to `KNOWN_PACKAGE_FIELDS` breaks every file
-    // using the documented pattern, and this is what says so.
+    // `docs/package-files.md` documents `_target: &target …` as the way to share a
+    // path between entries, and it stays legal only because `target` is not a
+    // top-level field. Adding it to `KNOWN_PACKAGE_FIELDS` breaks every such file.
     #[test]
     fn a_top_level_anchor_is_refused_only_when_it_shadows_a_package_field() {
         assert!(shadows_package_field("_dotfiles"));

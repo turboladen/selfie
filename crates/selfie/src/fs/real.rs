@@ -63,24 +63,16 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
         }
     }
 
-    // A **directory** is deliberately not one of these, though it is not a regular
-    // file either. It cannot produce either hazard this guard exists for: opening
-    // one never blocks, and writing to one fails `EISDIR` without touching
-    // anything. Classifying it here would only relabel an error that is already
-    // loud and already accurate.
+    // A **directory** is deliberately not one of these: opening one never blocks,
+    // and writing to one fails `EISDIR` without touching anything.
     //
-    // Two tests hold that, and the second is the surprising one:
-    // `a_directory_at_the_target_is_an_ordinary_error` pins that it stays an
-    // `IoError`, and `a_write_that_fails_after_an_accepted_conflict_is_refused`
-    // reaches `perform_deploy`'s *second* `Err` arm **by putting a directory at
-    // the target**. Folding directories in here refuses that entry earlier, and
-    // the only test covering that arm stops covering it -- silently, because it
-    // would still pass. Anyone tidying this up would see the first failure and
-    // never learn about the second.
+    // Two tests hold that. `a_directory_at_the_target_is_an_ordinary_error` pins
+    // that it stays an `IoError`, and
+    // `a_write_that_fails_after_an_accepted_conflict_is_refused` reaches
+    // `perform_deploy`'s second `Err` arm by putting a directory at the target --
+    // folding directories in here would silently stop covering that arm.
     //
-    // Not dead on unix -- `file_type` is unused there once the `cfg(unix)` block
-    // above has returned, and this consumes it so the non-unix build has no
-    // unused-variable warning. Deleting it breaks that build only.
+    // `file_type` is consumed here so the non-unix build has no unused variable.
     let _ = file_type;
     None
 }
@@ -201,15 +193,12 @@ impl FileSystem for RealFileSystem {
             // there is no interval between deciding and writing for a planter to
             // win. Checking first and then writing would be exactly that race.
             //
-            // `O_NONBLOCK` is here for a second kind of target: opening a fifo for
-            // writing blocks until a reader arrives, so without it this call hangs
-            // forever on one and no timeout in selfie bounds it. With it the open
-            // fails `ENXIO` instead, and the classifier below names the fifo.
+            // `O_NONBLOCK` is for a second kind of target: opening a fifo for
+            // writing blocks until a reader arrives, and no timeout in selfie
+            // bounds it. With the flag the open fails `ENXIO` instead.
             //
-            // It does not make the guarantee on its own — with a reader attached
-            // the open succeeds — which is what the descriptor check after it is
-            // for. On a regular file the flag has no effect, here or on the writes
-            // that follow.
+            // It is not the guarantee on its own -- with a reader attached the open
+            // succeeds -- which is what the descriptor check after it is for.
             options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         #[cfg(not(unix))]
@@ -255,17 +244,14 @@ impl FileSystem for RealFileSystem {
             }
         };
 
-        // Ask the descriptor, not the path. Everything above this line is a
-        // question about a name, and a name can be replaced between the asking and
-        // the answering; this inspects the object actually opened, so a fifo or
-        // device planted mid-apply is refused rather than written to. It is the
-        // only check here that is not a race.
+        // Ask the descriptor, not the path. Everything above is a question about a
+        // name, and a name can be replaced between asking and answering; this
+        // inspects the object actually opened, so a fifo or device planted
+        // mid-apply is refused. It is the only check here that is not a race.
         //
-        // Reached when the open succeeded, which for a fifo means a reader was
-        // already attached. Nothing has been written yet: `O_TRUNC` on a
-        // non-regular file is ignored for a fifo or terminal and unspecified
-        // elsewhere, so this must run before `write_all` rather than rely on the
-        // open being harmless.
+        // Nothing has been written yet: `O_TRUNC` on a non-regular file is ignored
+        // for a fifo and unspecified elsewhere, so this must run before
+        // `write_all`.
         match file.metadata() {
             Ok(metadata) if metadata.file_type().is_file() => {}
             Ok(_) => {
@@ -297,44 +283,25 @@ impl FileSystem for RealFileSystem {
         // Durability, because a caller records the write as having happened.
         //
         // `perform_deploy` calls `record_deployment` immediately after this
-        // returns, and both track handlers record a deployment after their copy
-        // into the repository. If the write is lost to a crash while that record
-        // survives, the state claims content the target does not have --
-        // `detect_drift` then reports `TargetChanged`, `deploy_decision` turns
-        // that into a `Conflict`, and with no resolver the entry is skipped
-        // forever. A lost deploy becomes a sticky conflict blamed on the user
-        // (selfie-aub).
+        // returns. If the write is lost to a crash while that record survives, the
+        // state claims content the target does not have, and the entry becomes a
+        // sticky conflict blamed on the user (selfie-aub).
         //
-        // Ordering is what fixes it, so this belongs *before* the record rather
-        // than beside it: making the state file more durable while the target
-        // stays lossy would widen the window instead of closing it. That is why
-        // `save_deploy_state` is deliberately left alone.
-        //
-        // Costs two fsyncs per file actually written -- nothing on a skip, a dry
-        // run, or an entry already in sync.
+        // Ordering is the fix, so this belongs *before* the record: making the
+        // state file more durable while the target stays lossy would widen the
+        // window. Costs two fsyncs per file actually written.
         file.sync_all().map_err(io_err)?;
 
         // The data is durable; the directory entry naming it is not. A freshly
-        // created file can survive its own fsync and still vanish, because the
-        // parent directory's update has not been committed.
+        // created file can survive its own fsync and still vanish.
         //
-        // **Best-effort, deliberately.** Opening a directory needs *read*
-        // permission, while creating and writing a file in it needs write and
-        // execute -- so a `0o300` directory takes the write and refuses this
-        // open with `EACCES`. Failing here would turn a deploy that works today
-        // into an error for that case, which is a worse outcome than the
-        // durability this buys. `a_write_only_parent_directory_still_succeeds`
-        // holds it.
+        // Best-effort, deliberately: opening a directory needs read permission,
+        // so a `0o300` directory refuses this open with `EACCES`. Failing here
+        // would break a deploy that works today.
+        // `a_write_only_parent_directory_still_succeeds` holds it.
         //
-        // Only the **immediate** parent. When `create_dir_all` above has just
-        // built a chain, the grandparent's entry for the new directory is not
-        // synced, so a crash can still lose the whole subtree.
-        //
-        // On macOS `sync_all` is `fsync(2)`, which APFS does not treat as a
-        // write barrier -- `F_FULLFSYNC` is, at a cost of hundreds of
-        // milliseconds. So what this guarantees is ordering against a process or
-        // kernel crash everywhere, and against power loss only where the
-        // filesystem honors `fsync`. Do not restate it as more than that.
+        // Only the immediate parent, and on macOS `sync_all` is `fsync(2)`,
+        // which APFS does not treat as a write barrier. Do not claim more.
         #[cfg(unix)]
         if let Ok(dir) = fs::File::open(parent) {
             let _ = dir.sync_all();
@@ -718,9 +685,9 @@ fn tp(path: &Path) -> TargetPath {
 ///
 /// The six tests directly below all still pass against a naive `create_dir_all` +
 /// `fs::write`, so they guard against gross breakage rather than against the defects
-/// this method exists to fix. Named as that pair rather than as a method: the port
-/// no longer has a following writer to compare against, and the comparison is with
-/// the implementation someone might reach for, not with an API that exists.
+/// this method exists to fix. Named as that pair rather than as a method: the
+/// comparison is with the implementation someone might reach for, not with an API
+/// the port offers.
 ///
 /// Everything in `unix` is load-bearing: temporarily swapping this implementation
 /// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
@@ -1228,16 +1195,13 @@ mod no_follow_write_tests {
 
         // The directory fsync must not turn a working write into a failure.
         //
-        // Opening a directory needs **read** permission; creating and
-        // writing a file in it needs write and execute. So `0o300` is a directory
-        // selfie can write into and cannot open -- the write succeeds, the file's
-        // own `sync_all` succeeds, and only the directory fsync fails, with
-        // `EACCES`. Making that fatal would break deploys into any write-only
-        // directory, which is why it is best-effort.
+        // Opening a directory needs read permission; writing a file in it needs
+        // write and execute. So `0o300` is a directory selfie can write into and
+        // cannot open -- only the directory fsync fails, with `EACCES`. Making
+        // that fatal would break deploys into any write-only directory.
         //
         // The mode is the whole fixture: at `0o700` this passes against a fatal
-        // implementation too, and proves nothing.
-        // selfie-aub
+        // implementation too, and proves nothing. selfie-aub
         #[test]
         fn a_write_only_parent_directory_still_succeeds() {
             if nix::unistd::Uid::effective().is_root() {
@@ -1430,20 +1394,16 @@ mod irregular_targets {
         }
     }
 
-    // With a reader attached the open succeeds, and the descriptor check is what
-    // refuses.
+    // With a reader attached the open succeeds, and the descriptor check refuses.
     //
-    // The route is pinned by construction rather than asserted: POSIX guarantees
-    // `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds
-    // the fifo open, so the failed-open path is unreachable here and only the
-    // `fstat` after the open can produce the refusal. The reader is opened by
-    // this thread with `O_NONBLOCK`, which POSIX guarantees returns immediately
-    // with no writer — a reader thread could not signal readiness, because its
-    // own open would block until the writer arrived, and the test would silently
-    // fall back to the readerless route it is written to exclude.
+    // Pinned by construction rather than asserted: POSIX guarantees
+    // `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds the
+    // fifo, so only the `fstat` after the open can produce the refusal. The reader
+    // is opened by this thread -- a reader thread could not signal readiness,
+    // because its own open would block until the writer arrived, and the test
+    // would fall back to the readerless route it exists to exclude.
     //
-    // That the `fstat` fired, rather than the write proceeding, is observable:
-    // the reader receives nothing.
+    // That the `fstat` fired is observable: the reader receives nothing.
     #[test]
     fn the_writer_refuses_a_fifo_that_has_a_reader() {
         use std::os::unix::fs::OpenOptionsExt as _;

@@ -101,15 +101,13 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
     // The only read of a package file in the crate, and the only place the
     // irregular-file guard has to sit. Reading a fifo blocks until a writer
-    // arrives, so a single `mkfifo ghost.yml` in the package directory wedged
-    // every command that enumerates specs -- `spec list`, `spec info`,
-    // `package list`, `package status`, `spec validate --all`. `command_timeout`
-    // did not bound it; that governs provider commands, not filesystem calls
-    // (selfie-h2kr).
+    // arrives, so one `mkfifo ghost.yml` in the package directory wedges every
+    // command that enumerates specs. `command_timeout` does not bound it; that
+    // governs provider commands, not filesystem calls (selfie-h2kr).
     //
-    // It has one caller today. It stays a separate function because it is the
-    // whole read path: anything that grows a second way to load a spec has to go
-    // through it, and the guard is not something a new caller can forget to add.
+    // It stays a separate function because it is the whole read path: anything
+    // that grows a second way to load a spec goes through it, so the guard is not
+    // something a new caller can forget.
     fn read_spec_file(&self, path: &Path) -> Result<String, PackageParseError> {
         if let Some(refusal) = self.fs.irregular_target_refusal(&repository_path(path)) {
             return Err(irregular_spec_refusal(path, refusal));
@@ -138,22 +136,16 @@ impl<F: FileSystem> YamlPackageRepository<F> {
     }
 }
 
-// The third wording frame on the shared classifier. `IrregularTarget`'s own
-// `Display` is worded for a deploy target and `repository_read_refusal` for a
-// file in the dotfiles repository the user syncs; neither describes a package
-// spec, which selfie reads out of its own package directory. Only the wording is
-// new -- the classification is `irregular_target_refusal`'s, as it is for the
-// dotfile source and deploy paths.
+// The third wording frame on the shared classifier. `IrregularTarget`'s `Display`
+// is worded for a deploy target and `repository_read_refusal` for a file in the
+// dotfiles repository; neither describes a package spec. Only the wording is new.
 //
-// The `other` arm fails **closed**, and is deliberately not a wildcard that
-// returns the content. `irregular_target_refusal` returns only `IrregularTarget`
-// today, so nothing reaches it; letting a future variant through would un-guard
-// the read and restore the hang this exists to prevent.
+// The `other` arm fails **closed** rather than returning the content. Nothing
+// reaches it today, and letting a future variant through would un-guard the read.
 //
-// It re-words rather than carrying the `FileSystemError` through. Every refusal
-// variant's `Display` was written for the deploy side and says selfie will not
-// *write* through a *target* -- false twice over on a read of a package file,
-// and it would print the path a second time.
+// It re-words rather than carrying the `FileSystemError` through: every refusal
+// variant's `Display` says selfie will not *write* through a *target*, false
+// twice over on a read, and would print the path a second time.
 fn irregular_spec_refusal(path: &Path, refusal: FileSystemError) -> PackageParseError {
     match refusal {
         FileSystemError::IrregularTarget { kind, .. } => PackageParseError::IrregularFile {
@@ -345,14 +337,12 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         //
         // `write_file_no_follow` rather than a plain write: a symlink at `path`
         // would otherwise be followed and the package YAML written wherever it
-        // points. The `path_exists` checks that guard the callers of this
-        // function *follow* symlinks, so a **dangling** one passes them and the
-        // write then creates the file at the planter's chosen path (selfie-yw7i).
+        // points. The `path_exists` checks guarding the callers *follow* symlinks,
+        // so a dangling one passes them and the write then creates the file at the
+        // planter's chosen path (selfie-yw7i).
         //
-        // The direction here is inward -- into selfie's own package directory --
-        // so the refusal is re-worded rather than rendered as-is. See
-        // `PackageRepoError::UnwritablePath` for why the filesystem error's own
-        // text cannot be used.
+        // The direction is inward, so the refusal is re-worded rather than
+        // rendered as-is. See `PackageRepoError::UnwritablePath`.
         self.fs
             .write_file_no_follow(&repository_path(path), yaml_content.as_bytes())
             .map_err(|e| match &e {
@@ -1699,17 +1689,13 @@ environments:
 
     // selfie-yw7i. A package file is written *into* selfie's own package
     // directory, so a refusal must describe that file -- but both refusal
-    // variants say "target" in their own `Display`, because both were written
-    // for a dotfile target, the path selfie deploys *out* to. Rendering either
-    // one verbatim tells someone who ran `selfie spec update` that their
-    // "target" is a symlink, naming a thing that is not in the sentence they
-    // typed.
+    // variants say "target" in their `Display`, having been written for a dotfile
+    // target. Rendering either verbatim tells someone who ran `selfie spec
+    // update` that their "target" is a symlink.
     //
-    // Asserted as an absence, which is what makes it bite: the natural
-    // regression here is not a wrong message but a reversion to
-    // `PackageRepoError::FileSystemError`, whose passthrough `Display` puts the
-    // word straight back. The path assertion alone would not catch that, since
-    // the filesystem error names the path too.
+    // Asserted as an absence, which is what makes it bite: the natural regression
+    // is a reversion to `PackageRepoError::FileSystemError`, whose passthrough
+    // `Display` puts the word straight back.
     #[test]
     fn a_refused_package_path_does_not_call_it_a_target() {
         for refusal in [

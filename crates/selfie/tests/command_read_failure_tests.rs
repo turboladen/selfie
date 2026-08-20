@@ -1,9 +1,8 @@
 // What the package operations do when a command's output could not be read.
 //
-// `selfie-ql8m`: `run_buffered` used to discard a mid-read IO error and return
-// whatever had been buffered as though it were the command's whole output.
-// Nothing downstream could tell the two apart, and every non-streaming path
-// goes through it.
+// `run_buffered` must not discard a mid-read IO error and return what it had
+// buffered as though it were the whole output — nothing downstream can tell the
+// two apart, and every non-streaming path goes through it. (selfie-ql8m)
 //
 // These assert the consumers' side of the fix — that a command whose output
 // selfie could not read does not become a *verdict*. The dotfile path's own

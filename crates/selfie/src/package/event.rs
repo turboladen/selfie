@@ -723,10 +723,8 @@ pub enum OperationSuccess {
         /// Entries there was correctly nothing to do for: already in sync, or a
         /// dry run declining to act.
         ///
-        /// Distinct from `refused_count`, and the distinction is the point. A
-        /// refused entry counted here is indistinguishable from one that needed
-        /// no work, which is how `selfie apply` came to report success for a run
-        /// that deployed nothing.
+        /// Distinct from `refused_count`: an entry counted here needed no work,
+        /// which is not the same as one selfie declined to touch.
         skipped_count: usize,
         conflict_count: usize,
         /// What selfie was asked to deploy and did not — refusals and failures
@@ -823,8 +821,8 @@ pub enum CommandFailure {
     /// [`BoundedText`](crate::commands::BoundedText) type is what bounds it: the
     /// newtype's field is private, so no struct-variant literal — here, in an
     /// adapter, or in a test — can put unbounded text in this field. That makes
-    /// this the one stderr-forwarding site the compiler enforces rather than the
-    /// convention it used to be. Do not add a `stdout` field back.
+    /// this the one stderr-forwarding site the compiler enforces. Do not add a
+    /// `stdout` field back.
     ExecutionFailed {
         command: String,
         exit_code: Option<i32>,
@@ -1222,32 +1220,16 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
                     reason: "Command timed out".to_string(),
                 })
             }
-            // Listed rather than matched with `_` so that adding a
-            // `CommandError` variant fails to build here. This arm renders the
-            // error with `Display`, and a variant whose `Display` carried
-            // command output would leak it into `PackageEvent::Completed` and
-            // on to both the CLI and the MCP server's JSON. Every variant below
-            // names the command, and beyond that only text selfie chose itself —
-            // never process output. Check that before extending this list.
+            // Listed rather than matched with `_`, so adding a `CommandError`
+            // variant fails to build here. This arm renders the error with
+            // `Display`, and a variant whose `Display` carried command output
+            // would leak it into `PackageEvent::Completed` and on to the CLI and
+            // the MCP server's JSON. Every variant below names the command and
+            // otherwise only text selfie chose. Check that before extending.
             //
-            // `OutputReadFailed` was checked against that requirement when it was
-            // added: alongside the command it renders the stream that failed and
-            // an `io::Error`, which is the OS's own message for the failed read.
-            // It carries no output bytes — whatever had been buffered when the
-            // read failed is dropped rather than reported.
-            //
-            // It once also had to render a reader *task* that did not finish, and
-            // substituted a fixed `&'static str` for the `JoinError` because a
-            // panic payload is produced by the task holding the command's bytes
-            // and can be derived from them. Those tasks are gone: `collect` in
-            // `commands::shell` reads both pipes inline, so no `JoinError` is
-            // reachable from this variant. See that function on why a `spawn`
-            // must not be reintroduced there without restoring the guard.
-            //
-            // `ContentMarkersAbsent` was checked the same way: it renders the
-            // command and nothing else. It cannot render what was captured,
-            // because the whole reason it exists is that selfie could not tell
-            // which part of that capture the command wrote.
+            // `OutputReadFailed` renders the failed stream and an `io::Error`,
+            // never output bytes. `ContentMarkersAbsent` renders the command and
+            // nothing else -- it exists because the capture could not be split.
             crate::commands::runner::CommandError::Cancelled { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
             | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }

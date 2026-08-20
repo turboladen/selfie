@@ -49,8 +49,12 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     YamlPackageRepository::new(fs, config.package_directory().clone())
 }
 
-// The one place the CLI picks a shell. `clippy.toml` makes a non-login runner a
-// build error crate-wide, including inside this function.
+/// Build the command runner every CLI service uses.
+///
+/// The one place the CLI picks a shell, so every command runs a user's commands
+/// the same way.
+// `clippy.toml` makes a non-login runner a build error crate-wide, including
+// inside this function.
 fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
     ShellCommandRunner::login_shell(config.command_timeout())
 }

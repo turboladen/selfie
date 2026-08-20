@@ -9,14 +9,12 @@ use std::process::{Command, Stdio};
 /// # Panics
 ///
 /// If the script cannot be written or made executable.
-// The write happens in a subprocess, and it has to. A test binary runs its tests
-// on several threads, several of which spawn processes. `File::create` here
-// would leave this process holding a write descriptor across the write, and any
+// The write happens in a subprocess, and it has to. A test binary runs tests on
+// several threads, several of which spawn processes. `File::create` here would
+// leave this process holding a write descriptor across the write, and a
 // concurrent `spawn` would fork a child that inherits it. The descriptor is
-// `O_CLOEXEC`, so the child holds it only until its own `exec`, but that window
-// is enough: Linux refuses to `execve` a file any process has open for writing,
-// with `ETXTBSY`. Writing in a child that has exited by the time this returns
-// means no descriptor exists to inherit.
+// `O_CLOEXEC`, so the child holds it only until its own `exec`, but Linux refuses
+// to `execve` a file any process has open for writing, with `ETXTBSY`.
 //
 // macOS does not enforce that rule, so getting it wrong fails only on CI, and
 // only sometimes.

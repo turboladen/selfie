@@ -157,44 +157,33 @@ pub trait FileSystem: Send + Sync {
     /// is neither absent nor a regular file
     ///
     /// A fifo, socket, device node or directory. `None` for a regular file, for a
-    /// path that does not exist, and for a **symlink to a regular file** — a
-    /// symlink is [`symlink_refusal`](FileSystem::symlink_refusal)'s question, and
-    /// answering it here too would report one thing two ways.
+    /// path that does not exist, and for a symlink to a regular file, which is
+    /// [`symlink_refusal`](FileSystem::symlink_refusal)'s question.
     ///
-    /// Must answer for what an `open` of `path` would land on, so a symlink to a
-    /// fifo is a fifo.
+    /// Answers for what an `open` of `path` would land on, so a symlink to a fifo
+    /// is a fifo.
     ///
-    /// **Call this before every read of a path selfie does not control.** A write
-    /// is protected either way — [`write_file_no_follow`](FileSystem::write_file_no_follow)
-    /// re-checks the descriptor it opened — but nothing does that for a read, and
-    /// opening a fifo to read blocks exactly as opening it to write does. Removing
-    /// this from a read path restores an indefinite hang.
+    /// **Call this before every read of a path selfie does not control.** Opening
+    /// a fifo to read blocks, and nothing else on a read path checks.
     ///
     /// Advisory for writes: stat-then-act is racy, so a fifo swapped in afterwards
-    /// is caught by the writer rather than here.
+    /// is caught by the writer instead.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
     ///
     /// Companion to [`write_file_private`](FileSystem::write_file_private), for
-    /// deciding whether an existing file already meets the standard that method
-    /// establishes. Secret-bearing content that is already correct still has to
-    /// be checked: content and permissions are independent, and a target whose
-    /// bytes happen to match may still be world-readable.
+    /// deciding whether an existing file already meets that standard. Content and
+    /// permissions are independent: a target whose bytes already match may still
+    /// be world-readable.
     ///
     /// # Platform notes
     ///
     /// On Unix this is exact: true when no group or other permission bit is set.
-    /// Symlinks are followed, so this reports on the file the path resolves to --
-    /// which is why it takes a [`TargetPath`]. Handed an already-resolved path it
-    /// would report on a link's destination and call the target private, and the
-    /// caller would then skip the write that replaces the link.
+    /// Symlinks are followed, so it reports on the file the path resolves to.
     ///
-    /// On every other platform this returns `true`, because there are no Unix
-    /// permission bits to inspect and nothing this method could meaningfully
-    /// report or a caller meaningfully fix. Callers use it to decide whether to
-    /// tighten, so `true` — "nothing to do" — is the correct answer there, not a
-    /// claim that the file is private.
+    /// On every other platform it returns `true`, meaning "nothing to tighten"
+    /// rather than a claim that the file is private.
     ///
     /// # Errors
     ///

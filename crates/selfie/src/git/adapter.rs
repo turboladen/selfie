@@ -752,15 +752,12 @@ mod tests {
     // A loopback server answering every request `401 Basic`, returning its port.
     //
     // A 401 is what puts git on the path that leaks: it has a username from the
-    // URL, decides it needs a password, cannot prompt, and names the URL in the
-    // failure. Against a *refused* port git fails earlier and strips the
-    // userinfo, so a listener is required — this cannot be tested by pointing
-    // at a closed port.
+    // URL, needs a password, cannot prompt, and names the URL in the failure.
+    // Against a refused port git fails earlier and strips the userinfo, so a
+    // listener is required.
     //
-    // Loops on `accept` because git makes more than one connection (`/info/refs`,
-    // then the retry once it has decided it needs credentials); a single-shot
-    // accept leaves the second hanging. The thread is deliberately not joined —
-    // it blocks in `accept` until the test binary exits.
+    // Loops on `accept` because git makes more than one connection. The thread is
+    // deliberately not joined -- it blocks in `accept` until the binary exits.
     fn spawn_401_server() -> u16 {
         use std::io::{Read, Write};
 
@@ -821,17 +818,15 @@ mod tests {
         (temp, path)
     }
 
-    // The premise: on *this* machine, with the environment `run_git` actually
-    // gives git, the raw stderr really does contain the token.
+    // The premise: on *this* machine, with the environment `run_git` gives git,
+    // the raw stderr really does contain the token.
     //
-    // Without this the leak tests below pass whenever git stops leaking — or,
-    // far more likely, whenever something on the machine answers the credential
-    // prompt so git never names the URL at all. A leak test that passes because
-    // the secret was never produced is worse than no test.
+    // Without this the leak tests below pass whenever git stops leaking -- or,
+    // far more likely, whenever something answers the credential prompt so git
+    // never names the URL. A leak test that passes because the secret was never
+    // produced is worse than no test.
     //
-    // Mirrors `run_git` exactly: same args, same cwd, same null stdin, same
-    // `GIT_TERMINAL_PROMPT`. A control run under a different environment would
-    // be proving the premise for conditions the assertion never sees.
+    // Mirrors `run_git` exactly: same args, cwd, null stdin, `GIT_TERMINAL_PROMPT`.
     fn assert_git_really_leaks_the_token(repo_root: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)

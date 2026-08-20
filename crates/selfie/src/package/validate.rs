@@ -623,23 +623,14 @@ impl Package {
     /// environments rather than the sum.
     // `selfie apply` executes commands taken from the package file rather than
     // only copying data out of it, which makes a package directory code and not
-    // data for anyone deciding whether to trust one. That has to be visible
-    // rather than implicit, and it matters more as package directories are
-    // shared or overlaid.
+    // data for anyone deciding whether to trust one.
     //
-    // Informational, because a package using `vars` correctly would warn on
-    // every validation, which is how warnings come to be ignored.
+    // Informational, because a package using `vars` correctly would warn on every
+    // validation, which is how warnings come to be ignored.
     //
-    // Worst case, not a sum over `Package::dotfiles_with_scope`, which lists a
-    // shared entry and each environment that overrides it. Summing would report
-    // three commands for one provider entry overridden on two machines.
-    //
-    // Counts what each entry declares, read from its fields — not
-    // `DotfileEntry::command_count`, which answers apply's question and returns
-    // zero for an entry apply would refuse. An undeployable entry still contains
-    // a command to review, and fixing the defect validation reports in the same
-    // breath is enough to make it run. The two counts agree for every valid
-    // entry, and `declared_and_deployable_command_counts_agree` holds them to it.
+    // Worst case, not a sum over `dotfiles_with_scope`, which would report three
+    // commands for one provider entry overridden on two machines. Counts what
+    // each entry declares, not `command_count`, which answers apply's question.
     fn report_apply_time_commands(&self) -> Vec<ValidationIssue> {
         // What the entry declares: a whole-file `command`, plus one per binding.
         // A malformed entry carrying both is counted honestly as both.
@@ -1671,20 +1662,13 @@ dotfiles:
     // The validator's decision must be the one `TargetRejection::of` gives, or a
     // spec passes validation and then cannot deploy.
     //
-    // Named for the *textual* rule on purpose: `TargetRejection::NoHome` is
-    // machine state rather than spec state, so the validator can never match the
-    // whole deploy rule -- only this half of it.
+    // Named for the *textual* rule: `TargetRejection::NoHome` is machine state
+    // rather than spec state, so the validator can only match this half.
     //
-    // What it catches is a call site that stops delegating and reimplements the
-    // rule inline, which is the regression that produced selfie-jlum. It cannot
-    // catch a bug *inside* `of`, because both sides here call it -- the same
-    // property its model `var_name_rule_matches_the_content_source_refusal`
-    // (`package.rs`) has, for the same reason. `of`'s own content is held by
-    // `a_named_user_target_is_a_validation_error` above and by the unit tests in
-    // `fs::target`, which assert specific rejections rather than agreement.
-    //
-    // Checks the *decision* rather than the predicate, and carries agree-accept
-    // rows as well as agree-reject rows.
+    // Catches a call site that stops delegating and reimplements the rule inline,
+    // the regression that produced selfie-jlum. It cannot catch a bug inside `of`,
+    // because both sides call it -- `a_named_user_target_is_a_validation_error`
+    // and the `fs::target` unit tests hold that.
     #[test]
     fn the_validator_matches_the_textual_rule() {
         for target in [

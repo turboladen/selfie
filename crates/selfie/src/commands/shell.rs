@@ -523,25 +523,16 @@ where
 ///
 /// [`CommandError::OutputReadFailed`] naming the pipe that failed, or
 /// [`CommandError::IoError`] if waiting on the child itself failed.
-// Generic over the three futures rather than taking a child, so a read failure —
-// which no real child can be made to produce on demand — is testable.
+// Generic over the three futures rather than taking a child, so a read failure --
+// which no real child can be made to produce on demand -- is testable.
 //
-// `try_join3` polls all three concurrently, which is what avoids the ~64KB
-// pipe-buffer deadlock, and returns the first error. Returning early matters
-// because the pipe reads are the only thing draining the child: waiting on
-// `wait()` after a read has failed blocks until the caller's timeout, and
-// reports a read failure as a timeout.
-//
-// A failed read is an error rather than an empty buffer beside a successful
-// status, because a command can exit 0 while the pipe carrying its answer fails,
-// and callers act on that output — one uses it as an executable path, one writes
-// it to a credentials file.
+// `try_join3` polls all three concurrently, avoiding the ~64KB pipe-buffer
+// deadlock, and returns the first error. Returning early matters because the pipe
+// reads are the only thing draining the child.
 //
 // Do not read the pipes in a `tokio::spawn`. That makes a `JoinError` reachable,
-// and its `Display` renders the panic payload of the task holding this command's
-// bytes into `CommandError::OutputReadFailed`, and on to
-// `PackageEvent::Completed`, the CLI and the MCP server's JSON. Reading inline
-// leaves nothing to leak.
+// whose `Display` renders the panic payload of the task holding this command's
+// bytes into `CommandError::OutputReadFailed` and on to the MCP server's JSON.
 async fn collect<S, O, E>(
     wait: S,
     stdout: O,
@@ -587,25 +578,14 @@ where
 /// accumulated byte-exactly into [`CommandOutput`] while only the relayed copy is
 /// decoded.
 // Not the stronger "a frame never ends inside a character". A frame can end
-// inside an invalid sequence, at the boundary of its maximal subpart —
-// `[0x61, 0xF4]` followed by `0xF5` yields a frame of just `[0xF4]`. That costs
-// nothing, because `0xF4` decodes to one `U+FFFD` framed alone or with its
-// neighbours. What never happens is a valid character being split, which is the
-// case that would turn one character into two `U+FFFD`.
+// inside an invalid sequence, at the boundary of its maximal subpart, which costs
+// nothing. What never happens is a valid character being split -- the case that
+// would turn one character into two `U+FFFD`.
 //
-// The boundary rule is `std`'s, not this module's: `str::from_utf8` reports both
-// how far the input was valid (`Utf8Error::valid_up_to`) and whether the
-// trailing bytes were merely incomplete or genuinely invalid
-// (`Utf8Error::error_len`). This is the adapter from that onto `Decoder`; it
-// does not parse UTF-8 itself.
-//
-// Framing at a fixed byte count instead — which the read loop this replaced did,
-// at 1024 bytes — splits any multi-byte character straddling the cut into two
-// `U+FFFD`s, one ending a chunk and one starting the next. Both halves reach the
-// terminal and the MCP server's JSON, because the relayed chunk is decoded here
-// and nothing downstream can undo it. Yielding text would likewise make a
-// command's captured stdout lossy under streaming and byte-exact everywhere
-// else.
+// The boundary rule is `std`'s: `str::from_utf8` reports how far the input was
+// valid and whether the trailing bytes were incomplete or invalid. This is the
+// adapter onto `Decoder`; it does not parse UTF-8 itself. Framing at a fixed byte
+// count instead splits any straddling character into two `U+FFFD`s.
 struct Utf8Boundary;
 
 impl Utf8Boundary {
@@ -691,16 +671,14 @@ where
 /// [`CommandError::OutputReadFailed`] naming the pipe that failed, or
 /// [`CommandError::IoError`] if waiting on the child itself failed.
 // `try_join!`, not `join!`. The pump is the only thing draining the pipes, and a
-// child blocked writing to a full one cannot exit until something does — so a
-// `join!`, which waits for both, turns a read failure into a wait for the entire
-// remaining timeout and then reports it as `CommandError::Timeout`. `try_join!`
-// returns the read failure as soon as it happens, and the caller kills the child
-// it left behind.
+// child blocked writing to a full one cannot exit until something does -- so a
+// `join!` turns a read failure into a wait for the entire remaining timeout,
+// reported as `CommandError::Timeout`. `try_join!` returns the read failure at
+// once, and the caller kills the child it left behind.
 //
 // The success path still requires both: the status and both pipes at EOF. That
-// is what avoids the ~64KB pipe-buffer deadlock, and it is why a grandchild
-// holding the pipe open runs out the timeout rather than hanging past it. No
-// phase here escapes the deadline.
+// avoids the ~64KB pipe-buffer deadlock, and is why a grandchild holding the pipe
+// open runs out the timeout rather than hanging past it.
 async fn drain_and_wait<S>(
     child: &mut tokio::process::Child,
     frames: S,
@@ -1010,19 +988,15 @@ mod tests {
          done";
 
     // 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
-    // ASCII.
+    // ASCII. The `é` straddles the 1024-byte read boundary.
     //
-    // The `é` straddles the 1024-byte boundary the old read loop cut on. The
-    // `0xFF` is what makes a byte-exactness assertion able to fail: a *valid*
-    // character that gets split still round-trips through
-    // `String::from_utf8_lossy(..).as_bytes()` byte for byte, so a fixture
-    // without an invalid byte cannot detect output that was decoded before it
-    // was captured.
-    // **Octal, not `\\xNN`.** Hex escapes are a bash/BSD extension; POSIX
-    // specifies `\\ooo`, and `/bin/sh` is dash on Debian and Ubuntu, whose
-    // `printf` emits `\\xc3` as five literal characters. That made this fixture
-    // produce no split character at all and the test fail for a reason having
-    // nothing to do with the decoder.
+    // The `0xFF` is what lets a byte-exactness assertion fail: a *valid* character
+    // that gets split still round-trips through `from_utf8_lossy(..).as_bytes()`
+    // byte for byte, so a fixture without an invalid byte cannot detect output
+    // decoded before it was captured.
+    //
+    // **Octal, not `\xNN`.** Hex escapes are a bash/BSD extension; `/bin/sh` is
+    // dash on Debian, whose `printf` emits `\xc3` as five literal characters.
     const SPLIT_CHARACTER: &str = "printf 'a%.0s' $(seq 1 1023); printf '\\303\\251'; \
          printf '\\377'; printf 'b%.0s' $(seq 1 100)";
 
@@ -1076,12 +1050,11 @@ mod tests {
         // selfie-b7mv, the buffered half — the same shape as the streaming test
         // above, and the reason this bead is not closed by either commit alone.
         //
-        // The timeout and cancellation arms used to live *inside* a `select!`
-        // that `child.wait()` could win. A grandchild inheriting the stdout pipe
-        // keeps it open after the shell exits, so `wait()` returned in
-        // milliseconds and the reads that followed had no deadline at all: the
-        // command ran ~8s against a 2s budget and was then reported as `Ok`. The
-        // budget was not merely exceeded, it was unenforced, and the caller was
+        // The timeout and cancellation arms must not sit inside a `select!` that
+        // `child.wait()` can win. A grandchild inheriting the stdout pipe keeps it
+        // open after the shell exits, so `wait()` returns in milliseconds and the
+        // reads that follow would have no deadline at all: the command runs to
+        // completion against an unenforced budget, and the caller is
         // told the command had succeeded.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
@@ -1104,24 +1077,14 @@ mod tests {
 
     // Is a process whose command line contains `marker` still running?
     //
-    // **The marker has to be the command the shell execs**, not a comment
-    // beside it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30`
-    // and the comment is gone, so `pgrep -f marker` finds nothing whether or not
-    // the child was killed — a test written that way passes either way. An
-    // unusual sleep duration is the marker instead: it survives the exec because
-    // it *is* the exec'd command.
+    // **The marker has to be the command the shell execs**, not a comment beside
+    // it. `sh -c 'sleep 30 # marker'` replaces the shell with `sleep 30` and the
+    // comment is gone, so `pgrep -f marker` finds nothing either way. An unusual
+    // sleep duration is the marker instead, because it *is* the exec'd command.
     //
-    // **The callers run it through `exec`, and that is load-bearing.** What the
-    // runner promises is that it kills its *direct child*; what this function
-    // observes is that no process is running the marker. Those are the same
-    // claim only when the shell has replaced itself with the marker rather than
-    // forking it. Replacing itself is what `exec` is specified to do, so this
-    // holds on every POSIX shell — whereas relying on a shell to *choose* to
-    // exec a lone command makes the test depend on an optimization. `bash` and
-    // `dash` differ there, which is how a version of this without `exec` passed
-    // on macOS and failed on Ubuntu, reporting a grandchild the runner never
-    // promised to kill (that leak is real, tracked separately, and deliberately
-    // out of scope here).
+    // The callers run it through `exec`, which is load-bearing: relying on a shell
+    // to *choose* to exec a lone command is an optimization `bash` and `dash`
+    // differ on, and without it this passed on macOS and failed on Ubuntu.
     fn a_process_matching(marker: &str) -> bool {
         let found = std::process::Command::new("pgrep")
             // `-x` anchors: the whole command line must be the marker, so an
@@ -1891,8 +1854,8 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_character_spanning_a_read_is_not_relayed_as_replacement_characters() {
         // The user-visible half of the decoder tests above, through the real
-        // adapter: one 'é' used to arrive as two U+FFFD, in the terminal and in
-        // the MCP server's JSON alike.
+        // adapter: a character split across two reads must not arrive as two
+        // U+FFFD, in the terminal or in the MCP server's JSON.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let (tx, mut rx) = tokio::sync::mpsc::channel(10_000);
@@ -2355,9 +2318,9 @@ mod content_tests {
 
     #[tokio::test]
     async fn an_unusable_shell_reports_what_the_wrapper_said_about_it() {
-        // The wrapper turns what used to be a spawn failure into a non-zero exit
-        // with the diagnosis on stderr. Reporting absent markers here instead
-        // would leave the user with no idea their `$SHELL` is the problem.
+        // The wrapper turns a spawn failure into a non-zero exit with the
+        // diagnosis on stderr. Reporting absent markers instead would leave the
+        // user with no idea their `$SHELL` is the problem.
         let dir = tempfile::tempdir().unwrap();
         let runner = ShellCommandRunner::new("/nonexistent/shell", TIMEOUT);
 
@@ -2380,8 +2343,8 @@ mod content_tests {
 
     #[tokio::test]
     async fn the_command_cannot_write_to_the_capture_descriptor() {
-        // Closed in the recipe, so a command can no longer address the descriptor
-        // its own output travels on.
+        // Closed in the recipe, so a command cannot address the descriptor its
+        // own output travels on.
         let dir = tempfile::tempdir().unwrap();
         let runner = noisy_runner(dir.path());
 
