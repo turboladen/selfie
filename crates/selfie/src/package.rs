@@ -1771,7 +1771,6 @@ environments:
             name: "broken-package".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/broken.yml"),
-            file_size_bytes: 1024,
             source: parse_error,
         };
 
@@ -1781,13 +1780,11 @@ environments:
                 name,
                 packages_path,
                 failed_file,
-                file_size_bytes,
                 source,
             } => {
                 assert_eq!(name, "broken-package");
                 assert_eq!(packages_path, PathBuf::from("/packages"));
                 assert_eq!(failed_file, PathBuf::from("/packages/broken.yml"));
-                assert_eq!(file_size_bytes, 1024);
 
                 // Verify the parse error is preserved
                 match source {

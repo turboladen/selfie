@@ -318,6 +318,7 @@ pub enum FileSystemError {
 /// let mut fs = MockFileSystem::default();
 /// let package_path = PathBuf::from("/test/packages/test-package.yml");
 ///
+/// fs.mock_no_irregular_files();
 /// fs.mock_write_file_no_follow(&package_path);
 /// fs.mock_remove_file(&package_path);
 ///
@@ -336,6 +337,21 @@ impl MockFileSystem {
         self.expect_read_file()
             .with(mockall::predicate::eq(path_buf.clone()))
             .returning(move |_| Ok(content_string.clone()));
+    }
+
+    /// Answer every irregular-file question with `None`, so reads proceed.
+    ///
+    /// For a fixture in which **no** path is refused.
+    ///
+    /// **Do not call this in a test where any path must be refused**, and do not
+    /// add a specific refusal alongside it. mockall evaluates expectations in
+    /// FIFO order and uses the first that matches, so this unlimited catch-all
+    /// swallows every later `expect_irregular_target_refusal`: the refusal never
+    /// fires, the read proceeds, and the test passes while asserting nothing.
+    /// Set the specific expectation on its own instead — one `returning` closure
+    /// can answer `Some` for the refused path and `None` for the rest.
+    pub fn mock_no_irregular_files(&mut self) {
+        self.expect_irregular_target_refusal().returning(|_| None);
     }
 
     /// Return `entries` whenever `path` is listed.

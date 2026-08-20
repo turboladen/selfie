@@ -54,6 +54,43 @@ use super::{
 
 use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 
+/// How to describe a package file that could not be loaded, so every command
+/// describes it the same way.
+///
+/// A file that fails to load is dropped by
+/// [`valid_packages`](super::port::ListPackagesOutput::valid_packages), which is
+/// what most callers iterate. Say what was skipped and why, or the run reports
+/// on the files it could read and looks like a clean result.
+///
+/// `pub` rather than `pub(crate)`: the CLI and the MCP server both call
+/// `list_packages` directly in places, and they need the same sentence.
+// One shared function rather than a loop per caller, so every command names a
+// skipped file the same way and no caller can quietly omit it.
+//
+// The wording avoids both "invalid" and "unparsable". A fifo is neither: it was
+// never opened, let alone parsed.
+#[must_use]
+pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String {
+    use super::port::PackageParseError as E;
+
+    // Matched rather than always prefixing the path, because half the variants
+    // already name the file in their own `Display` and the other half
+    // deliberately do not. Prefixing every variant would render "Skipping
+    // package file /x/bad.yml: YAML parsing error reading package file
+    // `/x/bad.yml`: …", naming the path twice.
+    //
+    // Exhaustive on purpose: a new variant has to declare which half it is in.
+    match invalid {
+        E::YamlParse { .. } | E::IoError { .. } | E::FileSystemError { .. } => {
+            format!("Skipping package: {invalid}")
+        }
+        E::IrregularFile { .. } | E::RefusedFile { .. } => format!(
+            "Skipping package file {}: {invalid}",
+            invalid.package_path().display()
+        ),
+    }
+}
+
 /// Helper for tracking progress through operation steps
 ///
 /// Provides a simple mechanism for tracking and reporting progress through
@@ -607,5 +644,79 @@ where
                 .await
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skipped_spec_warning;
+    use crate::package::port::PackageParseError;
+    use std::sync::Arc;
+
+    // Every variant, not just the one an end-to-end test happens to reach.
+    // `skipped_spec_warning` splits the enum in half -- variants that name the
+    // file in their own `Display` against variants that leave it to the caller --
+    // and filing a new variant in the wrong half is silent: too few paths leaves
+    // the user unable to tell which spec was skipped, too many is the
+    // duplication the split exists to prevent. Exactly one is the invariant.
+    #[test]
+    fn every_variant_names_the_package_file_exactly_once() {
+        let path = std::path::PathBuf::from("/test/packages/ghost.yml");
+        let yaml_error = serde_saphyr::from_str::<crate::package::Package>("name: [oops")
+            .expect_err("fixture must fail to parse");
+
+        let cases: Vec<(&str, PackageParseError)> = vec![
+            (
+                "YamlParse",
+                PackageParseError::YamlParse {
+                    package_path: path.clone(),
+                    source: Arc::new(yaml_error),
+                },
+            ),
+            (
+                "IoError",
+                PackageParseError::IoError {
+                    package_path: path.clone(),
+                    source: Arc::new(std::io::Error::other("permission denied")),
+                },
+            ),
+            (
+                // An `IoError` source rather than a refusal, because that is what
+                // is reachable: `RealFileSystem::read_file` only ever returns
+                // `FileSystemError::IoError`, and `irregular_spec_refusal` routes
+                // refusals to `RefusedFile` instead, so this variant never carries
+                // one. Built with a refusal source this case fails -- the inner
+                // `Display` names the path a second time and calls it a write --
+                // but that state is unconstructible by production code. See
+                // selfie-l10c.
+                "FileSystemError",
+                PackageParseError::FileSystemError {
+                    package_path: path.clone(),
+                    source: Arc::new(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                        std::io::Error::other("permission denied"),
+                    ))),
+                },
+            ),
+            (
+                "IrregularFile",
+                PackageParseError::IrregularFile {
+                    package_path: path.clone(),
+                    kind: "named pipe (fifo)",
+                },
+            ),
+            (
+                "RefusedFile",
+                PackageParseError::RefusedFile {
+                    package_path: path.clone(),
+                    reason: "it is a symlink".to_string(),
+                },
+            ),
+        ];
+
+        for (variant, error) in cases {
+            let message = skipped_spec_warning(&error);
+            let count = message.matches("/test/packages/ghost.yml").count();
+            assert_eq!(count, 1, "{variant}: named {count} times in: {message}");
+        }
     }
 }

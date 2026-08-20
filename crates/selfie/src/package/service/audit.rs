@@ -91,6 +91,19 @@ where
         Err(err) => return OperationResult::Failure(err.into()),
     };
 
+    // `valid_packages` drops a file that could not be loaded, and audit is the
+    // command a user runs precisely to be told what selfie found. Reporting
+    // nothing would mean an unreadable spec is audited by neither this run nor
+    // the user, so it warns per file the way `validate_all` does.
+    //
+    // A warning rather than an error: whether `audit --all` exits non-zero on an
+    // unparsable file is user-visible behavior and belongs to its own change.
+    for invalid in packages.invalid_packages() {
+        sender
+            .send_warning(super::skipped_spec_warning(invalid))
+            .await;
+    }
+
     let package_names: Vec<String> = packages
         .valid_packages()
         .filter(|p| p.environments().contains_key(config.environment()))
@@ -914,6 +927,91 @@ mod tests {
         }
 
         assert_eq!(audit_results.len(), 2, "Should have 2 audit results");
+    }
+
+    // `valid_packages` drops a file that could not be loaded, so the warning is
+    // the only thing that names it.
+    #[tokio::test]
+    async fn test_handle_audit_all_warns_about_invalid_package_files() {
+        use crate::package::port::{ListPackagesOutput, PackageParseError};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+
+        let good = PackageBuilder::default()
+            .name("good-pkg")
+            .environment("test", |b| b.install("echo install").audit_some("echo bun"))
+            .path(temp_dir.path().join("good-pkg.yml"))
+            .build();
+        let good_for_get = good.clone();
+        let good_path = temp_dir.path().join("good-pkg.yml");
+        let ghost_path = temp_dir.path().join("ghost.yml");
+
+        let mut mock_repo = MockPackageRepository::new();
+        let ghost_for_list = ghost_path.clone();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(ListPackagesOutput(vec![
+                Ok(good.clone()),
+                Err(PackageParseError::IrregularFile {
+                    package_path: ghost_for_list.clone(),
+                    kind: "named pipe (fifo)",
+                }),
+            ]))
+        });
+        mock_repo.expect_get_package().returning(move |_| {
+            Ok(GetPackage::from_existing(
+                good_for_get.clone(),
+                good_path.clone(),
+            ))
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
+
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        // The valid package is still audited. A "fix" that aborted the whole
+        // run on an unreadable file would fail here rather than on the warning.
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "Expected success, got: {result:?}"
+        );
+
+        let mut warnings = Vec::new();
+        let mut audit_results = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::package::event::PackageEvent::Warning { message, .. } => {
+                    warnings.push(message);
+                }
+                crate::package::event::PackageEvent::AuditResultCompleted { .. } => {
+                    audit_results += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(audit_results, 1, "the readable package is still audited");
+
+        let named = warnings
+            .iter()
+            .find(|w| w.contains("ghost.yml"))
+            .unwrap_or_else(|| panic!("no warning named the invalid file; got: {warnings:?}"));
+        assert!(named.contains("named pipe (fifo)"), "got: {named}");
     }
 
     #[tokio::test]

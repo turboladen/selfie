@@ -695,6 +695,29 @@ A symlink at a path selfie is about to write **into** your repository is also re
 This holds wherever selfie writes a file itself. Git sync and the post-save formatter run through
 separate tools and are not covered.
 
+### Package files that are not regular files
+
+The hazards above are about your dotfiles repository. Selfie refuses a package file that is a named
+pipe (fifo), a socket, or a device node in the same way:
+
+```
+⚠ Invalid: /home/you/.selfie/packages/ghost.yml — the package file is a named pipe (fifo), not a regular file. Replace it with a regular file or remove it from the package directory.
+```
+
+Commands that enumerate specs continue with the rest and name the file they skipped:
+
+- `selfie spec list`
+- `selfie package list`
+- `selfie spec validate --all`
+- `selfie package audit --all`
+- `selfie dotfiles list`
+- `selfie apply`
+
+A command that names that one spec fails instead, because the file it was asked about is the file it
+cannot read — `selfie spec info ghost`, `selfie package check ghost`, `selfie package status ghost`.
+
+`selfie spec remove ghost` is in that second group, so it will not delete the file. Use `rm`.
+
 ### Provider-sourced and templated dotfiles
 
 Where a config file holds a credential, the value can come from a command run at deploy time instead

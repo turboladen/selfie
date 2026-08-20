@@ -99,22 +99,33 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         Ok(Self::filter_matching_packages(name, entries))
     }
 
-    fn get_file_size(&self, path: &Path) -> u64 {
-        self.fs
-            .read_file(path)
-            .map(|content| content.len() as u64)
-            .unwrap_or(0)
-    }
+    // The only read of a package file in the crate, and the only place the
+    // irregular-file guard has to sit. Reading a fifo blocks until a writer
+    // arrives, so a single `mkfifo ghost.yml` in the package directory wedged
+    // every command that enumerates specs -- `spec list`, `spec info`,
+    // `package list`, `package status`, `spec validate --all`. `command_timeout`
+    // did not bound it; that governs provider commands, not filesystem calls
+    // (selfie-h2kr).
+    //
+    // It has one caller today. It stays a separate function because it is the
+    // whole read path: anything that grows a second way to load a spec has to go
+    // through it, and the guard is not something a new caller can forget to add.
+    fn read_spec_file(&self, path: &Path) -> Result<String, PackageParseError> {
+        if let Some(refusal) = self.fs.irregular_target_refusal(&repository_path(path)) {
+            return Err(irregular_spec_refusal(path, refusal));
+        }
 
-    // Load a Package from a file using the FileSystem trait
-    fn load_package_from_file(&self, path: &Path) -> Result<Package, PackageParseError> {
-        let content = self
-            .fs
+        self.fs
             .read_file(path)
             .map_err(|e| PackageParseError::FileSystemError {
                 package_path: path.to_path_buf(),
                 source: Arc::new(e),
-            })?;
+            })
+    }
+
+    // Load a Package from a file using the FileSystem trait
+    fn load_package_from_file(&self, path: &Path) -> Result<Package, PackageParseError> {
+        let content = self.read_spec_file(path)?;
 
         let mut package: Package =
             serde_saphyr::from_str(&content).map_err(|e| PackageParseError::YamlParse {
@@ -124,6 +135,42 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         package.set_source(path.to_path_buf(), content);
 
         Ok(package)
+    }
+}
+
+// The third wording frame on the shared classifier. `IrregularTarget`'s own
+// `Display` is worded for a deploy target and `repository_read_refusal` for a
+// file in the dotfiles repository the user syncs; neither describes a package
+// spec, which selfie reads out of its own package directory. Only the wording is
+// new -- the classification is `irregular_target_refusal`'s, as it is for the
+// dotfile source and deploy paths.
+//
+// The `other` arm fails **closed**, and is deliberately not a wildcard that
+// returns the content. `irregular_target_refusal` returns only `IrregularTarget`
+// today, so nothing reaches it; letting a future variant through would un-guard
+// the read and restore the hang this exists to prevent.
+//
+// It re-words rather than carrying the `FileSystemError` through. Every refusal
+// variant's `Display` was written for the deploy side and says selfie will not
+// *write* through a *target* -- false twice over on a read of a package file,
+// and it would print the path a second time.
+fn irregular_spec_refusal(path: &Path, refusal: FileSystemError) -> PackageParseError {
+    match refusal {
+        FileSystemError::IrregularTarget { kind, .. } => PackageParseError::IrregularFile {
+            package_path: path.to_path_buf(),
+            kind,
+        },
+        FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseError::RefusedFile {
+            package_path: path.to_path_buf(),
+            reason: match points_to {
+                Some(dest) => format!("it is a symlink to '{}'", dest.display()),
+                None => "it is a symlink".to_string(),
+            },
+        },
+        other => PackageParseError::RefusedFile {
+            package_path: path.to_path_buf(),
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -205,16 +252,26 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         }
 
         let package_file = &package_files[0];
-        let file_size = self.get_file_size(package_file);
 
+        // A refused file gets its own variant. `ParseError` renders as "Parse
+        // error in package `ghost`", which would send the user to inspect YAML
+        // in a file that was never opened.
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| PackageError::ParseError {
-                name: name.to_string(),
-                packages_path: self.package_dir.clone(),
-                failed_file: package_file.clone(),
-                file_size_bytes: file_size,
-                source,
+            .map_err(|source| match source {
+                refusal @ (PackageParseError::IrregularFile { .. }
+                | PackageParseError::RefusedFile { .. }) => PackageError::UnreadableFile {
+                    name: name.to_string(),
+                    packages_path: self.package_dir.clone(),
+                    failed_file: package_file.clone(),
+                    source: refusal,
+                },
+                source => PackageError::ParseError {
+                    name: name.to_string(),
+                    packages_path: self.package_dir.clone(),
+                    failed_file: package_file.clone(),
+                    source,
+                },
             })?;
 
         Ok(GetPackage::from_existing(package, package_file.clone()))
@@ -403,6 +460,7 @@ mod tests {
     #[test]
     fn test_get_package_success() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
         // Mock path_exists for directory
@@ -557,6 +615,7 @@ mod tests {
     #[test]
     fn test_list_packages() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
         fs.expect_path_exists()
@@ -692,6 +751,7 @@ mod tests {
     #[test]
     fn test_available_packages() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
         fs.expect_path_exists()
@@ -742,6 +802,7 @@ mod tests {
     #[test]
     fn test_package_parse_error_handling() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("invalid.yaml");
 
@@ -903,6 +964,237 @@ mod tests {
         let message = result.expect_err("a fifo template must be refused");
         assert!(message.contains("named pipe (fifo)"), "got: {message}");
         assert!(message.contains("repository file"), "got: {message}");
+    }
+
+    // A spec file the enumeration will read, and one it must refuse. Only
+    // `good.yml` gets a `read_file` expectation, so any attempt to read the
+    // irregular one fails the test on an unexpected call -- which is the actual
+    // invariant, since the read is what blocks. A mock cannot block, so this
+    // pins the guard's position and its wording while the real-fifo tests below
+    // pin the absence of the hang.
+    fn fs_with_one_irregular_spec(
+        package_dir: &Path,
+        good: &Path,
+        irregular: &Path,
+        kind: &'static str,
+    ) -> MockFileSystem {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(package_dir, true);
+        fs.mock_list_directory(package_dir, &[good, irregular]);
+        fs.mock_read_file(
+            good,
+            "name: good\n\nenvironments:\n  test-env:\n    install: true\n",
+        );
+
+        let irregular_owned = irregular.to_path_buf();
+        fs.expect_irregular_target_refusal()
+            .returning(move |target| {
+                (target.path() == irregular_owned).then(|| FileSystemError::IrregularTarget {
+                    path: irregular_owned.clone(),
+                    kind,
+                })
+            });
+        fs
+    }
+
+    #[test]
+    fn a_fifo_spec_is_reported_rather_than_read() {
+        let package_dir = PathBuf::from("/test/packages");
+        let good = package_dir.join("good.yml");
+        let ghost = package_dir.join("ghost.yml");
+        let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
+
+        let output = YamlPackageRepository::new(fs, package_dir)
+            .list_packages()
+            .expect("listing must succeed despite the fifo");
+
+        // The control. If the guard refused everything, or the fixture never
+        // reached a read, this is what notices.
+        let valid: Vec<_> = output.valid_packages().collect();
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0].name(), "good");
+        assert!(valid[0].environments().contains_key("test-env"));
+
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].package_path(), ghost);
+
+        let message = invalid[0].to_string();
+        assert!(message.contains("named pipe (fifo)"), "got: {message}");
+        // It was never parsed, so it must not be described as a parse failure --
+        // a regression routing the refusal back through `YamlParse` would
+        // otherwise satisfy every other assertion here.
+        assert!(!message.contains("YAML"), "got: {message}");
+        assert!(!message.contains("parsing"), "got: {message}");
+    }
+
+    // The single-package path, which wraps the refusal in a `PackageError` of
+    // its own. It carries the same two negative assertions as the listing test
+    // above, and they are the point: `PackageError::ParseError` renders as
+    // "Parse error in package `ghost`", so routing a refused file through it
+    // tells the user to go inspect YAML syntax in a file selfie never opened.
+    #[test]
+    fn get_package_refuses_a_fifo_spec() {
+        let package_dir = PathBuf::from("/test/packages");
+        let good = package_dir.join("good.yml");
+        let ghost = package_dir.join("ghost.yml");
+        let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
+
+        let error = YamlPackageRepository::new(fs, package_dir)
+            .get_package("ghost")
+            .expect_err("a fifo spec must be refused");
+
+        let message = error.to_string();
+        assert!(message.contains("named pipe (fifo)"), "got: {message}");
+        assert!(message.contains("ghost"), "got: {message}");
+        assert!(!message.contains("Parse error"), "got: {message}");
+        assert!(!message.contains("YAML"), "got: {message}");
+        assert!(!message.contains("parsing"), "got: {message}");
+    }
+
+    // The kind is carried through from the classifier rather than hardcoded to
+    // the fifo case, which is the only one anyone reproduces.
+    #[test]
+    fn a_socket_spec_is_refused_too() {
+        let package_dir = PathBuf::from("/test/packages");
+        let good = package_dir.join("good.yml");
+        let sock = package_dir.join("sock.yml");
+        let fs = fs_with_one_irregular_spec(&package_dir, &good, &sock, "socket");
+
+        let output = YamlPackageRepository::new(fs, package_dir)
+            .list_packages()
+            .expect("listing must succeed despite the socket");
+
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(invalid.len(), 1);
+        let message = invalid[0].to_string();
+        assert!(message.contains("socket"), "got: {message}");
+        assert!(!message.contains("fifo"), "got: {message}");
+    }
+
+    // The fail-closed arm. Nothing returns a non-`IrregularTarget` refusal from
+    // `irregular_target_refusal` today, so the input is synthetic -- the point is
+    // that narrowing the guard to the one variant it expects would let a future
+    // variant through and un-guard the read. `ghost.yml` is deliberately made
+    // readable and parseable, so a guard that stops matching yields `Ok` and
+    // fails this on its own assertion rather than on an unexpected mock call.
+    #[test]
+    fn a_non_irregular_refusal_still_refuses() {
+        let package_dir = PathBuf::from("/test/packages");
+        let ghost = package_dir.join("ghost.yml");
+
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(&package_dir, true);
+        fs.mock_list_directory(&package_dir, &[&ghost]);
+        fs.mock_read_file(
+            &ghost,
+            "name: ghost\n\nenvironments:\n  test-env:\n    install: true\n",
+        );
+
+        let ghost_owned = ghost.clone();
+        fs.expect_irregular_target_refusal().returning(move |_| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: ghost_owned.clone(),
+                points_to: None,
+            })
+        });
+
+        let output = YamlPackageRepository::new(fs, package_dir)
+            .list_packages()
+            .expect("listing must succeed");
+
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(output.valid_packages().count(), 0);
+        assert_eq!(invalid.len(), 1);
+
+        // Counts alone would also be satisfied by a regression that reclassified
+        // this as an ordinary parse failure, so the wording is asserted too. It
+        // must describe a *read* -- every `FileSystemError` refusal is worded for
+        // the deploy side and says selfie will not write through a target, which
+        // is false twice over here -- and must not name the path at all, since
+        // every caller renders it beside one. Rendering the filesystem error
+        // verbatim would print it twice.
+        let message = invalid[0].to_string();
+        assert!(message.contains("symlink"), "got: {message}");
+        assert!(message.contains("will not read"), "got: {message}");
+        assert!(!message.contains("write"), "got: {message}");
+        assert!(!message.contains("target"), "got: {message}");
+        assert_eq!(message.matches("ghost.yml").count(), 0, "got: {message}");
+    }
+
+    // The two tests below use a real fifo because `MockFileSystem` cannot block:
+    // a mocked fixture passes against the unguarded code and proves nothing about
+    // the hang. The deadline is what turns a regression into a failure rather
+    // than a wedged suite; the read blocks on the spawned thread, so no async
+    // timeout would fire.
+    #[cfg(unix)]
+    fn package_dir_with_a_fifo_spec() -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("good.yml"),
+            "name: good\n\nenvironments:\n  test-env:\n    install: true\n",
+        )
+        .unwrap();
+        nix::unistd::mkfifo(
+            &package_dir.join("ghost.yml"),
+            nix::sys::stat::Mode::S_IRWXU,
+        )
+        .unwrap();
+        (temp_dir, package_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_spec_does_not_block_list_packages() {
+        use std::sync::mpsc;
+
+        let (_temp_dir, package_dir) = package_dir_with_a_fifo_spec();
+        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(repo.list_packages().map(|output| {
+                (
+                    output.valid_packages().count(),
+                    output
+                        .invalid_packages()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            }));
+        });
+
+        let (valid, invalid) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("enumerating a fifo spec must not block")
+            .expect("listing must succeed despite the fifo");
+
+        assert_eq!(valid, 1);
+        assert_eq!(invalid.len(), 1);
+        assert!(invalid[0].contains("named pipe (fifo)"), "got: {invalid:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_spec_does_not_block_get_package() {
+        use std::sync::mpsc;
+
+        let (_temp_dir, package_dir) = package_dir_with_a_fifo_spec();
+        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(repo.get_package("ghost").map_err(|e| e.to_string()));
+        });
+
+        let message = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a fifo spec must not block")
+            .expect_err("a fifo spec must be refused");
+
+        assert!(message.contains("named pipe (fifo)"), "got: {message}");
     }
 
     #[test]
@@ -1456,6 +1748,7 @@ environments:
     #[test]
     fn test_remove_package_success() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_name = "test-package";
         let package_path = package_dir.join("test-package.yml");
@@ -1524,6 +1817,7 @@ environments:
     #[test]
     fn test_remove_package_filesystem_error() {
         let mut fs = MockFileSystem::default();
+        fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_name = "test-package";
         let package_path = package_dir.join("test-package.yml");

@@ -43,7 +43,7 @@ where
     let dep_graph =
         match deps::resolve_dependencies(package_name, repo, config.environment(), sender).await {
             Ok(graph) => graph,
-            Err(failure) => return OperationResult::Failure(failure),
+            Err(failure) => return OperationResult::Failure(*failure),
         };
 
     // Update total steps: 1 (resolve) + 7 per package (fetch, env, check, get_cmd, execute, verify, complete)
