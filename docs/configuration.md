@@ -52,9 +52,10 @@ selfie spec edit my-package
 If `EDITOR` is not set, the `selfie spec edit` command will fail with an error message instructing
 you to set this environment variable.
 
-If no configuration file is found, selfie does **not** create one. Every command that needs
-configuration fails with `No configuration file found in locations: …`, and command-line flags do
-not substitute for the file — see [Command-Line Overrides](#command-line-overrides). Write
+If no configuration file is found, selfie does **not** create one. Commands still run when the flags
+supply what the file would have: `--environment` and `--package-directory` have no default, so a run
+that passes both needs no file at all. Without them the run fails, naming the settings that are
+missing — see [Command-Line Overrides](#command-line-overrides). To use a file instead, write
 `~/.config/selfie/config.yaml` yourself, or point `SELFIE_CONFIG_DIR` at a directory that has one.
 
 ## Basic Configuration
@@ -354,18 +355,18 @@ Only `--package-directory` fails loudly, and the other two fail differently from
 - `--state-directory='~/state'` **creates a directory literally named `~`** in the current working
   directory and reports success, so `selfie --state-directory='~/state' apply -y` exits 0 having
   written its deploy state somewhere nobody will look for it.
-- `--dotfiles-directory='~/dotfiles'` creates nothing. The directory does not exist, so the
-  standalone dotfiles repository is dropped without a message: every standalone dotfile disappears
-  from `selfie dotfiles list` and is silently skipped by `selfie apply`, which still reports
-  success.
+- `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
+  dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
+  `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,
+  because the path was given rather than defaulted — the run's exit status does not change.
 
 **`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
-what is on disk and applies no overrides, so that a flag cannot hide a problem in the file it is
-masking. It therefore still fails when there is no config file at all, even on a run that would
-otherwise succeed from flags — there is no file for it to report on. Passing `-p` and reading back
-the file's `package_directory` is expected — it is not the flag being ignored. Use
-`selfie package list`, which prints the package directory it actually read, to see the effective
-value.
+what is on disk and applies no overrides, including to `verbose` and `use_colors`, so that a flag
+cannot hide a problem in the file it is masking. It therefore still fails when there is no config
+file at all, even on a run that would otherwise succeed from flags — there is no file for it to
+report on. Passing `-p` and reading back the file's `package_directory` is expected — it is not the
+flag being ignored. Use `selfie package list`, which prints the package directory it actually read,
+to see the effective value.
 
 **Two paths are not covered by any flag.** A dotfile `target` beginning with `~`, and the
 deploy-state fallback used when no `state_directory` is configured, both resolve against `HOME`.
