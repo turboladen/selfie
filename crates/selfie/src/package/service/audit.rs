@@ -43,7 +43,7 @@ where
     .await
     {
         Ok(result) => result,
-        Err(result) => return result,
+        Err(result) => return *result,
     };
 
     // Step 3: Execute the audit command
@@ -204,7 +204,7 @@ async fn get_audit_command(
     current_env: &str,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-) -> Result<(Option<String>, Vec<String>), OperationResult> {
+) -> Result<(Option<String>, Vec<String>), Box<OperationResult>> {
     progress.next(sender, "Checking package environment").await;
 
     // Get environment configuration

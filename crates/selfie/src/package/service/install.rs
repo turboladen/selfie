@@ -128,7 +128,7 @@ where
     .await
     {
         Ok(config) => config,
-        Err(result) => return result,
+        Err(result) => return *result,
     };
 
     // Check if package is already installed
@@ -414,7 +414,7 @@ async fn get_environment_config<'a>(
     current_env: &str,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-) -> Result<&'a EnvironmentConfig, OperationResult> {
+) -> Result<&'a EnvironmentConfig, Box<OperationResult>> {
     progress.next(sender, "Checking package environment").await;
 
     // Get environment configuration
