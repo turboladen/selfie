@@ -619,7 +619,7 @@ pub struct Package {
     /// error for anything outside `package` — which is where the second
     /// assignment lived — not a guarantee.
     #[serde(skip)]
-    raw_yaml: String,
+    raw_yaml: Option<String>,
 
     /// Top-level keys whose `_` prefix hides a misspelling of a real field.
     ///
@@ -760,7 +760,7 @@ impl Package {
             post_install_note: post_install_note.map(unspanned),
             environments: unspanned(environments),
             path,
-            raw_yaml: String::new(),
+            raw_yaml: None,
             shadowing_top_level_keys: Vec::new(),
         }
     }
@@ -790,7 +790,7 @@ impl Package {
             post_install_note: None,
             environments: unspanned(environments),
             path: PathBuf::new(), // Will be set by GetPackage::new
-            raw_yaml: String::new(),
+            raw_yaml: None,
             shadowing_top_level_keys: Vec::new(),
         }
     }
@@ -808,7 +808,17 @@ impl Package {
     pub(crate) fn set_source(&mut self, path: PathBuf, raw_yaml: String) {
         self.shadowing_top_level_keys = shadowing_top_level_keys(&raw_yaml);
         self.path = path;
-        self.raw_yaml = raw_yaml;
+        self.raw_yaml = Some(raw_yaml);
+    }
+
+    /// The YAML this package was parsed from, or `None` when it was built
+    /// programmatically.
+    ///
+    /// `Some("")` means a file that was empty, which is a different thing from
+    /// having no file at all. Unknown-key detection reads keys out of this text,
+    /// so the two cases must not collapse.
+    pub(crate) fn raw_yaml(&self) -> Option<&str> {
+        self.raw_yaml.as_deref()
     }
 
     /// Top-level keys whose `_` prefix hides a misspelling of a real field.
