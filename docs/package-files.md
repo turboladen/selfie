@@ -197,6 +197,12 @@ already passes.
 Each environment must have an `install` command and optionally a `check` command, `dependencies`,
 and `recommends`.
 
+An environment accepts only `install`, `check`, `audit`, `dependencies`, `recommends` and
+`dotfiles`. `selfie spec validate` reports any other key and names the environment it is in, so a
+misspelled optional key such as `audt:` is caught rather than ignored. Keys beginning with `_` are
+treated as YAML anchor definitions and allowed, unless the rest of the name matches a real field —
+`_check:` cannot be told apart from a misspelling of `check:` and is refused.
+
 ### `install`
 
 Command(s) to install the package. Can be a single command or multi-line script.
