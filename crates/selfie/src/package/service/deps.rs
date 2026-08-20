@@ -33,7 +33,7 @@ pub(crate) async fn resolve_dependencies<PR>(
     repo: &PR,
     config_environment: &str,
     sender: &EventSender,
-) -> Result<DependencyGraph, OperationFailure>
+) -> Result<DependencyGraph, Box<OperationFailure>>
 where
     PR: PackageRepository,
 {
@@ -78,7 +78,9 @@ fn dfs<'a, PR>(
     visit_state: &'a mut std::collections::HashMap<String, VisitState>,
     install_order: &'a mut Vec<String>,
     path: &'a mut Vec<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), OperationFailure>> + Send + 'a>>
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), Box<OperationFailure>>> + Send + 'a>,
+>
 where
     PR: PackageRepository + Sync,
 {
@@ -100,10 +102,10 @@ where
                     .expect("package must be on path when in Visiting state");
                 let cycle: Vec<String> = path[cycle_start..].to_vec();
 
-                return Err(OperationFailure::circular_dependency(
+                return Err(Box::new(OperationFailure::circular_dependency(
                     package_name.to_string(),
                     cycle,
-                ));
+                )));
             }
             VisitState::Unvisited => {}
         }
@@ -200,7 +202,9 @@ fn check_recommend_cycles<'a, PR>(
     _sender: &'a EventSender,
     visit_state: &'a mut std::collections::HashMap<String, VisitState>,
     path: &'a mut Vec<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), OperationFailure>> + Send + 'a>>
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), Box<OperationFailure>>> + Send + 'a>,
+>
 where
     PR: PackageRepository + Sync,
 {
@@ -221,10 +225,10 @@ where
                     .expect("package must be on path when in Visiting state");
                 let cycle: Vec<String> = path[cycle_start..].to_vec();
 
-                return Err(OperationFailure::circular_dependency(
+                return Err(Box::new(OperationFailure::circular_dependency(
                     package_name.to_string(),
                     cycle,
-                ));
+                )));
             }
             VisitState::Unvisited => {}
         }
