@@ -229,6 +229,19 @@ pub(crate) fn shadows_package_field(key: &str) -> bool {
     shadows_field(key, validate::KNOWN_PACKAGE_FIELDS)
 }
 
+/// [`shadows_field`] against the fields of one `environments.<env>` mapping.
+///
+/// `_dotfiles:` inside an environment costs that environment its overrides: the
+/// list reads as empty, so the shared entry deploys instead of the one written
+/// for this machine.
+///
+/// Scoped by [`KNOWN_ENVIRONMENT_FIELDS`](crate::package::validate::KNOWN_ENVIRONMENT_FIELDS),
+/// a third list distinct from the other two — `_target:` is legal here, as at
+/// the top level, and refused inside a dotfile entry.
+pub(crate) fn shadows_environment_field(key: &str) -> bool {
+    shadows_field(key, validate::KNOWN_ENVIRONMENT_FIELDS)
+}
+
 /// Say what is wrong with one unrecognized key, and what to do about it.
 ///
 /// Shared by [`InvalidEntry`]'s `Display`,
@@ -814,9 +827,13 @@ impl Package {
     /// The YAML this package was parsed from, or `None` when it was built
     /// programmatically.
     ///
-    /// `Some("")` means a file that was empty, which is a different thing from
-    /// having no file at all. Unknown-key detection reads keys out of this text,
-    /// so the two cases must not collapse.
+    /// `None` is the only case unknown-key detection may skip. A `String` that
+    /// was empty stood for both, so the check could no-op on a real file and say
+    /// nothing.
+    // `Some("")` is not reachable today — `set_source` runs only after a parse
+    // that requires `name` — and would report no keys anyway, since empty input
+    // deserializes to an empty map. It is a distinct state rather than a second
+    // spelling of `None`, which is the point of the `Option`.
     pub(crate) fn raw_yaml(&self) -> Option<&str> {
         self.raw_yaml.as_deref()
     }
@@ -900,18 +917,30 @@ impl Package {
         let mut out: Vec<(Option<&str>, &DotfileEntry)> =
             self.dotfiles.iter().map(|d| (None, d)).collect();
 
-        // Environments in a stable (name-sorted) order for deterministic output.
-        let mut env_names: Vec<&String> = self.environments().keys().collect();
-        env_names.sort();
-        for name in env_names {
-            if let Some(env) = self.environments().get(name) {
-                for d in env.dotfiles() {
-                    out.push((Some(name.as_str()), d));
-                }
+        for (name, env) in self.environments_sorted() {
+            for d in env.dotfiles() {
+                out.push((Some(name), d));
             }
         }
 
         out
+    }
+
+    /// Every environment, in name order.
+    ///
+    /// `environments` is a `HashMap`, so anything a caller renders in sequence —
+    /// a diagnostic list, an inventory — has to impose an order or the same file
+    /// reports differently between runs. Hash order is not insertion order and is
+    /// randomized per process.
+    pub(crate) fn environments_sorted(&self) -> Vec<(&str, &EnvironmentConfig)> {
+        let mut envs: Vec<(&str, &EnvironmentConfig)> = self
+            .environments
+            .value
+            .iter()
+            .map(|(name, env)| (name.as_str(), env))
+            .collect();
+        envs.sort_by_key(|(name, _)| *name);
+        envs
     }
 
     /// Add a dotfile mapping to this package.
