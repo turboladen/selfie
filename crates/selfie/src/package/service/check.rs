@@ -32,7 +32,7 @@ where
     // Step 1: Load package from repository
     let package_blob = match load_package(package_name, repo, sender, progress).await {
         Ok(pkg) => pkg,
-        Err(result) => return result,
+        Err(result) => return *result,
     };
 
     // Step 2: Get environment-specific check command
@@ -46,7 +46,7 @@ where
     .await
     {
         Ok(cmd) => cmd,
-        Err(result) => return result,
+        Err(result) => return *result,
     };
 
     // Step 3: Execute the check command
@@ -74,7 +74,7 @@ async fn load_package<PR>(
     repo: &PR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-) -> Result<GetPackage, OperationResult>
+) -> Result<GetPackage, Box<OperationResult>>
 where
     PR: PackageRepository,
 {
@@ -87,7 +87,7 @@ where
                 .await;
             Ok(pkg)
         }
-        Err(err) => Err(OperationResult::Failure(err.into())),
+        Err(err) => Err(Box::new(OperationResult::Failure(err.into()))),
     }
 }
 
@@ -97,7 +97,7 @@ async fn get_check_command(
     current_env: &str,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-) -> Result<Option<String>, OperationResult> {
+) -> Result<Option<String>, Box<OperationResult>> {
     progress.next(sender, "Checking package environment").await;
 
     // Get environment configuration
@@ -124,7 +124,7 @@ async fn handle_missing_check_command(
     package_blob: &GetPackage,
     current_env: &str,
     sender: &EventSender,
-) -> Result<Option<String>, OperationResult> {
+) -> Result<Option<String>, Box<OperationResult>> {
     // Find other environments that do have check commands
     let other_envs_with_check: Vec<String> = package_blob
         .package
@@ -155,7 +155,7 @@ async fn handle_missing_check_command(
     };
     sender.send_check_result(check_result).await;
 
-    Err(OperationResult::Failure(err.into()))
+    Err(Box::new(OperationResult::Failure(err.into())))
 }
 
 fn create_operation_result(
