@@ -4,13 +4,13 @@ use selfie::{
 };
 use tracing::info;
 
-use crate::{config::CliConfig, display_manager::DisplayManager, tables::ValidationTableReporter};
+use crate::{display_manager::DisplayManager, tables::ValidationTableReporter};
 
-pub(crate) fn handle_validate(
-    config: &CliConfig,
-    display: &DisplayManager,
-    fs: &impl FileSystem,
-) -> i32 {
+/// Report what the configuration file on disk says, and whether it is valid.
+///
+/// Takes no `CliConfig`, deliberately: every value reported here comes from a
+/// fresh load of the file, so a flag cannot mask a problem in it.
+pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) -> i32 {
     info!("Validating configuration");
 
     // Load the raw on-disk config (without CLI overrides) so that validation
@@ -29,7 +29,8 @@ pub(crate) fn handle_validate(
     // `main` suppresses notices for this command, so both halves are reported
     // here. They print as notices because only the library builds a
     // `ValidationIssue`.
-    let cli_notices = crate::config::cli_section(&loaded).notices;
+    let cli_load = crate::config::cli_section(&loaded);
+    let cli_notices = cli_load.notices;
     let raw_config = loaded.config();
 
     if result.issues().has_errors() {
@@ -75,9 +76,12 @@ pub(crate) fn handle_validate(
             raw_config.max_concurrency().get(),
         );
         report_with_style(display, "stop_on_error:", raw_config.stop_on_error());
-        // verbose and use_colors are CLI-only settings, not in the on-disk config
-        report_with_style(display, "verbose:", config.verbose());
-        report_with_style(display, "use_colors:", config.use_colors());
+        // From the file's `cli:` section, not the run's flags. Every other line
+        // here reports the file, and this command exists so a flag cannot mask a
+        // problem in it -- `--no-color` must not make a file saying
+        // `use_colors: true` read as false.
+        report_with_style(display, "verbose:", cli_load.section.verbose);
+        report_with_style(display, "use_colors:", cli_load.section.use_colors);
 
         0
     }
@@ -94,17 +98,11 @@ fn report_with_style(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CliSection;
     use selfie::fs::MockFileSystem;
     use std::path::Path;
-    use test_common::test_config;
 
     fn create_display() -> DisplayManager {
         DisplayManager::new(false)
-    }
-
-    fn test_cli_config() -> CliConfig {
-        CliConfig::new(test_config(), CliSection::default())
     }
 
     // Creates a mock filesystem that returns a valid config file.
@@ -122,49 +120,33 @@ mod tests {
 
     #[test]
     fn test_handle_validate_function_does_not_panic() {
-        let config = test_cli_config();
         let display = create_display();
         let fs = mock_fs_with_valid_config();
 
-        let result = handle_validate(&config, &display, &fs);
+        let result = handle_validate(&display, &fs);
         assert!(result == 0 || result == 1);
     }
 
     #[test]
     fn test_handle_validate_with_colors_enabled() {
-        let config = CliConfig::new(
-            test_config(),
-            CliSection {
-                verbose: false,
-                use_colors: true,
-            },
-        );
         let display = DisplayManager::new(true);
         let fs = mock_fs_with_valid_config();
 
-        let result = handle_validate(&config, &display, &fs);
+        let result = handle_validate(&display, &fs);
         assert!(result == 0 || result == 1);
     }
 
     #[test]
     fn test_handle_validate_with_verbose_enabled() {
-        let config = CliConfig::new(
-            test_config(),
-            CliSection {
-                verbose: true,
-                use_colors: false,
-            },
-        );
         let display = create_display();
         let fs = mock_fs_with_valid_config();
 
-        let result = handle_validate(&config, &display, &fs);
+        let result = handle_validate(&display, &fs);
         assert!(result == 0 || result == 1);
     }
 
     #[test]
     fn test_handle_validate_catches_empty_environment_on_disk() {
-        let config = test_cli_config(); // has environment set via builder
         let display = create_display();
 
         // On-disk config has empty environment — CLI config would mask this,
@@ -178,13 +160,12 @@ mod tests {
         fs.mock_config_file(config_dir, config_yaml);
         fs.mock_expand_path("/test/packages", "/test/packages");
 
-        let result = handle_validate(&config, &display, &fs);
+        let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);
     }
 
     #[test]
     fn test_handle_validate_reports_load_error() {
-        let config = test_cli_config();
         let display = create_display();
 
         // Mock filesystem where config file doesn't exist
@@ -197,7 +178,7 @@ mod tests {
         // asks before it concludes the file is absent.
         fs.expect_symlink_refusal().returning(|_| None);
 
-        let result = handle_validate(&config, &display, &fs);
+        let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);
     }
 }

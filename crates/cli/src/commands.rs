@@ -62,7 +62,7 @@ pub(crate) async fn dispatch_command(
             track::handle_track(file, config, &display, cancellation_token).await
         }
         ClapCommands::Config(config_cmd) => {
-            dispatch_config_command(&config_cmd.command, config, display, fs)
+            dispatch_config_command(&config_cmd.command, display, fs)
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
@@ -244,13 +244,12 @@ async fn dispatch_sync_command(
 /// Handle configuration management commands
 fn dispatch_config_command(
     command: &ConfigSubcommands,
-    config: &CliConfig,
     display: DisplayManager,
     fs: &impl selfie::fs::FileSystem,
 ) -> i32 {
     debug!("Handling config command: {:?}", command);
 
     match command {
-        ConfigSubcommands::Validate => config::handle_validate(config, &display, fs),
+        ConfigSubcommands::Validate => config::handle_validate(&display, fs),
     }
 }
