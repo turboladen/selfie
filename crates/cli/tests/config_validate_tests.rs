@@ -66,3 +66,28 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
         .success()
         .stderr(predicates::str::contains("does not exist"));
 }
+
+// A flag must not change what this command reports, including the two `cli:`
+// settings. Every other line already came from the reloaded file; these two came
+// from the flag-merged config, so `--no-color` made a file saying
+// `use_colors: true` read back as false.
+#[test]
+fn a_flag_does_not_change_the_cli_settings_this_reports() {
+    let yaml = r#"
+environment: "test-env"
+package_directory: "/test/packages"
+cli:
+  use_colors: true
+  verbose: true
+"#;
+
+    let temp_dir = setup_test_config(yaml);
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["--no-color", "config", "validate"]);
+
+    // Asserted as the file's values, against the flag that contradicts one of
+    // them. Asserting only that the command succeeds would pass either way.
+    cmd.assert()
+        .stdout(predicates::str::contains("use_colors: true"))
+        .stdout(predicates::str::contains("verbose: true"));
+}
