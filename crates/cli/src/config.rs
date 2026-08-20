@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use selfie::config::{IgnoredKey, LoadedConfig, SelfieConfig};
+use selfie::config::{IgnoredKey, LoadedConfig, SelfieConfig, SelfieConfigBuilder};
 use serde::Deserialize;
 
 use crate::{cli::ClapCli, display_manager::DisplayManager};
@@ -206,7 +206,93 @@ impl CliConfig {
     }
 }
 
+/// The error returned when neither a configuration file nor the command-line
+/// flags supplied every required setting.
+///
+/// `environment` and `package_directory` have no default and no fallback, so a
+/// run that supplies neither has nothing to work from.
+#[derive(Debug)]
+pub(crate) struct MissingRequiredSettings {
+    searched: PathBuf,
+    missing: Vec<&'static str>,
+}
+
+impl std::fmt::Display for MissingRequiredSettings {
+    // Names **every** missing setting, not the first one. Reporting them one per
+    // run turns a fresh-machine bootstrap into a guessing game.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No configuration file found in {}, and not every required setting was supplied on the command line.\nMissing: {}\nSupply the missing flags, or create {}/config.yaml with `environment:` and `package_directory:`.",
+            self.searched.display(),
+            self.missing.join(", "),
+            self.searched.display(),
+        )
+    }
+}
+
+impl std::error::Error for MissingRequiredSettings {}
+
 impl ClapCli {
+    /// Build a configuration from flags alone, for a machine with no config file.
+    ///
+    /// Only `environment` and `package_directory` are required — every other
+    /// setting has a default, so a flags-only run and a two-key file produce the
+    /// same configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`MissingRequiredSettings`] naming every required setting not supplied.
+    pub(crate) fn config_from_flags(
+        &self,
+        searched: PathBuf,
+    ) -> Result<SelfieConfig, MissingRequiredSettings> {
+        // An empty value counts as not supplied. `--environment ''` parses to
+        // `Some("")`, which would otherwise satisfy the check and build a config
+        // whose environment matches no package's — and with no file, nothing
+        // downstream validates it, so the run fails much later with a confusing
+        // "no environment" from whichever command got there first.
+        let environment = self
+            .environment
+            .as_ref()
+            .filter(|value| !value.trim().is_empty());
+        let package_directory = self
+            .package_directory
+            .as_ref()
+            .filter(|value| !value.as_os_str().is_empty());
+
+        let mut missing = Vec::new();
+        if environment.is_none() {
+            missing.push("--environment");
+        }
+        if package_directory.is_none() {
+            missing.push("--package-directory");
+        }
+        if !missing.is_empty() {
+            return Err(MissingRequiredSettings { searched, missing });
+        }
+
+        // The builder applies exactly the defaults the file path applies:
+        // `command_timeout`, `max_concurrency`, `stop_on_error`, and `None` for
+        // the two optional directories so they keep their fallbacks.
+        //
+        // `build_cli_config` overwrites both of these a moment later, from the
+        // same flags — so the values set here are replaced by identical ones,
+        // and a mutation to them changes nothing observable. Set them anyway:
+        // this function returns a `SelfieConfig`, and one carrying an empty
+        // environment would be a half-built value waiting for a second caller
+        // to use it directly and forget the other half.
+        let mut builder = SelfieConfigBuilder::default();
+        if let Some(env) = environment {
+            builder = builder.environment(env);
+        }
+        if let Some(dir) = package_directory {
+            builder = builder.package_directory(dir);
+        }
+
+        Ok(builder.build())
+    }
+
     /// Apply CLI flag overrides to build a `CliConfig`.
     pub(crate) fn build_cli_config(
         &self,
