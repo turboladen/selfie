@@ -325,6 +325,28 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             });
         }
 
+        // The same refusal one level down. An environment's unknown key is not
+        // modeled, so serializing from the struct drops it: `audt:` for `audit:`
+        // takes the user's command text with it, and nothing says so.
+        //
+        // Reported with the environment named, since a package may define
+        // several and only one carries the key.
+        let mut env_names: Vec<&String> = package.environments().keys().collect();
+        env_names.sort();
+        for env_name in env_names {
+            let unknown = package.environments()[env_name].unknown_keys();
+            if !unknown.is_empty() {
+                let fields: Vec<String> = unknown
+                    .iter()
+                    .map(|key| format!("environments.{env_name}.{key}"))
+                    .collect();
+                return Err(PackageRepoError::UnknownEnvironmentFields {
+                    path: path.to_path_buf(),
+                    fields: fields.join(", "),
+                });
+            }
+        }
+
         // Serialize the package to YAML
         let yaml_content = serde_saphyr::to_string(package).map_err(|e| {
             PackageRepoError::IoError(Arc::new(std::io::Error::new(
@@ -1513,6 +1535,47 @@ environments:
              - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n",
         )
         .expect("fixture must parse — the typo is a validation error, not a parse error")
+    }
+
+    // selfie-nr4b, the same laundering one level up. `audt:` is not modeled, so
+    // serializing from the struct drops the user's audit command with no message.
+    //
+    // `times(0)` is again the assertion that matters: refusing after the write
+    // would already have destroyed the text.
+    #[test]
+    fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
+        let package: Package = serde_saphyr::from_str(
+            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
+        )
+        .expect("fixture must parse -- the typo is a validation error, not a parse error");
+
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+
+        fs.expect_write_file_no_follow().times(0);
+
+        let repo = YamlPackageRepository::new(fs, package_dir);
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("a package with an unrecognized environment key must not be rewritten");
+
+        assert!(
+            matches!(err, PackageRepoError::UnknownEnvironmentFields { .. }),
+            "got: {err:?}"
+        );
+        // Not the dotfile-entry variant: that one says the rewrite would make an
+        // entry deployable, which is not what is at stake for a setting.
+        assert!(
+            !err.to_string().contains("deployable"),
+            "the refusal must not describe an entry, got: {err}"
+        );
+        // Names the environment, not just the key: a package may define several
+        // and only one carries it.
+        assert!(
+            err.to_string().contains("environments.work.audt"),
+            "the diagnostic must name the environment and the key, got: {err}"
+        );
     }
 
     #[test]
