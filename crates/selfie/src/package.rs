@@ -756,7 +756,10 @@ impl PartialEq for Package {
 }
 
 /// Configuration for a specific environment
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// An unrecognized key is recorded in [`unknown_keys`](Self::unknown_keys)
+/// rather than rejected, so one typo does not fail the whole package file.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EnvironmentConfig {
     /// Command to install the package
     pub(crate) install: String,
@@ -786,6 +789,87 @@ pub struct EnvironmentConfig {
     /// `target` is added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) dotfiles: Vec<DotfileEntry>,
+
+    /// Keys this environment carried that it does not model.
+    ///
+    /// Read off the mapping at parse time rather than by re-reading the file, so
+    /// it is available to `selfie apply` and to the writer, neither of which has
+    /// the raw YAML in hand.
+    #[serde(skip)]
+    pub(crate) unknown_keys: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for EnvironmentConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        struct EnvVisitor;
+
+        impl<'de> Visitor<'de> for EnvVisitor {
+            type Value = EnvironmentConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an environment configuration")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<EnvironmentConfig, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut install = None;
+                let mut check = None;
+                let mut audit = None;
+                let mut dependencies = None;
+                let mut recommends = None;
+                let mut dotfiles = None;
+                let mut unknown_keys = Vec::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    // Refuses a second occurrence, for the reason `DotfileEntry`
+                    // gives: `MapAccess` does not promise unique keys, and taking
+                    // the last value silently is the one outcome to avoid.
+                    macro_rules! once {
+                        ($slot:ident, $name:literal) => {{
+                            if $slot.is_some() {
+                                return Err(M::Error::duplicate_field($name));
+                            }
+                            $slot = Some(map.next_value()?);
+                        }};
+                    }
+
+                    match key.parse::<EnvironmentField>() {
+                        Ok(EnvironmentField::Install) => once!(install, "install"),
+                        Ok(EnvironmentField::Check) => once!(check, "check"),
+                        Ok(EnvironmentField::Audit) => once!(audit, "audit"),
+                        Ok(EnvironmentField::Dependencies) => once!(dependencies, "dependencies"),
+                        Ok(EnvironmentField::Recommends) => once!(recommends, "recommends"),
+                        Ok(EnvironmentField::Dotfiles) => once!(dotfiles, "dotfiles"),
+                        Err(_) => {
+                            map.next_value::<IgnoredAny>()?;
+                            if unknown_key::<EnvironmentField>(&key).is_some() {
+                                unknown_keys.push(key);
+                            }
+                        }
+                    }
+                }
+
+                Ok(EnvironmentConfig {
+                    install: install.ok_or_else(|| M::Error::missing_field("install"))?,
+                    check: check.flatten(),
+                    audit: audit.flatten(),
+                    dependencies: dependencies.unwrap_or_default(),
+                    recommends: recommends.unwrap_or_default(),
+                    dotfiles: dotfiles.unwrap_or_default(),
+                    unknown_keys,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EnvVisitor)
+    }
 }
 
 impl EnvironmentConfig {
@@ -805,7 +889,17 @@ impl EnvironmentConfig {
             dependencies,
             recommends,
             dotfiles: Vec::new(),
+            unknown_keys: Vec::new(),
         }
+    }
+
+    /// Keys this environment carried that it does not model.
+    ///
+    /// Empty for a programmatically built environment, which has no text a user
+    /// could misspell.
+    #[must_use]
+    pub fn unknown_keys(&self) -> &[String] {
+        &self.unknown_keys
     }
 
     /// Get the install command for this environment
@@ -885,6 +979,7 @@ impl Package {
                 dependencies: Vec::new(),
                 recommends: Vec::new(),
                 dotfiles: Vec::new(),
+                unknown_keys: Vec::new(),
             },
         );
 
@@ -1071,6 +1166,42 @@ impl Package {
 
 #[cfg(test)]
 mod package_tests {
+
+    // The key is recorded rather than rejected, so one typo does not fail the
+    // whole file, and it is available without the raw YAML -- which is what lets
+    // apply and the writer see it.
+    #[test]
+    fn an_environment_records_a_key_it_does_not_model() {
+        let env: EnvironmentConfig =
+            serde_saphyr::from_str("install: \"echo i\"\naudt: \"echo a\"\n").unwrap();
+
+        assert_eq!(env.unknown_keys(), ["audt"]);
+        assert_eq!(env.install(), "echo i");
+    }
+
+    // An anchor is legal here, as at the top level. Only a name colliding with a
+    // real field is recorded, because it cannot be told apart from a misspelling.
+    #[test]
+    fn an_environment_anchor_is_recorded_only_when_it_shadows_a_field() {
+        let plain: EnvironmentConfig =
+            serde_saphyr::from_str("install: \"echo i\"\n_shared: \"x\"\n").unwrap();
+        assert!(
+            plain.unknown_keys().is_empty(),
+            "got: {:?}",
+            plain.unknown_keys()
+        );
+
+        let shadowing: EnvironmentConfig =
+            serde_saphyr::from_str("install: \"echo i\"\n_check: \"x\"\n").unwrap();
+        assert_eq!(shadowing.unknown_keys(), ["_check"]);
+    }
+
+    // A programmatically built environment has no text to misspell.
+    #[test]
+    fn a_built_environment_records_no_unknown_keys() {
+        let env = EnvironmentConfig::new("echo i".to_string(), None, None, vec![], vec![]);
+        assert!(env.unknown_keys().is_empty());
+    }
 
     // Case matters: `EnumString` is exact unless `ascii_case_insensitive` is set,
     // and the deserializer's match now goes through it.
