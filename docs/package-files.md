@@ -199,7 +199,14 @@ Each environment must have an `install` command. Everything else is optional: a 
 
 An environment accepts only `install`, `check`, `audit`, `dependencies`, `recommends` and
 `dotfiles`. `selfie spec validate` reports any other key and names the environment it is in, so a
-misspelled optional key such as `audt:` is caught rather than ignored. Keys beginning with `_` are
+misspelled optional key such as `audt:` is caught rather than ignored.
+
+`selfie apply` refuses a package whose _applied_ environment carries such a key, rather than
+deploying from it. An `_dotfiles:` there would otherwise leave that environment's list empty, so the
+shared entry would deploy over the file the environment meant to override. A key in an environment
+the run does not apply is left alone. The commands that rewrite a package file — `selfie spec edit`,
+`selfie package track-dotfile` and the MCP `spec_update` tool — refuse for the same reason: the key
+is not modeled, so rewriting from the struct would delete it silently. Keys beginning with `_` are
 treated as YAML anchor definitions and allowed, unless the rest of the name matches a real field —
 `_check:` cannot be told apart from a misspelling of `check:` and is refused.
 
