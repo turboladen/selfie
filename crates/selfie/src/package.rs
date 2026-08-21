@@ -187,7 +187,7 @@ impl std::fmt::Display for InvalidEntry<'_> {
 }
 
 /// Whether `key` is an underscore-prefixed anchor definition whose name
-/// collides with one of `known`.
+/// collides with a field of level `F`.
 ///
 /// `_`-prefixed keys are otherwise legal anywhere — that is what lets a package
 /// file define YAML anchors without `deny_unknown_fields` rejecting them
@@ -195,13 +195,12 @@ impl std::fmt::Display for InvalidEntry<'_> {
 /// from a typo for `vars:`, and reading it as an anchor deploys the template
 /// *unrendered* with the bindings silently absent.
 ///
-/// Parameterized over the field list rather than hard-coded, because the same
-/// rule applies at two levels against **different** lists, and which list is in
+/// Parameterized over the level rather than hard-coded, because the same rule
+/// applies at three levels against **different** field sets, and which set is in
 /// force is the entire reason a top-level `_target:` is legal while an entry's
 /// `_target:` is not.
-fn shadows_field(key: &str, known: &[&str]) -> bool {
-    key.strip_prefix('_')
-        .is_some_and(|rest| known.contains(&rest))
+fn shadows_field<F: KnownFields>(key: &str) -> bool {
+    key.strip_prefix('_').is_some_and(F::accepts)
 }
 
 /// [`shadows_field`] against a dotfile entry's own fields.
@@ -210,7 +209,7 @@ fn shadows_field(key: &str, known: &[&str]) -> bool {
 /// …` is an ordinary anchor — `docs/package-files.md` uses exactly that — and is
 /// unaffected by this, because `target` is not a top-level field.
 pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
-    shadows_field(key, KNOWN_DOTFILE_FIELDS)
+    shadows_field::<DotfileField>(key)
 }
 
 /// [`shadows_field`] against a package's top-level fields.
@@ -220,26 +219,43 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 /// remedy is the same as for an entry — rename the anchor, or drop the
 /// underscore.
 ///
-/// Scoped by [`KNOWN_PACKAGE_FIELDS`](crate::package::validate::KNOWN_PACKAGE_FIELDS),
-/// which deliberately **excludes** `target`. That exclusion is what keeps the
-/// documented `_target: &target …` anchor legal, and it is load-bearing: adding
-/// `target` to that list refuses every package file using the documented
-/// pattern.
+/// Scoped by [`PackageField`], which deliberately **excludes** `target`. That
+/// exclusion is what keeps the documented `_target: &target …` anchor legal, and
+/// it is load-bearing: adding a `Target` variant refuses every package file
+/// using the documented pattern.
 pub(crate) fn shadows_package_field(key: &str) -> bool {
-    shadows_field(key, validate::KNOWN_PACKAGE_FIELDS)
+    shadows_field::<PackageField>(key)
 }
 
-/// [`shadows_field`] against the fields of one `environments.<env>` mapping.
+/// An unrecognized key, already worded for the level it was found at.
+pub(crate) struct UnknownKey {
+    /// What is wrong with it and what to do about it.
+    pub(crate) message: String,
+    /// Whether the name collides with a real field of this level, which needs
+    /// different advice from a plain misspelling.
+    pub(crate) shadows: bool,
+}
+
+/// Judge one key against level `F`, returning `None` when it is accepted.
 ///
-/// `_dotfiles:` inside an environment costs that environment its overrides: the
-/// list reads as empty, so the shared entry deploys instead of the one written
-/// for this machine.
+/// Membership and wording both come from `F`, so a caller cannot test a key
+/// against one level and then explain it in terms of another. That pairing used
+/// to be two independent choices at each call site.
 ///
-/// Scoped by [`KNOWN_ENVIRONMENT_FIELDS`](crate::package::validate::KNOWN_ENVIRONMENT_FIELDS),
-/// a third list distinct from the other two — `_target:` is legal here, as at
-/// the top level, and refused inside a dotfile entry.
-pub(crate) fn shadows_environment_field(key: &str) -> bool {
-    shadows_field(key, validate::KNOWN_ENVIRONMENT_FIELDS)
+/// `_`-prefixed keys are YAML anchor definitions and pass, unless the remainder
+/// names a real field of this level — `_check:` cannot be told apart from a
+/// misspelling of `check:`.
+pub(crate) fn unknown_key<F: KnownFields>(key: &str) -> Option<UnknownKey> {
+    let shadows = shadows_field::<F>(key);
+
+    if (key.starts_with('_') && !shadows) || F::accepts(key) {
+        return None;
+    }
+
+    Some(UnknownKey {
+        message: describe_unknown_key_in::<F>(key),
+        shadows,
+    })
 }
 
 /// Say what is wrong with one unrecognized key, and what to do about it.
@@ -257,10 +273,10 @@ pub(crate) fn shadows_environment_field(key: &str) -> bool {
 /// So it names the ambiguity and gives the remedy for each reading: rename it if
 /// it is an anchor, spell it correctly if it is not.
 ///
-/// `known` is the field list in force at the key's level, and it appears in the
-/// message, so the reader is told which namespace they are in.
-pub(crate) fn describe_unknown_key_in(key: &str, known: &[&str]) -> String {
-    if let Some(field) = key.strip_prefix('_').filter(|_| shadows_field(key, known)) {
+/// `F`'s field names appear in the message, so the reader is told which
+/// namespace they are in.
+pub(crate) fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
+    if let Some(field) = key.strip_prefix('_').filter(|_| shadows_field::<F>(key)) {
         format!(
             "'{key}' cannot be told apart from a misspelling of the '{field}' field; \
              rename it, or correct it to '{field}'"
@@ -268,14 +284,14 @@ pub(crate) fn describe_unknown_key_in(key: &str, known: &[&str]) -> String {
     } else {
         format!(
             "unknown field '{key}'; expected one of: {}",
-            known.join(", ")
+            F::NAMES.join(", ")
         )
     }
 }
 
 /// [`describe_unknown_key_in`] for a key inside a dotfile entry.
 pub(crate) fn describe_unknown_key(key: &str) -> String {
-    describe_unknown_key_in(key, KNOWN_DOTFILE_FIELDS)
+    describe_unknown_key_in::<DotfileField>(key)
 }
 
 /// Top-level keys of `raw_yaml` whose `_` prefix hides a real field name.
@@ -345,12 +361,84 @@ pub struct DotfileEntry {
     unknown_keys: Vec<String>,
 }
 
-/// Field names a dotfile entry accepts, in the order they are reported.
+/// One level's set of accepted keys.
 ///
-/// The single source of truth for both the deserializer below and
-/// `Package::validate_unknown_dotfile_fields`; `test_known_dotfile_fields_matches_struct`
-/// checks it against what `DotfileEntry` actually serializes.
-pub(crate) const KNOWN_DOTFILE_FIELDS: &[&str] = &["source", "command", "vars", "target"];
+/// A type parameter rather than a `&[&str]` argument, so a caller cannot hand a
+/// key from one level the field list of another: doing so told the user an
+/// environment accepts `name, homepage, description, …` and compiled cleanly.
+pub(crate) trait KnownFields: strum::VariantNames + std::str::FromStr {
+    /// Every accepted key, in declaration order, for an "expected one of" list.
+    const NAMES: &'static [&'static str] = Self::VARIANTS;
+
+    /// Whether `key` is one of them.
+    fn accepts(key: &str) -> bool {
+        key.parse::<Self>().is_ok()
+    }
+}
+
+/// The keys a dotfile entry accepts.
+///
+/// `target` is here and deliberately absent from [`PackageField`], which is what
+/// keeps the documented top-level `_target: &target …` anchor legal.
+// A parallel declaration to `DotfileEntry`'s serde field names, which serde
+// exposes no way to read at runtime, and to the deserializer's match arms below.
+// The match is exhaustive, so a new variant is a compile error there;
+// `test_known_dotfile_fields_matches_struct` covers the serde side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum DotfileField {
+    Source,
+    Command,
+    Vars,
+    Target,
+}
+
+/// The keys a package file accepts at its top level.
+// Parallel to `Package`'s serde field names, for the reason given on
+// `DotfileField`; `test_known_fields_matches_package_struct` checks both
+// directions, so neither a new field nor a stale variant can drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum PackageField {
+    Name,
+    Homepage,
+    Description,
+    Dotfiles,
+    PostInstallNote,
+    Environments,
+}
+
+/// The keys one `environments.<env>` mapping accepts.
+///
+/// A third set, distinct from the other two: `target` is not one, so `_target:`
+/// is an ordinary anchor here as at the top level, and refused only inside a
+/// dotfile entry.
+///
+/// `_dotfiles:` here costs that environment its overrides — the list reads as
+/// empty, so the shared entry deploys instead of the one written for this
+/// machine.
+// `selfie spec validate` reports that `_dotfiles:`; apply does not yet refuse it
+// (selfie-ty9n).
+//
+// Parallel to `EnvironmentConfig`'s serde field names, for the reason given on
+// `DotfileField`; `known_environment_fields_matches_the_struct` checks both
+// directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum EnvironmentField {
+    Install,
+    Check,
+    Audit,
+    Dependencies,
+    Recommends,
+    Dotfiles,
+}
+
+// Both members have default bodies built from the strum supertraits, so a level
+// is declared by naming its enum here.
+impl KnownFields for DotfileField {}
+impl KnownFields for PackageField {}
+impl KnownFields for EnvironmentField {}
 
 /// Hand-written so unrecognized keys can be *recorded* rather than rejected.
 ///
@@ -409,12 +497,17 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                         }};
                     }
 
-                    match key.as_str() {
-                        "source" => once!(source, "source"),
-                        "command" => once!(command, "command"),
-                        "vars" => once!(vars, "vars"),
-                        "target" => once!(target, "target"),
-                        _ => {
+                    // Matched through `DotfileField` rather than on the raw
+                    // string, so the arms are exhaustive over the same enum the
+                    // validators use: a variant added there without a slot here
+                    // fails to compile instead of parsing as an unknown key,
+                    // which would silently drop the field and refuse the entry.
+                    match key.parse::<DotfileField>() {
+                        Ok(DotfileField::Source) => once!(source, "source"),
+                        Ok(DotfileField::Command) => once!(command, "command"),
+                        Ok(DotfileField::Vars) => once!(vars, "vars"),
+                        Ok(DotfileField::Target) => once!(target, "target"),
+                        Err(_) => {
                             map.next_value::<IgnoredAny>()?;
                             // `_`-prefixed keys are YAML anchor definitions, not
                             // data. Allowing them is why this is not
@@ -978,6 +1071,19 @@ impl Package {
 
 #[cfg(test)]
 mod package_tests {
+
+    // Case matters: `EnumString` is exact unless `ascii_case_insensitive` is set,
+    // and the deserializer's match now goes through it.
+    #[test]
+    fn field_names_are_matched_case_sensitively() {
+        use super::{DotfileField, PackageField};
+        assert!("source".parse::<DotfileField>().is_ok());
+        assert!("Source".parse::<DotfileField>().is_err());
+        assert!("SOURCE".parse::<DotfileField>().is_err());
+        assert!("post_install_note".parse::<PackageField>().is_ok());
+        assert!("postInstallNote".parse::<PackageField>().is_err());
+    }
+
     use std::path::PathBuf;
 
     use builder::PackageBuilder;
@@ -1139,7 +1245,7 @@ vars: {}
         // deploys it *unrendered*, placeholders and all, over the target. The
         // whole set of colliding names is checked rather than `_vars` alone: a
         // fix hard-coded to one of them passes a one-name test. See selfie-kj5y.
-        for field in KNOWN_DOTFILE_FIELDS {
+        for field in DotfileField::NAMES {
             let key = format!("_{field}");
             let entry = entry_from_yaml(&format!(
                 "{key}: &a creds.tpl\nsource: creds.tpl\ntarget: ~/.gem/credentials\n"
@@ -1366,15 +1472,10 @@ vars: {}
         );
     }
 
-    // Keeps `KNOWN_DOTFILE_FIELDS` in sync with what `DotfileEntry` serializes.
-    //
-    // Two fixtures, not one: every field but `target` is `skip_serializing_if`, so
-    // a single entry can never emit all four keys and a one-fixture version would
-    // silently stop covering `command` or `vars`.
-    //
     // `docs/package-files.md` documents `_target: &target …` as the way to share a
     // path between entries, and it stays legal only because `target` is not a
-    // top-level field. Adding it to `KNOWN_PACKAGE_FIELDS` breaks every such file.
+    // top-level field. Adding a `Target` variant to `PackageField` breaks every
+    // such file.
     #[test]
     fn a_top_level_anchor_is_refused_only_when_it_shadows_a_package_field() {
         assert!(shadows_package_field("_dotfiles"));
@@ -1410,16 +1511,14 @@ vars: {}
     // list for its own level.
     #[test]
     fn an_unknown_key_is_described_against_the_list_in_force() {
-        let shadowed =
-            describe_unknown_key_in("_dotfiles", crate::package::validate::KNOWN_PACKAGE_FIELDS);
+        let shadowed = describe_unknown_key_in::<PackageField>("_dotfiles");
         assert!(
             shadowed.contains("cannot be told apart from a misspelling of the 'dotfiles' field"),
             "got: {shadowed}"
         );
         assert!(shadowed.contains("rename it"), "got: {shadowed}");
 
-        let plain =
-            describe_unknown_key_in("configs", crate::package::validate::KNOWN_PACKAGE_FIELDS);
+        let plain = describe_unknown_key_in::<PackageField>("configs");
         assert!(plain.contains("unknown field 'configs'"), "got: {plain}");
         assert!(
             plain.contains("dotfiles"),
@@ -1471,6 +1570,11 @@ environments:
         assert_eq!(package.path(), std::path::Path::new("/packages/myapp.yml"));
     }
 
+    // Keeps `DotfileField` in sync with what `DotfileEntry` serializes.
+    //
+    // Two fixtures, not one: every field but `target` is `skip_serializing_if`, so
+    // a single entry can never emit all four keys and a one-fixture version would
+    // silently stop covering `command` or `vars`.
     #[test]
     fn test_known_dotfile_fields_matches_struct() {
         let template = entry_from_yaml("source: a.tpl\ntarget: ~/.a\nvars:\n  k: op read x\n");
@@ -1485,16 +1589,16 @@ environments:
 
         for key in &seen {
             assert!(
-                KNOWN_DOTFILE_FIELDS.contains(&key.as_str()),
-                "DotfileEntry serialized '{key}', which is not in KNOWN_DOTFILE_FIELDS — \
-                 add it there and to the deserializer's match arms"
+                DotfileField::accepts(key),
+                "DotfileEntry serialized '{key}', which is not in DotfileField — \
+                 add the variant, and a match arm for it in the deserializer"
             );
         }
-        for known in KNOWN_DOTFILE_FIELDS {
+        for known in DotfileField::NAMES {
             assert!(
                 seen.contains(*known),
-                "KNOWN_DOTFILE_FIELDS lists '{known}' but no fixture emits it; \
-                 the list or the fixtures are stale"
+                "DotfileField has '{known}' but no fixture emits it; \
+                 the enum or the fixtures are stale"
             );
         }
     }

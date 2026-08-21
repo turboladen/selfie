@@ -6,8 +6,8 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, Package, describe_unknown_key, describe_unknown_key_in, shadows_dotfile_field,
-    shadows_environment_field, shadows_package_field,
+    DotfileEntry, EnvironmentField, Package, PackageField, describe_unknown_key,
+    shadows_dotfile_field, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -79,32 +79,6 @@ pub fn unreadable_template_issue(
     )
 }
 
-/// Known top-level keys in a package YAML file.
-///
-/// Used by `validate_unknown_fields()` and verified against the `Package` struct
-/// by `test_known_fields_matches_package_struct`.
-pub(crate) const KNOWN_PACKAGE_FIELDS: &[&str] = &[
-    "name",
-    "homepage",
-    "description",
-    "dotfiles",
-    "post_install_note",
-    "environments",
-];
-
-/// Keys `EnvironmentConfig` accepts, for the same check one level down.
-///
-/// Held to the struct by `known_environment_fields_matches_the_struct`, which
-/// checks both directions so neither a new field nor a stale entry can drift.
-pub(crate) const KNOWN_ENVIRONMENT_FIELDS: &[&str] = &[
-    "install",
-    "check",
-    "audit",
-    "dependencies",
-    "recommends",
-    "dotfiles",
-];
-
 /// Flag unrecognized keys inside each `environments.<env>` mapping.
 ///
 /// Reads the already-parsed top-level map rather than parsing again, so a file
@@ -125,22 +99,15 @@ fn unknown_environment_keys(
         let Some(env) = env.as_object() else { continue };
 
         for key in env.keys() {
-            // `_`-prefixed keys are anchor definitions, as at the top level and
-            // inside a dotfile entry. A name matching a real field is still
-            // refused, because it cannot be told apart from a misspelling.
-            let shadows = shadows_environment_field(key);
-            if key.starts_with('_') && !shadows {
+            let Some(unknown) = unknown_key::<EnvironmentField>(key) else {
                 continue;
-            }
-            if KNOWN_ENVIRONMENT_FIELDS.contains(&key.as_str()) {
-                continue;
-            }
+            };
 
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &format!("environments.{env_name}.{key}"),
-                &describe_unknown_key_in(key, KNOWN_ENVIRONMENT_FIELDS),
-                shadows.then_some(
+                &unknown.message,
+                unknown.shadows.then_some(
                     "Anchors are legal here; only a name matching a field of this environment \
                      is refused, because it cannot be told apart from a misspelling of that \
                      field.",
@@ -295,7 +262,7 @@ impl Package {
     /// the refusal that matters is `handle_apply`'s, which reads
     /// `Package::shadowing_top_level_keys`. This is what `selfie spec validate`
     /// says about the same file, worded identically through
-    /// [`describe_unknown_key_in`].
+    /// [`describe_unknown_key_in`](super::describe_unknown_key_in).
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
         // No YAML at all means a programmatically built package, which has no
         // keys a user could misspell. An empty *file* is a different case and
@@ -333,31 +300,23 @@ impl Package {
 
         let mut issues: Vec<ValidationIssue> = raw
             .keys()
-            .filter(|k| {
-                (!k.starts_with('_') || shadows_package_field(k))
-                    && !KNOWN_PACKAGE_FIELDS.contains(&k.as_str())
-            })
-            .map(|k| {
+            .filter_map(|k| {
+                let unknown = unknown_key::<PackageField>(k)?;
+
                 // A collision needs different advice from a plain misspelling,
                 // for the reason `unknown_dotfile_keys` gives: the key may have
                 // been named deliberately, and which remedy applies depends on
                 // which reading was meant.
-                let suggestion = if shadows_package_field(k) {
-                    Some(
+                Some(ValidationIssue::error(
+                    ValidationErrorCategory::InvalidValue,
+                    k,
+                    &unknown.message,
+                    unknown.shadows.then_some(
                         "Anchors are legal here; only a name matching a top-level field is \
                          refused, because it cannot be told apart from a misspelling of that \
                          field.",
-                    )
-                } else {
-                    None
-                };
-
-                ValidationIssue::error(
-                    ValidationErrorCategory::InvalidValue,
-                    k,
-                    &describe_unknown_key_in(k, KNOWN_PACKAGE_FIELDS),
-                    suggestion,
-                )
+                    ),
+                ))
             })
             .collect();
 
@@ -954,7 +913,7 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use crate::{
-        package::{DotfileEntry, EnvironmentConfig, builder::PackageBuilder},
+        package::{DotfileEntry, EnvironmentConfig, KnownFields, builder::PackageBuilder},
         validation::ValidationLevel,
     };
 
@@ -1919,8 +1878,8 @@ environments:
         // does not leave the user grepping for which one.
         assert_eq!(issues[0].field, "environments.work.audt");
         // The message has to offer this environment's fields, not the top-level
-        // ones: `describe_unknown_key_in` takes the list as an argument, so the
-        // wrong one reads as a plausible message and changes no field path.
+        // ones: the level is a turbofish at the call site, so the wrong one still
+        // compiles, reads as a plausible message and changes no field path.
         assert_eq!(
             issues[0].message,
             "unknown field 'audt'; expected one of: install, check, audit, dependencies, \
@@ -2168,11 +2127,11 @@ environments:
         );
     }
 
-    // Ensures KNOWN_FIELDS stays in sync with the Package struct.
+    // Ensures `PackageField` stays in sync with the `Package` struct.
     //
     // Serializes a fully populated Package to YAML, re-parses as a raw map,
-    // and asserts every key is present in KNOWN_FIELDS. If this test fails,
-    // a field was added to Package without updating KNOWN_FIELDS.
+    // and asserts every key has a variant. If this test fails, a field was added
+    // to Package without a matching `PackageField` variant.
     #[test]
     fn test_known_fields_matches_package_struct() {
         // Every optional field populated. Most are `skip_serializing_if`, so a
@@ -2199,14 +2158,14 @@ environments:
         // misspelling forever.
         for key in &emitted {
             assert!(
-                KNOWN_PACKAGE_FIELDS.contains(&key.as_str()),
-                "Package serialized '{key}', which is not in KNOWN_PACKAGE_FIELDS — update the list in validate.rs"
+                PackageField::accepts(key),
+                "Package serialized '{key}', which is not in PackageField — add the variant"
             );
         }
-        for known in KNOWN_PACKAGE_FIELDS {
+        for known in PackageField::NAMES {
             assert!(
                 emitted.contains(*known),
-                "KNOWN_PACKAGE_FIELDS lists '{known}', which no fixture serializes — remove it, or widen a fixture to emit it"
+                "PackageField has '{known}', which no fixture serializes — remove the variant, or widen a fixture to emit it"
             );
         }
     }
@@ -2235,14 +2194,14 @@ environments:
 
         for key in &emitted {
             assert!(
-                KNOWN_ENVIRONMENT_FIELDS.contains(&key.as_str()),
-                "EnvironmentConfig serialized '{key}', which is not in KNOWN_ENVIRONMENT_FIELDS"
+                EnvironmentField::accepts(key),
+                "EnvironmentConfig serialized '{key}', which is not in EnvironmentField"
             );
         }
-        for known in KNOWN_ENVIRONMENT_FIELDS {
+        for known in EnvironmentField::NAMES {
             assert!(
                 emitted.contains(*known),
-                "KNOWN_ENVIRONMENT_FIELDS lists '{known}', which no fixture serializes"
+                "EnvironmentField has '{known}', which no fixture serializes"
             );
         }
     }

@@ -29,13 +29,12 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, Package, describe_unknown_key_in,
+        ContentSource, DotfileEntry, Package, PackageField, describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
         port::PackageRepository,
-        validate::KNOWN_PACKAGE_FIELDS,
     },
     paths::is_within,
     privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
@@ -1276,7 +1275,7 @@ where
         if !shadowing.is_empty() {
             let described: Vec<String> = shadowing
                 .iter()
-                .map(|key| describe_unknown_key_in(key, KNOWN_PACKAGE_FIELDS))
+                .map(|key| describe_unknown_key_in::<PackageField>(key))
                 .collect();
             sender
                 .send_warning(format!(
