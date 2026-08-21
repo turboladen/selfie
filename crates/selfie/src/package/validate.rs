@@ -7,7 +7,7 @@ use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssu
 
 use super::{
     DotfileEntry, Package, describe_unknown_key, describe_unknown_key_in, shadows_dotfile_field,
-    shadows_package_field,
+    shadows_environment_field, shadows_package_field,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -92,11 +92,71 @@ pub(crate) const KNOWN_PACKAGE_FIELDS: &[&str] = &[
     "environments",
 ];
 
+/// Keys `EnvironmentConfig` accepts, for the same check one level down.
+///
+/// Held to the struct by `known_environment_fields_matches_the_struct`, which
+/// checks both directions so neither a new field nor a stale entry can drift.
+pub(crate) const KNOWN_ENVIRONMENT_FIELDS: &[&str] = &[
+    "install",
+    "check",
+    "audit",
+    "dependencies",
+    "recommends",
+    "dotfiles",
+];
+
+/// Flag unrecognized keys inside each `environments.<env>` mapping.
+///
+/// Reads the already-parsed top-level map rather than parsing again, so a file
+/// this could not re-read is reported once by the caller instead of twice.
+///
+/// An environment whose value is not a mapping is left alone: deserializing the
+/// package would have failed first, so reaching here means it is one.
+fn unknown_environment_keys(
+    raw: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<ValidationIssue> {
+    let Some(serde_json::Value::Object(envs)) = raw.get("environments") else {
+        return vec![];
+    };
+
+    let mut issues = Vec::new();
+
+    for (env_name, env) in envs {
+        let Some(env) = env.as_object() else { continue };
+
+        for key in env.keys() {
+            // `_`-prefixed keys are anchor definitions, as at the top level and
+            // inside a dotfile entry. A name matching a real field is still
+            // refused, because it cannot be told apart from a misspelling.
+            let shadows = shadows_environment_field(key);
+            if key.starts_with('_') && !shadows {
+                continue;
+            }
+            if KNOWN_ENVIRONMENT_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
+
+            issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                &format!("environments.{env_name}.{key}"),
+                &describe_unknown_key_in(key, KNOWN_ENVIRONMENT_FIELDS),
+                shadows.then_some(
+                    "Anchors are legal here; only a name matching a field of this environment \
+                     is refused, because it cannot be told apart from a misspelling of that \
+                     field.",
+                ),
+            ));
+        }
+    }
+
+    issues
+}
+
 /// Flag unrecognized keys in a `dotfiles` list, naming the entry carrying each.
 ///
 /// Reads the keys off the entries rather than re-parsing the raw YAML, so this
 /// works for a programmatically built `Package` too — unlike the top-level check
-/// above, which is inert when `raw_yaml` is empty.
+/// above, which has no source to read for one.
 ///
 /// `path` names the list (`dotfiles` or `environments.<env>.dotfiles`), matching
 /// the field paths `validate_dotfiles` already reports.
@@ -237,16 +297,38 @@ impl Package {
     /// says about the same file, worded identically through
     /// [`describe_unknown_key_in`].
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
-        if self.raw_yaml.is_empty() {
+        // No YAML at all means a programmatically built package, which has no
+        // keys a user could misspell. An empty *file* is a different case and
+        // still parses, so it does not land here.
+        let Some(raw_yaml) = self.raw_yaml() else {
             return vec![];
-        }
+        };
 
         // Uses serde_json::Value as the "any value" container because serde-saphyr
         // has no Value type. This works because we only inspect keys, not values.
-        let Ok(raw) = serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
-            &self.raw_yaml,
-        ) else {
-            return vec![]; // Parse errors handled elsewhere
+        let raw = match serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
+            raw_yaml,
+        ) {
+            Ok(raw) => raw,
+            // The package parsed once already, so this re-parse failing means the
+            // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
+            // for instance. Say the check did not run; staying quiet here reports
+            // a file as clean when nothing looked at it.
+            Err(e) => {
+                // `Info`, not a warning: nothing is known to be wrong with the
+                // file, only unchecked, and `sync push` refuses a package
+                // carrying any warning. Blocking a push over a check that did
+                // not run would be a worse outcome than the gap it reports.
+                return vec![ValidationIssue::info(
+                    ValidationErrorCategory::Advisory,
+                    "package",
+                    &format!("could not re-read the package file to check for unknown keys: {e}"),
+                    Some(
+                        "Neither the top-level keys nor the keys inside each environment were \
+                         checked for this package.",
+                    ),
+                )];
+            }
         };
 
         let mut issues: Vec<ValidationIssue> = raw
@@ -279,6 +361,8 @@ impl Package {
             })
             .collect();
 
+        issues.extend(unknown_environment_keys(&raw));
+
         // `raw` is a `HashMap`, so the iteration order is not the file's. Sort by
         // the field name to keep the report stable between runs.
         issues.sort_by(|a, b| a.field().cmp(b.field()));
@@ -293,7 +377,7 @@ impl Package {
     pub(crate) fn validate_unknown_dotfile_fields(&self) -> Vec<ValidationIssue> {
         let mut issues = unknown_dotfile_keys(&self.dotfiles, "dotfiles");
 
-        for (env_name, env) in self.environments() {
+        for (env_name, env) in self.environments_sorted() {
             issues.extend(unknown_dotfile_keys(
                 env.dotfiles(),
                 &format!("environments.{env_name}.dotfiles"),
@@ -389,7 +473,7 @@ impl Package {
         }
 
         // Validate each environment's required fields
-        for (env_name, env_config) in &self.environments.value {
+        for (env_name, env_config) in self.environments_sorted() {
             if env_config.install.is_empty() {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::RequiredField,
@@ -455,7 +539,11 @@ impl Package {
     }
     /// Basic command syntax validation that doesn't require external dependencies
     pub(crate) fn validate_command_syntax(&self) -> Vec<ValidationIssue> {
-        self.validate_command_syntax_for(self.environments.value.keys().map(String::as_str))
+        // Sorted for the same reason the other walks are: every environment is
+        // checked, and hash order would vary the report between runs.
+        self.validate_command_syntax_for(
+            self.environments_sorted().into_iter().map(|(name, _)| name),
+        )
     }
 
     /// Validate command syntax for only the specified environments
@@ -586,7 +674,7 @@ impl Package {
         // Environment-specific dotfiles (ADR-0001): the same structural checks,
         // plus a warning when an entry overrides a shared entry's target, so the
         // override is surfaced rather than applied silently.
-        for (env_name, env) in self.environments() {
+        for (env_name, env) in self.environments_sorted() {
             for (i, dotfile) in env.dotfiles().iter().enumerate() {
                 let field = format!("environments.{env_name}.dotfiles[{i}]");
                 issues.extend(Self::validate_dotfile_entry(dotfile, &field));
@@ -705,7 +793,7 @@ impl Package {
             refs.extend(reference(entry, format!("dotfiles[{i}]")));
         }
 
-        for (env_name, env) in self.environments() {
+        for (env_name, env) in self.environments_sorted() {
             for (i, entry) in env.dotfiles().iter().enumerate() {
                 refs.extend(reference(
                     entry,
@@ -958,9 +1046,9 @@ mod tests {
 
     #[test]
     fn unknown_dotfile_keys_are_reported_for_a_package_that_was_never_parsed_from_a_file() {
-        // `validate_unknown_fields` reads `raw_yaml` and goes quiet when it is
-        // empty. This check reads the entries instead, so it still works for a
-        // package assembled in memory.
+        // `validate_unknown_fields` reads `raw_yaml` and has nothing to read for a
+        // package with no source. This check reads the entries instead, so it
+        // still works for a package assembled in memory.
         let package = PackageBuilder::default()
             .name("creds")
             .dotfiles(vec![entry_from_yaml(
@@ -969,7 +1057,10 @@ mod tests {
             .environment("test", |b| b.install("echo i"))
             .build();
 
-        assert!(package.raw_yaml.is_empty(), "fixture must have no raw YAML");
+        assert!(
+            package.raw_yaml().is_none(),
+            "fixture must have no raw YAML"
+        );
 
         let issues = package.validate_unknown_dotfile_fields();
         assert_eq!(issues.len(), 1, "got: {issues:?}");
@@ -1804,6 +1895,192 @@ dotfiles:
         package
     }
 
+    // A misspelled *optional* key is the silent case. Misspelling `install`
+    // instead fails the parse, because that field is required.
+    #[test]
+    fn a_misspelled_environment_key_is_reported() {
+        // Two environments, and the typo is in the second: a walk that stopped at
+        // the first would pass a one-environment fixture.
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+environments:
+  home:
+    install: "echo i"
+    audit: "echo a"
+  work:
+    install: "echo i"
+    audt: "echo a"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        // Names the environment as well as the key, so a file defining several
+        // does not leave the user grepping for which one.
+        assert_eq!(issues[0].field, "environments.work.audt");
+        // The message has to offer this environment's fields, not the top-level
+        // ones: `describe_unknown_key_in` takes the list as an argument, so the
+        // wrong one reads as a plausible message and changes no field path.
+        assert_eq!(
+            issues[0].message,
+            "unknown field 'audt'; expected one of: install, check, audit, dependencies, \
+             recommends, dotfiles"
+        );
+    }
+
+    // An anchor under an environment stays legal, and only a name that collides
+    // with a real field is refused -- the rule the top level already applies.
+    #[test]
+    fn an_environment_anchor_is_allowed_unless_it_shadows_a_field() {
+        // `_target` is the case that separates the three field lists: legal here
+        // and at the top level, refused inside a dotfile entry.
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+environments:
+  work:
+    install: "echo i"
+    _shared: "anything"
+    _target: "~/.config/myapp"
+    _check: "echo c"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].field, "environments.work._check");
+        // Both readings, and the remedy for each. Saying the field is unset would
+        // be false of a genuine anchor aliased by `check: *c`.
+        assert_eq!(
+            issues[0].message,
+            "'_check' cannot be told apart from a misspelling of the 'check' field; rename it, \
+             or correct it to 'check'"
+        );
+    }
+
+    // A package with no file behind it has no keys to misspell, so the check is
+    // silent rather than complaining about a package it cannot read.
+    #[test]
+    fn a_package_with_no_source_reports_nothing() {
+        let package = PackageBuilder::default()
+            .name("built")
+            .environment("work", |b| b.install("echo i"))
+            .build();
+
+        assert!(package.raw_yaml().is_none());
+        assert!(package.validate_unknown_fields().is_empty());
+    }
+
+    // The check must say when it could not run. Silence here reported a file as
+    // clean while nothing had looked at it.
+    #[test]
+    fn a_package_whose_yaml_cannot_be_re_read_says_so() {
+        // A real file, not a hand-set field: the explicit-key mapping under a key
+        // `Package` ignores deserializes fine into the struct and not at all into
+        // `serde_json::Value`, which has no key for it. `package_with_raw_yaml`
+        // parses first, so this fixture proves the two views can disagree.
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+environments:
+  work:
+    install: "echo i"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert!(
+            issues[0].message.contains("could not re-read"),
+            "got: {}",
+            issues[0].message
+        );
+        // Not silence, and not an error either: nothing is known to be wrong
+        // with the file, only unchecked.
+        assert_eq!(issues[0].level, ValidationLevel::Info);
+    }
+
+    // Every walk over `environments()` reports in name order. A `HashMap`
+    // iterated directly does not: hash order is randomized per process, so the
+    // same file lists its problems differently between two runs.
+    #[test]
+    fn environment_diagnostics_are_reported_in_name_order() {
+        let package = package_from_yaml(
+            r#"name: myapp
+environments:
+  charlie:
+    install: "echo i"
+    dotfiles:
+      - source: c.tpl
+        target: relative/c
+        vars:
+          k: echo c
+        var:
+          k: echo c
+  alpha:
+    install: "echo i"
+    dotfiles:
+      - source: a.tpl
+        target: relative/a
+        vars:
+          k: echo a
+        var:
+          k: echo a
+  bravo:
+    install: "echo i"
+    dotfiles:
+      - source: b.tpl
+        target: relative/b
+        vars:
+          k: echo b
+        var:
+          k: echo b
+"#,
+        );
+
+        let unknown: Vec<String> = package
+            .validate_unknown_dotfile_fields()
+            .iter()
+            .map(|i| i.field.clone())
+            .collect();
+        assert_eq!(
+            unknown,
+            [
+                "environments.alpha.dotfiles[0].var",
+                "environments.bravo.dotfiles[0].var",
+                "environments.charlie.dotfiles[0].var",
+            ]
+        );
+
+        let templates: Vec<String> = package
+            .template_dotfiles()
+            .iter()
+            .map(|r| r.field.clone())
+            .collect();
+        assert_eq!(
+            templates,
+            [
+                "environments.alpha.dotfiles[0]",
+                "environments.bravo.dotfiles[0]",
+                "environments.charlie.dotfiles[0]",
+            ]
+        );
+
+        // `validate_dotfiles` walks the same map a third time.
+        let entries: Vec<String> = package
+            .validate_dotfiles()
+            .iter()
+            .map(|i| i.field.clone())
+            .filter(|f| f.starts_with("environments."))
+            .collect();
+        assert!(
+            entries.windows(2).all(|w| w[0] <= w[1]),
+            "expected name-sorted fields, got: {entries:?}"
+        );
+        assert_eq!(entries.len(), 3, "got: {entries:?}");
+    }
+
     // `_dotfiles:` is reported, and the message says what to do about it.
     #[test]
     fn a_top_level_key_shadowing_a_field_is_reported() {
@@ -1898,7 +2175,10 @@ environments:
     // a field was added to Package without updating KNOWN_FIELDS.
     #[test]
     fn test_known_fields_matches_package_struct() {
-        let package = PackageBuilder::default()
+        // Every optional field populated. Most are `skip_serializing_if`, so a
+        // field left unset here is a field the reverse direction below cannot
+        // see, and a stale entry in the list would survive.
+        let full = PackageBuilder::default()
             .name("sync-test")
             .homepage("https://example.com")
             .description("A test")
@@ -1907,14 +2187,62 @@ environments:
             .environment("test-env", |b| b.install("echo hi"))
             .build();
 
-        let yaml = serde_saphyr::to_string(&package).unwrap();
-        let raw: std::collections::HashMap<String, serde_json::Value> =
-            serde_saphyr::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&full).unwrap();
+        let emitted: std::collections::BTreeSet<String> =
+            serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
+                .unwrap()
+                .into_keys()
+                .collect();
 
-        for key in raw.keys() {
+        // Both directions. Serialized-but-unknown loses detection for that key;
+        // known-but-never-serialized leaves a stale entry that quietly excuses a
+        // misspelling forever.
+        for key in &emitted {
             assert!(
                 KNOWN_PACKAGE_FIELDS.contains(&key.as_str()),
-                "Package serialized a field '{key}' not in KNOWN_PACKAGE_FIELDS — update the list in validate.rs"
+                "Package serialized '{key}', which is not in KNOWN_PACKAGE_FIELDS — update the list in validate.rs"
+            );
+        }
+        for known in KNOWN_PACKAGE_FIELDS {
+            assert!(
+                emitted.contains(*known),
+                "KNOWN_PACKAGE_FIELDS lists '{known}', which no fixture serializes — remove it, or widen a fixture to emit it"
+            );
+        }
+    }
+
+    #[test]
+    fn known_environment_fields_matches_the_struct() {
+        // `check`, `audit`, `recommends` and `dotfiles` are all
+        // `skip_serializing_if`, so every one has to be populated or the reverse
+        // direction below cannot see it. Built literally rather than through
+        // `new`, which forces `dotfiles` empty and so could not emit that key.
+        let full = EnvironmentConfig {
+            install: "echo install".to_string(),
+            check: Some("echo check".to_string()),
+            audit: Some("echo audit".to_string()),
+            dependencies: vec!["dep".to_string()],
+            recommends: vec!["rec".to_string()],
+            dotfiles: vec![DotfileEntry::new("src", "~/.t")],
+        };
+
+        let yaml = serde_saphyr::to_string(&full).unwrap();
+        let emitted: std::collections::BTreeSet<String> =
+            serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
+                .unwrap()
+                .into_keys()
+                .collect();
+
+        for key in &emitted {
+            assert!(
+                KNOWN_ENVIRONMENT_FIELDS.contains(&key.as_str()),
+                "EnvironmentConfig serialized '{key}', which is not in KNOWN_ENVIRONMENT_FIELDS"
+            );
+        }
+        for known in KNOWN_ENVIRONMENT_FIELDS {
+            assert!(
+                emitted.contains(*known),
+                "KNOWN_ENVIRONMENT_FIELDS lists '{known}', which no fixture serializes"
             );
         }
     }

@@ -194,8 +194,14 @@ already passes.
 
 ## Environment Configuration
 
-Each environment must have an `install` command and optionally a `check` command, `dependencies`,
-and `recommends`.
+Each environment must have an `install` command. Everything else is optional: a `check` command, an
+`audit` command, `dependencies`, `recommends`, and `dotfiles`.
+
+An environment accepts only `install`, `check`, `audit`, `dependencies`, `recommends` and
+`dotfiles`. `selfie spec validate` reports any other key and names the environment it is in, so a
+misspelled optional key such as `audt:` is caught rather than ignored. Keys beginning with `_` are
+treated as YAML anchor definitions and allowed, unless the rest of the name matches a real field —
+`_check:` cannot be told apart from a misspelling of `check:` and is refused.
 
 ### `install`
 
@@ -1067,10 +1073,11 @@ anchor inside the entry whose name matches one of the entry's fields, such as `_
 ## YAML anchors
 
 Keys beginning with an underscore are ignored by selfie, so a package file can define YAML anchors
-and reuse them with aliases. This works both at the top level of the file and inside an individual
-dotfile entry, and an underscore-prefixed key is not reported as an unrecognized key — with one
-exception, described below: an anchor whose name matches a real field **at its own level**, such as
-`_vars` inside an entry or `_dotfiles` at the top level.
+and reuse them with aliases. This works at the top level of the file, inside an individual
+environment, and inside an individual dotfile entry, and an underscore-prefixed key is not reported
+as an unrecognized key — with one exception, described below: an anchor whose name matches a real
+field **at its own level**, such as `_vars` inside an entry, `_check` inside an environment, or
+`_dotfiles` at the top level.
 
 ```yaml
 _brew: &brew brew install ripgrep
@@ -1158,6 +1165,33 @@ the same key in the same words.
 The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
 and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the
 example above depends on it — while `_target:` inside an entry is refused.
+
+### And to the keys inside an environment
+
+The third list is an environment's own fields — `_install`, `_check`, `_audit`, `_dependencies`,
+`_recommends` or `_dotfiles` inside an `environments.<env>` mapping:
+
+```yaml
+name: myapp
+environments:
+  work:
+    install: brew install myapp
+    # Refused: is `_dotfiles` an anchor, or a typo for `dotfiles`?
+    _dotfiles:
+      - source: myapp/work.toml
+        target: ~/.config/myapp/config.toml
+```
+
+Read as an anchor, that environment has **no dotfiles of its own**, so the shared entry deploys on
+the work machine instead of the one written for it — the same silence as the top-level case, with
+the wrong file in place rather than no file.
+
+`selfie spec validate` reports it as `environments.work._dotfiles`. Unlike the top-level key, this
+one does not stop `selfie apply`, which reads only the file's top level before deploying — so run
+`selfie spec validate` after editing an environment.
+
+`_target: &target …` inside an environment is an ordinary anchor, as at the top level: `target` is
+not a field of an environment either.
 
 ## Common Patterns
 

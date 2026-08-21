@@ -229,6 +229,19 @@ pub(crate) fn shadows_package_field(key: &str) -> bool {
     shadows_field(key, validate::KNOWN_PACKAGE_FIELDS)
 }
 
+/// [`shadows_field`] against the fields of one `environments.<env>` mapping.
+///
+/// `_dotfiles:` inside an environment costs that environment its overrides: the
+/// list reads as empty, so the shared entry deploys instead of the one written
+/// for this machine.
+///
+/// Scoped by [`KNOWN_ENVIRONMENT_FIELDS`](crate::package::validate::KNOWN_ENVIRONMENT_FIELDS),
+/// a third list distinct from the other two — `_target:` is legal here, as at
+/// the top level, and refused inside a dotfile entry.
+pub(crate) fn shadows_environment_field(key: &str) -> bool {
+    shadows_field(key, validate::KNOWN_ENVIRONMENT_FIELDS)
+}
+
 /// Say what is wrong with one unrecognized key, and what to do about it.
 ///
 /// Shared by [`InvalidEntry`]'s `Display`,
@@ -619,7 +632,7 @@ pub struct Package {
     /// error for anything outside `package` — which is where the second
     /// assignment lived — not a guarantee.
     #[serde(skip)]
-    raw_yaml: String,
+    raw_yaml: Option<String>,
 
     /// Top-level keys whose `_` prefix hides a misspelling of a real field.
     ///
@@ -760,7 +773,7 @@ impl Package {
             post_install_note: post_install_note.map(unspanned),
             environments: unspanned(environments),
             path,
-            raw_yaml: String::new(),
+            raw_yaml: None,
             shadowing_top_level_keys: Vec::new(),
         }
     }
@@ -790,7 +803,7 @@ impl Package {
             post_install_note: None,
             environments: unspanned(environments),
             path: PathBuf::new(), // Will be set by GetPackage::new
-            raw_yaml: String::new(),
+            raw_yaml: None,
             shadowing_top_level_keys: Vec::new(),
         }
     }
@@ -808,7 +821,21 @@ impl Package {
     pub(crate) fn set_source(&mut self, path: PathBuf, raw_yaml: String) {
         self.shadowing_top_level_keys = shadowing_top_level_keys(&raw_yaml);
         self.path = path;
-        self.raw_yaml = raw_yaml;
+        self.raw_yaml = Some(raw_yaml);
+    }
+
+    /// The YAML this package was parsed from, or `None` when it was built
+    /// programmatically.
+    ///
+    /// `None` is the only case unknown-key detection may skip. A `String` that
+    /// was empty stood for both, so the check could no-op on a real file and say
+    /// nothing.
+    // `Some("")` is not reachable today — `set_source` runs only after a parse
+    // that requires `name` — and would report no keys anyway, since empty input
+    // deserializes to an empty map. It is a distinct state rather than a second
+    // spelling of `None`, which is the point of the `Option`.
+    pub(crate) fn raw_yaml(&self) -> Option<&str> {
+        self.raw_yaml.as_deref()
     }
 
     /// Top-level keys whose `_` prefix hides a misspelling of a real field.
@@ -890,18 +917,30 @@ impl Package {
         let mut out: Vec<(Option<&str>, &DotfileEntry)> =
             self.dotfiles.iter().map(|d| (None, d)).collect();
 
-        // Environments in a stable (name-sorted) order for deterministic output.
-        let mut env_names: Vec<&String> = self.environments().keys().collect();
-        env_names.sort();
-        for name in env_names {
-            if let Some(env) = self.environments().get(name) {
-                for d in env.dotfiles() {
-                    out.push((Some(name.as_str()), d));
-                }
+        for (name, env) in self.environments_sorted() {
+            for d in env.dotfiles() {
+                out.push((Some(name), d));
             }
         }
 
         out
+    }
+
+    /// Every environment, in name order.
+    ///
+    /// `environments` is a `HashMap`, so anything a caller renders in sequence —
+    /// a diagnostic list, an inventory — has to impose an order or the same file
+    /// reports differently between runs. Hash order is not insertion order and is
+    /// randomized per process.
+    pub(crate) fn environments_sorted(&self) -> Vec<(&str, &EnvironmentConfig)> {
+        let mut envs: Vec<(&str, &EnvironmentConfig)> = self
+            .environments
+            .value
+            .iter()
+            .map(|(name, env)| (name.as_str(), env))
+            .collect();
+        envs.sort_by_key(|(name, _)| *name);
+        envs
     }
 
     /// Add a dotfile mapping to this package.
