@@ -1,4 +1,4 @@
-use comfy_table::{ContentArrangement, Table, modifiers, presets};
+use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 use selfie::package::{
     event::{PackageEvent, SpecListData},
@@ -62,8 +62,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     if !data.specs.is_empty() {
         let mut table = Table::new();
         table
-            .load_preset(presets::UTF8_FULL_CONDENSED)
-            .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+            .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
             .set_content_arrangement(ContentArrangement::Dynamic);
         table.set_header(vec!["Name", "Description", "Environments", "Git"]);
 

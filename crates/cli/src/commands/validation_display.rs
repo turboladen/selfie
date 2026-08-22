@@ -3,7 +3,7 @@
 //! Used by both `spec validate` and `sync push` to display validation issues
 //! in a consistent table format.
 
-use comfy_table::{ContentArrangement, Table, modifiers, presets};
+use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
 use crate::display_manager::DisplayManager;
@@ -137,8 +137,7 @@ pub(crate) fn display_validation_groups(
 fn create_validation_table() -> Table {
     let mut table = Table::new();
     table
-        .load_preset(presets::UTF8_FULL_CONDENSED)
-        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+        .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
     table
 }
