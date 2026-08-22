@@ -6076,6 +6076,94 @@ mod top_level_anchor_shadowing {
             .collect()
     }
 
+    // selfie-ty9n, the same hazard one level down.
+    //
+    // `_dotfiles:` inside the environment being applied leaves that environment's
+    // list empty, so `dotfiles_for_environment` falls back to the shared entry and
+    // deploys the file this machine was meant to override -- reporting success.
+    //
+    // The shared target is asserted **absent**: this is what separates a refusal
+    // from the old behavior, where the wrong file was written and the run exited
+    // zero. Asserting only the warning would pass against a version that warned
+    // and deployed anyway.
+    #[tokio::test]
+    async fn apply_refuses_an_environment_carrying_a_shadowing_key() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/shared.toml"), "SHARED").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+dotfiles:
+  - source: "myapp/shared.toml"
+    target: "{}"
+environments:
+  test:
+    install: "echo installed"
+    _dotfiles:
+      - source: "myapp/work.toml"
+        target: "{}"
+"#,
+                target.display(),
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1);
+        assert!(
+            !target.exists(),
+            "the shared entry was deployed over the override"
+        );
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("myapp") && w.contains("test") && w.contains("_dotfiles")),
+            "the refusal must name the package, the environment and the key: {warnings:?}"
+        );
+    }
+
+    // An environment this run does not apply cannot affect what it deploys, so a
+    // typo there is not a reason to refuse.
+    #[tokio::test]
+    async fn apply_ignores_a_shadowing_key_in_another_environment() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/shared.toml"), "SHARED").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+dotfiles:
+  - source: "myapp/shared.toml"
+    target: "{}"
+environments:
+  test:
+    install: "echo installed"
+  other:
+    install: "echo other"
+    _dotfiles: []
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0);
+        assert!(target.exists(), "the shared entry should still deploy");
+    }
+
     // Apply refuses the package and says why.
     //
     // The target must not exist afterwards: the entry under `_dotfiles:` is not

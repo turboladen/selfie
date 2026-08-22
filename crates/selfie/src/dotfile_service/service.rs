@@ -29,7 +29,8 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, Package, PackageField, describe_unknown_key_in,
+        ContentSource, DotfileEntry, EnvironmentField, Package, PackageField,
+        describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -1286,6 +1287,33 @@ where
                 .await;
             refused_count += 1;
             continue;
+        }
+
+        // The same refusal for the environment about to be applied. An unknown
+        // key here is not merely ignored: `_dotfiles:` leaves this environment's
+        // list empty, so `dotfiles_for_environment` falls back to the shared
+        // entry and deploys a file this machine was meant to override.
+        //
+        // Scoped to the active environment, because a typo in an environment
+        // this run does not touch cannot affect what it deploys.
+        if let Some(env) = package.environments().get(config.environment()) {
+            let unknown = env.unknown_keys();
+            if !unknown.is_empty() {
+                let described: Vec<String> = unknown
+                    .iter()
+                    .map(|key| describe_unknown_key_in::<EnvironmentField>(key))
+                    .collect();
+                sender
+                    .send_warning(format!(
+                        "Skipping package '{}': in environment '{}': {}",
+                        package.name(),
+                        config.environment(),
+                        described.join("; ")
+                    ))
+                    .await;
+                refused_count += 1;
+                continue;
+            }
         }
 
         let dotfiles = package.dotfiles_for_environment(config.environment());

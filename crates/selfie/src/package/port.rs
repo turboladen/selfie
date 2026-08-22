@@ -158,6 +158,27 @@ pub enum PackageRepoError {
         fields: String,
     },
 
+    /// Refused to rewrite a package file because an environment carries a key
+    /// the struct does not model.
+    ///
+    /// Separate from [`UnknownDotfileFields`](Self::UnknownDotfileFields)
+    /// because the harm differs. No entry becomes deployable here: the key is
+    /// a setting of the environment, so re-serializing deletes whatever the user
+    /// wrote for it -- `audt: "brew audit myapp"` takes the command with it.
+    // Same reasoning as the sibling for naming the file rather than a command:
+    // every writer is refused by this guard.
+    #[error(
+        "refusing to rewrite {path}: unrecognized {fields}. \
+         Saving would delete the key and whatever it was set to. \
+         Edit {path} directly to correct or remove the key."
+    )]
+    UnknownEnvironmentFields {
+        /// The file that would have been rewritten.
+        path: PathBuf,
+        /// The offending field paths, e.g. `environments.work.audt`.
+        fields: String,
+    },
+
     /// Refused to write a package file because of what is at its path.
     ///
     /// Carries its own wording, which **must never say "target"**. Anything that

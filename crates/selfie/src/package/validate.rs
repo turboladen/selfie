@@ -1598,6 +1598,7 @@ dotfiles:
             dependencies: vec![],
             recommends: vec![],
             dotfiles: vec![],
+            unknown_keys: Vec::new(),
         };
 
         package
@@ -2183,6 +2184,7 @@ environments:
             dependencies: vec!["dep".to_string()],
             recommends: vec!["rec".to_string()],
             dotfiles: vec![DotfileEntry::new("src", "~/.t")],
+            unknown_keys: Vec::new(),
         };
 
         let yaml = serde_saphyr::to_string(&full).unwrap();

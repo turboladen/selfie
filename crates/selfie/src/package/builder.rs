@@ -167,6 +167,7 @@ impl EnvironmentConfigBuilder {
             dependencies: self.dependencies,
             recommends: self.recommends,
             dotfiles: self.dotfiles,
+            unknown_keys: Vec::new(),
         }
     }
 }
