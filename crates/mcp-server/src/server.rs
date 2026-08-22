@@ -5,7 +5,8 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo, ToolsCapability,
+        CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo,
+        ToolsCapability,
     },
     tool, tool_handler, tool_router,
 };
@@ -467,7 +468,7 @@ impl SelfieServer {
             "results": results,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -634,7 +635,7 @@ impl SelfieServer {
                 }))
                 .collect::<Vec<_>>(),
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&config_data).unwrap_or_default(),
         )]))
     }
@@ -703,7 +704,7 @@ impl SelfieServer {
             "dotfiles": entries,
             "skipped": skipped,
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&data).unwrap_or_default(),
         )]))
     }
@@ -807,7 +808,7 @@ impl SelfieServer {
                     "status": "error",
                     "message": e.to_string(),
                 });
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&data).unwrap_or_default(),
                 )]));
             }
@@ -819,7 +820,7 @@ impl SelfieServer {
                 "message": "Working tree is clean — nothing to push",
                 "warnings": prepare_result.warnings,
             });
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&data).unwrap_or_default(),
             )]));
         }
@@ -876,9 +877,9 @@ impl ServerHandler for SelfieServer {
 fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult {
     let json = serde_json::to_string_pretty(&result.data).unwrap_or_default();
     if result.success {
-        CallToolResult::success(vec![Content::text(json)])
+        CallToolResult::success(vec![ContentBlock::text(json)])
     } else {
-        CallToolResult::error(vec![Content::text(json)])
+        CallToolResult::error(vec![ContentBlock::text(json)])
     }
 }
 
