@@ -3,7 +3,7 @@
 //! This module provides shared functionality used across multiple package commands
 //! to reduce code duplication and maintain consistency.
 
-use comfy_table::{ContentArrangement, Table, modifiers, presets};
+use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
 use selfie::{
@@ -444,8 +444,7 @@ pub(crate) fn create_package_service(
 pub(crate) fn create_formatted_table() -> Table {
     let mut table = Table::new();
     table
-        .load_preset(presets::UTF8_FULL_CONDENSED)
-        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+        .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
     table
 }
