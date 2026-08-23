@@ -61,6 +61,17 @@ Passing it means the checklist passed, not that CI will be green — CI also run
 run `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features` before pushing a
 change to doc comments. CI's `docs` job runs exactly that.
 
+### Running `/code-review` and dep bumps
+
+- **`/code-review` forks with the _session's_ cwd, not the worktree you are thinking about.** Put
+  the checkout on the target branch first, or pass an explicit target; with `--fix` it edits
+  whatever tree it landed in. It once reviewed an already-merged branch 42 commits behind `main`.
+- **CI's toolchain runs ahead of local.** `main` can go red with no code change. Run
+  `rustup update stable`, then check clippy against a pristine `git archive` of `origin/main` to
+  tell a toolchain break from your own.
+- **A dep bump needing code migration does not go on the dependabot branch** — it force-pushes over
+  you. Open your own branch carrying the bump plus the migration, with `Closes #<N>` in the body.
+
 `dprint fmt` reformats every Markdown and YAML file in the repo, not just the ones you edited.
 Commit that: unformatted files anywhere are a miss, and the fix belongs in whatever PR finds it.
 
@@ -74,6 +85,12 @@ When adding user-facing features, update `docs/` before considering the feature 
 
 Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` in CI does not
 catch British forms, because they are real words.
+
+`typos` also rejects a **deliberate** misspelling in a fixture, which unknown-key tests need — this
+paragraph tripped it once already. Probe with `echo <word> | typos -` and pick one it does not know
+(`audt` passes; a transposed `check` does not) rather than widening `_typos.toml`. Misspelling a
+_required_ field is the wrong fixture anyway — that fails the parse; only optional keys fail
+silently.
 
 ## Guidelines
 

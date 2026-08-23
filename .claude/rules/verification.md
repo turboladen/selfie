@@ -30,6 +30,13 @@ These are cheap, they apply everywhere, and each one is here because skipping it
   `git switch main | tail -2 && git commit …` runs the commit even when the switch failed, because
   `tail` succeeded — that is how a beads commit landed on a feature branch here. Never pipe a
   command whose failure has to stop the chain.
+- **A `cargo test` filter matching nothing prints `test result: ok. 0 passed` and exits 0.** A pass
+  that ran no tests proves nothing — assert the count, or that the total moved. Cargo takes one
+  substring, not `a\|b`.
+- `gh pr checks` can report **all-pass while a newer run is in flight on the same SHA**. Merge on
+  `mergeStateStatus: CLEAN` or on the raw check-runs API showing nothing `in_progress`.
+- **In a worktree `.git` is a file**, so `[ -d .git/rebase-merge ]` always says "no rebase in
+  progress". Use `git rev-parse --git-dir`.
 - A check whose pass condition is **"exited non-zero"** proves almost nothing: nearly every failure
   mode satisfies it, including never reaching the code under test. The sudo-refusal check passed on
   a run that died on a missing config file. Assert on the specific output as well as the status.
