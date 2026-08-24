@@ -1048,13 +1048,20 @@ refuses.
 
 ### Validation Rules for Dotfiles
 
+- Exactly one of `source` and `command` — setting both is an error, and so is setting neither
 - `source` must not be empty
 - `source` must not contain path traversal sequences (`../`)
+- `source` must be relative; a path starting with `/` or `~` is an error
+- `command` accompanies no `vars`: there is no template to render them into
+- Each `vars` name must match `[A-Za-z_][A-Za-z0-9_]*`, or its placeholder would survive into the
+  deployed file
 - `target` must be an absolute path or start with `~/` — see [Dotfiles](#dotfiles) for which to use
 - `target` must not use the `~user/…` form; selfie does not resolve another user's home directory
 - A dotfile entry accepts only `source`, `command`, `vars` and `target`
 
-Selfie validates these rules when you run `selfie spec validate`.
+Selfie validates these rules when you run `selfie spec validate`, which reports the line each
+problem is on. A package assembled by another tool rather than parsed from a file has no line to
+report, and shows `-` instead.
 
 #### Unrecognized keys
 
