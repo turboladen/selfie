@@ -340,18 +340,20 @@ fn shadowing_top_level_keys(raw_yaml: &str) -> Vec<String> {
 //
 // `deny_unknown_fields` cannot do this: it rejects `_`-prefixed anchors, and a
 // rejected key fails the whole package file to parse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Eq, Serialize)]
 pub struct DotfileEntry {
     // No `#[serde(default)]`: `Deserialize` is hand-written below and supplies its
     // own defaults, so the attribute would be inert. `skip_serializing_if` still
     // applies — it is read by the derived `Serialize`.
+    // `Spanned` so a diagnostic can name the line the user wrote, not just the
+    // field path. It serializes as the bare value, so a rewrite is unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<String>,
+    source: Option<Spanned<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
+    command: Option<Spanned<String>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     vars: BTreeMap<String, String>,
-    target: String,
+    target: Spanned<String>,
 
     /// Keys present in the YAML that are not fields of this struct, excluding
     /// `_`-prefixed anchor definitions. Not serialized: a saved package is
@@ -473,10 +475,14 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                 // `source` and `command` are therefore `Option<Option<String>>`:
                 // deserializing them as bare `String` would reject `source: ~`,
                 // which the derived impl accepted as `None`.
-                let mut source: Option<Option<String>> = None;
-                let mut command: Option<Option<String>> = None;
+                // `Spanned` on the slots is what carries the line into a
+                // diagnostic. The outer `Option` still records only whether the
+                // key was seen, so `source:` written as null stays distinct from
+                // `source:` absent.
+                let mut source: Option<Option<Spanned<String>>> = None;
+                let mut command: Option<Option<Spanned<String>>> = None;
                 let mut vars: Option<BTreeMap<String, String>> = None;
-                let mut target: Option<String> = None;
+                let mut target: Option<Spanned<String>> = None;
                 let mut unknown_keys = Vec::new();
 
                 while let Some(key) = map.next_key::<String>()? {
@@ -539,14 +545,29 @@ impl<'de> Deserialize<'de> for DotfileEntry {
     }
 }
 
+/// Compare only values, ignoring YAML source locations.
+///
+/// Same reason `Package` hand-writes this: an entry parsed from a file would
+/// otherwise never equal one built in memory, because their spans differ. Every
+/// round-trip test compares exactly those two.
+impl PartialEq for DotfileEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.source.as_ref().map(|s| &s.value) == other.source.as_ref().map(|s| &s.value)
+            && self.command.as_ref().map(|s| &s.value) == other.command.as_ref().map(|s| &s.value)
+            && self.vars == other.vars
+            && self.target.value == other.target.value
+            && self.unknown_keys == other.unknown_keys
+    }
+}
+
 impl DotfileEntry {
     /// Create a plain repository-file entry.
     pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
-            source: Some(source.into()),
+            source: Some(unspanned(source.into())),
             command: None,
             vars: BTreeMap::new(),
-            target: target.into(),
+            target: unspanned(target.into()),
             unknown_keys: Vec::new(),
         }
     }
@@ -566,12 +587,24 @@ impl DotfileEntry {
     /// `None` for a provider entry, whose content comes from a command rather
     /// than from a file in the repository.
     pub fn source(&self) -> Option<&str> {
-        self.source.as_deref()
+        self.source.as_ref().map(|s| s.value.as_str())
+    }
+
+    /// Where `source:` was written, for a diagnostic about it.
+    #[must_use]
+    pub fn source_location(&self) -> Option<&Location> {
+        self.source.as_ref().map(|s| &s.defined)
     }
 
     /// Get the whole-file provider command, if this entry has one.
     pub fn command(&self) -> Option<&str> {
-        self.command.as_deref()
+        self.command.as_ref().map(|s| s.value.as_str())
+    }
+
+    /// Where `command:` was written, for a diagnostic about it.
+    #[must_use]
+    pub fn command_location(&self) -> Option<&Location> {
+        self.command.as_ref().map(|s| &s.defined)
     }
 
     /// Get the variable bindings (name to command). Empty unless this entry is a
@@ -582,7 +615,14 @@ impl DotfileEntry {
 
     /// Get the target path (deployment destination, may use `~` for home directory).
     pub fn target(&self) -> &str {
-        &self.target
+        &self.target.value
+    }
+
+    /// Where `target:` was written. Always present for a parsed entry, since the
+    /// field is required; `Location::UNKNOWN` for one built in memory.
+    #[must_use]
+    pub fn target_location(&self) -> &Location {
+        &self.target.defined
     }
 
     /// Where this entry's content comes from, or why it has nowhere.
@@ -624,7 +664,7 @@ impl DotfileEntry {
             return Err(InvalidEntry::VarName(name));
         }
 
-        match (self.source.as_deref(), self.command.as_deref()) {
+        match (self.source(), self.command()) {
             (Some(source), None) if !self.vars.is_empty() => Ok(ContentSource::Template {
                 source,
                 vars: &self.vars,
@@ -1166,6 +1206,27 @@ impl Package {
 
 #[cfg(test)]
 mod package_tests {
+
+    // The spans have to come from the document, not be defaulted. Without this a
+    // diagnostic would report `line 0` and read as "unknown" everywhere.
+    #[test]
+    fn a_parsed_dotfile_entry_carries_the_lines_its_fields_were_written_on() {
+        let entry: DotfileEntry =
+            serde_saphyr::from_str("source: creds.tpl\ncommand: \"true\"\ntarget: ~/.creds\n")
+                .unwrap();
+
+        assert_eq!(entry.source_location().unwrap().line(), 1);
+        assert_eq!(entry.command_location().unwrap().line(), 2);
+        assert_eq!(entry.target_location().line(), 3);
+    }
+
+    // An entry built in memory has no file to point at, and must say so rather
+    // than claiming line 0 is a real position.
+    #[test]
+    fn a_built_dotfile_entry_has_no_locations() {
+        let entry = DotfileEntry::new("src", "~/.t");
+        assert_eq!(*entry.target_location(), serde_saphyr::Location::UNKNOWN);
+    }
 
     // The key is recorded rather than rejected, so one typo does not fail the
     // whole file, and it is available without the raw YAML -- which is what lets
