@@ -59,8 +59,17 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
         common::create_new_package(package_name, config)
     };
 
-    // Write the package to the file system first
-    if let Err(exit_code) = common::save_package(&repo, &package_blob, display) {
+    // Only a package that does not exist yet is written. An existing file is
+    // opened exactly as the user wrote it.
+    //
+    // Saving first re-serialized it through serde, which flattens YAML anchors,
+    // drops every comment, and reorders keys -- damage done before the editor
+    // even opened, on a run where the user might change nothing. It also made
+    // `spec edit` refuse to open the one file a typo guard had just rejected,
+    // which is the file the user is trying to fix.
+    if package_blob.is_new()
+        && let Err(exit_code) = common::save_package(&repo, &package_blob, display)
+    {
         return exit_code;
     }
 
@@ -177,6 +186,18 @@ mod tests {
             original_package.environments().len(),
             deserialized.environments().len()
         );
+    }
+
+    // `handle_edit` writes only when the blob says it is new, so if this ever
+    // stopped being true, `spec edit <new-name>` would open an editor on a file
+    // that was never created. Not reachable from an integration test: the create
+    // path goes through a `dialoguer` confirm, which needs a TTY.
+    #[test]
+    fn a_newly_created_package_reports_itself_as_new() {
+        let package_dir = std::path::PathBuf::from("/test/packages");
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
+
+        assert!(common::create_new_package("brand-new", &config).is_new());
     }
 
     #[test]
