@@ -6,7 +6,7 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, PackageField, describe_unknown_key,
+    DotfileEntry, EnvironmentField, Package, PackageField, describe_unknown_key, parse_top_level,
     shadows_dotfile_field, unknown_key,
 };
 
@@ -286,7 +286,7 @@ impl Package {
     ///
     /// Reporting it here is only half the fix. Apply does not run validation, so
     /// the refusal that matters is `handle_apply`'s, which reads
-    /// `Package::shadowing_top_level_keys`. This is what `selfie spec validate`
+    /// `Package::top_level_keys`. This is what `selfie spec validate`
     /// says about the same file, worded identically through
     /// [`describe_unknown_key_in`](super::describe_unknown_key_in).
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
@@ -297,11 +297,9 @@ impl Package {
             return vec![];
         };
 
-        // Uses serde_json::Value as the "any value" container because serde-saphyr
-        // has no Value type. This works because we only inspect keys, not values.
-        let raw = match serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
-            raw_yaml,
-        ) {
+        // The same parse apply's check is derived from, so the two cannot
+        // disagree about whether this file could be read back.
+        let raw = match parse_top_level(raw_yaml) {
             Ok(raw) => raw,
             // The package parsed once already, so this re-parse failing means the
             // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
@@ -347,9 +345,7 @@ impl Package {
         let Some(raw_yaml) = self.raw_yaml() else {
             return vec![];
         };
-        let Ok(raw) = serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
-            raw_yaml,
-        ) else {
+        let Ok(raw) = parse_top_level(raw_yaml) else {
             return vec![];
         };
 

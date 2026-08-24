@@ -29,7 +29,7 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, EnvironmentField, Package, PackageField,
+        ContentSource, DotfileEntry, EnvironmentField, Package, TopLevelKeys,
         describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
@@ -1270,14 +1270,14 @@ where
         // mirrors: the ambiguity is in the file's top level, so there is no entry
         // to attach it to.
         //
-        // Empty for a programmatically built package, so nothing fires for a
-        // caller that never had raw YAML.
-        let shadowing = package.shadowing_top_level_keys();
-        if !shadowing.is_empty() {
-            let described: Vec<String> = shadowing
-                .iter()
-                .map(|key| describe_unknown_key_in::<PackageField>(key))
-                .collect();
+        // Nothing fires for a package built in memory, which never had raw YAML.
+        //
+        // The keys arrive already worded for the level they were found at, so
+        // this cannot explain them against a different one.
+        if let TopLevelKeys::Checked(keys) = package.top_level_keys()
+            && !keys.is_empty()
+        {
+            let described: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
             sender
                 .send_warning(format!(
                     "Skipping package '{}': {}",
