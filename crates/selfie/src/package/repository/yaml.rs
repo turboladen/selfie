@@ -413,31 +413,6 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                 _ => PackageRepoError::FileSystemError(e),
             })?;
 
-        // Best-effort: run dprint fmt on the saved file to normalize formatting.
-        // Silently ignored if dprint is not installed, fails, or times out (5s).
-        if let Ok(canonical) = std::fs::canonicalize(path)
-            && let Ok(mut child) = std::process::Command::new("dprint")
-                .args(["fmt", &canonical.to_string_lossy()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-        {
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break, // Process finished
-                    Ok(None) if start.elapsed() < timeout => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    _ => {
-                        let _ = child.kill(); // Timed out or error — kill it
-                        break;
-                    }
-                }
-            }
-        }
-
         Ok(())
     }
 
