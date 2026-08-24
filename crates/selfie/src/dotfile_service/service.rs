@@ -1268,12 +1268,10 @@ where
         //
         // Whole-package rather than per-entry, unlike the entry-level rule this
         // mirrors: the ambiguity is in the file's top level, so there is no entry
-        // to attach it to.
-        //
-        // Nothing fires for a package built in memory, which never had raw YAML.
-        //
-        // The keys arrive already worded for the level they were found at, so
-        // this cannot explain them against a different one.
+        // to attach it to. The keys arrive already worded for the level they were
+        // found at, so this cannot explain them against a different one. A file
+        // that could not be read back at all is decided below, once what it would
+        // deploy is known.
         if let TopLevelKeys::Checked(keys) = package.top_level_keys()
             && !keys.is_empty()
         {
@@ -1317,6 +1315,43 @@ where
         }
 
         let dotfiles = package.dotfiles_for_environment(config.environment());
+
+        // Waits for `dotfiles` because what an unread top level costs depends on
+        // what is left to deploy.
+        //
+        // With nothing to deploy, a package that has none by design and one whose
+        // entries are hidden behind an unchecked key are indistinguishable, and
+        // the `continue` below reports both as nothing to do (selfie-c28).
+        //
+        // With entries, what deploys is what selfie's own parse produced -- not
+        // necessarily the right content: a hidden `environments:` key costs the
+        // mapping, so a shared entry can land on its override's target (selfie-flsi).
+        if let TopLevelKeys::Unchecked(error) = package.top_level_keys() {
+            if dotfiles.is_empty() {
+                sender
+                    .send_warning(format!(
+                        "Skipping package '{}': it has no dotfiles to deploy, and its top-level \
+                         keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled \
+                         out. The re-read failed with: {error}",
+                        package.name()
+                    ))
+                    .await;
+                refused_count += 1;
+                continue;
+            }
+
+            // The parse failure ends both messages because it is several lines of
+            // source snippet, and anything after it reads as part of it.
+            sender
+                .send_warning(format!(
+                    "Package '{}': could not re-read the package file to check its top-level \
+                     keys, so a key that shadows a real field would not have been caught. \
+                     Applying it anyway. The re-read failed with: {error}",
+                    package.name()
+                ))
+                .await;
+        }
+
         if dotfiles.is_empty() {
             continue;
         }

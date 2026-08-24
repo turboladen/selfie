@@ -1184,6 +1184,31 @@ you wrote. It counts as a refusal, so
 [the run exits non-zero](../README.md#a-refusal-is-not-a-success). `selfie spec validate` reports
 the same key in the same words.
 
+Checking those keys means reading the file a second time, and a file selfie can load as a package
+can still fail that second read — a mapping used as a key is one way. `selfie apply` always says so,
+and what it does next depends on what the package still has to deploy.
+
+If it has dotfiles for this environment, they are deployed and nothing here makes the run fail.
+Nothing is known to be wrong with the file, only unchecked, and what deploys is what selfie read
+from the file either way:
+
+```
+⚠ Package 'myapp': could not re-read the package file to check its top-level keys, so a key that shadows a real field would not have been caught. Applying it anyway. The re-read failed with: …
+```
+
+If it has nothing to deploy, the package is **refused** and
+[the run exits non-zero](../README.md#a-refusal-is-not-a-success):
+
+```
+⚠ Skipping package 'myapp': it has no dotfiles to deploy, and its top-level keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled out. The re-read failed with: …
+```
+
+Deploying nothing is exactly what `_dotfiles:` looks like from the outside, and this is the one file
+selfie cannot check for it — so the two cannot be told apart, and reporting the run as a quiet
+success would hide the case this whole section is about. A package that genuinely has no dotfiles is
+unaffected, because its keys were read and found clean. `selfie spec validate` reports the failed
+read either way, as an advisory notice.
+
 The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
 and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the
 example above depends on it — while `_target:` inside an entry is refused.

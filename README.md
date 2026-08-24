@@ -216,6 +216,11 @@ named in the output, and the summary line counts them:
 Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)
 ```
 
+Whole packages are refused too, when the ambiguity is in the file rather than in one entry: a
+top-level or per-environment key whose `_` prefix hides a real field name, or a package file selfie
+could not re-read to check for one that has nothing to deploy anyway. See
+[Package Files](docs/package-files.md#the-same-rule-applies-to-a-packages-top-level-keys).
+
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 
 - **A skip.** The entry was already in sync, so there was nothing to do.

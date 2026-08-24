@@ -293,6 +293,9 @@ pub(crate) fn describe_unknown_key(key: &str) -> String {
 pub(crate) fn parse_top_level(
     raw_yaml: &str,
 ) -> Result<HashMap<String, serde_json::Value>, String> {
+    // Not a workaround: serde-saphyr answers an empty map for empty input today.
+    // It does not document that, and the answer decides whether apply warns about
+    // an empty file, so it is pinned here rather than inherited.
     if raw_yaml.is_empty() {
         return Ok(HashMap::new());
     }
@@ -317,6 +320,9 @@ pub(crate) enum TopLevelKeys {
     /// package field, already worded for that level, sorted, and empty when
     /// there is none.
     Checked(Vec<UnknownKey>),
+    /// The file could not be read back, so its top-level keys were never
+    /// examined. Carries the parse failure for a caller to report.
+    Unchecked(String),
 }
 
 /// What `raw_yaml`'s top level says about keys that shadow a package field.
@@ -324,17 +330,16 @@ pub(crate) enum TopLevelKeys {
 /// `_dotfiles:` is the case that matters: read as an anchor, the package has no
 /// dotfiles at all, so apply has nothing to deploy and nothing to report.
 ///
-/// Reports no keys for YAML that does not parse, matching
-/// `validate_unknown_fields`: a file that cannot be parsed is reported as a
-/// parse error by the loader, and guessing at its keys here would report the
-/// same problem twice in different words.
+/// YAML that cannot be read back is [`Unchecked`](TopLevelKeys::Unchecked)
+/// rather than clean, because no key of it was ever looked at.
 ///
 /// Sorted, because `serde_saphyr` hands back a `HashMap` and two runs over the
 /// same file must name the keys in the same order — otherwise the warning text
 /// varies between runs on Linux, where hash order is not insertion order.
 fn top_level_keys(raw_yaml: &str) -> TopLevelKeys {
-    let Ok(raw) = parse_top_level(raw_yaml) else {
-        return TopLevelKeys::Checked(Vec::new());
+    let raw = match parse_top_level(raw_yaml) {
+        Ok(raw) => raw,
+        Err(error) => return TopLevelKeys::Unchecked(error),
     };
 
     let mut keys: Vec<String> = raw.into_keys().collect();
@@ -1106,7 +1111,9 @@ impl Package {
     /// A non-empty [`Checked`](TopLevelKeys::Checked) means `selfie apply`
     /// refuses the whole package: the file cannot be read unambiguously, and the
     /// keys it does carry may not be the ones its author meant.
-    /// [`Unchecked`](TopLevelKeys::Unchecked) means nothing is known either way.
+    /// [`Unchecked`](TopLevelKeys::Unchecked) means nothing is known either way;
+    /// apply reports it, and refuses the package when it has nothing left to
+    /// deploy.
     #[must_use]
     pub(crate) fn top_level_keys(&self) -> &TopLevelKeys {
         &self.top_level_keys
@@ -1784,6 +1791,17 @@ vars: {}
         );
     }
 
+    // A package file whose top level parses as a package but not into
+    // `serde_json::Value`, which has no key for a mapping keyed by a sequence.
+    const YAML_THAT_CANNOT_BE_RE_READ: &str = r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+environments:
+  test:
+    install: "echo hi"
+"#;
+
     fn checked_keys(raw_yaml: &str) -> Vec<UnknownKey> {
         match top_level_keys(raw_yaml) {
             TopLevelKeys::Checked(keys) => keys,
@@ -1823,10 +1841,29 @@ environments:
         );
 
         assert!(checked_keys("").is_empty(), "an empty file has no keys");
+    }
+
+    // A file the check could not read back is not a clean file. Reporting no keys
+    // here is what let apply deploy a package nothing had looked at (selfie-5j5j).
+    #[test]
+    fn a_file_that_cannot_be_re_read_is_unchecked_rather_than_clean() {
         assert!(
-            checked_keys("name: [unclosed").is_empty(),
-            "unparsable YAML is the loader's error to report, not this one's"
+            serde_saphyr::from_str::<Package>(YAML_THAT_CANNOT_BE_RE_READ).is_ok(),
+            "the fixture must parse as a package, or the two views never disagreed"
         );
+
+        match top_level_keys(YAML_THAT_CANNOT_BE_RE_READ) {
+            TopLevelKeys::Unchecked(error) => assert!(
+                !error.is_empty(),
+                "the failure must be carried, for a caller to report"
+            ),
+            other => panic!("expected Unchecked, got {other:?}"),
+        }
+
+        assert!(matches!(
+            top_level_keys("name: [unclosed"),
+            TopLevelKeys::Unchecked(_)
+        ));
     }
 
     // `set_source` keeps the derived keys in step with the YAML they came from.
@@ -1854,6 +1891,22 @@ environments:
             keys[0].message
         );
         assert_eq!(package.path(), std::path::Path::new("/packages/myapp.yml"));
+    }
+
+    // The load-time derivation carries the unchecked state too, so apply learns
+    // about it without re-parsing the file inside its loop.
+    #[test]
+    fn set_source_carries_a_file_it_could_not_re_read() {
+        let mut package = Package::new_template("myapp");
+        package.set_source(
+            PathBuf::from("/packages/myapp.yml"),
+            YAML_THAT_CANNOT_BE_RE_READ.to_string(),
+        );
+
+        assert!(matches!(
+            package.top_level_keys(),
+            TopLevelKeys::Unchecked(_)
+        ));
     }
 
     // Keeps `DotfileField` in sync with what `DotfileEntry` serializes.
