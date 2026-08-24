@@ -800,11 +800,22 @@ impl Package {
         let mut issues = Vec::new();
         let target = dotfile.target();
 
+        // Each diagnostic points at the field it is about, so a package with
+        // several entries does not make the reader count list items. `target` is
+        // the fallback: it is the one field every entry has.
+        let target_loc = location_string(dotfile.target_location());
+        let source_loc = dotfile.source_location().and_then(location_string);
+        let command_loc = dotfile.command_location().and_then(location_string);
+        let entry_loc = source_loc
+            .clone()
+            .or_else(|| command_loc.clone())
+            .or_else(|| target_loc.clone());
+
         // Content-source shape. All of these checks are offline: validation must
         // work without network access and must never trigger an authentication
         // prompt, so no binding is ever executed here.
         match (dotfile.source(), dotfile.command()) {
-            (Some(_), Some(_)) => issues.push(ValidationIssue::error(
+            (Some(_), Some(_)) => issues.push(ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 field,
                 "Dotfile sets both 'source' and 'command'; exactly one is required",
@@ -812,8 +823,9 @@ impl Package {
                     "Use 'source' for a file in the repository, or 'command' for content produced \
                      by a command.",
                 ),
+                command_loc.clone(),
             )),
-            (None, None) => issues.push(ValidationIssue::error(
+            (None, None) => issues.push(ValidationIssue::error_at(
                 ValidationErrorCategory::RequiredField,
                 field,
                 "Dotfile sets neither 'source' nor 'command'; exactly one is required",
@@ -821,16 +833,20 @@ impl Package {
                     "Use 'source' for a file in the repository, or 'command' for content produced \
                      by a command.",
                 ),
+                entry_loc.clone(),
             )),
-            (None, Some(_)) if !dotfile.vars().is_empty() => issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{field}.vars"),
-                "Dotfile sets both 'command' and 'vars', but there is no template to render",
-                Some(
-                    "Drop 'vars', or replace 'command' with a 'source' template that references \
-                     them.",
-                ),
-            )),
+            (None, Some(_)) if !dotfile.vars().is_empty() => {
+                issues.push(ValidationIssue::error_at(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.vars"),
+                    "Dotfile sets both 'command' and 'vars', but there is no template to render",
+                    Some(
+                        "Drop 'vars', or replace 'command' with a 'source' template that \
+                         references them.",
+                    ),
+                    command_loc.clone(),
+                ));
+            }
             _ => {}
         }
 
@@ -841,11 +857,15 @@ impl Package {
         // holds them together.
         for name in dotfile.vars().keys() {
             if !crate::dotfile_service::template::is_valid_name(name) {
-                issues.push(ValidationIssue::error(
+                issues.push(ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     &format!("{field}.vars"),
                     &format!("Dotfile var name '{name}' is not valid"),
                     Some("Names must match [A-Za-z_][A-Za-z0-9_]*."),
+                    // `entry_loc`, not `command_loc`: a `vars` block belongs to a
+                    // template, which has a `source` and no `command`, so the
+                    // command location is `None` for every entry this fires on.
+                    entry_loc.clone(),
                 ));
             }
         }
@@ -854,11 +874,12 @@ impl Package {
         // entry's content comes from a command, so there is no path to check.
         if let Some(source) = dotfile.source() {
             if source.is_empty() {
-                issues.push(ValidationIssue::error(
+                issues.push(ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     &format!("{field}.source"),
                     "Dotfile source path cannot be empty",
                     Some("Provide a relative path to the dotfile within the repository."),
+                    source_loc.clone(),
                 ));
             }
 
@@ -866,20 +887,22 @@ impl Package {
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
             {
-                issues.push(ValidationIssue::error(
+                issues.push(ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     &format!("{field}.source"),
                     "Dotfile source path must not contain '..' (path traversal)",
                     Some("Use a relative path without parent directory references."),
+                    source_loc.clone(),
                 ));
             }
 
             if source.starts_with('/') || source.starts_with('~') {
-                issues.push(ValidationIssue::error(
+                issues.push(ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     &format!("{field}.source"),
                     "Dotfile source path must be relative",
                     Some("Use a path relative to the dotfiles directory, e.g., 'pkg/config.toml'."),
+                    source_loc.clone(),
                 ));
             }
         }
@@ -894,11 +917,12 @@ impl Package {
         // machine with no determinable home directory.
         // `the_validator_matches_the_textual_rule` holds the two in step.
         if let Some(rejection) = crate::fs::TargetRejection::of(target) {
-            issues.push(ValidationIssue::error(
+            issues.push(ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{field}.target"),
                 &format!("Dotfile {}", rejection.message()),
                 Some(rejection.suggestion()),
+                target_loc.clone(),
             ));
         }
 
@@ -1883,6 +1907,92 @@ dotfiles:
             yaml.to_string(),
         );
         package
+    }
+
+    // A dotfile diagnostic points at the line the field was written on. Before
+    // this, every one of them rendered `-` in the Location column, so a package
+    // with several entries left the reader counting list items.
+    #[test]
+    fn a_dotfile_diagnostic_carries_the_line_of_the_field_it_is_about() {
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+environments:
+  test:
+    install: "true"
+dotfiles:
+  - source: "../escape.conf"
+    target: "~/.a"
+"#,
+        );
+
+        let result = package.validate("test");
+        let errors = result.issues().errors();
+        let traversal = errors
+            .iter()
+            .find(|i| i.field() == "dotfiles[0].source")
+            .expect("the traversal error must be reported");
+
+        // The exact line, not merely "some location": an off-by-one here sends
+        // the reader to the wrong entry, which is worse than no location.
+        assert_eq!(
+            traversal.location(),
+            Some("line 6, column 13"),
+            "got: {:?}",
+            traversal.location()
+        );
+    }
+
+    // A `vars` block belongs to a template, which has a `source` and no
+    // `command`, so keying this rule off the command location rendered `-` for
+    // every entry it can actually fire on.
+    #[test]
+    fn a_var_name_error_points_at_the_entry_not_a_command_it_does_not_have() {
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+environments:
+  test:
+    install: "true"
+dotfiles:
+  - source: creds.tpl
+    vars:
+      not-a-name: "true"
+    target: "~/.creds"
+"#,
+        );
+
+        let result = package.validate("test");
+        let errors = result.issues().errors();
+        let var_error = errors
+            .iter()
+            .find(|i| i.field() == "dotfiles[0].vars")
+            .expect("the var-name error must be reported");
+
+        assert_eq!(
+            var_error.location(),
+            Some("line 6, column 13"),
+            "got: {:?}",
+            var_error.location()
+        );
+    }
+
+    // An entry built in memory has no file position, and must render as unknown
+    // rather than claiming line 0.
+    #[test]
+    fn a_built_dotfile_entry_reports_no_location() {
+        let package = PackageBuilder::default()
+            .name("built")
+            .environment("test", |b| b.install("true"))
+            .dotfiles(vec![DotfileEntry::new("../escape.conf", "~/.a")])
+            .build();
+
+        let result = package.validate("test");
+        let errors = result.issues().errors();
+        let traversal = errors
+            .iter()
+            .find(|i| i.field() == "dotfiles[0].source")
+            .expect("the traversal error must be reported");
+
+        assert_eq!(traversal.location(), None);
     }
 
     // A misspelled *optional* key is the silent case. Misspelling `install`
