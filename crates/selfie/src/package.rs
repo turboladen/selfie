@@ -1220,6 +1220,32 @@ mod package_tests {
         assert_eq!(entry.target_location().line(), 3);
     }
 
+    // `Spanned` must serialize as the bare value. If it ever emitted its struct
+    // shape instead, every `save_package` would write `source: {value: …,
+    // defined: …}` into the user's file -- silent corruption that no span test
+    // would notice. serde-saphyr moved 0.0.29 -> 1.1.0 during this work, so this
+    // is a live dependency contract, not a hypothetical.
+    #[test]
+    fn spanned_fields_serialize_as_bare_scalars() {
+        let entry: DotfileEntry =
+            serde_saphyr::from_str("source: creds.tpl\ntarget: ~/.creds\n").unwrap();
+
+        let yaml = serde_saphyr::to_string(&entry).unwrap();
+
+        assert!(yaml.contains("source: creds.tpl"), "got: {yaml}");
+        assert!(yaml.contains("target: ~/.creds"), "got: {yaml}");
+        for leaked in ["value:", "defined:", "referenced:", "span:", "source_id:"] {
+            assert!(
+                !yaml.contains(leaked),
+                "`Spanned`'s internals reached the file: {leaked} in {yaml}"
+            );
+        }
+
+        // And it parses back to the same entry, which is what a rewrite depends on.
+        let round_tripped: DotfileEntry = serde_saphyr::from_str(&yaml).unwrap();
+        assert_eq!(round_tripped, entry);
+    }
+
     // An entry built in memory has no file to point at, and must say so rather
     // than claiming line 0 is a real position.
     #[test]
