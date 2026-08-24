@@ -1208,9 +1208,10 @@ Read as an anchor, that environment has **no dotfiles of its own**, so the share
 the work machine instead of the one written for it — the same silence as the top-level case, with
 the wrong file in place rather than no file.
 
-`selfie spec validate` reports it as `environments.work._dotfiles`. Unlike the top-level key, this
-one does not stop `selfie apply`, which reads only the file's top level before deploying — so run
-`selfie spec validate` after editing an environment.
+`selfie spec validate` reports it as `environments.work._dotfiles`. `selfie apply` refuses the
+package too, but only when the environment carrying the key is the one being applied — a key in an
+environment this machine does not use cannot affect what it deploys. Run `selfie spec validate`
+after editing an environment to catch the ones apply leaves alone.
 
 `_target: &target …` inside an environment is an ordinary anchor, as at the top level: `target` is
 not a field of an environment either.

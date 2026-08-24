@@ -329,13 +329,15 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // or a plain `configs:`, is not modeled either, so rewriting drops it --
         // taking every entry under it with no diagnostic.
         //
-        // Errors only: this check also reports an advisory when it could not read
-        // the file back, and refusing a write over a check that did not run would
-        // block the writer for a file with nothing known to be wrong with it.
-        // The top-level check only. `validate_unknown_fields` also walks each
-        // environment, and handing both to this guard reported an environment's
-        // key as a top-level one -- the wrong variant, the wrong remedy, and it
-        // preempted the environment guard below entirely.
+        // Errors only, so a future advisory here cannot start refusing writes: a
+        // write must be refused for a key known to be there, not for one nothing
+        // could rule out. A file that could not be read back reports no issues at
+        // all -- `unknown_top_level_field_issues` says why.
+        //
+        // The top-level check only. Handing this guard `validate_unknown_fields`,
+        // which also walks each environment, reported an environment's key as a
+        // top-level one -- wrong variant, wrong remedy, and it preempted the
+        // environment guard below.
         let unknown: Vec<ValidationIssue> = package
             .unknown_top_level_field_issues()
             .into_iter()

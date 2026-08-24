@@ -345,6 +345,10 @@ impl Package {
         let Some(raw_yaml) = self.raw_yaml() else {
             return vec![];
         };
+        // A file that cannot be read back has no keys to report, and the writer
+        // reading this must not refuse a save over a check that did not run --
+        // the file it would decline to rewrite may be perfectly good.
+        // `validate_unknown_fields` is where that state is reported (selfie-ebvx).
         let Ok(raw) = parse_top_level(raw_yaml) else {
             return vec![];
         };

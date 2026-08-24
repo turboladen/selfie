@@ -454,8 +454,8 @@ pub(crate) enum PackageField {
 /// `_dotfiles:` here costs that environment its overrides — the list reads as
 /// empty, so the shared entry deploys instead of the one written for this
 /// machine.
-// `selfie spec validate` reports that `_dotfiles:`; apply does not yet refuse it
-// (selfie-ty9n).
+// `selfie spec validate` reports that `_dotfiles:`, and apply refuses the
+// package when the environment carrying it is the one being applied.
 //
 // Parallel to `EnvironmentConfig`'s serde field names, for the reason given on
 // `DotfileField`; `known_environment_fields_matches_the_struct` checks both
