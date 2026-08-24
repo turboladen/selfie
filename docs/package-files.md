@@ -204,11 +204,19 @@ misspelled optional key such as `audt:` is caught rather than ignored.
 `selfie apply` refuses a package whose _applied_ environment carries such a key, rather than
 deploying from it. An `_dotfiles:` there would otherwise leave that environment's list empty, so the
 shared entry would deploy over the file the environment meant to override. A key in an environment
-the run does not apply is left alone. The commands that rewrite a package file — `selfie spec edit`,
+the run does not apply is left alone. The commands that rewrite a package file —
 `selfie package track-dotfile` and the MCP `spec_update` tool — refuse for the same reason: the key
-is not modeled, so rewriting from the struct would delete it silently. Keys beginning with `_` are
-treated as YAML anchor definitions and allowed, unless the rest of the name matches a real field —
-`_check:` cannot be told apart from a misspelling of `check:` and is refused.
+is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
+at the file's top level, where a rewrite would take every entry under it.
+
+`selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
+as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
+would refuse to write can still be opened to fix it. Only a package that does not exist yet is
+written before the editor opens.
+
+Keys beginning with `_` are treated as YAML anchor definitions and allowed, unless the rest of the
+name matches a real field — `_check:` cannot be told apart from a misspelling of `check:` and is
+refused.
 
 ### `install`
 

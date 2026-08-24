@@ -1804,6 +1804,7 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             // what would reintroduce the target-facing phrasing it exists to
             // avoid. Each message is worth stating in exactly one place.
             err @ (crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
+            | crate::package::port::PackageRepoError::UnknownTopLevelFields { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
             | crate::package::port::PackageRepoError::UnwritablePath { .. }) => {
                 OperationFailure::Generic(err.to_string())

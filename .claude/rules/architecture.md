@@ -32,12 +32,14 @@ decide how to display information about that event to the user in the current UI
 - **Progress:** `ProgressTracker` provides step-based progress (e.g., "Installing package (2/5)").
 - **Service orchestration:** `PackageServiceImpl::execute_operation_with_deps()` is the standard
   pattern — creates channel, spawns async task, returns stream.
-- **Post-save formatting:** `YamlPackageRepository::save_package()` runs `dprint fmt` on the saved
-  file as a best-effort post-processing step. Silently skipped if `dprint` is not installed.
 
 ## Boundary rules
 
 - The `selfie` library must never write to stdout/stderr — all output goes through `PackageEvent`.
+- The library must not shell out to a tool it does not declare. `save_package` ran `dprint fmt` on
+  the file it had just written, which made formatting depend on the caller's `PATH` and mutated the
+  file outside the `FileSystem` port it had just used — after `canonicalize` had resolved the very
+  symlinks `write_file_no_follow` refused to follow.
 - **Config is split by concern:** `SelfieConfig` (library) holds operational settings
   (`environment`, `package_directory`, `command_timeout`, `stop_on_error`, `max_concurrency`).
   `CliConfig` (CLI crate) wraps `SelfieConfig` and adds presentation settings (`verbose`,
