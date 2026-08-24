@@ -79,6 +79,32 @@ pub fn unreadable_template_issue(
     )
 }
 
+/// Flag unrecognized keys at the top level of the parsed mapping.
+fn unknown_top_level_keys(
+    raw: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<ValidationIssue> {
+    raw.keys()
+        .filter_map(|k| {
+            let unknown = unknown_key::<PackageField>(k)?;
+
+            // A collision needs different advice from a plain misspelling,
+            // for the reason `unknown_dotfile_keys` gives: the key may have
+            // been named deliberately, and which remedy applies depends on
+            // which reading was meant.
+            Some(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
+                k,
+                &unknown.message,
+                unknown.shadows.then_some(
+                    "Anchors are legal here; only a name matching a top-level field is \
+                     refused, because it cannot be told apart from a misspelling of that \
+                     field.",
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// Flag unrecognized keys inside each `environments.<env>` mapping.
 ///
 /// Reads the already-parsed top-level map rather than parsing again, so a file
@@ -298,32 +324,36 @@ impl Package {
             }
         };
 
-        let mut issues: Vec<ValidationIssue> = raw
-            .keys()
-            .filter_map(|k| {
-                let unknown = unknown_key::<PackageField>(k)?;
-
-                // A collision needs different advice from a plain misspelling,
-                // for the reason `unknown_dotfile_keys` gives: the key may have
-                // been named deliberately, and which remedy applies depends on
-                // which reading was meant.
-                Some(ValidationIssue::error(
-                    ValidationErrorCategory::InvalidValue,
-                    k,
-                    &unknown.message,
-                    unknown.shadows.then_some(
-                        "Anchors are legal here; only a name matching a top-level field is \
-                         refused, because it cannot be told apart from a misspelling of that \
-                         field.",
-                    ),
-                ))
-            })
-            .collect();
-
+        let mut issues = unknown_top_level_keys(&raw);
         issues.extend(unknown_environment_keys(&raw));
 
         // `raw` is a `HashMap`, so the iteration order is not the file's. Sort by
         // the field name to keep the report stable between runs.
+        issues.sort_by(|a, b| a.field().cmp(b.field()));
+        issues
+    }
+
+    /// The unrecognized keys at the file's **top level only**.
+    ///
+    /// Separate from [`validate_unknown_fields`](Self::validate_unknown_fields),
+    /// which also walks each environment. A caller that acts on the level -- the
+    /// writer picks a different refusal per level -- must not be handed both, or
+    /// an environment's key is reported as a top-level one.
+    ///
+    /// Empty for a package with no source, and for one whose YAML cannot be read
+    /// back: that is reported by `validate_unknown_fields`, and a writer must not
+    /// refuse over a check that did not run.
+    pub(crate) fn unknown_top_level_field_issues(&self) -> Vec<ValidationIssue> {
+        let Some(raw_yaml) = self.raw_yaml() else {
+            return vec![];
+        };
+        let Ok(raw) = serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(
+            raw_yaml,
+        ) else {
+            return vec![];
+        };
+
+        let mut issues = unknown_top_level_keys(&raw);
         issues.sort_by(|a, b| a.field().cmp(b.field()));
         issues
     }

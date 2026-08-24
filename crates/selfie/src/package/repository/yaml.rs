@@ -13,7 +13,7 @@ use crate::{
             PackageRepoError, PackageRepository,
         },
     },
-    validation::ValidationIssue,
+    validation::{ValidationIssue, ValidationLevel},
 };
 
 #[derive(Debug, Clone)]
@@ -320,6 +320,30 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         if !unknown.is_empty() {
             let fields: Vec<&str> = unknown.iter().map(ValidationIssue::field).collect();
             return Err(PackageRepoError::UnknownDotfileFields {
+                path: path.to_path_buf(),
+                fields: fields.join(", "),
+            });
+        }
+
+        // The same refusal at the file's top level. `_dotfiles:` read as an anchor,
+        // or a plain `configs:`, is not modeled either, so rewriting drops it --
+        // taking every entry under it with no diagnostic.
+        //
+        // Errors only: this check also reports an advisory when it could not read
+        // the file back, and refusing a write over a check that did not run would
+        // block the writer for a file with nothing known to be wrong with it.
+        // The top-level check only. `validate_unknown_fields` also walks each
+        // environment, and handing both to this guard reported an environment's
+        // key as a top-level one -- the wrong variant, the wrong remedy, and it
+        // preempted the environment guard below entirely.
+        let unknown: Vec<ValidationIssue> = package
+            .unknown_top_level_field_issues()
+            .into_iter()
+            .filter(|i| i.level() == ValidationLevel::Error)
+            .collect();
+        if !unknown.is_empty() {
+            let fields: Vec<&str> = unknown.iter().map(ValidationIssue::field).collect();
+            return Err(PackageRepoError::UnknownTopLevelFields {
                 path: path.to_path_buf(),
                 fields: fields.join(", "),
             });
@@ -1542,12 +1566,51 @@ environments:
     //
     // `times(0)` is again the assertion that matters: refusing after the write
     // would already have destroyed the text.
+    // The positive half of the same boundary: a top-level key still gets the
+    // top-level variant. Narrowing the guard to fix the environment case could
+    // otherwise have disabled it outright, and every other test here would pass.
+    #[test]
+    fn save_package_refuses_a_top_level_key_carrying_an_anchor_name() {
+        let yaml = "name: creds\n_dotfiles:\n  - source: a\n    target: ~/.a\nenvironments:\n  work:\n    install: \"echo i\"\n";
+        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
+
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+
+        fs.expect_write_file_no_follow().times(0);
+
+        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let err = repo
+            .save_package(&package, &package_dir.join("creds.yml"))
+            .expect_err("a package with an unrecognized top-level key must not be rewritten");
+
+        assert!(
+            matches!(err, PackageRepoError::UnknownTopLevelFields { .. }),
+            "got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("_dotfiles"),
+            "the refusal must name the key, got: {err}"
+        );
+    }
+
+    // The fixture must carry its raw YAML, as a loaded package does. Without
+    // `set_source` the top-level check has nothing to read and goes quiet, which
+    // hid the guard ordering below entirely.
     #[test]
     fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
         let package: Package = serde_saphyr::from_str(
             "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
         )
         .expect("fixture must parse -- the typo is a validation error, not a parse error");
+
+        let mut package = package;
+        package.set_source(
+            PathBuf::from("/test/packages/creds.yml"),
+            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n"
+                .to_string(),
+        );
 
         let mut fs = MockFileSystem::default();
         let package_dir = PathBuf::from("/test/packages");

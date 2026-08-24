@@ -158,6 +158,24 @@ pub enum PackageRepoError {
         fields: String,
     },
 
+    /// Refused to rewrite a package file because its top level carries a key the
+    /// struct does not model.
+    ///
+    /// `_dotfiles:` read as an anchor, or a plain misspelling like `configs:`,
+    /// is dropped by a rewrite -- taking every entry under it, which is the
+    /// largest thing any of these refusals protects.
+    #[error(
+        "refusing to rewrite {path}: unrecognized {fields}. \
+         Saving would delete the key and everything under it. \
+         Edit {path} directly to correct or remove the key."
+    )]
+    UnknownTopLevelFields {
+        /// The file that would have been rewritten.
+        path: PathBuf,
+        /// The offending field paths, e.g. `_dotfiles`.
+        fields: String,
+    },
+
     /// Refused to rewrite a package file because an environment carries a key
     /// the struct does not model.
     ///
