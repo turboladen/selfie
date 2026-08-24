@@ -107,24 +107,20 @@ fn unknown_top_level_keys(
 
 /// Flag unrecognized keys inside each `environments.<env>` mapping.
 ///
-/// Reads the already-parsed top-level map rather than parsing again, so a file
-/// this could not re-read is reported once by the caller instead of twice.
-///
-/// An environment whose value is not a mapping is left alone: deserializing the
-/// package would have failed first, so reaching here means it is one.
-fn unknown_environment_keys(
-    raw: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<ValidationIssue> {
-    let Some(serde_json::Value::Object(envs)) = raw.get("environments") else {
-        return vec![];
-    };
-
+/// Reads the keys off the parsed environments, which needs no second read of the
+/// file — the same place `selfie apply` and the writer guard read them.
+fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
+    // Reading the raw file for these instead made this the one check a file
+    // selfie could not read back silently dropped, so `selfie spec validate`
+    // passed a package `selfie apply` then refused (selfie-5j5j). Keep the source
+    // here the same as apply's, or the two can disagree again.
     let mut issues = Vec::new();
 
-    for (env_name, env) in envs {
-        let Some(env) = env.as_object() else { continue };
-
-        for key in env.keys() {
+    for (env_name, env) in package.environments_sorted() {
+        for key in env.unknown_keys() {
+            // `EnvironmentConfig`'s deserializer records only what
+            // `unknown_key::<EnvironmentField>` rejects, so this `else` cannot
+            // fire. The call stays because it is what words the key.
             let Some(unknown) = unknown_key::<EnvironmentField>(key) else {
                 continue;
             };
@@ -297,10 +293,17 @@ impl Package {
             return vec![];
         };
 
+        // Environment keys come off the parsed environments, so they are reported
+        // whether or not the re-read below succeeds. Only the top level needs the
+        // raw file, and returning early on a failed re-read used to take the
+        // environment check down with it -- validate passed a package apply then
+        // refused.
+        let mut issues = unknown_environment_keys(self);
+
         // The same parse apply's check is derived from, so the two cannot
         // disagree about whether this file could be read back.
-        let raw = match parse_top_level(raw_yaml) {
-            Ok(raw) => raw,
+        match parse_top_level(raw_yaml) {
+            Ok(raw) => issues.extend(unknown_top_level_keys(&raw)),
             // The package parsed once already, so this re-parse failing means the
             // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
             // for instance. Say the check did not run; staying quiet here reports
@@ -310,20 +313,14 @@ impl Package {
                 // file, only unchecked, and `sync push` refuses a package
                 // carrying any warning. Blocking a push over a check that did
                 // not run would be a worse outcome than the gap it reports.
-                return vec![ValidationIssue::info(
+                issues.push(ValidationIssue::info(
                     ValidationErrorCategory::Advisory,
                     "package",
-                    &format!("could not re-read the package file to check for unknown keys: {e}"),
-                    Some(
-                        "Neither the top-level keys nor the keys inside each environment were \
-                         checked for this package.",
-                    ),
-                )];
+                    &format!("could not re-read the package file to check its top-level keys: {e}"),
+                    Some("The top-level keys were not checked for this package."),
+                ));
             }
-        };
-
-        let mut issues = unknown_top_level_keys(&raw);
-        issues.extend(unknown_environment_keys(&raw));
+        }
 
         // `raw` is a `HashMap`, so the iteration order is not the file's. Sort by
         // the field name to keep the report stable between runs.
@@ -2025,6 +2022,52 @@ environments:
             issues[0].message,
             "unknown field 'audt'; expected one of: install, check, audit, dependencies, \
              recommends, dotfiles"
+        );
+    }
+
+    // The environment check survives a file whose top level cannot be re-read.
+    //
+    // `selfie apply` refuses this package -- it reads the key off the parsed
+    // environment, which needs no re-read -- so a validate that reported only the
+    // advisory passed a package apply then declined, and exited 0 doing it
+    // (selfie-5j5j).
+    #[test]
+    fn an_environment_key_is_still_reported_when_the_top_level_cannot_be_re_read() {
+        // A mapping keyed by a sequence: parses as a package, and not into the
+        // `serde_json::Value` map the top-level check reads.
+        let package = package_with_raw_yaml(
+            r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+environments:
+  work:
+    install: "echo i"
+    audt: "echo a"
+"#,
+        );
+
+        let issues = package.validate_unknown_fields();
+
+        assert!(
+            issues.iter().any(|i| i.field == "environments.work.audt"
+                && i.level == crate::validation::ValidationLevel::Error),
+            "the environment key must still be an error: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "package"
+                && i.message.contains("could not re-read")
+                && i.level == crate::validation::ValidationLevel::Info),
+            "the unread top level must still be reported: {issues:?}"
+        );
+        // The advisory says what was skipped, and the environment keys no longer
+        // are. Claiming otherwise reads as a second, invented gap.
+        assert!(
+            !issues.iter().any(|i| i
+                .suggestion
+                .as_deref()
+                .is_some_and(|s| s.contains("environment"))),
+            "the advisory must not claim the environment keys went unchecked: {issues:?}"
         );
     }
 
