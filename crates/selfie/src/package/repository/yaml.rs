@@ -325,19 +325,16 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             });
         }
 
-        // The same refusal at the file's top level. `_dotfiles:` read as an anchor,
-        // or a plain `configs:`, is not modeled either, so rewriting drops it --
-        // taking every entry under it with no diagnostic.
+        // The same refusal at the file's top level: `_dotfiles:` as an anchor, or
+        // a plain `configs:`, is not modeled either, so rewriting drops it and
+        // every entry under it with no diagnostic.
         //
-        // Errors only, so a future advisory here cannot start refusing writes: a
-        // write must be refused for a key known to be there, not for one nothing
-        // could rule out. A file that could not be read back reports no issues at
-        // all -- `unknown_top_level_field_issues` says why.
+        // Errors only, so a future advisory cannot start refusing writes: refuse
+        // for a key known to be there, not one nothing could rule out. An unread
+        // file reports nothing here -- see `unknown_top_level_field_issues`.
         //
-        // The top-level check only. Handing this guard `validate_unknown_fields`,
-        // which also walks each environment, reported an environment's key as a
-        // top-level one -- wrong variant, wrong remedy, and it preempted the
-        // environment guard below.
+        // Top-level only: handing this `validate_unknown_fields`, which also
+        // walks environments, reported an environment key as a top-level one.
         let unknown: Vec<ValidationIssue> = package
             .unknown_top_level_field_issues()
             .into_iter()

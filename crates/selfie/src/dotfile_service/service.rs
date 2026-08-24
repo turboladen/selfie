@@ -1262,16 +1262,16 @@ where
             continue;
         }
 
-        // Refuse the whole package before asking what dotfiles it has: `_dotfiles:`
-        // reads as a YAML anchor, so the list comes back empty and the `is_empty`
-        // check below would skip the package in silence (selfie-g199).
+        // Refuse the whole package before asking what dotfiles it has. A
+        // `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
+        // or short, so the `is_empty` check below would skip the package in
+        // silence (selfie-g199, selfie-jt6m). The set is the one `spec validate`
+        // errors on, so the two commands answer alike.
         //
-        // Whole-package rather than per-entry, unlike the entry-level rule this
-        // mirrors: the ambiguity is in the file's top level, so there is no entry
-        // to attach it to. The keys arrive already worded for the level they were
-        // found at, so this cannot explain them against a different one. A file
-        // that could not be read back at all is decided below, once what it would
-        // deploy is known.
+        // Whole-package rather than per-entry: the problem is in the file's top
+        // level, so there is no entry to attach it to. The keys arrive worded for
+        // that level, so this cannot explain them against another. A file that
+        // could not be read back is decided below instead.
         if let TopLevelKeys::Checked(keys) = package.top_level_keys()
             && !keys.is_empty()
         {
@@ -1345,8 +1345,9 @@ where
             sender
                 .send_warning(format!(
                     "Package '{}': could not re-read the package file to check its top-level \
-                     keys, so a key that shadows a real field would not have been caught. \
-                     Applying it anyway. The re-read failed with: {error}",
+                     keys, so an unrecognized one -- a misspelling, or an anchor named after a \
+                     real field -- would not have been caught. Applying it anyway. The re-read \
+                     failed with: {error}",
                     package.name()
                 ))
                 .await;

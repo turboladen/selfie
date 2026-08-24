@@ -310,25 +310,25 @@ pub(crate) fn parse_top_level(
     serde_saphyr::from_str(raw_yaml).map_err(|e| e.to_string())
 }
 
-/// What a package file's top level says about keys that shadow a real field.
+/// What a package file's top level holds that a package does not accept.
 #[derive(Debug, Clone, Default)]
 pub(crate) enum TopLevelKeys {
     /// No file behind this package, so there is nothing a user could misspell.
     #[default]
     NoSource,
-    /// The file was read back. Every top-level key whose `_` prefix hides a
-    /// package field, already worded for that level, sorted, and empty when
-    /// there is none.
+    /// The file was read back. Every top-level key a package does not accept,
+    /// already worded for that level, sorted, and empty when there is none.
     Checked(Vec<UnknownKey>),
     /// The file could not be read back, so its top-level keys were never
     /// examined. Carries the parse failure for a caller to report.
     Unchecked(String),
 }
 
-/// What `raw_yaml`'s top level says about keys that shadow a package field.
+/// The top-level keys of `raw_yaml` that a package file does not accept.
 ///
-/// `_dotfiles:` is the case that matters: read as an anchor, the package has no
-/// dotfiles at all, so apply has nothing to deploy and nothing to report.
+/// The same set `selfie spec validate` reports as errors: a misspelling such as
+/// `configs:`, and an anchor whose name hides a real field. A `_`-prefixed
+/// anchor that hides nothing is legal and absent from it.
 ///
 /// YAML that cannot be read back is [`Unchecked`](TopLevelKeys::Unchecked)
 /// rather than clean, because no key of it was ever looked at.
@@ -345,12 +345,15 @@ fn top_level_keys(raw_yaml: &str) -> TopLevelKeys {
     let mut keys: Vec<String> = raw.into_keys().collect();
     keys.sort();
 
-    // The level is named once, here, and what comes out is already worded for it.
-    // Handing a consumer bare keys had it name a level again a call frame away,
-    // where nothing tied the two choices together (selfie-vhw4).
+    // `unknown_key` decides membership and wording together, so the level is
+    // named once here and what comes out is already worded for it. Handing a
+    // consumer bare keys had it name a level again a call frame away, where
+    // nothing tied the two choices together (selfie-vhw4). Nothing is filtered
+    // out of what it returns, so no message is built and discarded -- do not add
+    // a pre-filter, which would name the level twice again.
     TopLevelKeys::Checked(
         keys.iter()
-            .filter_map(|key| unknown_key::<PackageField>(key).filter(|found| found.shadows))
+            .filter_map(|key| unknown_key::<PackageField>(key))
             .collect(),
     )
 }
@@ -808,7 +811,7 @@ pub struct Package {
     #[serde(skip)]
     raw_yaml: Option<String>,
 
-    /// What this file's top level says about keys that shadow a real field.
+    /// What this file's top level holds that a package does not accept.
     ///
     /// Derived from `raw_yaml` at load time rather than during deserialization,
     /// which would mean hand-writing `Deserialize` for this whole struct — its
@@ -1106,11 +1109,11 @@ impl Package {
         self.raw_yaml.as_deref()
     }
 
-    /// What this file's top level says about keys that shadow a real field.
+    /// What this file's top level holds that a package does not accept.
     ///
     /// A non-empty [`Checked`](TopLevelKeys::Checked) means `selfie apply`
-    /// refuses the whole package: the file cannot be read unambiguously, and the
-    /// keys it does carry may not be the ones its author meant.
+    /// refuses the whole package: the keys it does carry may not be the ones its
+    /// author meant, and the unrecognized ones are dropped rather than applied.
     /// [`Unchecked`](TopLevelKeys::Unchecked) means nothing is known either way;
     /// apply reports it, and refuses the package when it has nothing left to
     /// deploy.
@@ -1809,35 +1812,50 @@ environments:
         }
     }
 
-    // Derived from raw YAML, and already worded for the top level.
+    // Derived from raw YAML, sorted, and already worded for the top level.
+    //
+    // Three shapes in one fixture, because what separates them is the whole rule:
+    // a plain misspelling and an anchor hiding a field are both returned, and an
+    // anchor hiding nothing is not.
     #[test]
-    fn shadowing_keys_are_read_from_the_raw_yaml() {
+    fn unrecognized_top_level_keys_are_read_from_the_raw_yaml() {
         let yaml = r#"name: myapp
 _dotfiles:
   - source: "a"
     target: "~/a"
+configs:
+  - source: "b"
+    target: "~/b"
 _target: &t "~/b"
 environments:
   test:
     install: "echo hi"
 "#;
         let keys = checked_keys(yaml);
+        let messages: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
+
         assert_eq!(
-            keys.len(),
-            1,
-            "only the shadowing key, and the legal anchor left alone: {keys:?}"
+            messages.len(),
+            2,
+            "the legal `_target` anchor must be left alone: {messages:?}"
         );
+        // Sorted by key, so `_dotfiles` precedes `configs`.
         assert!(
-            keys[0]
-                .message
+            messages[0]
                 .contains("'_dotfiles' cannot be told apart from a misspelling of the 'dotfiles'"),
-            "got: {}",
-            keys[0].message
+            "got: {messages:?}"
         );
         assert!(
-            !keys[0].message.contains("source, command"),
-            "a top-level key must not be worded against the dotfile field list: {}",
-            keys[0].message
+            messages[1].contains("unknown field 'configs'"),
+            "got: {messages:?}"
+        );
+        assert!(
+            !messages[1].contains("cannot be told apart"),
+            "a key colliding with nothing must not be described as an anchor: {messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("source, command")),
+            "a top-level key must not be worded against the dotfile field list: {messages:?}"
         );
 
         assert!(checked_keys("").is_empty(), "an empty file has no keys");
