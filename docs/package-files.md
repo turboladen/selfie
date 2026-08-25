@@ -209,6 +209,11 @@ the run does not apply is left alone. The commands that rewrite a package file â
 is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
 at the file's top level, where a rewrite would take every entry under it.
 
+The same commands also refuse a file selfie could not read back, even though no key is known to be
+wrong with it. Apply is the other way round: it warns and deploys such a file rather than stop over
+a check that did not run, and skips it only when there is nothing left to deploy. A declined write
+costs a retry, while rewriting would delete whatever the file carries that selfie does not model.
+
 `selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
 would refuse to write can still be opened to fix it. Only a package that does not exist yet is

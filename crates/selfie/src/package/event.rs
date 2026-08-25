@@ -1798,13 +1798,15 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
                 OperationFailure::Generic(format!("File system error: {fs_err}"))
             }
             // All rendered by their own `Display`, and none wrapped in a prefix.
-            // The two unknown-key refusals already name the offending field
-            // paths; `UnwritablePath` is worded for the direction it refuses and
-            // must not pick up the "File system error: " frame above, which is
+            // The unknown-key refusals already name the offending field paths,
+            // and `UncheckedTopLevel` carries the parse failure that stands in
+            // for them; `UnwritablePath` is worded for the direction it refuses
+            // and must not pick up the "File system error: " frame above, which is
             // what would reintroduce the target-facing phrasing it exists to
             // avoid. Each message is worth stating in exactly one place.
             err @ (crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
             | crate::package::port::PackageRepoError::UnknownTopLevelFields { .. }
+            | crate::package::port::PackageRepoError::UncheckedTopLevel { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
             | crate::package::port::PackageRepoError::UnwritablePath { .. }) => {
                 OperationFailure::Generic(err.to_string())
