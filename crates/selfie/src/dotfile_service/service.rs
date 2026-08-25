@@ -29,7 +29,7 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, EnvironmentField, Package, PackageField,
+        ContentSource, DotfileEntry, EnvironmentField, Package, TopLevelKeys,
         describe_unknown_key_in,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
@@ -1262,22 +1262,20 @@ where
             continue;
         }
 
-        // Refuse the whole package before asking what dotfiles it has: `_dotfiles:`
-        // reads as a YAML anchor, so the list comes back empty and the `is_empty`
-        // check below would skip the package in silence (selfie-g199).
+        // Refuse the whole package before asking what dotfiles it has. A
+        // `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
+        // or short, so the `is_empty` check below would skip the package in
+        // silence (selfie-g199, selfie-jt6m). The set is the one `spec validate`
+        // errors on, so the two commands answer alike.
         //
-        // Whole-package rather than per-entry, unlike the entry-level rule this
-        // mirrors: the ambiguity is in the file's top level, so there is no entry
-        // to attach it to.
-        //
-        // Empty for a programmatically built package, so nothing fires for a
-        // caller that never had raw YAML.
-        let shadowing = package.shadowing_top_level_keys();
-        if !shadowing.is_empty() {
-            let described: Vec<String> = shadowing
-                .iter()
-                .map(|key| describe_unknown_key_in::<PackageField>(key))
-                .collect();
+        // Whole-package rather than per-entry: the problem is in the file's top
+        // level, so there is no entry to attach it to. The keys arrive worded for
+        // that level, so this cannot explain them against another. A file that
+        // could not be read back is decided below instead.
+        if let TopLevelKeys::Checked(keys) = package.top_level_keys()
+            && !keys.is_empty()
+        {
+            let described: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
             sender
                 .send_warning(format!(
                     "Skipping package '{}': {}",
@@ -1317,6 +1315,44 @@ where
         }
 
         let dotfiles = package.dotfiles_for_environment(config.environment());
+
+        // Waits for `dotfiles` because what an unread top level costs depends on
+        // what is left to deploy.
+        //
+        // With nothing to deploy, a package that has none by design and one whose
+        // entries are hidden behind an unchecked key are indistinguishable, and
+        // the `continue` below reports both as nothing to do (selfie-c28).
+        //
+        // With entries, what deploys is what selfie's own parse produced -- not
+        // necessarily the right content: a hidden `environments:` key costs the
+        // mapping, so a shared entry can land on its override's target (selfie-flsi).
+        if let TopLevelKeys::Unchecked(error) = package.top_level_keys() {
+            if dotfiles.is_empty() {
+                sender
+                    .send_warning(format!(
+                        "Skipping package '{}': it has no dotfiles to deploy, and its top-level \
+                         keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled \
+                         out. The re-read failed with: {error}",
+                        package.name()
+                    ))
+                    .await;
+                refused_count += 1;
+                continue;
+            }
+
+            // The parse failure ends both messages because it is several lines of
+            // source snippet, and anything after it reads as part of it.
+            sender
+                .send_warning(format!(
+                    "Package '{}': could not re-read the package file to check its top-level \
+                     keys, so an unrecognized one -- a misspelling, or an anchor named after a \
+                     real field -- would not have been caught. Applying it anyway. The re-read \
+                     failed with: {error}",
+                    package.name()
+                ))
+                .await;
+        }
+
         if dotfiles.is_empty() {
             continue;
         }

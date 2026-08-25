@@ -6048,14 +6048,45 @@ dotfiles:
     }
 }
 
-// `_dotfiles:` at a package's top level, and what `selfie apply` does about it.
+// A package file's top-level keys, and what `selfie apply` does about the ones a
+// package does not accept.
 //
-// Read as a YAML anchor, the key leaves the package with no dotfiles at all, so
-// apply deployed nothing and reported success — no warning, no error, no count
-// (selfie-g199). `selfie spec validate` reports it too, but apply never runs
-// validation, so the refusal has to live on the apply path itself.
-mod top_level_anchor_shadowing {
+// `_dotfiles:` as an anchor leaves the package no dotfiles, so apply deployed
+// nothing and reported success (selfie-g199); a plain `configs:` did the same
+// while `spec validate` errored (selfie-jt6m). Apply never runs validation.
+//
+// Checking rereads the file, and one that parses can still fail that read. Apply
+// says so either way: with entries it applies them, with nothing to deploy it
+// refuses (selfie-5j5j).
+mod top_level_key_refusals {
     use super::*;
+
+    // Parses as a package, and not at all into the map the key check reads: a
+    // mapping keyed by a sequence has no `serde_json::Value` to be read into.
+    // The `dotfiles:` entry is what proves the package still deploys.
+    fn package_that_cannot_be_re_read(dirs: &TestDirs, target: &std::path::Path) {
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+dotfiles:
+  - source: "myapp/config.toml"
+    target: "{}"
+environments:
+  test:
+    install: "echo installed"
+"#,
+                target.display()
+            ),
+        );
+    }
 
     fn refused_count(events: &[PackageEvent]) -> usize {
         match get_operation_result(events).expect("no Completed event") {
@@ -6247,10 +6278,240 @@ dotfiles:
         );
     }
 
+    // Apply says the check could not run, and deploys the package regardless.
+    //
+    // Both halves matter and neither implies the other: staying quiet reports a
+    // file as clean when nothing looked at it, and refusing stops a package whose
+    // YAML is legal from deploying at all, over a check that did not run.
+    #[tokio::test]
+    async fn apply_warns_and_still_deploys_a_file_it_cannot_re_read() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_that_cannot_be_re_read(&dirs, &target);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            refused_count(&events),
+            0,
+            "a check that did not run is not a refusal: {:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "the package must still deploy"
+        );
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("myapp") && w.contains("could not re-read")),
+            "apply must say the check could not run: {warnings:?}"
+        );
+        // The two arms are one `match` apart, and this one is not a skip. Saying
+        // so would describe a package that did deploy as skipped.
+        assert!(
+            !warnings.iter().any(|w| w.contains("Skipping")),
+            "nothing was skipped: {warnings:?}"
+        );
+    }
+
+    // The same unread file, with nothing left to deploy, is refused.
+    //
+    // Deploying nothing is what a shadowed `dotfiles:` key looks like from the
+    // outside, and this file is one selfie could not check for that key. The two
+    // are indistinguishable here, so the run says so rather than reporting the
+    // package as having had nothing to do.
+    #[tokio::test]
+    async fn apply_refuses_an_unchecked_file_that_would_deploy_nothing() {
+        let dirs = TestDirs::new();
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+environments:
+  test:
+    install: "echo installed"
+"#,
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            refused_count(&events),
+            1,
+            "a package that deploys nothing and could not be checked is a refusal, not a quiet \
+             skip: {:?}",
+            warning_messages(&events)
+        );
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Skipping package 'myapp'") && w.contains("dotfiles:")),
+            "the refusal must name the package and what could not be ruled out: {warnings:?}"
+        );
+        // The deploying arm says the opposite of this one, and the two are a few
+        // lines apart. A copy-paste either way reads as a lie about what happened.
+        assert!(
+            !warnings.iter().any(|w| w.contains("Applying it anyway")),
+            "nothing was applied: {warnings:?}"
+        );
+    }
+
+    // The divergence itself: one file, and both surfaces have to speak about it.
+    //
+    // Validation reported the unread file while apply stayed quiet, so the two
+    // disagreed about the same key check on the same bytes.
+    #[tokio::test]
+    async fn apply_and_validate_both_report_a_file_that_cannot_be_re_read() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_that_cannot_be_re_read(&dirs, &target);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("could not re-read")),
+            "apply stayed quiet: {:?}",
+            warning_messages(&events)
+        );
+
+        use selfie::package::port::PackageRepository;
+
+        let repo = YamlPackageRepository::new(RealFileSystem, dirs.package_dir.clone());
+        let package = repo.get_package("myapp").expect("fixture must load");
+        let result = package.package().validate("test");
+        assert!(
+            result
+                .issues()
+                .infos()
+                .iter()
+                .any(|issue| issue.message().contains("could not re-read")),
+            "validate stayed quiet: {:?}",
+            result.issues()
+        );
+    }
+
+    // A plain misspelling, no anchor involved: `configs:` for `dotfiles:`.
+    //
+    // `selfie spec validate` has always called this an error and the writer has
+    // always refused to rewrite over it, while apply deployed what was left and
+    // exited zero -- so the file's own author was told three different things by
+    // three commands (selfie-jt6m). The entry under the real `dotfiles:` key is
+    // what makes the refusal observable: it would deploy if the package were not
+    // refused.
+    #[tokio::test]
+    async fn apply_refuses_a_plain_unrecognized_top_level_key() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+configs:
+  - source: "myapp/other.toml"
+    target: "{}"
+dotfiles:
+  - source: "myapp/config.toml"
+    target: "{}"
+environments:
+  test:
+    install: "echo installed"
+"#,
+                dirs.target_dir.join("other.toml").display(),
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1);
+        assert!(
+            !target.exists(),
+            "the refusal must precede the deploy, or the file is read on a guess about its keys"
+        );
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Skipping package 'myapp'")
+                    && w.contains("unknown field 'configs'")),
+            "the refusal must name the package and the key: {warnings:?}"
+        );
+        // The anchor wording belongs to a key that collides with a field name.
+        // `configs` collides with nothing, and telling its author to rename an
+        // anchor they did not write sends them looking for one.
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("cannot be told apart from a misspelling")),
+            "a plain unknown key must not be described as an anchor collision: {warnings:?}"
+        );
+    }
+
+    // Any top-level field counts, not just `dotfiles`.
+    //
+    // `homepage` is a package field and not an environment one, so a check
+    // wired to the wrong level leaves this key unrefused. The `_dotfiles:` test
+    // above cannot see that: `dotfiles` is a field at both levels.
+    #[tokio::test]
+    async fn apply_refuses_a_top_level_anchor_named_like_any_package_field() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+_homepage: &h "https://example.com"
+homepage: *h
+dotfiles:
+  - source: "myapp/config.toml"
+    target: "{}"
+environments:
+  test:
+    install: "echo installed"
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1);
+        assert!(!target.exists(), "nothing should have been deployed");
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("_homepage")
+                && w.contains("cannot be told apart from a misspelling")),
+            "the refusal must name the key: {warnings:?}"
+        );
+    }
+
     // A package with genuinely no dotfiles is still silent.
     //
     // Without this, an implementation that refused every package reaching the
-    // empty-dotfiles check would pass the first test.
+    // empty-dotfiles check would pass the first test. It is also the control for
+    // the unchecked-file warning above: a build that warned about every package
+    // would fail here.
     #[tokio::test]
     async fn a_package_with_no_dotfiles_at_all_is_not_refused() {
         let dirs = TestDirs::new();
@@ -6268,6 +6529,58 @@ environments:
 
         assert_eq!(refused_count(&events), 0);
         assert_eq!(warning_messages(&events), Vec::<String>::new());
+    }
+
+    // "Nothing to deploy" is asked of the environment being applied, not of the
+    // shared list. The two tests above both put their entries at the top level,
+    // so a check reading `Package::dotfiles` instead would pass them and refuse
+    // this package, whose only entry is the environment's.
+    #[tokio::test]
+    async fn an_unchecked_file_deploying_only_environment_entries_is_not_refused() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: "myapp/config.toml"
+        target: "{}"
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            refused_count(&events),
+            0,
+            "the environment's entry is something to deploy: {:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "REPO",
+            "the environment's entry must still deploy"
+        );
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("Skipping")),
+            "nothing was skipped: {:?}",
+            warning_messages(&events)
+        );
     }
 }
 

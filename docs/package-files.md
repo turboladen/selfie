@@ -1156,9 +1156,10 @@ underscore. Only these four names are affected inside a dotfile entry:
 
 ### The same rule applies to a package's top-level keys
 
-An underscore-prefixed key at the top level of the file is refused when the rest of its name is a
-top-level field — `_name`, `_homepage`, `_description`, `_dotfiles`, `_post_install_note` or
-`_environments`:
+A package file accepts `name`, `homepage`, `description`, `dotfiles`, `post_install_note` and
+`environments`. Any other key at the top level is refused — a misspelling such as `configs:`, and an
+underscore-prefixed anchor whose name is one of those fields (`_dotfiles`, `_name`, …). An anchor
+whose name is not a field, such as `_brew:` or `_target:`, is legal and left alone.
 
 ```yaml
 name: myapp
@@ -1166,23 +1167,53 @@ name: myapp
 _dotfiles:
   - source: myapp/config.toml
     target: ~/.config/myapp/config.toml
+# Refused: nothing reads `configs`, so these entries would never deploy.
+configs:
+  - source: myapp/other.toml
+    target: ~/.config/myapp/other.toml
 ```
 
-`_dotfiles:` is the case that bites. Read as an anchor, the package has **no dotfiles at all**, so
-`selfie apply` has nothing to deploy and nothing to report — a run that looks completely successful
-and did nothing.
+Both cases bite the same way. The keys selfie reads are not the ones you wrote, so `selfie apply`
+has less to deploy than the file appears to describe — and with `_dotfiles:` as the only dotfiles
+key, **nothing at all** to deploy, a run that looks completely successful and did nothing.
 
 `selfie apply` therefore **refuses the whole package** and names the key:
 
 ```
 ⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'
+⚠ Skipping package 'myapp': unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
 ```
 
-The refusal covers the package rather than a single entry, because the ambiguity is in the file's
-top level: there is no entry to attach it to, and the entries the file does have may not be the ones
-you wrote. It counts as a refusal, so
-[the run exits non-zero](../README.md#a-refusal-is-not-a-success). `selfie spec validate` reports
-the same key in the same words.
+The refusal covers the package rather than a single entry, because the problem is in the file's top
+level: there is no entry to attach it to, and the entries the file does have may not be the ones you
+wrote. It counts as a refusal, so [the run exits non-zero](../README.md#a-refusal-is-not-a-success).
+`selfie spec validate` reports the same keys in the same words, and the commands that rewrite a
+package file refuse them too — all three agree on the set.
+
+Checking those keys means reading the file a second time, and a file selfie can load as a package
+can still fail that second read — a mapping used as a key is one way. `selfie apply` always says so,
+and what it does next depends on what the package still has to deploy.
+
+If it has dotfiles for this environment, they are deployed and nothing here makes the run fail.
+Nothing is known to be wrong with the file, only unchecked, and what deploys is what selfie read
+from the file either way:
+
+```
+⚠ Package 'myapp': could not re-read the package file to check its top-level keys, so an unrecognized one -- a misspelling, or an anchor named after a real field -- would not have been caught. Applying it anyway. The re-read failed with: …
+```
+
+If it has nothing to deploy, the package is **refused** and
+[the run exits non-zero](../README.md#a-refusal-is-not-a-success):
+
+```
+⚠ Skipping package 'myapp': it has no dotfiles to deploy, and its top-level keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled out. The re-read failed with: …
+```
+
+Deploying nothing is exactly what `_dotfiles:` looks like from the outside, and this is the one file
+selfie cannot check for it — so the two cannot be told apart, and reporting the run as a quiet
+success would hide the case this whole section is about. A package that genuinely has no dotfiles is
+unaffected, because its keys were read and found clean. `selfie spec validate` reports the failed
+read either way, as an advisory notice.
 
 The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
 and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the
@@ -1208,9 +1239,10 @@ Read as an anchor, that environment has **no dotfiles of its own**, so the share
 the work machine instead of the one written for it — the same silence as the top-level case, with
 the wrong file in place rather than no file.
 
-`selfie spec validate` reports it as `environments.work._dotfiles`. Unlike the top-level key, this
-one does not stop `selfie apply`, which reads only the file's top level before deploying — so run
-`selfie spec validate` after editing an environment.
+`selfie spec validate` reports it as `environments.work._dotfiles`. `selfie apply` refuses the
+package too, but only when the environment carrying the key is the one being applied — a key in an
+environment this machine does not use cannot affect what it deploys. Run `selfie spec validate`
+after editing an environment to catch the ones apply leaves alone.
 
 `_target: &target …` inside an environment is an ordinary anchor, as at the top level: `target` is
 not a field of an environment either.
