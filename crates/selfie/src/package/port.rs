@@ -176,6 +176,30 @@ pub enum PackageRepoError {
         fields: String,
     },
 
+    /// Refused to rewrite a package file because its top level could not be read
+    /// back, so selfie cannot say whether it carries keys the struct would drop.
+    ///
+    /// Distinct from [`UnknownTopLevelFields`](Self::UnknownTopLevelFields),
+    /// which names keys it found. Here nothing is known, and a rewrite serializes
+    /// from the struct regardless -- so the safe direction is to decline the
+    /// write, which costs the user a retry, rather than to delete silently.
+    // The parse failure ends the message. It renders as several lines of source
+    // snippet with a `|` gutter, so anything after it is read as part of the
+    // snippet -- the remedy came out as `  |. Edit /packages/creds.yml directly`.
+    // The apply-path warning orders the same string the same way.
+    #[error(
+        "refusing to rewrite {path}: its top level could not be read back, so any \
+         key selfie does not model would be dropped without warning. \
+         Edit {path} directly, or simplify it until selfie can read it. \
+         The read failed with: {error}"
+    )]
+    UncheckedTopLevel {
+        /// The file that would have been rewritten.
+        path: PathBuf,
+        /// Why the re-read failed.
+        error: String,
+    },
+
     /// Refused to rewrite a package file because an environment carries a key
     /// the struct does not model.
     ///

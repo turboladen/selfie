@@ -7,13 +7,13 @@ use crate::{
     dotfile_service::service::repository_read_refusal,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
-        GetPackage, Package,
+        GetPackage, Package, TopLevelKeys,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
             PackageRepoError, PackageRepository,
         },
     },
-    validation::{ValidationIssue, ValidationLevel},
+    validation::ValidationIssue,
 };
 
 #[derive(Debug, Clone)]
@@ -329,23 +329,25 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // a plain `configs:`, is not modeled either, so rewriting drops it and
         // every entry under it with no diagnostic.
         //
-        // Errors only, so a future advisory cannot start refusing writes: refuse
-        // for a key known to be there, not one nothing could rule out. An unread
-        // file reports nothing here -- see `unknown_top_level_field_issues`.
-        //
-        // Top-level only: handing this `validate_unknown_fields`, which also
-        // walks environments, reported an environment key as a top-level one.
-        let unknown: Vec<ValidationIssue> = package
-            .unknown_top_level_field_issues()
-            .into_iter()
-            .filter(|i| i.level() == ValidationLevel::Error)
-            .collect();
-        if !unknown.is_empty() {
-            let fields: Vec<&str> = unknown.iter().map(ValidationIssue::field).collect();
-            return Err(PackageRepoError::UnknownTopLevelFields {
-                path: path.to_path_buf(),
-                fields: fields.join(", "),
-            });
+        // A file selfie could not read back is refused too. Apply proceeds on one
+        // of those because refusing would stop a deploy over a check that did not
+        // run; a declined write costs a retry instead, and the thing at risk here
+        // is the user's own text (selfie-ebvx).
+        match package.top_level_keys() {
+            TopLevelKeys::Checked(unknown) if !unknown.is_empty() => {
+                let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
+                return Err(PackageRepoError::UnknownTopLevelFields {
+                    path: path.to_path_buf(),
+                    fields: fields.join(", "),
+                });
+            }
+            TopLevelKeys::Unchecked(error) => {
+                return Err(PackageRepoError::UncheckedTopLevel {
+                    path: path.to_path_buf(),
+                    error: error.clone(),
+                });
+            }
+            TopLevelKeys::Checked(_) | TopLevelKeys::NoSource => {}
         }
 
         // The same refusal one level down. An environment's unknown key is not
@@ -1535,11 +1537,58 @@ environments:
         .expect("fixture must parse — the typo is a validation error, not a parse error")
     }
 
-    // selfie-nr4b, the same laundering one level up. `audt:` is not modeled, so
-    // serializing from the struct drops the user's audit command with no message.
+    // A file selfie could not read back is refused too, and this is the half that
+    // was inverted: the guard passed exactly when selfie knew least, so the
+    // rewrite dropped the key that made the file unreadable in the first place.
     //
-    // `times(0)` is again the assertion that matters: refusing after the write
-    // would already have destroyed the text.
+    // `times(0)` is the assertion that matters. Refusing after the write would
+    // already have destroyed the user's text.
+    #[test]
+    fn save_package_refuses_a_file_whose_top_level_could_not_be_read() {
+        let yaml = "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \"echo i\"\n";
+        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
+        assert!(
+            matches!(package.top_level_keys(), TopLevelKeys::Unchecked(_)),
+            "fixture must reach the unchecked state, got: {:?}",
+            package.top_level_keys()
+        );
+
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        fs.expect_write_file_no_follow().times(0);
+
+        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let err = repo
+            .save_package(&package, &package_dir.join("creds.yml"))
+            .expect_err("a file selfie could not read back must not be rewritten");
+
+        assert!(
+            matches!(err, PackageRepoError::UncheckedTopLevel { .. }),
+            "got: {err:?}"
+        );
+        // Not the found-keys variant: that one names keys, and here there are
+        // none to name -- claiming otherwise would send the user looking.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("unrecognized"),
+            "the refusal must not claim it found keys, got: {err}"
+        );
+        // The parse failure has to come last. It renders as several lines of
+        // source snippet with a `|` gutter, so a remedy placed after it arrives
+        // as `  |. Edit /packages/creds.yml directly` and reads as snippet.
+        let remedy = rendered
+            .find("simplify it until selfie can read it")
+            .expect("the refusal must give a remedy");
+        let failure = rendered
+            .find("The read failed with:")
+            .expect("the refusal must carry the parse failure");
+        assert!(
+            remedy < failure,
+            "the remedy must precede the parse failure, got: {rendered}"
+        );
+    }
+
     // The positive half of the same boundary: a top-level key still gets the
     // top-level variant. Narrowing the guard to fix the environment case could
     // otherwise have disabled it outright, and every other test here would pass.
@@ -1572,6 +1621,12 @@ environments:
     // The fixture must carry its raw YAML, as a loaded package does. Without
     // `set_source` the top-level check has nothing to read and goes quiet, which
     // hid the guard ordering below entirely.
+    //
+    // selfie-nr4b, the same laundering one level up. `audt:` is not modeled, so
+    // serializing from the struct drops the user's audit command with no message.
+    //
+    // `times(0)` is again the assertion that matters: refusing after the write
+    // would already have destroyed the text.
     #[test]
     fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
         let package: Package = serde_saphyr::from_str(

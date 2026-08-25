@@ -6,7 +6,7 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, PackageField, describe_unknown_key, parse_top_level,
+    DotfileEntry, EnvironmentField, Package, TopLevelKeys, UnknownKey, describe_unknown_key,
     shadows_dotfile_field, unknown_key,
 };
 
@@ -79,28 +79,27 @@ pub fn unreadable_template_issue(
     )
 }
 
-/// Flag unrecognized keys at the top level of the parsed mapping.
-fn unknown_top_level_keys(
-    raw: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<ValidationIssue> {
-    raw.keys()
-        .filter_map(|k| {
-            let unknown = unknown_key::<PackageField>(k)?;
-
+/// Report the top-level keys apply and the writer already found unrecognized.
+///
+/// Takes them rather than re-reading the file, so `selfie spec validate` cannot
+/// judge a key the other two did not, or word it differently.
+fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
+    keys.iter()
+        .map(|unknown| {
             // A collision needs different advice from a plain misspelling,
             // for the reason `unknown_dotfile_keys` gives: the key may have
             // been named deliberately, and which remedy applies depends on
             // which reading was meant.
-            Some(ValidationIssue::error(
+            ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
-                k,
+                &unknown.key,
                 &unknown.message,
                 unknown.shadows.then_some(
                     "Anchors are legal here; only a name matching a top-level field is \
                      refused, because it cannot be told apart from a misspelling of that \
                      field.",
                 ),
-            ))
+            )
         })
         .collect()
 }
@@ -268,7 +267,7 @@ impl Package {
         issues
     }
 
-    /// Flag unknown top-level YAML fields by parsing the raw YAML content.
+    /// Flag unknown top-level YAML fields, and unknown keys in each environment.
     ///
     /// Fields starting with `_` are allowed (YAML anchor definitions like
     /// `_brew: &brew`). Anything else is an error — likely a typo or a
@@ -289,68 +288,44 @@ impl Package {
         // No YAML at all means a programmatically built package, which has no
         // keys a user could misspell. An empty *file* is a different case and
         // still parses, so it does not land here.
-        let Some(raw_yaml) = self.raw_yaml() else {
+        if self.raw_yaml().is_none() {
             return vec![];
-        };
+        }
 
         // Environment keys come off the parsed environments, so they are reported
-        // whether or not the re-read below succeeds. Only the top level needs the
-        // raw file, and returning early on a failed re-read used to take the
-        // environment check down with it -- validate passed a package apply then
-        // refused.
+        // whether or not the top level could be read back. Only the top level
+        // needs the raw file, and returning early on a failed re-read used to take
+        // the environment check down with it -- validate passed a package apply
+        // then refused.
         let mut issues = unknown_environment_keys(self);
 
-        // The same parse apply's check is derived from, so the two cannot
-        // disagree about whether this file could be read back.
-        match parse_top_level(raw_yaml) {
-            Ok(raw) => issues.extend(unknown_top_level_keys(&raw)),
-            // The package parsed once already, so this re-parse failing means the
+        // The keys `set_source` derived, not a second parse of the same file, so
+        // validate, apply and the writer cannot disagree about what the top level
+        // holds or about whether it could be read back at all.
+        match self.top_level_keys() {
+            TopLevelKeys::Checked(keys) => issues.extend(unknown_top_level_keys(keys)),
+            // The package parsed once already, so the re-read failing means the
             // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
             // for instance. Say the check did not run; staying quiet here reports
             // a file as clean when nothing looked at it.
-            Err(e) => {
-                // `Info`, not a warning: nothing is known to be wrong with the
-                // file, only unchecked, and `sync push` refuses a package
-                // carrying any warning. Blocking a push over a check that did
-                // not run would be a worse outcome than the gap it reports.
-                issues.push(ValidationIssue::info(
-                    ValidationErrorCategory::Advisory,
-                    "package",
-                    &format!("could not re-read the package file to check its top-level keys: {e}"),
-                    Some("The top-level keys were not checked for this package."),
-                ));
-            }
+            //
+            // `Info`, not a warning: nothing is known to be wrong with the file,
+            // only unchecked, and `sync push` refuses a package carrying any
+            // warning. Blocking a push over a check that did not run would be a
+            // worse outcome than the gap it reports.
+            TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::info(
+                ValidationErrorCategory::Advisory,
+                "package",
+                &format!("could not re-read the package file to check its top-level keys: {error}"),
+                Some("The top-level keys were not checked for this package."),
+            )),
+            // `set_source` derives this from the same string the check above read,
+            // so a package carrying YAML is never `NoSource`.
+            TopLevelKeys::NoSource => {}
         }
 
-        // `raw` is a `HashMap`, so the iteration order is not the file's. Sort by
+        // The top level arrives sorted, but the two sets are concatenated. Sort by
         // the field name to keep the report stable between runs.
-        issues.sort_by(|a, b| a.field().cmp(b.field()));
-        issues
-    }
-
-    /// The unrecognized keys at the file's **top level only**.
-    ///
-    /// Separate from [`validate_unknown_fields`](Self::validate_unknown_fields),
-    /// which also walks each environment. A caller that acts on the level -- the
-    /// writer picks a different refusal per level -- must not be handed both, or
-    /// an environment's key is reported as a top-level one.
-    ///
-    /// Empty for a package with no source, and for one whose YAML cannot be read
-    /// back: that is reported by `validate_unknown_fields`, and a writer must not
-    /// refuse over a check that did not run.
-    pub(crate) fn unknown_top_level_field_issues(&self) -> Vec<ValidationIssue> {
-        let Some(raw_yaml) = self.raw_yaml() else {
-            return vec![];
-        };
-        // A file that cannot be read back has no keys to report, and the writer
-        // reading this must not refuse a save over a check that did not run --
-        // the file it would decline to rewrite may be perfectly good.
-        // `validate_unknown_fields` is where that state is reported (selfie-ebvx).
-        let Ok(raw) = parse_top_level(raw_yaml) else {
-            return vec![];
-        };
-
-        let mut issues = unknown_top_level_keys(&raw);
         issues.sort_by(|a, b| a.field().cmp(b.field()));
         issues
     }
@@ -964,7 +939,9 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use crate::{
-        package::{DotfileEntry, EnvironmentConfig, KnownFields, builder::PackageBuilder},
+        package::{
+            DotfileEntry, EnvironmentConfig, KnownFields, PackageField, builder::PackageBuilder,
+        },
         validation::ValidationLevel,
     };
 

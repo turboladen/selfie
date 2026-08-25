@@ -215,6 +215,9 @@ pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
 /// An unrecognized key, already worded for the level it was found at.
 #[derive(Debug, Clone)]
 pub(crate) struct UnknownKey {
+    /// The key as the file spelled it, for a caller that lists names rather than
+    /// sentences.
+    pub(crate) key: String,
     /// What is wrong with it and what to do about it.
     pub(crate) message: String,
     /// Whether the name collides with a real field of this level, which needs
@@ -239,6 +242,7 @@ pub(crate) fn unknown_key<F: KnownFields>(key: &str) -> Option<UnknownKey> {
     }
 
     Some(UnknownKey {
+        key: key.to_string(),
         message: describe_unknown_key_in::<F>(key),
         shadows,
     })
