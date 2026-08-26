@@ -209,6 +209,11 @@ the run does not apply is left alone. The commands that rewrite a package file �
 is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
 at the file's top level, where a rewrite would take every entry under it.
 
+Creating a package refuses too when a file is already at that path and selfie cannot read it. Only a
+name with no file behind it is a create; anything else — a file that will not parse, one selfie
+refused to open, two files claiming the same name — would be overwritten, and the guards above
+cannot see it because the package being written was built in memory rather than read from disk.
+
 The same commands also refuse a file selfie could not read back, even though no key is known to be
 wrong with it. Apply is the other way round: it warns and deploys such a file rather than stop over
 a check that did not run, and skips it only when there is nothing left to deploy. A declined write
