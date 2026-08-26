@@ -7,6 +7,7 @@
 pub mod common;
 
 use common::{sandboxed_command, setup_default_test_config};
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 
 // Everything a serde round trip destroys, in one file: an anchor and its alias,
@@ -77,4 +78,44 @@ environments:
         .success();
 
     assert_eq!(fs::read_to_string(&path).unwrap(), yaml);
+}
+
+// `spec edit` is what a user reaches for when a file is broken, so treating a
+// parse failure as "does not exist" is worst here: selfie offered to create,
+// and on `y` wrote a template over the file they were trying to repair.
+//
+// The write itself sits behind a `dialoguer` confirm that needs a TTY, so this
+// asserts the half a test can reach — that selfie no longer claims the file is
+// absent — plus the file being untouched.
+#[test]
+fn spec_edit_does_not_call_an_unparsable_file_missing() {
+    let temp = setup_default_test_config();
+    let yaml = "{{{\n";
+    let path = write_package(&temp, "myapp", yaml);
+
+    sandboxed_command(&temp)
+        .env("EDITOR", "true")
+        .args(["spec", "edit", "myapp"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("does not exist").not());
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        yaml,
+        "the file must not be touched"
+    );
+}
+
+// The control. A name with no file behind it must still be offered as a new
+// package, or the guard above has broken `spec edit` for its other purpose.
+#[test]
+fn spec_edit_still_offers_to_create_a_package_with_no_file() {
+    let temp = setup_default_test_config();
+
+    sandboxed_command(&temp)
+        .env("EDITOR", "true")
+        .args(["spec", "edit", "brandnew"])
+        .assert()
+        .stdout(predicates::str::contains("does not exist"));
 }

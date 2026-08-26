@@ -245,6 +245,29 @@ pub enum PackageRepoError {
     },
 }
 
+impl PackageRepoError {
+    /// Whether this means no package file exists at that name.
+    ///
+    /// Two answers do: the name matched nothing, and the package directory is
+    /// not there at all. Every other error means selfie found something and
+    /// could not use it -- a file that will not parse, one it refused to read,
+    /// two files claiming the same name -- and each is a file that creating or
+    /// templating over would destroy.
+    // Lives on the error rather than beside one caller because two commands ask
+    // this and a third will. A rule stated twice is a rule that can drift, which
+    // is what selfie-vhw4 was about.
+    #[must_use]
+    pub fn means_no_such_package(&self) -> bool {
+        match self {
+            Self::PackageError(e) => matches!(**e, PackageError::PackageNotFound { .. }),
+            // A missing package directory holds no file to lose, and the write
+            // creates it -- `write_file_no_follow` runs `create_dir_all` first.
+            Self::PackageListError(PackageListError::PackageDirectoryNotFound(_)) => true,
+            _ => false,
+        }
+    }
+}
+
 impl From<PackageError> for PackageRepoError {
     fn from(err: PackageError) -> Self {
         Self::PackageError(Box::new(err))
