@@ -301,6 +301,21 @@ pub enum PackageListError {
 ///
 /// Represents detailed failures when working with individual packages,
 /// providing rich context for debugging and user-friendly error messages.
+// File names alone -- the directory is already named earlier in the message, so
+// repeating the full path for every conflict buries the part that differs.
+fn format_conflicting_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap_or(p.as_os_str())
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Error, Debug, Clone)]
 pub enum PackageError {
     /// No package with the specified name could be found
@@ -316,7 +331,13 @@ pub enum PackageError {
     },
 
     /// Multiple package files found with the same name, creating ambiguity
-    #[error("Multiple packages found with name `{name}` in path {}", packages_path.display())]
+    #[error(
+        "Multiple packages found with name `{name}` in path {}: {}. Names are compared ignoring \
+         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
+         Rename or remove all but one.",
+        packages_path.display(),
+        format_conflicting_paths(conflicting_paths)
+    )]
     MultiplePackagesFound {
         name: String,
         packages_path: PathBuf,
@@ -688,5 +709,57 @@ mod tests {
             }
             _ => panic!("Expected PackageDirectoryNotFound error"),
         }
+    }
+}
+
+#[cfg(test)]
+mod conflicting_path_tests {
+    use super::*;
+
+    // The conflicting file names are the only part of this error a user can act
+    // on, and they were captured but never rendered. Asserting the rendered
+    // string is what keeps them there.
+    #[test]
+    fn the_ambiguity_error_names_the_files_and_the_remedy() {
+        let rendered = PackageError::MultiplePackagesFound {
+            name: "neovim".to_string(),
+            packages_path: PathBuf::from("/packages"),
+            conflicting_paths: vec![
+                PathBuf::from("/packages/Neovim.yml"),
+                PathBuf::from("/packages/neovim.yml"),
+            ],
+            files_examined: 2,
+            search_patterns: vec![],
+        }
+        .to_string();
+
+        assert!(rendered.contains("Neovim.yml"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yml"), "got: {rendered}");
+        assert!(rendered.contains("Rename"), "no remedy: {rendered}");
+        // The directory is stated once; repeating it per file hides the
+        // difference between them, which is the whole point of listing them.
+        assert_eq!(rendered.matches("/packages/").count(), 0, "got: {rendered}");
+    }
+
+    // One error covers two different collisions: names that differ only by
+    // case, and `.yml` against `.yaml`. Wording that blames only capitalization
+    // sends the reader of this pair looking for a difference that is not there.
+    #[test]
+    fn the_ambiguity_error_covers_an_extension_collision_too() {
+        let rendered = PackageError::MultiplePackagesFound {
+            name: "neovim".to_string(),
+            packages_path: PathBuf::from("/packages"),
+            conflicting_paths: vec![
+                PathBuf::from("/packages/neovim.yaml"),
+                PathBuf::from("/packages/neovim.yml"),
+            ],
+            files_examined: 2,
+            search_patterns: vec![],
+        }
+        .to_string();
+
+        assert!(rendered.contains("neovim.yaml"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yml"), "got: {rendered}");
+        assert!(rendered.contains("`.yml` and `.yaml`"), "got: {rendered}");
     }
 }
