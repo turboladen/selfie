@@ -14,8 +14,21 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
     // Create repository to look up the package
     let repo = common::create_package_repository(config);
 
-    // Check if package exists first for better error messages
-    let existing_package = repo.get_package(package_name).ok();
+    // A parse failure is not an absent package. Collapsing it with `.ok()` made
+    // selfie say the package did not exist, offer to create it, and write a
+    // template over the file -- and `spec edit` is the command a user reaches
+    // for precisely when a file is broken (selfie-6iry).
+    let existing_package = match repo.get_package(package_name) {
+        Ok(pkg) => Some(pkg),
+        Err(e) if e.means_no_such_package() => None,
+        Err(e) => {
+            display.print_error(format!(
+                "Cannot edit '{package_name}': a file is already there and selfie could not use \
+                 it, so opening it as a new package would overwrite it. Edit it directly. {e}"
+            ));
+            return 1;
+        }
+    };
     let package_exists = existing_package.is_some();
     let package_path = existing_package.as_ref().map(|p| p.file_path());
 

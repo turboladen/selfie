@@ -209,6 +209,9 @@ the run does not apply is left alone. The commands that rewrite a package file �
 is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
 at the file's top level, where a rewrite would take every entry under it.
 
+`selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
+treating it as one offered to create a template over the file the user opened the editor to repair.
+
 Creating a package refuses too when a file is already at that path and selfie cannot read it. Only a
 name with no file behind it is a create; anything else — a file that will not parse, one selfie
 refused to open, two files claiming the same name — would be overwritten, and the guards above

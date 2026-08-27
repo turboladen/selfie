@@ -7,28 +7,10 @@ use crate::{
     package::{
         Package,
         event::{EventSender, OperationResult, OperationSuccess},
-        port::{PackageError, PackageListError, PackageRepoError, PackageRepository},
+        port::PackageRepository,
         service::ProgressTracker,
     },
 };
-
-/// Whether the repository's answer means there is no package file to overwrite.
-///
-/// Two answers do: the name matched nothing, and the package directory is not
-/// there at all. Every other error means selfie found something and could not
-/// use it -- a file that will not parse, one it refused to read, two files
-/// claiming the same name -- and each is a file a create would destroy.
-fn is_absent(err: &PackageRepoError) -> bool {
-    match err {
-        PackageRepoError::PackageError(e) => matches!(**e, PackageError::PackageNotFound { .. }),
-        // A missing package directory holds no file to lose, and the write
-        // creates it -- `write_file_no_follow` runs `create_dir_all` first.
-        // Counting it as "something is there" refuses the first create on a
-        // machine whose package directory does not exist yet.
-        PackageRepoError::PackageListError(PackageListError::PackageDirectoryNotFound(_)) => true,
-        _ => false,
-    }
-}
 
 pub(super) async fn handle_create<PR>(
     package: Package,
@@ -64,7 +46,7 @@ where
                 .await;
             return OperationResult::Failure(error.into());
         }
-        Err(e) if is_absent(&e) => {}
+        Err(e) if e.means_no_such_package() => {}
         Err(e) => {
             sender
                 .send_warning(format!(
@@ -109,7 +91,10 @@ mod tests {
         package::{
             PackageBuilder,
             event::{OperationContext, PackageEvent, metadata::OperationType},
-            port::{MockPackageRepository, PackageParseError},
+            port::{
+                MockPackageRepository, PackageError, PackageListError, PackageParseError,
+                PackageRepoError,
+            },
         },
     };
     use std::{path::PathBuf, sync::Arc};
