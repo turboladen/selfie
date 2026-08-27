@@ -58,6 +58,36 @@ where
         }
     }
 
+    // The name said nothing was there; ask the file system about the path.
+    //
+    // Name matching is exact, so an existing `Neovim.yml` does not answer to
+    // `neovim`. On a case-insensitive file system the write then resolves to
+    // that same file and truncates it, and selfie reports success naming a path
+    // that is not what is on disk. On a case-sensitive one the two really are
+    // different files and this does not fire (selfie-6cg2).
+    if repo.path_is_occupied(package.path()) {
+        let path = package.path().to_path_buf();
+        sender
+            .send_warning(format!(
+                "Refusing to create '{package_name}': {} is already taken. On this file system \
+                 that path may resolve to a file stored under a different capitalization, and \
+                 creating would replace it.",
+                path.display()
+            ))
+            .await;
+        // A distinct variant from `PackageAlreadyExists`: the name really is
+        // free, and reporting that the package exists would send someone
+        // looking for a spec that answers to it. Consumers that only see the
+        // error -- the MCP server among them -- get the accurate reason.
+        return OperationResult::Failure(
+            crate::package::port::PackageError::PackagePathOccupied {
+                name: package_name,
+                file_path: path,
+            }
+            .into(),
+        );
+    }
+
     // Step 2: Save the package
     progress.next(sender, "Saving package file").await;
 
@@ -90,7 +120,7 @@ mod tests {
         config::SelfieConfigBuilder,
         package::{
             PackageBuilder,
-            event::{OperationContext, PackageEvent, metadata::OperationType},
+            event::{OperationContext, OperationFailure, PackageEvent, metadata::OperationType},
             port::{
                 MockPackageRepository, PackageError, PackageListError, PackageParseError,
                 PackageRepoError,
@@ -143,6 +173,49 @@ mod tests {
         }
     }
 
+    // Name matching is exact, so an existing `Neovim.yml` does not answer to the
+    // name `neovim`. On a case-insensitive file system the write resolves to
+    // that same file and truncates it, so the file system has to be asked about
+    // the path even when the name check came back clean.
+    #[tokio::test]
+    async fn create_refuses_when_the_path_is_already_taken() {
+        let (_temp, config, package) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+
+        let mut repo = MockPackageRepository::new();
+        // The name is genuinely free -- this is the case the name check misses.
+        repo.expect_get_package().returning(|name| {
+            Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: PathBuf::from("/packages"),
+                files_examined: 0,
+                search_patterns: vec![],
+            }
+            .into())
+        });
+        repo.expect_path_is_occupied().returning(|_| true);
+        // The assertion that matters: nothing is written.
+        repo.expect_save_package().times(0);
+
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        // Which refusal it is matters as much as that it refused. Reporting
+        // that the package already exists would be false here -- the name check
+        // above found nothing -- and sends a reader looking for a spec that
+        // answers to the name. Matching the variant rather than its rendering
+        // keeps that pinned when the wording changes.
+        assert!(
+            matches!(
+                result,
+                OperationResult::Failure(OperationFailure::Package(
+                    PackageError::PackagePathOccupied { .. }
+                ))
+            ),
+            "got: {result:?}"
+        );
+    }
+
     // A file that is present but will not parse is not an absent package.
     // Creating over it destroys what the user wrote, and `save_package`'s guards
     // cannot catch it: the package being written was built in memory, so it has
@@ -154,6 +227,7 @@ mod tests {
         let mut progress = ProgressTracker::new(2);
 
         let mut repo = MockPackageRepository::new();
+        repo.expect_path_is_occupied().returning(|_| false);
         repo.expect_get_package()
             .returning(|_| Err(a_real_parse_error().into()));
         // The assertion that matters: nothing is written.
@@ -176,6 +250,7 @@ mod tests {
         let mut progress = ProgressTracker::new(2);
 
         let mut repo = MockPackageRepository::new();
+        repo.expect_path_is_occupied().returning(|_| false);
         repo.expect_get_package().returning(|name| {
             Err(PackageError::PackageNotFound {
                 name: name.to_string(),
@@ -205,6 +280,7 @@ mod tests {
         let mut progress = ProgressTracker::new(2);
 
         let mut repo = MockPackageRepository::new();
+        repo.expect_path_is_occupied().returning(|_| false);
         repo.expect_get_package().returning(|_| {
             Err(PackageRepoError::PackageListError(
                 PackageListError::PackageDirectoryNotFound(PathBuf::from("/packages")),

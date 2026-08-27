@@ -207,6 +207,10 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         self.fs.read_file(&resolved)
     }
 
+    fn path_is_occupied(&self, path: &Path) -> bool {
+        self.fs.path_exists(path)
+    }
+
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
         // Check if package directory exists first
         if !self.fs.path_exists(&self.package_dir) {

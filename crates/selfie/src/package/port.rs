@@ -31,6 +31,15 @@ pub trait PackageRepository: Send + Sync {
     /// the definition is malformed, or if file system access fails.
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError>;
 
+    /// Whether anything already occupies `path`.
+    ///
+    /// Asked of the file system rather than of a name, because the two disagree.
+    /// Name matching is exact, so an existing `Neovim.yml` does not match the
+    /// name `neovim` -- but on a case-insensitive file system, opening
+    /// `neovim.yml` resolves to that same file and truncates it. Only the file
+    /// system knows which of the two it is.
+    fn path_is_occupied(&self, path: &Path) -> bool;
+
     /// Read a file a package refers to but does not contain, such as a dotfile
     /// template whose contents validation inspects.
     ///
@@ -367,6 +376,14 @@ pub enum PackageError {
     /// A package with the specified name already exists
     #[error("Package `{name}` already exists at {}", file_path.display())]
     PackageAlreadyExists { name: String, file_path: PathBuf },
+
+    /// The write path for a new package is occupied, though the name is free
+    #[error(
+        "Cannot create `{name}`: {} already exists, though no package answers to that name. \
+         Creating would replace that file.",
+        file_path.display()
+    )]
+    PackagePathOccupied { name: String, file_path: PathBuf },
 
     /// Package environment exists but has no install command configured
     #[error(

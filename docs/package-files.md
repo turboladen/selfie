@@ -209,6 +209,12 @@ the run does not apply is left alone. The commands that rewrite a package file â
 is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
 at the file's top level, where a rewrite would take every entry under it.
 
+Creating also refuses when the path is already taken, which is not the same question as whether the
+name is. Package names match exactly, so an existing `Neovim.yml` does not answer to `neovim` â€” but
+on a case-insensitive file system, writing `neovim.yml` resolves to that same file. selfie asks the
+file system rather than comparing names, so on a case-sensitive file system the two remain separate
+packages and both can exist.
+
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
