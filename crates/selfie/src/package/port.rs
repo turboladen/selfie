@@ -33,11 +33,10 @@ pub trait PackageRepository: Send + Sync {
 
     /// Whether anything already occupies `path`.
     ///
-    /// Asked of the file system rather than of a name, because the two disagree.
-    /// Name matching is exact, so an existing `Neovim.yml` does not match the
-    /// name `neovim` -- but on a case-insensitive file system, opening
-    /// `neovim.yml` resolves to that same file and truncates it. Only the file
-    /// system knows which of the two it is.
+    /// Asked of the path, not of a package name: a caller about to write to
+    /// `path` needs to know whether that write would land on something, and
+    /// [`Self::get_package`] cannot answer it, because a name and a path do not
+    /// have to agree about what is stored.
     fn path_is_occupied(&self, path: &Path) -> bool;
 
     /// Read a file a package refers to but does not contain, such as a dotfile

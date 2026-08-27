@@ -119,3 +119,49 @@ fn spec_edit_still_offers_to_create_a_package_with_no_file() {
         .assert()
         .stdout(predicates::str::contains("does not exist"));
 }
+
+// `spec edit` on a name whose path is taken by a differently-capitalized file
+// must refuse before offering to create, or it prompts for permission to do
+// something it will not do -- and on a case-insensitive file system the write
+// would replace that file.
+//
+// Reachable without a terminal precisely because the guard sits ahead of the
+// confirm; the older create-path guards do not have that property.
+#[test]
+fn spec_edit_refuses_to_create_over_a_file_stored_under_another_case() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    let existing = packages.join("Neovim.yml");
+    let yaml = "name: Neovim\nenvironments:\n  test-env:\n    install: \"brew install neovim\"\n";
+    fs::write(&existing, yaml).unwrap();
+
+    // Probe this file system rather than assume: CI is Linux, where the two
+    // names are different files and nothing should be refused.
+    let probe = packages.join("CaseProbe.yml");
+    fs::write(&probe, "probe").unwrap();
+    let case_insensitive = packages.join("caseprobe.yml").exists();
+    fs::remove_file(&probe).unwrap();
+
+    let assertion = sandboxed_command(&temp)
+        .env("EDITOR", "true")
+        .args(["spec", "edit", "neovim"])
+        .assert();
+
+    if case_insensitive {
+        // stderr, not stdout: `print_error` writes there, and asserting the
+        // wrong stream would pass on an empty one.
+        assertion
+            .failure()
+            .stderr(predicates::str::contains("already taken"));
+    } else {
+        // Two genuinely separate files here, so the create is legitimate and
+        // must still be offered.
+        assertion.stdout(predicates::str::contains("does not exist"));
+    }
+
+    assert_eq!(
+        fs::read_to_string(&existing).unwrap(),
+        yaml,
+        "the existing file must not be replaced"
+    );
+}

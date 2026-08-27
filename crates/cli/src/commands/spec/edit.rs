@@ -46,6 +46,25 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
         ));
         pkg
     } else {
+        // Before offering to create, ask the file system whether the path is
+        // free. Names match exactly, so an existing `Neovim.yml` does not answer
+        // to `neovim`, but on a case-insensitive file system writing
+        // `neovim.yml` resolves to it and truncates it (selfie-6cg2).
+        //
+        // Ahead of the prompt on purpose: asking someone to confirm a create
+        // that is about to be refused wastes the answer, and it is the only
+        // position a test without a terminal can reach.
+        let prospective = common::create_new_package(package_name, config);
+        if repo.path_is_occupied(prospective.file_path()) {
+            display.print_error(format!(
+                "Cannot create '{package_name}': {} is already taken. On this file system that \
+                 path may resolve to a file stored under a different capitalization, and creating \
+                 would replace it.",
+                prospective.file_path().display()
+            ));
+            return 1;
+        }
+
         display.print_info(format!("Package '{package_name}' does not exist."));
 
         // Prompt user for confirmation before creating
