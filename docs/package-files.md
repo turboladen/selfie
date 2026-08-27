@@ -42,7 +42,8 @@ environments:
 
 ### `name`
 
-The package name, which must match the filename (without `.yaml` extension).
+The package name, which must match the filename without its extension. Both `.yml` and `.yaml` are
+accepted.
 
 ```yaml
 name: ripgrep # for file ripgrep.yaml
