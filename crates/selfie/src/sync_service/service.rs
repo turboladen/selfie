@@ -4,7 +4,7 @@
 //! Uses [`GitSyncProvider`] for git operations and [`DotfileService`] for
 //! drift checking during `sync status`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
@@ -634,6 +634,84 @@ enum FileChangeKind {
 /// issue is by definition not a defect — a package with a provider-sourced
 /// dotfile always carries one, so counting it here would block `sync push` for
 /// every correct package that uses the feature.
+// Spec files in `dir` that resolve to one package name, grouped under that
+// name. Only groups of two or more are returned.
+//
+// A collision is a property of the directory, not of any one file, so the
+// per-file validation cannot see it: each colliding file is individually valid.
+fn colliding_specs(dir: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        // An unreadable directory is not this check's business to report; the
+        // per-file validation already fails on anything it cannot read.
+        return Vec::new();
+    };
+
+    let names = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| is_yaml_file(Path::new(name)));
+
+    group_name_collisions(names)
+}
+
+// Split from the directory read so it can be tested on any file system. Two
+// extensions of one name exist anywhere, but a host that folds case cannot hold
+// two capitalizations of one name at all, so a test building real files reaches
+// only half of what this groups.
+//
+// Grouping is by folded *stem*, matching how the package repository resolves a
+// name: capitalization and the choice of `.yml` or `.yaml` are both invisible
+// to it, so `Neovim.yml`, `neovim.yml` and `neovim.yaml` are three files
+// claiming one package.
+fn group_name_collisions<I>(names: I) -> Vec<(String, Vec<String>)>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for file_name in names {
+        let stem = file_name
+            .rsplit_once('.')
+            .map_or(file_name.as_str(), |(stem, _)| stem)
+            .to_lowercase();
+        by_name.entry(stem).or_default().push(file_name);
+    }
+
+    by_name
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .map(|(name, mut names)| {
+            names.sort();
+            (name, names)
+        })
+        .collect()
+}
+
+// Both flavors leave the package unresolvable, but only one destroys a file, so
+// the refusals do not say the same thing. Two capitalizations of one file name
+// cannot both survive a checkout on a case-insensitive file system; two
+// extensions can, and telling someone their `.yml`/`.yaml` pair will be
+// discarded sends them looking for a difference that is not there.
+fn name_collision_message(names: &[String]) -> String {
+    let mut folded: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    folded.sort();
+    let capitalization_differs = folded.windows(2).any(|pair| pair[0] == pair[1]);
+
+    let joined = names.join(" and ");
+
+    if capitalization_differs {
+        format!(
+            "{joined} fold to one package name, and checking this out on a case-insensitive \
+             file system discards one of them. Rename all but one before pushing."
+        )
+    } else {
+        format!(
+            "{joined} name the same package under different extensions, so no command can \
+             resolve it. Rename or remove all but one before pushing."
+        )
+    }
+}
+
 fn validate_changed_packages(
     repo_root: &Path,
     changes: &[(PathBuf, FileChangeKind)],
@@ -642,6 +720,40 @@ fn validate_changed_packages(
     use super::port::{PackageValidationFailure, PackageValidationIssue};
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
+
+    // Directories this push touches, each checked once. A collision between two
+    // specs is invisible to the per-file loop below, which sees one file at a
+    // time and finds each of them individually valid.
+    //
+    // The repo root is always scanned, not only when a spec in it changed.
+    // Specs live there, and a push carrying nothing but dotfile sources --
+    // `starship/starship.toml` -- would otherwise propagate a collision that
+    // was already on disk while touching no spec that would reveal it.
+    let mut touched_dirs: BTreeSet<PathBuf> = changes
+        .iter()
+        .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_yaml_file(path))
+        .filter_map(|(path, _)| repo_root.join(path).parent().map(Path::to_path_buf))
+        .collect();
+    touched_dirs.insert(repo_root.to_path_buf());
+
+    // Refusing the push is the only place the damage can still be prevented.
+    // The machine that loses a spec is the one that pulls, and by then the file
+    // is gone with nothing left to warn about.
+    for dir in touched_dirs {
+        for (_name, names) in colliding_specs(&dir) {
+            let relative = dir.strip_prefix(repo_root).unwrap_or(&dir);
+            failures.push(PackageValidationFailure {
+                path: relative.join(&names[0]).display().to_string(),
+                issues: vec![PackageValidationIssue {
+                    level: "ERROR".to_string(),
+                    category: "NameCollision".to_string(),
+                    field: "-".to_string(),
+                    message: name_collision_message(&names),
+                    location: None,
+                }],
+            });
+        }
+    }
 
     for (path, kind) in changes {
         if *kind == FileChangeKind::Deleted || !is_yaml_file(path) {
@@ -919,8 +1031,12 @@ fn generate_batch_message(entries: &[(PathBuf, FileChangeKind)]) -> String {
 
 /// Check if a path is a YAML file.
 fn is_yaml_file(path: &Path) -> bool {
+    // Ignoring case because the package repository does: it resolves a name by
+    // folding both stem and extension, so `Neovim.YML` loads as `neovim`. A
+    // case-sensitive answer here would hide such a file from the collision
+    // check and from validation while it remained a real spec.
     path.extension()
-        .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
 }
 
 /// Check if a YAML spec file (`{name}.yml` or `{name}.yaml`) exists on disk
@@ -1998,5 +2114,249 @@ mod credential_egress_tests {
             rendered.contains("could not read Password"),
             "git's diagnosis must survive redaction, got: {rendered}"
         );
+    }
+}
+
+#[cfg(test)]
+mod name_collision_tests {
+    use super::{colliding_specs, group_name_collisions, name_collision_message};
+
+    // The guard is only worth anything if a push actually refuses. Detection
+    // being correct proves nothing about the call site: deleting it leaves
+    // every other test in this module passing.
+    #[test]
+    fn a_push_touching_a_colliding_directory_is_refused() {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let spec = "name: neovim\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(packages.join("Neovim.yml"), spec).unwrap();
+        std::fs::write(packages.join("neovim.yml"), spec).unwrap();
+
+        if std::fs::read_dir(&packages).unwrap().count() < 2 {
+            eprintln!(
+                "SKIPPED a_push_touching_a_colliding_directory_is_refused: this file \
+                 system folds case, so the pair cannot be created"
+            );
+            return;
+        }
+
+        let changes = vec![(
+            PathBuf::from("packages/neovim.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &changes, "test-env");
+
+        let Err(error) = result else {
+            panic!("a push carrying a case collision must be refused");
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("NameCollision"), "got: {rendered}");
+        assert!(rendered.contains("Neovim.yml"), "got: {rendered}");
+    }
+
+    // Reads a real directory, so it can only run where the colliding pair can
+    // exist. Skipping is loud rather than silent: a quietly-skipped test looks
+    // identical to a passing one.
+    #[test]
+    fn a_real_directory_holding_both_capitalizations_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Neovim.yml"), "name: Neovim").unwrap();
+        std::fs::write(dir.path().join("neovim.yml"), "name: neovim").unwrap();
+
+        let entries = std::fs::read_dir(dir.path()).unwrap().count();
+        if entries < 2 {
+            eprintln!(
+                "SKIPPED a_real_directory_holding_both_capitalizations_is_reported: \
+                 this file system folds case, so the pair cannot be created"
+            );
+            return;
+        }
+
+        let groups = colliding_specs(dir.path());
+        assert_eq!(groups.len(), 1, "got: {groups:?}");
+        assert_eq!(groups[0].1, vec!["Neovim.yml", "neovim.yml"]);
+    }
+
+    fn group(names: &[&str]) -> Vec<(String, Vec<String>)> {
+        group_name_collisions(names.iter().map(|s| (*s).to_string()))
+    }
+
+    // The pair a push must refuse. Both names are reported, so the message can
+    // tell the user which files to rename, and the group is keyed by the
+    // package name they collide on rather than by either file name.
+    #[test]
+    fn names_differing_only_by_case_are_one_group() {
+        assert_eq!(
+            group(&["Neovim.yml", "neovim.yml"]),
+            vec![(
+                "neovim".to_string(),
+                vec!["Neovim.yml".to_string(), "neovim.yml".to_string()]
+            )]
+        );
+    }
+
+    // Distinct packages must not be grouped, or every push on a healthy
+    // repository is refused.
+    #[test]
+    fn distinct_names_do_not_collide() {
+        assert!(group(&["neovim.yml", "vim.yml", "emacs.yml"]).is_empty());
+    }
+
+    // A lone file is not a collision.
+    #[test]
+    fn a_single_file_is_not_a_collision() {
+        assert!(group(&["Neovim.yml"]).is_empty());
+    }
+
+    // The end-to-end half of the extension case, and it runs on every machine:
+    // unlike two capitalizations, `neovim.yml` and `neovim.yaml` coexist on a
+    // case-insensitive file system too. Nothing here needs a skip.
+    #[test]
+    fn a_push_touching_two_extensions_of_one_name_is_refused() {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let spec = "name: neovim\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(root.path().join("neovim.yml"), spec).unwrap();
+        std::fs::write(root.path().join("neovim.yaml"), spec).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            2,
+            "both files must exist for this to test anything"
+        );
+
+        let changes = vec![(PathBuf::from("neovim.yml"), FileChangeKind::Modified)];
+        let result = validate_changed_packages(root.path(), &changes, "test-env");
+
+        let Err(error) = result else {
+            panic!("a push carrying two extensions of one name must be refused");
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("NameCollision"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yaml"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yml"), "got: {rendered}");
+        assert!(rendered.contains("different extensions"), "got: {rendered}");
+    }
+
+    // A package name is the stem, so two extensions claim one name exactly as
+    // two capitalizations do. The loader reports the ambiguity, but only on the
+    // machine that already has both files; push is where it can still be kept
+    // out of everyone else's clone.
+    #[test]
+    fn the_same_stem_under_two_extensions_is_one_package() {
+        let groups = group(&["neovim.yml", "neovim.yaml"]);
+        assert_eq!(groups.len(), 1, "got: {groups:?}");
+        assert_eq!(groups[0].1, vec!["neovim.yaml", "neovim.yml"]);
+    }
+
+    // Every way of spelling one name lands in a single group, so the refusal
+    // names all of them at once rather than surfacing a new pair per push.
+    #[test]
+    fn case_and_extension_differences_group_together() {
+        let groups = group(&["Neovim.yml", "neovim.YAML", "neovim.yml"]);
+        assert_eq!(groups.len(), 1, "got: {groups:?}");
+        assert_eq!(groups[0].1.len(), 3);
+    }
+
+    // Saying a `.yml`/`.yaml` pair will be discarded on checkout is false --
+    // both survive -- and sends the reader hunting for a capitalization
+    // difference that is not there.
+    #[test]
+    fn the_extension_refusal_does_not_blame_capitalization() {
+        let rendered =
+            name_collision_message(&["neovim.yaml".to_string(), "neovim.yml".to_string()]);
+
+        assert!(rendered.contains("different extensions"), "got: {rendered}");
+        assert!(!rendered.contains("case-insensitive"), "got: {rendered}");
+        assert!(!rendered.contains("discards"), "got: {rendered}");
+    }
+
+    // The case refusal keeps the consequence that makes it urgent: a file is
+    // destroyed on checkout, not merely a name left unresolvable.
+    #[test]
+    fn the_case_refusal_names_the_file_that_is_lost() {
+        let rendered =
+            name_collision_message(&["Neovim.yml".to_string(), "neovim.yml".to_string()]);
+
+        assert!(rendered.contains("case-insensitive"), "got: {rendered}");
+        assert!(rendered.contains("discards"), "got: {rendered}");
+    }
+
+    // Folding is Unicode, matching the loader's name comparison.
+    #[test]
+    fn folding_is_not_ascii_only() {
+        assert_eq!(group(&["\u{dc}nicode.yml", "\u{fc}nicode.yml"]).len(), 1);
+    }
+
+    // Three-way collisions report every file, not just the first pair.
+    #[test]
+    fn every_colliding_file_is_reported() {
+        let groups = group(&["NEOVIM.yml", "Neovim.yml", "neovim.yml"]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.len(), 3);
+    }
+
+    // A collision already on disk is not created by the push that carries it,
+    // and a change to a dotfile source touches no spec at all. Scanning only
+    // the directories of changed specs would look everywhere except the one
+    // place specs live.
+    #[test]
+    fn a_push_carrying_only_dotfile_sources_still_sees_a_collision() {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let spec = "name: neovim\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(root.path().join("Neovim.yml"), spec).unwrap();
+        std::fs::write(root.path().join("neovim.yml"), spec).unwrap();
+
+        if std::fs::read_dir(root.path()).unwrap().count() < 2 {
+            eprintln!(
+                "SKIPPED a_push_carrying_only_dotfile_sources_still_sees_a_collision: this \
+                 file system folds case, so the pair cannot be created"
+            );
+            return;
+        }
+
+        std::fs::create_dir_all(root.path().join("starship")).unwrap();
+        std::fs::write(root.path().join("starship/starship.toml"), "x = 1\n").unwrap();
+
+        // Nothing here is a spec, so the per-file loop never reads the root.
+        let changes = vec![(
+            PathBuf::from("starship/starship.toml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &changes, "test-env");
+
+        let Err(error) = result else {
+            panic!("a push carrying a case collision must be refused");
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("NameCollision"), "got: {rendered}");
+        assert!(rendered.contains("Neovim.yml"), "got: {rendered}");
+    }
+
+    // The package repository folds the extension as well as the stem, so
+    // `Neovim.YML` loads as package `neovim`. Everything push does with a spec
+    // is gated on this predicate, so a file it fails to recognize is skipped by
+    // the collision check and by per-file validation while remaining a spec --
+    // which is how an uppercase extension would carry a colliding pair through
+    // a push that reports no problem.
+    #[test]
+    fn an_uppercase_extension_still_names_a_spec() {
+        use super::is_yaml_file;
+        use std::path::Path;
+
+        assert!(is_yaml_file(Path::new("Neovim.YML")));
+        assert!(is_yaml_file(Path::new("neovim.Yaml")));
+        assert!(is_yaml_file(Path::new("neovim.yml")));
+        assert!(is_yaml_file(Path::new("neovim.yaml")));
+        assert!(!is_yaml_file(Path::new("neovim.toml")));
+        assert!(!is_yaml_file(Path::new("neovim")));
     }
 }
