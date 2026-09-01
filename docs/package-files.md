@@ -217,10 +217,17 @@ name with no file behind it is a create; anything else — a file that will not 
 refused to open, two files claiming the same name — would be overwritten, and the guards above
 cannot see it because the package being written was built in memory rather than read from disk.
 
-The same commands also refuse a file selfie could not read back, even though no key is known to be
-wrong with it. Apply is the other way round: it warns and deploys such a file rather than stop over
-a check that did not run, and skips it only when there is nothing left to deploy. A declined write
-costs a retry, while rewriting would delete whatever the file carries that selfie does not model.
+`selfie spec create` and `selfie spec edit` also refuse when the path is already taken, which is not
+the same question as whether the name is. Package names match exactly, so an existing `Neovim.yml`
+does not answer to `neovim` — but on a case-insensitive file system, writing `neovim.yml` resolves
+to that same file. selfie asks the file system rather than comparing names, so on a case-sensitive
+file system the two remain separate packages and both can exist.
+
+The rewriting commands also refuse a file selfie could not read back, even though no key is known to
+be wrong with it. Apply is the other way round: it warns and deploys such a file rather than stop
+over a check that did not run, and skips it only when there is nothing left to deploy. A declined
+write costs a retry, while rewriting would delete whatever the file carries that selfie does not
+model.
 
 `selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
