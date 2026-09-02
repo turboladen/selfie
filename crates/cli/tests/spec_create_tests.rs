@@ -47,6 +47,11 @@ fn spec_create_does_not_replace_a_file_stored_under_another_case() {
     sandboxed_command(&temp)
         .args(["spec", "create", "neovim"])
         .assert()
+        // The status as well as the message: without a terminal the menu that
+        // follows cannot be answered, so the run cancels and exits 0. A check
+        // on the message alone would also pass on a run that printed it and
+        // then failed for an unrelated reason.
+        .success()
         .stdout(predicates::str::contains("already exists"));
 
     // Listing the directory rather than testing `neovim.yml.exists()`, which is

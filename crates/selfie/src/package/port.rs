@@ -297,10 +297,6 @@ pub enum PackageListError {
     PackageDirectoryNotFound(PathBuf),
 }
 
-/// Errors that can occur with specific package operations
-///
-/// Represents detailed failures when working with individual packages,
-/// providing rich context for debugging and user-friendly error messages.
 // File names alone -- the directory is already named earlier in the message, so
 // repeating the full path for every conflict buries the part that differs.
 fn format_conflicting_paths(paths: &[PathBuf]) -> String {
@@ -316,6 +312,10 @@ fn format_conflicting_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
+/// Errors that can occur with specific package operations
+///
+/// Represents detailed failures when working with individual packages,
+/// providing rich context for debugging and user-friendly error messages.
 #[derive(Error, Debug, Clone)]
 pub enum PackageError {
     /// No package with the specified name could be found

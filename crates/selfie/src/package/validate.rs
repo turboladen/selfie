@@ -911,8 +911,12 @@ impl Package {
 
         let file_stem = self.path().file_stem().and_then(|s| s.to_str());
 
+        // Folded, because that is how a name resolves to a file: `Neovim.yml`
+        // answers to `neovim`, so warning about the pair would report a
+        // mismatch selfie itself does not see -- and `sync push` fails on a
+        // warning, so it would refuse a spec nothing is wrong with.
         if let Some(stem) = file_stem
-            && stem != self.name()
+            && stem.to_lowercase() != self.name().to_lowercase()
         {
             issues.push(ValidationIssue::warning(
                 ValidationErrorCategory::InvalidValue,
@@ -2393,5 +2397,21 @@ environments:
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
         assert!(issues[0].message.contains("fisher"));
         assert!(issues[0].message.contains("fish-fisher.yml"));
+    }
+
+    // `Neovim.yml` resolves to the name `neovim`, so the two agree and there is
+    // nothing for a user to fix. A warning here is not merely noise: `sync
+    // push` refuses on any warning, so it would block every push of a spec
+    // whose file is capitalized.
+    #[test]
+    fn a_stem_differing_only_by_case_is_not_a_mismatch() {
+        let package = PackageBuilder::default()
+            .name("neovim")
+            .environment("test-env", |b| b.install("brew install neovim"))
+            .path(PathBuf::from("/packages/Neovim.yml"))
+            .build();
+
+        let issues = package.validate_filename_consistency();
+        assert!(issues.is_empty(), "got: {issues:?}");
     }
 }

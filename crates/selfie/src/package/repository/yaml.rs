@@ -47,15 +47,16 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             .list_directory(dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+        // The same question `filter_matching_packages` and the sync guard ask,
+        // so enumeration cannot admit a file name resolution rejects or skip
+        // one it accepts.
         let mut yaml_files: Vec<PathBuf> = entries
             .into_iter()
             .filter(|path| {
-                if let Some(ext) = path.extension() {
-                    let ext_str = ext.to_string_lossy().to_lowercase();
-                    ext_str == "yaml" || ext_str == "yml"
-                } else {
-                    false
-                }
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::package::spec_name_from_file_name)
+                    .is_some()
             })
             .collect();
 
@@ -78,22 +79,27 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // diagnostic. Folding the two to one name turns that into an ambiguity
         // the caller is told to resolve.
         //
-        // `to_lowercase` rather than `eq_ignore_ascii_case`: a package name may
-        // hold any Unicode alphanumeric, so `Ünicode` and `ünicode` have to fold
-        // together as well.
+        // What counts as a match is `spec_name_from_file_name`, shared with the
+        // sync guard so the two cannot disagree about which files are one
+        // package.
         let wanted = name.to_lowercase();
-        entries
+        let mut matches: Vec<PathBuf> = entries
             .into_iter()
             .filter(|path| {
                 path.file_name()
                     .and_then(|n| n.to_str())
-                    .and_then(|file_name| file_name.rsplit_once('.'))
-                    .is_some_and(|(stem, extension)| {
-                        let extension = extension.to_lowercase();
-                        (extension == "yml" || extension == "yaml") && stem.to_lowercase() == wanted
-                    })
+                    .and_then(crate::package::spec_name_from_file_name)
+                    .is_some_and(|spec_name| spec_name == wanted)
             })
-            .collect()
+            .collect();
+
+        // Sorted because more than one match is rendered into the ambiguity
+        // error, and `list_directory` yields file system order -- insertion
+        // order on APFS, hash order on ext4. Unsorted, the same broken
+        // directory names its files in a different order on each machine and
+        // sometimes between runs on one.
+        matches.sort();
+        matches
     }
 
     /// List directory entries and find matching package files, also reporting how many
@@ -221,10 +227,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         self.fs.read_file(&resolved)
     }
 
-    // Name matching here is exact, so an existing `Neovim.yml` does not match
-    // the name `neovim` -- but on a case-insensitive file system, opening
-    // `neovim.yml` resolves to that same file and truncates it. Only the file
-    // system knows which of the two it is, so ask it rather than compare names.
+    // A path can be taken by something that answers to no package name at all:
+    // a directory, a `.txt` file, or a spec the name folding does not reach.
+    // Only the file system knows, so ask it rather than compare names.
     fn path_is_occupied(&self, path: &Path) -> bool {
         self.fs.path_exists(path)
     }
@@ -490,6 +495,24 @@ mod tests {
     mod case_insensitive_names {
         use super::super::YamlPackageRepository;
         use std::path::PathBuf;
+
+        // More than one match is rendered into the ambiguity error, and
+        // `list_directory` yields file system order -- insertion order on
+        // APFS, hash order on ext4. Unsorted, the same broken directory names
+        // its files differently on each machine, and the user comparing two
+        // machines' output cannot tell that from a real difference.
+        #[test]
+        fn matches_come_back_sorted_whatever_order_the_directory_gave() {
+            assert_eq!(
+                matches("neovim", &["neovim.yml", "Neovim.yml", "neovim.yaml"]),
+                vec!["Neovim.yml", "neovim.yaml", "neovim.yml"]
+            );
+            // The same set, handed over in a different order.
+            assert_eq!(
+                matches("neovim", &["neovim.yaml", "neovim.yml", "Neovim.yml"]),
+                vec!["Neovim.yml", "neovim.yaml", "neovim.yml"]
+            );
+        }
 
         fn matches(name: &str, files: &[&str]) -> Vec<String> {
             let entries = files.iter().map(PathBuf::from).collect();

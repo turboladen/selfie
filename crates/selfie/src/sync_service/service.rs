@@ -262,7 +262,12 @@ where
 
         // Validate changed YAML files before proposing commits.
         let environment = self.config.environment();
-        validate_changed_packages(&repo_info.root, &all_changed, environment)?;
+        validate_changed_packages(
+            &repo_info.root,
+            self.config.package_directory(),
+            &all_changed,
+            environment,
+        )?;
 
         if options.batch {
             let files: Vec<PathBuf> = all_changed.iter().map(|(p, _)| p.clone()).collect();
@@ -281,7 +286,14 @@ where
             });
         }
 
-        let (commits, warnings) = group_changes_by_package(all_changed, options, &repo_info.root);
+        // From the package directory, not the repo root. The repository loads
+        // specs from there, and the repo is discovered by walking up from it,
+        // so the two are the same directory only in the flat layout. Built from
+        // the root, this set is empty whenever specs live in a subdirectory,
+        // and every dotfile source is reported ungrouped instead of committed
+        // with its package.
+        let spec_names = spec_names_in(self.config.package_directory());
+        let (commits, warnings) = group_changes_by_package(all_changed, options, &spec_names);
 
         Ok(PrepareResult {
             pending_commits: commits,
@@ -571,10 +583,13 @@ where
                         }
                     };
 
-                    let (packages_updated, packages_added, packages_removed) =
-                        categorize_pull_changes(&changed_files, &repo_info.root);
+                    // One read of the package directory for both consumers.
+                    let spec_names = spec_names_in(config.package_directory());
 
-                    if has_dotfile_changes(&changed_files, &repo_info.root) {
+                    let (packages_updated, packages_added, packages_removed) =
+                        categorize_pull_changes(&changed_files, &spec_names);
+
+                    if has_dotfile_changes(&changed_files, &spec_names) {
                         sender
                             .send_log(
                                 crate::package::event::LogLevel::Warning,
@@ -624,16 +639,6 @@ enum FileChangeKind {
     Deleted,
 }
 
-/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
-/// if any have errors.
-///
-/// Only non-deleted YAML files are validated — deleted files are obviously not
-/// parseable, and non-YAML files (dotfile sources) don't have a schema to validate.
-///
-/// Informational notices are excluded. This is a gate on pushing, and an `Info`
-/// issue is by definition not a defect — a package with a provider-sourced
-/// dotfile always carries one, so counting it here would block `sync push` for
-/// every correct package that uses the feature.
 // Spec files in `dir` that resolve to one package name, grouped under that
 // name. Only groups of two or more are returned.
 //
@@ -649,7 +654,7 @@ fn colliding_specs(dir: &Path) -> Vec<(String, Vec<String>)> {
     let names = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_yaml_file(Path::new(name)));
+        .filter(|name| is_spec_file(Path::new(name)));
 
     group_name_collisions(names)
 }
@@ -670,11 +675,10 @@ where
     let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for file_name in names {
-        let stem = file_name
-            .rsplit_once('.')
-            .map_or(file_name.as_str(), |(stem, _)| stem)
-            .to_lowercase();
-        by_name.entry(stem).or_default().push(file_name);
+        let Some(name) = crate::package::spec_name_from_file_name(&file_name) else {
+            continue;
+        };
+        by_name.entry(name).or_default().push(file_name);
     }
 
     by_name
@@ -712,8 +716,20 @@ fn name_collision_message(names: &[String]) -> String {
     }
 }
 
+/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
+/// if any have errors.
+///
+/// Only non-deleted specs in `package_dir` are validated — deleted files are
+/// obviously not parseable, and neither a dotfile source nor YAML belonging to
+/// some other tool has this schema to validate against.
+///
+/// Informational notices are excluded. This is a gate on pushing, and an `Info`
+/// issue is by definition not a defect — a package with a provider-sourced
+/// dotfile always carries one, so counting it here would block `sync push` for
+/// every correct package that uses the feature.
 fn validate_changed_packages(
     repo_root: &Path,
+    package_dir: &Path,
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
@@ -721,42 +737,57 @@ fn validate_changed_packages(
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
-    // Directories this push touches, each checked once. A collision between two
-    // specs is invisible to the per-file loop below, which sees one file at a
-    // time and finds each of them individually valid.
-    //
-    // The repo root is always scanned, not only when a spec in it changed.
-    // Specs live there, and a push carrying nothing but dotfile sources --
-    // `starship/starship.toml` -- would otherwise propagate a collision that
-    // was already on disk while touching no spec that would reveal it.
-    let mut touched_dirs: BTreeSet<PathBuf> = changes
-        .iter()
-        .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_yaml_file(path))
-        .filter_map(|(path, _)| repo_root.join(path).parent().map(Path::to_path_buf))
-        .collect();
-    touched_dirs.insert(repo_root.to_path_buf());
+    // Both spellings resolved before either is compared. The two arrive by
+    // different routes -- the git adapter canonicalizes the root it discovers,
+    // while a package directory named with `--package-directory` is stored
+    // exactly as typed -- so one symlinked path, or a `/tmp` that resolves to
+    // `/private/tmp`, makes the same directory compare unequal to itself. Every
+    // changed file then fails the test below, and the per-file gate, credential
+    // egress included, stops running with nothing said.
+    let resolve = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let repo_root = resolve(repo_root);
+    let package_dir = resolve(package_dir);
 
+    // A spec is a direct child of the package directory, which is where the
+    // repository loads them from and how deep it looks. Anything else ending in
+    // `.yml` belongs to someone else -- a CI workflow, a linter config, a
+    // Compose file -- and parsing one as a package refuses the push over fields
+    // it was never going to have.
+    let names_a_spec = |path: &Path| {
+        is_spec_file(path) && repo_root.join(path).parent() == Some(package_dir.as_path())
+    };
+
+    // The package directory is scanned whether or not a spec in it changed. A
+    // collision is a property of the directory, not of any one file, so the
+    // per-file loop below cannot see it: each colliding file is individually
+    // valid, and a push carrying nothing but dotfile sources touches none of
+    // them at all.
+    //
+    // Only that directory. The repo root is a different one whenever the
+    // package directory sits inside a larger dotfiles repository, and scanning
+    // it would report two unrelated YAML files there as one package.
+    //
     // Refusing the push is the only place the damage can still be prevented.
     // The machine that loses a spec is the one that pulls, and by then the file
     // is gone with nothing left to warn about.
-    for dir in touched_dirs {
-        for (_name, names) in colliding_specs(&dir) {
-            let relative = dir.strip_prefix(repo_root).unwrap_or(&dir);
-            failures.push(PackageValidationFailure {
-                path: relative.join(&names[0]).display().to_string(),
-                issues: vec![PackageValidationIssue {
-                    level: "ERROR".to_string(),
-                    category: "NameCollision".to_string(),
-                    field: "-".to_string(),
-                    message: name_collision_message(&names),
-                    location: None,
-                }],
-            });
-        }
+    for (_name, names) in colliding_specs(&package_dir) {
+        let relative = package_dir
+            .strip_prefix(&repo_root)
+            .unwrap_or(package_dir.as_path());
+        failures.push(PackageValidationFailure {
+            path: relative.join(&names[0]).display().to_string(),
+            issues: vec![PackageValidationIssue {
+                level: "ERROR".to_string(),
+                category: "NameCollision".to_string(),
+                field: "-".to_string(),
+                message: name_collision_message(&names),
+                location: None,
+            }],
+        });
     }
 
     for (path, kind) in changes {
-        if *kind == FileChangeKind::Deleted || !is_yaml_file(path) {
+        if *kind == FileChangeKind::Deleted || !names_a_spec(path) {
             continue;
         }
 
@@ -894,13 +925,13 @@ fn collect_changed_files(
 fn group_changes_by_package(
     changes: Vec<(PathBuf, FileChangeKind)>,
     options: &PushOptions,
-    repo_root: &Path,
+    spec_names: &BTreeSet<String>,
 ) -> (Vec<PendingCommit>, Vec<String>) {
     let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
     let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
 
     for (path, kind) in &changes {
-        match infer_package_name(path, repo_root) {
+        match infer_package_name(path, spec_names) {
             Some(name) => groups.entry(name).or_default().push((path.clone(), *kind)),
             None => ungrouped.push((path.clone(), *kind)),
         }
@@ -943,64 +974,85 @@ fn group_changes_by_package(
     (commits, warnings)
 }
 
-/// Check whether any changed files are dotfile sources (non-YAML files
-/// inside a package subdirectory, e.g., `starship/starship.toml`).
+/// Check whether any changed file is a dotfile source — a file inside a
+/// subdirectory named by a spec, e.g. `starship/starship.toml`.
 ///
-/// Root-level non-YAML files (README.md, .gitignore) are **not** considered
-/// dotfile sources. A subdirectory file is only considered a dotfile source if
-/// a YAML spec with the same name as its parent directory exists in the repo
-/// (e.g., `starship/starship.toml` is a dotfile source if `starship.yml` exists
-/// on disk, even if `starship.yml` itself didn't change).
-fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile], repo_root: &Path) -> bool {
-    changed_files.iter().any(|f| {
-        !is_yaml_file(&f.path)
-            && f.path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|dir| has_spec_on_disk(repo_root, &dir.to_string_lossy()))
-    })
+/// A file at the top of the repository (README.md, .gitignore) is not one, and
+/// neither is a file whose parent directory answers to no package name. The
+/// spec itself need not have changed: `starship/starship.toml` counts whenever
+/// `starship.yml` is on disk.
+///
+/// Its own extension decides nothing. A YAML dotfile source is common
+/// (`lazygit/config.yml`), and skipping it would drop the notice telling the
+/// user their deployed copy is now stale.
+fn has_dotfile_changes(
+    changed_files: &[crate::git::ChangedFile],
+    spec_names: &BTreeSet<String>,
+) -> bool {
+    changed_files
+        .iter()
+        .any(|f| dotfile_source_package(&f.path, spec_names).is_some())
 }
 
-/// Infer the package name from a file path, using the repo filesystem.
+/// Infer the folded package name a changed file belongs to.
 ///
-/// Rules:
-/// - YAML files (`*.yml`, `*.yaml`) → package name is the file stem
-///   (e.g., `starship.yml` → `starship`)
-/// - Non-YAML files in a subdirectory whose name matches a YAML spec on disk
-///   → package name is the parent directory name
-///   (e.g., `starship/starship.toml` → `starship` if `starship.yml` exists
-///   in the repo, even if it wasn't modified)
+/// Rules, applied in this order:
+/// - A file in a subdirectory named by a spec belongs to that package
+///   (`starship/starship.toml` → `starship` when `starship.yml` is on disk,
+///   whether or not the spec itself changed)
+/// - Otherwise a `*.yml` or `*.yaml` file is a spec and names its own package
+///   (`Starship.YML` → `starship`)
 /// - Everything else → `None` (ungrouped)
-fn infer_package_name(path: &Path, repo_root: &Path) -> Option<String> {
-    // YAML files → package name is the file stem
-    if is_yaml_file(path) {
-        return path.file_stem().map(|s| s.to_string_lossy().to_string());
+fn infer_package_name(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
+    // The parent directory is asked first, because a dotfile source is not
+    // always a `.toml`. `lazygit/config.yml` is one, and reading it as the spec
+    // of a package called `config` both invents that package and splits the
+    // file out of the commit its own package gets.
+    if let Some(name) = dotfile_source_package(path, spec_names) {
+        return Some(name);
     }
 
-    // Non-YAML files → use parent directory name if a matching YAML spec
-    // exists on disk (prevents `docs/sync.md` from being grouped as "docs").
-    let dir_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().to_string())?;
+    // Folded, because this is the key changes are grouped under and identity is
+    // folded everywhere else. Returning the spelling on disk splits one package
+    // into two commits as soon as two of its files disagree about case --
+    // `Neovim.yml` grouping as `Neovim` while `neovim/starship.toml` groups as
+    // `neovim`.
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .and_then(crate::package::spec_name_from_file_name)
+}
 
-    if has_spec_on_disk(repo_root, &dir_name) {
-        Some(dir_name)
-    } else {
-        None
-    }
+/// The package `path` belongs to as a dotfile source: the one its parent
+/// directory names, if a spec answers to that name.
+///
+/// The parent directory has to name a spec, or `docs/sync.md` would claim a
+/// package called `docs`.
+fn dotfile_source_package(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|dir| spec_named(spec_names, &dir.to_string_lossy()))
 }
 
 /// Generate a conventional commit message for a package's changes.
 fn generate_commit_message(name: &str, entries: &[(PathBuf, FileChangeKind)]) -> String {
-    let has_yaml_changes = entries.iter().any(|(p, _)| is_yaml_file(p));
-    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_yaml_file(p));
+    // The group's own spec, not merely any YAML in the group: a dotfile source
+    // can be YAML too, and `lazygit/config.yml` alone would otherwise be
+    // announced as adding lazygit's package spec.
+    let is_the_spec = |path: &Path| {
+        path.file_name()
+            .and_then(|file_name| file_name.to_str())
+            .and_then(crate::package::spec_name_from_file_name)
+            .is_some_and(|spec_name| spec_name == name)
+    };
+
+    let has_yaml_changes = entries.iter().any(|(p, _)| is_the_spec(p));
+    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_the_spec(p));
     let has_new_yaml = entries
         .iter()
-        .any(|(p, k)| is_yaml_file(p) && *k == FileChangeKind::Added);
+        .any(|(p, k)| is_the_spec(p) && *k == FileChangeKind::Added);
     let has_deleted_yaml = entries
         .iter()
-        .any(|(p, k)| is_yaml_file(p) && *k == FileChangeKind::Deleted);
+        .any(|(p, k)| is_the_spec(p) && *k == FileChangeKind::Deleted);
 
     if has_deleted_yaml && !has_non_yaml_changes {
         return format!("chore({name}): remove package spec");
@@ -1029,21 +1081,58 @@ fn generate_batch_message(entries: &[(PathBuf, FileChangeKind)]) -> String {
     format!("chore: update {count} {label}")
 }
 
-/// Check if a path is a YAML file.
-fn is_yaml_file(path: &Path) -> bool {
-    // Ignoring case because the package repository does: it resolves a name by
-    // folding both stem and extension, so `Neovim.YML` loads as `neovim`. A
-    // case-sensitive answer here would hide such a file from the collision
-    // check and from validation while it remained a real spec.
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
+/// Check whether a path names a package spec.
+///
+/// Not the same question as whether it is YAML: `.yml` is a hidden file with
+/// no stem, so it names no package and this returns false for it.
+fn is_spec_file(path: &Path) -> bool {
+    // Answered by the same function the package repository resolves names
+    // with. When these disagreed, a `Neovim.YML` the loader read as a spec was
+    // invisible here, so the push guard and per-file validation both skipped it.
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::package::spec_name_from_file_name)
+        .is_some()
 }
 
-/// Check if a YAML spec file (`{name}.yml` or `{name}.yaml`) exists on disk
-/// in the repo root. Used to associate subdirectory files with their package.
-fn has_spec_on_disk(repo_root: &Path, name: &str) -> bool {
-    repo_root.join(format!("{name}.yml")).exists()
-        || repo_root.join(format!("{name}.yaml")).exists()
+/// The folded names of every spec sitting directly in `spec_dir`.
+///
+/// That is the package directory, not the repo root: the repository loads specs
+/// from there, and the repo is discovered by walking up from it. Callers pass
+/// the configured package directory.
+///
+/// Built once per operation. Grouping consults it for each changed file, so
+/// reading the directory inside that loop would cost one `read_dir` per change.
+fn spec_names_in(spec_dir: &Path) -> BTreeSet<String> {
+    // Reading the directory rather than probing `{name}.yml` and `{name}.yaml`.
+    // Those two paths answer for one capitalization only, so a spec stored as
+    // `Starship.YML` left `starship/starship.toml` unmatched on a
+    // case-sensitive file system and matched on a case-insensitive one -- the
+    // per-machine split that folding names exists to remove.
+    let Ok(entries) = std::fs::read_dir(spec_dir) else {
+        return BTreeSet::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name();
+            file_name
+                .to_str()
+                .and_then(crate::package::spec_name_from_file_name)
+        })
+        .collect()
+}
+
+/// The folded form of `name` if a spec answers to it.
+///
+/// Returns the folded name rather than a `bool` so a caller that needs it --
+/// grouping keys on it -- does not fold a second time.
+fn spec_named(spec_names: &BTreeSet<String>, name: &str) -> Option<String> {
+    // Folded here rather than at each call site, so a caller cannot compare a
+    // raw directory name against a set that holds only folded ones.
+    let folded = name.to_lowercase();
+    spec_names.contains(&folded).then_some(folded)
 }
 
 /// Extract the package name from a conventional commit message.
@@ -1111,7 +1200,7 @@ async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Opti
 /// Categorize changed files from a pull into updated, added, and removed package names.
 fn categorize_pull_changes(
     changed_files: &[crate::git::ChangedFile],
-    repo_root: &Path,
+    spec_names: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut updated = Vec::new();
     let mut added = Vec::new();
@@ -1122,7 +1211,7 @@ fn categorize_pull_changes(
     let mut seen_removed = std::collections::HashSet::new();
 
     for file in changed_files {
-        if let Some(name) = infer_package_name(&file.path, repo_root) {
+        if let Some(name) = infer_package_name(&file.path, spec_names) {
             match file.change_type {
                 ChangeType::Added => {
                     if seen_added.insert(name.clone()) {
@@ -1162,15 +1251,66 @@ mod tests {
         (temp, root)
     }
 
+    // The name is the grouping key, so an unfolded one splits a single package
+    // across two commits as soon as two of its files disagree about case. Both
+    // of these belong to the package `neovim` and have to report it identically.
+    #[test]
+    fn a_package_groups_under_one_name_however_its_files_are_spelled() {
+        let (_temp, root) = repo_with_specs(&["Neovim.YML"]);
+        let spec_names = spec_names_in(&root);
+
+        assert_eq!(
+            infer_package_name(Path::new("Neovim.YML"), &spec_names),
+            Some("neovim".to_string()),
+            "the spec itself"
+        );
+        assert_eq!(
+            infer_package_name(Path::new("Neovim/init.lua"), &spec_names),
+            Some("neovim".to_string()),
+            "a dotfile source beside it"
+        );
+    }
+
+    // A dotfile source is not always a `.toml`: lazygit, alacritty and yamllint
+    // all keep theirs in YAML. Read as a spec, the file both invents a package
+    // called `config` and leaves lazygit's own commit without it, and the pull
+    // summary drops the notice that a deployed copy has gone stale.
+    #[test]
+    fn a_yaml_dotfile_source_belongs_to_its_package() {
+        let (_temp, root) = repo_with_specs(&["lazygit.yml"]);
+        let spec_names = spec_names_in(&root);
+
+        assert_eq!(
+            infer_package_name(Path::new("lazygit/config.yml"), &spec_names),
+            Some("lazygit".to_string())
+        );
+
+        let files = [crate::git::ChangedFile {
+            path: PathBuf::from("lazygit/config.yml"),
+            change_type: ChangeType::Modified,
+        }];
+        assert!(has_dotfile_changes(&files, &spec_names));
+
+        // And the commit says what changed, rather than announcing a spec.
+        let entries = vec![(
+            PathBuf::from("lazygit/config.yml"),
+            FileChangeKind::Modified,
+        )];
+        assert_eq!(
+            generate_commit_message("lazygit", &entries),
+            "chore(lazygit): update dotfile"
+        );
+    }
+
     #[test]
     fn infer_from_yaml_file_stem() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("starship.yml"), temp.path()),
+            infer_package_name(Path::new("starship.yml"), &spec_names_in(temp.path())),
             Some("starship".to_string())
         );
         assert_eq!(
-            infer_package_name(Path::new("fnm.yaml"), temp.path()),
+            infer_package_name(Path::new("fnm.yaml"), &spec_names_in(temp.path())),
             Some("fnm".to_string())
         );
     }
@@ -1179,7 +1319,10 @@ mod tests {
     fn infer_from_nested_yaml() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("packages/starship.yml"), temp.path()),
+            infer_package_name(
+                Path::new("packages/starship.yml"),
+                &spec_names_in(temp.path())
+            ),
             Some("starship".to_string())
         );
     }
@@ -1189,11 +1332,11 @@ mod tests {
         let (_temp, root) = repo_with_specs(&["starship.yml", "fnm.yml"]);
 
         assert_eq!(
-            infer_package_name(Path::new("starship/starship.toml"), &root),
+            infer_package_name(Path::new("starship/starship.toml"), &spec_names_in(&root)),
             Some("starship".to_string())
         );
         assert_eq!(
-            infer_package_name(Path::new("fnm/init.fish"), &root),
+            infer_package_name(Path::new("fnm/init.fish"), &spec_names_in(&root)),
             Some("fnm".to_string())
         );
     }
@@ -1204,7 +1347,7 @@ mod tests {
         // should be grouped under the package (spec exists on disk).
         let (_temp, root) = repo_with_specs(&["starship.yml"]);
         assert_eq!(
-            infer_package_name(Path::new("starship/starship.toml"), &root),
+            infer_package_name(Path::new("starship/starship.toml"), &spec_names_in(&root)),
             Some("starship".to_string())
         );
     }
@@ -1214,7 +1357,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         // No docs.yml on disk → should NOT be grouped
         assert_eq!(
-            infer_package_name(Path::new("docs/sync.md"), temp.path()),
+            infer_package_name(Path::new("docs/sync.md"), &spec_names_in(temp.path())),
             None
         );
     }
@@ -1223,11 +1366,11 @@ mod tests {
     fn infer_returns_none_for_root_non_yaml() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("README.md"), temp.path()),
+            infer_package_name(Path::new("README.md"), &spec_names_in(temp.path())),
             None
         );
         assert_eq!(
-            infer_package_name(Path::new(".gitignore"), temp.path()),
+            infer_package_name(Path::new(".gitignore"), &spec_names_in(temp.path())),
             None
         );
     }
@@ -1349,7 +1492,8 @@ mod tests {
         ];
 
         let temp = tempfile::TempDir::new().unwrap();
-        let (updated, added, removed) = categorize_pull_changes(&changed, temp.path());
+        let (updated, added, removed) =
+            categorize_pull_changes(&changed, &spec_names_in(temp.path()));
         assert_eq!(updated, vec!["starship"]);
         assert_eq!(added, vec!["fnm"]);
         assert_eq!(removed, vec!["old-tool"]);
@@ -1371,7 +1515,7 @@ mod tests {
             },
         ];
 
-        let (updated, added, removed) = categorize_pull_changes(&changed, &root);
+        let (updated, added, removed) = categorize_pull_changes(&changed, &spec_names_in(&root));
         assert_eq!(updated, vec!["starship"]);
         assert!(added.is_empty());
         assert!(removed.is_empty());
@@ -1450,7 +1594,8 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].name, "fnm");
@@ -1467,7 +1612,8 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(warnings.len(), 1);
@@ -1486,7 +1632,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[1].name, "housekeeping");
@@ -1505,7 +1652,7 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, _) = group_changes_by_package(changes, &options, &root);
+        let (commits, _) = group_changes_by_package(changes, &options, &spec_names_in(&root));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].name, "starship");
@@ -1526,7 +1673,8 @@ mod tests {
         )];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, &root);
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(&root));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].name, "starship");
@@ -1544,7 +1692,7 @@ mod tests {
             path: PathBuf::from("starship/starship.toml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(has_dotfile_changes(&files, &root));
+        assert!(has_dotfile_changes(&files, &spec_names_in(&root)));
     }
 
     #[test]
@@ -1557,7 +1705,7 @@ mod tests {
             path: PathBuf::from("starship/starship.toml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(has_dotfile_changes(&files, &root));
+        assert!(has_dotfile_changes(&files, &spec_names_in(&root)));
     }
 
     #[test]
@@ -1569,7 +1717,7 @@ mod tests {
             path: PathBuf::from("docs/sync.md"),
             change_type: ChangeType::Modified,
         }];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     #[test]
@@ -1587,7 +1735,7 @@ mod tests {
                 change_type: ChangeType::Modified,
             },
         ];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     #[test]
@@ -1599,7 +1747,7 @@ mod tests {
             path: PathBuf::from("starship.yml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     // ─── collect_drift_summary tests ──────────────────────────────────────────
@@ -1687,8 +1835,12 @@ mod push_validation_tests {
              - command: op read op://Private/token\n    target: ~/.creds\n",
         );
 
-        let result =
-            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+        let result = validate_changed_packages(
+            temp.path(),
+            temp.path(),
+            &[(relative, FileChangeKind::Modified)],
+            "test",
+        );
 
         assert!(
             result.is_ok(),
@@ -1707,8 +1859,12 @@ mod push_validation_tests {
              - source: a.tpl\n    command: op read x\n    target: ~/.creds\n",
         );
 
-        let result =
-            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+        let result = validate_changed_packages(
+            temp.path(),
+            temp.path(),
+            &[(relative, FileChangeKind::Modified)],
+            "test",
+        );
 
         assert!(
             matches!(result, Err(SyncError::ValidationFailed { .. })),
@@ -1830,7 +1986,7 @@ mod credential_egress_tests {
 
     // Never called: neither `prepare_push` nor `execute_push` touches it.
     #[derive(Clone)]
-    struct UnusedDotfileService;
+    pub(super) struct UnusedDotfileService;
 
     impl DotfileService for UnusedDotfileService {
         async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
@@ -1861,7 +2017,7 @@ mod credential_egress_tests {
     // A privilege port reporting a fixed answer, so these tests do not depend on
     // how the suite was invoked.
     #[derive(Clone, Copy, Debug)]
-    struct RunningAs(Elevation);
+    pub(super) struct RunningAs(pub(super) Elevation);
 
     impl Privilege for RunningAs {
         fn elevation(&self) -> Elevation {
@@ -2119,6 +2275,127 @@ mod credential_egress_tests {
 
 #[cfg(test)]
 mod name_collision_tests {
+    use crate::git::{
+        CommitId, FastForwardResult, GitSyncError, GitSyncProvider, RepoInfo, RepoStatus,
+    };
+    use std::path::{Path, PathBuf};
+
+    // The repo is discovered by walking up from the package directory, so a
+    // package directory below the repo root leaves the two distinct. Nothing
+    // else in this file models that: the other git fake returns the path it was
+    // handed, which makes root and package directory the same and hides every
+    // bug about confusing them.
+    #[derive(Clone)]
+    struct GitWithRepoAboveThePackageDir {
+        status: RepoStatus,
+    }
+
+    impl GitSyncProvider for GitWithRepoAboveThePackageDir {
+        fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
+            Ok(RepoInfo {
+                root: path
+                    .parent()
+                    .expect("the fixture nests the package directory")
+                    .to_path_buf(),
+                branch: Some("main".to_string()),
+                remote_name: Some("origin".to_string()),
+            })
+        }
+
+        fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+            Ok(self.status.clone())
+        }
+
+        fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push stages nothing")
+        }
+
+        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            unreachable!("preparing a push commits nothing")
+        }
+
+        fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push pushes nothing")
+        }
+
+        fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push fetches nothing")
+        }
+
+        fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+            unreachable!("preparing a push merges nothing")
+        }
+
+        fn diff_commits(
+            &self,
+            _: &Path,
+            _: &CommitId,
+            _: &CommitId,
+        ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+            unreachable!("only pull diffs commits")
+        }
+    }
+
+    // A dotfile source belongs to the package its parent directory names, and
+    // the spec that answers to that name lives in the package directory. Built
+    // from the repo root instead, the set is empty whenever the package
+    // directory is a subdirectory, so this file is reported ungrouped and left
+    // out of the push -- the user's dotfile edit silently does not sync.
+    #[tokio::test]
+    async fn a_dotfile_source_is_grouped_when_the_package_dir_is_below_the_repo_root() {
+        use crate::sync_service::port::{PushOptions, SyncService};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(packages.join("starship")).unwrap();
+        std::fs::write(
+            packages.join("starship.yml"),
+            "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(packages.join("starship/starship.toml"), "x = 1\n").unwrap();
+
+        let service = super::SyncServiceImpl::new(
+            GitWithRepoAboveThePackageDir {
+                status: RepoStatus {
+                    modified: vec![PathBuf::from("packages/starship/starship.toml")],
+                    staged: vec![],
+                    untracked: vec![],
+                    deleted: vec![],
+                    ahead: 0,
+                    behind: 0,
+                },
+            },
+            crate::sync_service::service::credential_egress_tests::UnusedDotfileService,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(&packages)
+                .build(),
+            super::SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let prepared = service
+            .prepare_push(&PushOptions::default())
+            .await
+            .expect("the fixture is valid, so preparing must succeed");
+
+        assert!(
+            prepared.warnings.is_empty(),
+            "the file belongs to `starship`, so nothing is ungrouped: {:?}",
+            prepared.warnings
+        );
+        let names: Vec<&str> = prepared
+            .pending_commits
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["starship"], "got: {names:?}");
+    }
+
     use super::{colliding_specs, group_name_collisions, name_collision_message};
 
     // The guard is only worth anything if a push actually refuses. Detection
@@ -2148,7 +2425,9 @@ mod name_collision_tests {
             PathBuf::from("packages/neovim.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        // `packages`, not the root: that is where this fixture puts the specs,
+        // and the scan looks where the repository loads them from.
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -2212,6 +2491,149 @@ mod name_collision_tests {
         assert!(group(&["Neovim.yml"]).is_empty());
     }
 
+    // The repo root arrives canonicalized from the git adapter, while a package
+    // directory named on the command line arrives exactly as typed. Comparing
+    // the two verbatim decides that no changed file is a spec, and the whole
+    // per-file gate -- the credential-egress refusal among it -- passes a push
+    // it must refuse.
+    //
+    // A symlink is how the two spellings are made to differ on demand; a
+    // `--package-directory /tmp/...` on a host where `/tmp` resolves elsewhere
+    // reaches the same state without one.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_directory_named_through_a_symlink_is_still_validated() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("repo");
+        std::fs::create_dir_all(real_root.join("packages")).unwrap();
+        std::fs::write(
+            real_root.join("packages/neovim.yml"),
+            "name: neovim\nenvironments: {}\n",
+        )
+        .unwrap();
+
+        let linked_root = temp.path().join("link");
+        std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
+
+        let repo_root = dunce::canonicalize(&real_root).unwrap();
+        let changes = vec![(
+            PathBuf::from("packages/neovim.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result =
+            validate_changed_packages(&repo_root, &linked_root.join("packages"), &changes, "test");
+
+        let Err(error) = result else {
+            panic!("a spec defining no environment must be refused however its directory is named");
+        };
+        assert!(
+            format!("{error:?}").contains("neovim.yml"),
+            "got: {error:?}"
+        );
+    }
+
+    // A sync repository holds more YAML than selfie's. Treating all of it as
+    // specs parses a CI workflow as a package and refuses the push over fields
+    // it was never going to have -- `unknown field 'jobs'`, `unknown field
+    // 'on'`, `at least one environment must be defined`. The repository reads
+    // specs from the package directory and looks no deeper, so that is the rule
+    // the push gate has to use as well.
+    //
+    // Needs no particular file system: nothing here depends on how the disk
+    // compares names.
+    #[test]
+    fn yaml_that_is_not_a_spec_does_not_fail_a_push() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            root.path().join(".github/workflows/ci.yml"),
+            "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        )
+        .unwrap();
+
+        let changes = vec![(
+            PathBuf::from(".github/workflows/ci.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        assert!(
+            result.is_ok(),
+            "a workflow file is not a package spec: {result:?}"
+        );
+    }
+
+    // The other half of the same rule: a `.yml` sitting in a subdirectory of
+    // the package directory is not a spec either, because the repository lists
+    // that directory without descending into it.
+    #[test]
+    fn yaml_below_the_package_directory_is_not_a_spec() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(packages.join("starship")).unwrap();
+        std::fs::write(
+            packages.join("starship/config.yml"),
+            "format: \"$all\"\nnot_a_selfie_spec: true\n",
+        )
+        .unwrap();
+
+        let changes = vec![(
+            PathBuf::from("packages/starship/config.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        assert!(
+            result.is_ok(),
+            "a dotfile source that happens to be YAML is not a spec: {result:?}"
+        );
+    }
+
+    // A dotfile source is associated with its package by looking for a spec of
+    // the same name in the repo root. Probing `{name}.yml` and `{name}.yaml`
+    // answers for one capitalization only, so a spec stored as `Starship.YML`
+    // left `starship/starship.toml` ungrouped and out of the push.
+    //
+    // Only a case-sensitive file system separates the two implementations: on
+    // one that folds case, `starship.yml` resolves to `Starship.YML` and the
+    // path probe is rescued by the file system rather than by being right.
+    // Skipping is loud, because a quietly-skipped test reads as a passing one.
+    #[test]
+    fn a_dotfile_source_finds_its_spec_under_any_capitalization() {
+        use super::{spec_named, spec_names_in};
+
+        let root = tempfile::tempdir().unwrap();
+        let spec = "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(root.path().join("Starship.YML"), spec).unwrap();
+
+        if root.path().join("starship.yml").exists() {
+            eprintln!(
+                "SKIPPED a_dotfile_source_finds_its_spec_under_any_capitalization: this file \
+                 system folds case, so a path probe finds the spec without folding names"
+            );
+            return;
+        }
+
+        let spec_names = spec_names_in(root.path());
+
+        assert!(
+            spec_named(&spec_names, "starship").is_some(),
+            "a spec stored as `Starship.YML` must answer to `starship`"
+        );
+        assert!(
+            spec_named(&spec_names, "neovim").is_none(),
+            "a name with no spec behind it must not match"
+        );
+    }
+
     // The end-to-end half of the extension case, and it runs on every machine:
     // unlike two capitalizations, `neovim.yml` and `neovim.yaml` coexist on a
     // case-insensitive file system too. Nothing here needs a skip.
@@ -2231,7 +2653,7 @@ mod name_collision_tests {
         );
 
         let changes = vec![(PathBuf::from("neovim.yml"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying two extensions of one name must be refused");
@@ -2331,7 +2753,7 @@ mod name_collision_tests {
             PathBuf::from("starship/starship.toml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -2339,6 +2761,34 @@ mod name_collision_tests {
         let rendered = format!("{error:?}");
         assert!(rendered.contains("NameCollision"), "got: {rendered}");
         assert!(rendered.contains("Neovim.yml"), "got: {rendered}");
+    }
+
+    // The repo is discovered by walking up from the package directory, so the
+    // two are the same directory only when the package directory happens to be
+    // the top of the repository. Scanning the root alone looks at a directory
+    // that holds no specs and lets the collision through.
+    #[test]
+    fn a_package_directory_below_the_repo_root_is_still_scanned() {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let spec = "name: neovim\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(packages.join("neovim.yml"), spec).unwrap();
+        std::fs::write(packages.join("neovim.yaml"), spec).unwrap();
+
+        std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
+        let changes = vec![(PathBuf::from("README.md"), FileChangeKind::Modified)];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        let Err(error) = result else {
+            panic!("a push must be refused over a collision in the package directory");
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("NameCollision"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yaml"), "got: {rendered}");
     }
 
     // The package repository folds the extension as well as the stem, so
@@ -2349,14 +2799,14 @@ mod name_collision_tests {
     // a push that reports no problem.
     #[test]
     fn an_uppercase_extension_still_names_a_spec() {
-        use super::is_yaml_file;
+        use super::is_spec_file;
         use std::path::Path;
 
-        assert!(is_yaml_file(Path::new("Neovim.YML")));
-        assert!(is_yaml_file(Path::new("neovim.Yaml")));
-        assert!(is_yaml_file(Path::new("neovim.yml")));
-        assert!(is_yaml_file(Path::new("neovim.yaml")));
-        assert!(!is_yaml_file(Path::new("neovim.toml")));
-        assert!(!is_yaml_file(Path::new("neovim")));
+        assert!(is_spec_file(Path::new("Neovim.YML")));
+        assert!(is_spec_file(Path::new("neovim.Yaml")));
+        assert!(is_spec_file(Path::new("neovim.yml")));
+        assert!(is_spec_file(Path::new("neovim.yaml")));
+        assert!(!is_spec_file(Path::new("neovim.toml")));
+        assert!(!is_spec_file(Path::new("neovim")));
     }
 }
