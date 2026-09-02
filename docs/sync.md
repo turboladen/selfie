@@ -137,6 +137,23 @@ The MCP server exposes three sync tools for AI assistant integration:
 The `messages` parameter on `selfie_sync_push` is a map of package name to custom commit message,
 allowing AI assistants to provide meaningful messages without interactive prompting.
 
+## Two files claiming one package name
+
+`selfie sync push` refuses to push a package directory holding two specs that resolve to the same
+package name. A name is the filename without its extension, compared ignoring case, so all of these
+are one package:
+
+- `Neovim.yml` and `neovim.yml` — the capitalization differs
+- `neovim.yml` and `neovim.yaml` — the extension differs
+- `Neovim.YML` and `neovim.yaml` — both differ
+
+Rename or remove all but one before pushing. The refusal says which files collided.
+
+Both flavors leave the package unresolvable, and the first also destroys a file: two capitalizations
+of one filename cannot both survive a checkout on a case-insensitive file system, so a clone there
+keeps one and discards the other with no diagnostic. Two extensions both survive. The refusals say
+different things for that reason.
+
 ## Limitations
 
 - **No merge conflict resolution** — if the remote has diverged, you need to resolve manually with

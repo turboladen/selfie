@@ -120,45 +120,38 @@ fn spec_edit_still_offers_to_create_a_package_with_no_file() {
         .stdout(predicates::str::contains("does not exist"));
 }
 
-// `spec edit` on a name whose path is taken by a differently-capitalized file
-// must refuse before offering to create, or it prompts for permission to do
-// something it will not do -- and on a case-insensitive file system the write
-// would replace that file.
+// The name folds, so `spec edit neovim` finds `Neovim.yml` and opens it rather
+// than offering to create a second spec. This is the outcome the folding is
+// for: that file used to be neither reachable by name nor safely replaceable,
+// so the only thing `spec edit` could do with it was refuse.
 //
-// Reachable without a terminal precisely because the guard sits ahead of the
-// confirm; the older create-path guards do not have that property.
+// Uniform across file systems, so no probe: what changed is what a name means,
+// not what the disk does with two spellings of one path.
 #[test]
-fn spec_edit_refuses_to_create_over_a_file_stored_under_another_case() {
+fn spec_edit_opens_a_spec_stored_under_another_case() {
     let temp = setup_default_test_config();
     let packages = temp.path().join("packages");
     let existing = packages.join("Neovim.yml");
     let yaml = "name: Neovim\nenvironments:\n  test-env:\n    install: \"brew install neovim\"\n";
     fs::write(&existing, yaml).unwrap();
 
-    // Probe this file system rather than assume: CI is Linux, where the two
-    // names are different files and nothing should be refused.
-    let probe = packages.join("CaseProbe.yml");
-    fs::write(&probe, "probe").unwrap();
-    let case_insensitive = packages.join("caseprobe.yml").exists();
-    fs::remove_file(&probe).unwrap();
-
-    let assertion = sandboxed_command(&temp)
+    sandboxed_command(&temp)
         .env("EDITOR", "true")
         .args(["spec", "edit", "neovim"])
-        .assert();
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Opening existing package"));
 
-    if case_insensitive {
-        // stderr, not stdout: `print_error` writes there, and asserting the
-        // wrong stream would pass on an empty one.
-        assertion
-            .failure()
-            .stderr(predicates::str::contains("already taken"));
-    } else {
-        // Two genuinely separate files here, so the create is legitimate and
-        // must still be offered.
-        assertion.stdout(predicates::str::contains("does not exist"));
-    }
-
+    let mut entries: Vec<String> = fs::read_dir(&packages)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["Neovim.yml".to_string()],
+        "opening a spec must not create a second one beside it"
+    );
     assert_eq!(
         fs::read_to_string(&existing).unwrap(),
         yaml,

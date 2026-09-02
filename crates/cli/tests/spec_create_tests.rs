@@ -29,55 +29,39 @@ fn spec_create_writes_a_package_that_does_not_exist() {
     );
 }
 
-// Whether the packages directory distinguishes `Neovim.yml` from `neovim.yml`.
-// The guard only has something to refuse when it does not, and CI runs Linux,
-// where it does -- so without this the test below would assert nothing there and
-// stay green with the guard deleted.
-fn packages_dir_is_case_sensitive(temp: &tempfile::TempDir) -> bool {
-    let probe = temp.path().join("packages").join("CaseProbe.yml");
-    fs::write(&probe, "probe").unwrap();
-    let sensitive = !temp.path().join("packages").join("caseprobe.yml").exists();
-    fs::remove_file(&probe).unwrap();
-    sensitive
-}
-
-// A file stored under a different capitalization is invisible to the name check,
-// and on a case-insensitive file system the write resolves to it and truncates
-// it. On a case-sensitive one the two are different files and the create
-// legitimately succeeds. Both outcomes are asserted, so neither file system
-// leaves the guard unexercised.
+// A spec stored under a different capitalization answers to the folded name, so
+// the create finds `Neovim.yml` and declines instead of writing a second file.
+//
+// No file system probe here, unlike the version this replaces: the refusal now
+// comes from the name index rather than from asking the disk whether the path
+// is taken, so it does not depend on how the disk compares names. The same
+// outcome on Linux and on APFS is the point of the change.
 #[test]
 fn spec_create_does_not_replace_a_file_stored_under_another_case() {
     let temp = setup_default_test_config();
-    let case_sensitive = packages_dir_is_case_sensitive(&temp);
-    let existing = temp.path().join("packages").join("Neovim.yml");
+    let packages = temp.path().join("packages");
+    let existing = packages.join("Neovim.yml");
     let yaml = "name: Neovim\nenvironments:\n  test-env:\n    install: \"brew install neovim\"\n";
     fs::write(&existing, yaml).unwrap();
 
-    let assertion = sandboxed_command(&temp)
+    sandboxed_command(&temp)
         .args(["spec", "create", "neovim"])
-        .assert();
+        .assert()
+        .stdout(predicates::str::contains("already exists"));
 
-    let created = temp.path().join("packages").join("neovim.yml");
-    if case_sensitive {
-        // Two genuinely different files, so the create takes nothing.
-        assertion.success();
-        assert!(
-            created.exists(),
-            "a create that collides with nothing must still write"
-        );
-    } else {
-        // One file under two spellings, so the create has to be refused.
-        //
-        // Asserting the message as well as the status: almost every way this
-        // could fail exits non-zero and leaves the file intact, including a run
-        // that never reaches the guard, so a status check alone would pass on a
-        // missing config or a panic.
-        assertion
-            .failure()
-            .stderr(predicates::str::contains("already taken"));
-    }
-
+    // Listing the directory rather than testing `neovim.yml.exists()`, which is
+    // true on a case-insensitive file system whether or not anything was
+    // written, and would report a pass for the write it is meant to catch.
+    let mut entries: Vec<String> = fs::read_dir(&packages)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["Neovim.yml".to_string()],
+        "a name that already resolves must not gain a second file"
+    );
     assert_eq!(
         fs::read_to_string(&existing).unwrap(),
         yaml,

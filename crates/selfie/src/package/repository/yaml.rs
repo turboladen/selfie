@@ -68,15 +68,29 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         Ok(yaml_files)
     }
 
-    /// Filter a list of paths to those matching `{name}.yml` or `{name}.yaml`.
+    /// Filter a list of paths to those named `{name}.yml` or `{name}.yaml`,
+    /// ignoring case in both the stem and the extension.
     fn filter_matching_packages(name: &str, entries: Vec<PathBuf>) -> Vec<PathBuf> {
+        // Case-insensitive because specs sync across machines. A directory
+        // holding both `Neovim.yml` and `neovim.yml` is legal on a
+        // case-sensitive file system and collapses to a single file when
+        // checked out on a case-insensitive one, discarding a spec with no
+        // diagnostic. Folding the two to one name turns that into an ambiguity
+        // the caller is told to resolve.
+        //
+        // `to_lowercase` rather than `eq_ignore_ascii_case`: a package name may
+        // hold any Unicode alphanumeric, so `Ünicode` and `ünicode` have to fold
+        // together as well.
+        let wanted = name.to_lowercase();
         entries
             .into_iter()
             .filter(|path| {
                 path.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|file_name| {
-                        file_name == format!("{name}.yml") || file_name == format!("{name}.yaml")
+                    .and_then(|file_name| file_name.rsplit_once('.'))
+                    .is_some_and(|(stem, extension)| {
+                        let extension = extension.to_lowercase();
+                        (extension == "yml" || extension == "yaml") && stem.to_lowercase() == wanted
                     })
             })
             .collect()
@@ -468,6 +482,67 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
 #[cfg(test)]
 mod tests {
+
+    // Package identity ignores case. These pin the matcher directly, because
+    // the callers turn two matches into MultiplePackagesFound and one into a
+    // load, so a matcher regression surfaces as a confusing error rather than
+    // as a wrong match.
+    mod case_insensitive_names {
+        use super::super::YamlPackageRepository;
+        use std::path::PathBuf;
+
+        fn matches(name: &str, files: &[&str]) -> Vec<String> {
+            let entries = files.iter().map(PathBuf::from).collect();
+            YamlPackageRepository::<crate::fs::MockFileSystem>::filter_matching_packages(
+                name, entries,
+            )
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect()
+        }
+
+        // The whole point: a differently-capitalized file answers to the name,
+        // so it can be read and reported instead of looking absent.
+        #[test]
+        fn a_name_matches_a_file_stored_under_another_case() {
+            assert_eq!(matches("neovim", &["Neovim.yml"]), vec!["Neovim.yml"]);
+            assert_eq!(matches("Neovim", &["neovim.yml"]), vec!["neovim.yml"]);
+        }
+
+        // Two files folding to one name is the ambiguity the caller reports.
+        #[test]
+        fn both_capitalizations_match_and_leave_the_caller_to_report_ambiguity() {
+            assert_eq!(
+                matches("neovim", &["Neovim.yml", "neovim.yml"]).len(),
+                2,
+                "both must match, or the collision is invisible"
+            );
+        }
+
+        #[test]
+        fn the_extension_folds_too() {
+            assert_eq!(matches("neovim", &["neovim.YML"]), vec!["neovim.YML"]);
+            assert_eq!(matches("neovim", &["neovim.YAML"]), vec!["neovim.YAML"]);
+        }
+
+        // Names allow any Unicode alphanumeric, so folding cannot be ASCII-only.
+        #[test]
+        fn folding_is_not_ascii_only() {
+            assert_eq!(
+                matches("\u{fc}nicode", &["\u{dc}nicode.yml"]),
+                vec!["\u{dc}nicode.yml"]
+            );
+        }
+
+        // Folding case must not widen matching in any other direction.
+        #[test]
+        fn unrelated_names_and_extensions_still_do_not_match() {
+            assert!(matches("neovim", &["neovim-extra.yml"]).is_empty());
+            assert!(matches("neovim", &["vim.yml"]).is_empty());
+            assert!(matches("neovim", &["neovim.txt"]).is_empty());
+            assert!(matches("neovim", &["neovim"]).is_empty());
+        }
+    }
     use mockall::*;
 
     use super::*;

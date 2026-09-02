@@ -42,11 +42,25 @@ environments:
 
 ### `name`
 
-The package name, which must match the filename (without `.yaml` extension).
+The package name, which must match the filename without its extension. Both `.yml` and `.yaml` are
+accepted.
 
 ```yaml
 name: ripgrep # for file ripgrep.yaml
 ```
+
+Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
+`Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
+package from another — `Neovim.YML`, `neovim.yml` and `neovim.yaml` all name the package `neovim`.
+
+A directory holding two of them is reported as ambiguous rather than resolved silently, and
+`selfie sync push` refuses to carry it.
+
+Two capitalizations of one name are worse than two extensions, and the refusals say so. `neovim.yml`
+and `neovim.yaml` both survive any checkout, and the package is merely unresolvable until one of
+them is renamed. `Neovim.yml` and `neovim.yml` cannot both survive a checkout on a case-insensitive
+file system: cloning that directory there keeps one file and discards the other with no diagnostic.
+That makes the capitalization half a portability requirement rather than a style preference.
 
 ### `environments`
 
