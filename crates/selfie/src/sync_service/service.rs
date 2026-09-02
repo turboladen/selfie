@@ -974,72 +974,85 @@ fn group_changes_by_package(
     (commits, warnings)
 }
 
-/// Check whether any changed files are dotfile sources (non-YAML files
-/// inside a package subdirectory, e.g., `starship/starship.toml`).
+/// Check whether any changed file is a dotfile source — a file inside a
+/// subdirectory named by a spec, e.g. `starship/starship.toml`.
 ///
-/// Root-level non-YAML files (README.md, .gitignore) are **not** considered
-/// dotfile sources. A subdirectory file is only considered a dotfile source if
-/// a YAML spec with the same name as its parent directory exists in the repo
-/// (e.g., `starship/starship.toml` is a dotfile source if `starship.yml` exists
-/// on disk, even if `starship.yml` itself didn't change).
+/// A file at the top of the repository (README.md, .gitignore) is not one, and
+/// neither is a file whose parent directory answers to no package name. The
+/// spec itself need not have changed: `starship/starship.toml` counts whenever
+/// `starship.yml` is on disk.
+///
+/// Its own extension decides nothing. A YAML dotfile source is common
+/// (`lazygit/config.yml`), and skipping it would drop the notice telling the
+/// user their deployed copy is now stale.
 fn has_dotfile_changes(
     changed_files: &[crate::git::ChangedFile],
     spec_names: &BTreeSet<String>,
 ) -> bool {
-    changed_files.iter().any(|f| {
-        !is_spec_file(&f.path)
-            && f.path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|dir| spec_named(spec_names, &dir.to_string_lossy()).is_some())
-    })
+    changed_files
+        .iter()
+        .any(|f| dotfile_source_package(&f.path, spec_names).is_some())
 }
 
-/// Infer the package name from a file path, using the repo filesystem.
+/// Infer the folded package name a changed file belongs to.
 ///
-/// Rules:
-/// - YAML files (`*.yml`, `*.yaml`) → package name is the file stem
-///   (e.g., `starship.yml` → `starship`)
-/// - Non-YAML files in a subdirectory whose name matches a YAML spec on disk
-///   → package name is the parent directory name
-///   (e.g., `starship/starship.toml` → `starship` if `starship.yml` exists
-///   in the repo, even if it wasn't modified)
+/// Rules, applied in this order:
+/// - A file in a subdirectory named by a spec belongs to that package
+///   (`starship/starship.toml` → `starship` when `starship.yml` is on disk,
+///   whether or not the spec itself changed)
+/// - Otherwise a `*.yml` or `*.yaml` file is a spec and names its own package
+///   (`Starship.YML` → `starship`)
 /// - Everything else → `None` (ungrouped)
 fn infer_package_name(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
+    // The parent directory is asked first, because a dotfile source is not
+    // always a `.toml`. `lazygit/config.yml` is one, and reading it as the spec
+    // of a package called `config` both invents that package and splits the
+    // file out of the commit its own package gets.
+    if let Some(name) = dotfile_source_package(path, spec_names) {
+        return Some(name);
+    }
+
     // Folded, because this is the key changes are grouped under and identity is
     // folded everywhere else. Returning the spelling on disk splits one package
     // into two commits as soon as two of its files disagree about case --
     // `Neovim.yml` grouping as `Neovim` while `neovim/starship.toml` groups as
     // `neovim`.
-    if let Some(name) = path
-        .file_name()
+    path.file_name()
         .and_then(|file_name| file_name.to_str())
         .and_then(crate::package::spec_name_from_file_name)
-    {
-        return Some(name);
-    }
+}
 
-    // Not a spec, so it belongs to the package its parent directory names --
-    // if a spec answers to that name. Without the check, `docs/sync.md` would
-    // be grouped as the package "docs".
-    let dir_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().to_string())?;
-
-    spec_named(spec_names, &dir_name)
+/// The package `path` belongs to as a dotfile source: the one its parent
+/// directory names, if a spec answers to that name.
+///
+/// The parent directory has to name a spec, or `docs/sync.md` would claim a
+/// package called `docs`.
+fn dotfile_source_package(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|dir| spec_named(spec_names, &dir.to_string_lossy()))
 }
 
 /// Generate a conventional commit message for a package's changes.
 fn generate_commit_message(name: &str, entries: &[(PathBuf, FileChangeKind)]) -> String {
-    let has_yaml_changes = entries.iter().any(|(p, _)| is_spec_file(p));
-    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_spec_file(p));
+    // The group's own spec, not merely any YAML in the group: a dotfile source
+    // can be YAML too, and `lazygit/config.yml` alone would otherwise be
+    // announced as adding lazygit's package spec.
+    let is_the_spec = |path: &Path| {
+        path.file_name()
+            .and_then(|file_name| file_name.to_str())
+            .and_then(crate::package::spec_name_from_file_name)
+            .is_some_and(|spec_name| spec_name == name)
+    };
+
+    let has_yaml_changes = entries.iter().any(|(p, _)| is_the_spec(p));
+    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_the_spec(p));
     let has_new_yaml = entries
         .iter()
-        .any(|(p, k)| is_spec_file(p) && *k == FileChangeKind::Added);
+        .any(|(p, k)| is_the_spec(p) && *k == FileChangeKind::Added);
     let has_deleted_yaml = entries
         .iter()
-        .any(|(p, k)| is_spec_file(p) && *k == FileChangeKind::Deleted);
+        .any(|(p, k)| is_the_spec(p) && *k == FileChangeKind::Deleted);
 
     if has_deleted_yaml && !has_non_yaml_changes {
         return format!("chore({name}): remove package spec");
@@ -1255,6 +1268,37 @@ mod tests {
             infer_package_name(Path::new("Neovim/init.lua"), &spec_names),
             Some("neovim".to_string()),
             "a dotfile source beside it"
+        );
+    }
+
+    // A dotfile source is not always a `.toml`: lazygit, alacritty and yamllint
+    // all keep theirs in YAML. Read as a spec, the file both invents a package
+    // called `config` and leaves lazygit's own commit without it, and the pull
+    // summary drops the notice that a deployed copy has gone stale.
+    #[test]
+    fn a_yaml_dotfile_source_belongs_to_its_package() {
+        let (_temp, root) = repo_with_specs(&["lazygit.yml"]);
+        let spec_names = spec_names_in(&root);
+
+        assert_eq!(
+            infer_package_name(Path::new("lazygit/config.yml"), &spec_names),
+            Some("lazygit".to_string())
+        );
+
+        let files = [crate::git::ChangedFile {
+            path: PathBuf::from("lazygit/config.yml"),
+            change_type: ChangeType::Modified,
+        }];
+        assert!(has_dotfile_changes(&files, &spec_names));
+
+        // And the commit says what changed, rather than announcing a spec.
+        let entries = vec![(
+            PathBuf::from("lazygit/config.yml"),
+            FileChangeKind::Modified,
+        )];
+        assert_eq!(
+            generate_commit_message("lazygit", &entries),
+            "chore(lazygit): update dotfile"
         );
     }
 
