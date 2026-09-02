@@ -646,11 +646,9 @@ mod tests {
     // Every kind, not just the one an end-to-end test happens to reach.
     //
     // A `PackageParseKind` has no path field, so no kind can name the file in its
-    // own wording. What it can do is carry one at runtime: `Io` holds an
-    // `io::Error` and `Refused` a `String`, and either can be built from something
-    // that already names the path -- `RealFileSystem::write_file_private` re-tags
-    // its io errors with the target for exactly that reason. A read-side re-tag
-    // would double the path here and the type could not stop it.
+    // own wording. What it can do is carry one at runtime, which the type cannot
+    // prevent and this test does not cover:
+    // `a_payload_carrying_the_path_doubles_it` states that boundary.
     #[test]
     fn every_kind_names_the_package_file_exactly_once() {
         let path = std::path::PathBuf::from("/test/packages/ghost.yml");
@@ -670,15 +668,10 @@ mod tests {
                     source: Arc::new(std::io::Error::other("permission denied")),
                 },
             ),
-            // A refusal source, which the read path cannot produce today but which
-            // this kind's `Display` would forward if it ever did: every refusal
-            // variant names a target and calls it a write.
             (
-                "FileSystem",
-                PackageParseKind::FileSystem {
-                    source: Arc::new(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                        std::io::Error::other("permission denied"),
-                    ))),
+                "Unreadable",
+                PackageParseKind::Unreadable {
+                    reason: "the home directory could not be determined".to_string(),
                 },
             ),
             (
@@ -700,6 +693,54 @@ mod tests {
             let message = skipped_spec_warning(&error);
             let count = message.matches("/test/packages/ghost.yml").count();
             assert_eq!(count, 1, "{kind}: named {count} times in: {message}");
+        }
+    }
+
+    // The boundary of the invariant above. `Io`, `Refused` and `Unreadable` carry
+    // free text, so a payload can arrive already naming the file, and the warning
+    // then says it twice.
+    //
+    // Left open deliberately: closing it means inspecting a payload's text for the
+    // path before prefixing, which is the string-matching this area was rewritten
+    // to remove. The constraint sits on whoever builds these kinds, and the one
+    // production builder is held to it by `a_real_unreadable_spec_is_named_once`.
+    #[test]
+    fn a_payload_carrying_the_path_doubles_it() {
+        let path = std::path::PathBuf::from("/test/packages/ghost.yml");
+
+        let retagged: Vec<(&str, PackageParseKind)> = vec![
+            (
+                "Io",
+                PackageParseKind::Io {
+                    source: Arc::new(std::io::Error::other(format!(
+                        "{}: permission denied",
+                        path.display()
+                    ))),
+                },
+            ),
+            (
+                "Refused",
+                PackageParseKind::Refused {
+                    reason: format!("{} is a symlink", path.display()),
+                },
+            ),
+            (
+                "Unreadable",
+                PackageParseKind::Unreadable {
+                    reason: format!("{} could not be opened", path.display()),
+                },
+            ),
+        ];
+
+        for (kind, parse_kind) in retagged {
+            let error = PackageParseError::new(path.clone(), parse_kind);
+            let message = skipped_spec_warning(&error);
+            let count = message.matches("/test/packages/ghost.yml").count();
+            assert_eq!(
+                count, 2,
+                "{kind}: a re-tagged payload must double the path, or the count \
+                 above is no longer checking anything: {message}"
+            );
         }
     }
 }

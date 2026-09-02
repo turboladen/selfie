@@ -357,11 +357,12 @@ pub enum PackageError {
         source: PackageParseError,
     },
 
-    /// Package definition file exists but selfie refused to read it
+    /// Package definition file exists but its contents never reached the parser
     ///
-    /// Separate from [`ParseError`](Self::ParseError) because nothing was
-    /// parsed: the file was never opened. Saying "parse error" for a fifo sends
-    /// the reader to inspect YAML syntax in a file that has none.
+    /// Separate from [`ParseError`](Self::ParseError) because nothing was parsed:
+    /// selfie either declined to open the file or the read itself failed. Saying
+    /// "parse error" for a fifo sends the reader to inspect YAML syntax in a file
+    /// that has none.
     #[error("Cannot read package `{name}` from {}: {source}", packages_path.display())]
     UnreadableFile {
         name: String,
@@ -567,12 +568,13 @@ pub enum PackageParseKind {
         source: Arc<std::io::Error>,
     },
 
-    /// File system abstraction error during package file access
-    #[error("file system error reading the package file: {source}")]
-    FileSystem {
-        #[source]
-        source: Arc<crate::fs::filesystem::FileSystemError>,
-    },
+    /// The package file could not be read, for a reason that is nobody's mistake
+    ///
+    /// Distinct from [`Refused`](Self::Refused), which is selfie declining to read
+    /// something it could have. Nothing here was declined; the read could not be
+    /// attempted.
+    #[error("the package file could not be read: {reason}")]
+    Unreadable { reason: String },
 
     /// The package file is a fifo, socket or device node rather than a regular file
     ///
