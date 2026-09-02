@@ -93,6 +93,12 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             })
             .collect();
 
+        // Sorted because more than one match is rendered into the ambiguity
+        // error, and `list_directory` yields file system order -- insertion
+        // order on APFS, hash order on ext4. Unsorted, the same broken
+        // directory names its files in a different order on each machine and
+        // sometimes between runs on one.
+        matches.sort();
         matches
     }
 
@@ -490,6 +496,24 @@ mod tests {
     mod case_insensitive_names {
         use super::super::YamlPackageRepository;
         use std::path::PathBuf;
+
+        // More than one match is rendered into the ambiguity error, and
+        // `list_directory` yields file system order -- insertion order on
+        // APFS, hash order on ext4. Unsorted, the same broken directory names
+        // its files differently on each machine, and the user comparing two
+        // machines' output cannot tell that from a real difference.
+        #[test]
+        fn matches_come_back_sorted_whatever_order_the_directory_gave() {
+            assert_eq!(
+                matches("neovim", &["neovim.yml", "Neovim.yml", "neovim.yaml"]),
+                vec!["Neovim.yml", "neovim.yaml", "neovim.yml"]
+            );
+            // The same set, handed over in a different order.
+            assert_eq!(
+                matches("neovim", &["neovim.yaml", "neovim.yml", "Neovim.yml"]),
+                vec!["Neovim.yml", "neovim.yaml", "neovim.yml"]
+            );
+        }
 
         fn matches(name: &str, files: &[&str]) -> Vec<String> {
             let entries = files.iter().map(PathBuf::from).collect();
