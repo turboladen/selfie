@@ -1,24 +1,17 @@
-# Crate-scoped: `selfie`'s own tests want a deterministic `/bin/sh`.
+# Deserializing YAML into selfie's own types goes through `selfie::yaml::parse`,
+# which suppresses source snippets and answers a classified failure. A parse made
+# directly against serde-saphyr quotes the file it was reading into its error, and
+# those errors reach the CLI and the MCP server's JSON. Selfie's own config file is
+# the exception, and reaches the `config` crate instead.
 #
-# `login_shell` is deliberately not listed. Adding it would need an `#[expect]` on
-# `create_command_runner`, and a function-wide `#[expect]` also suppresses the two
-# below *inside* it — letting the one function that picks the shell silently revert
-# to `/bin/sh`. A second `login_shell` call is duplication; a `/bin/sh` call is the
-# defect.
+# Every deserializing entry point serde-saphyr exports at its crate root with the
+# features selfie enables, not the four spellings someone happens to reach for
+# first. A list covering some of them bans a habit rather than the behavior.
 #
-# The serde-saphyr entries below are copied from the workspace-root `clippy.toml`
-# rather than inherited. Clippy reads the nearest `clippy.toml` walking up from the
-# crate and stops there, so this file hides the root's lists from `selfie-cli`
-# completely -- both the methods and the types. Moving the two above up to the root
-# instead is not the fix: banning `ShellCommandRunner::new` workspace-wide fires
-# inside the `selfie` crate's own tests, which is what this file exists to avoid.
-#
-# Keep the two copies in step. A call planted in this crate must make
-# `cargo clippy -p selfie-cli --all-targets -- -D warnings` fail.
+# The type is denied as well as the functions: without it a new error variant
+# could store the raw error and render it later, which no ban on the parse
+# entry points would catch.
 disallowed-methods = [
-  { path = "selfie::commands::ShellCommandRunner::new", reason = "use commands::common::create_command_runner — the CLI runs a login shell so provider commands see the user's profile" },
-  { path = "selfie::commands::ShellCommandRunner::default_shell", reason = "the CLI runs a login shell so provider commands see the user's profile; use commands::common::create_command_runner" },
-
   { path = "serde_saphyr::from_str", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::from_str_with_options", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::from_slice", reason = "use selfie::yaml::parse, which does not quote the file" },

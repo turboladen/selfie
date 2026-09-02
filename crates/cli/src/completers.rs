@@ -4,7 +4,6 @@
 //! These run on every TAB press and must be fast — no package parsing,
 //! no command execution, just config load + directory listing.
 
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +27,16 @@ pub(crate) fn complete_package_names(current: &OsStr) -> Vec<CompletionCandidate
         .collect()
 }
 
+/// The one config setting a completion needs.
+// Only the one setting, because the file holds more than strings. `cli:` is a
+// mapping, so reading the file as a map of strings refuses it whole and every
+// completion comes back empty for anyone who set `verbose` or `use_colors`.
+// Unknown keys are ignored, so nothing else has to be modeled here.
+#[derive(serde::Deserialize)]
+struct PackageDirectory {
+    package_directory: String,
+}
+
 /// Resolve the package directory from the selfie config file.
 ///
 /// Uses the same config-dir strategy as `RealFileSystem` (`etcetera`)
@@ -47,9 +56,8 @@ fn resolve_package_directory() -> Option<PathBuf> {
         .find(|p: &PathBuf| p.exists())?;
 
     let contents = std::fs::read_to_string(config_path).ok()?;
-    let config: HashMap<String, String> = serde_saphyr::from_str(&contents).ok()?;
-    let pkg_dir_str = config.get("package_directory")?;
-    let expanded = shellexpand::tilde(pkg_dir_str.as_str());
+    let config: PackageDirectory = selfie::yaml::parse(&contents).ok()?;
+    let expanded = shellexpand::tilde(config.package_directory.as_str());
     let path = PathBuf::from(expanded.as_ref());
 
     if path.is_dir() { Some(path) } else { None }
@@ -99,6 +107,20 @@ mod tests {
     fn list_package_names_returns_empty_for_nonexistent_dir() {
         let names = list_package_names(Path::new("/nonexistent/path/that/does/not/exist"));
         assert!(names.is_empty());
+    }
+
+    // The layout `docs/configuration.md` prescribes, read the way the completer
+    // reads it. `cli:` is a mapping and `command_timeout` a number, so a shape
+    // that accepted only strings would refuse the whole file and hand every TAB
+    // press an empty list -- silently, since completion errors are swallowed.
+    #[test]
+    fn the_documented_config_layout_still_yields_a_package_directory() {
+        let yaml = "environment: macos\npackage_directory: ~/.selfie/packages\n\
+                    command_timeout: 60\ncli:\n  verbose: true\n  use_colors: false\n";
+
+        let config: PackageDirectory = selfie::yaml::parse(yaml).expect("the config must parse");
+
+        assert_eq!(config.package_directory, "~/.selfie/packages");
     }
 
     #[test]

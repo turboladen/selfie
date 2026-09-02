@@ -191,10 +191,9 @@ pub enum PackageRepoError {
     /// which names keys it found. Here nothing is known, and a rewrite serializes
     /// from the struct regardless -- so the safe direction is to decline the
     /// write, which costs the user a retry, rather than to delete silently.
-    // The parse failure ends the message. It renders as several lines of source
-    // snippet with a `|` gutter, so anything after it is read as part of the
-    // snippet -- the remedy came out as `  |. Edit /packages/creds.yml directly`.
-    // The apply-path warning orders the same string the same way.
+    // The parse failure ends the message, because it is the part a reader can act
+    // on last: the remedy is the same whatever the file turned out to be wrong
+    // about. The apply-path warning orders the same string the same way.
     #[error(
         "refusing to rewrite {path}: its top level could not be read back, so any \
          key selfie does not model would be dropped without warning. \
@@ -513,7 +512,7 @@ pub enum PackageParseError {
     YamlParse {
         package_path: PathBuf,
         #[source]
-        source: Arc<serde_saphyr::Error>,
+        source: crate::yaml::ParseFailure,
     },
 
     /// IO error occurred while reading the package file

@@ -592,7 +592,7 @@ mod tests {
     }
 
     fn provider_entry(command: &str, target: &str) -> DotfileEntry {
-        serde_saphyr::from_str(&format!("command: {command}\ntarget: {target}")).unwrap()
+        crate::yaml::parse(&format!("command: {command}\ntarget: {target}")).unwrap()
     }
 
     fn template_entry(source: &str, vars: &[(&str, &str)], target: &str) -> DotfileEntry {
@@ -600,7 +600,7 @@ mod tests {
         for (name, command) in vars {
             yaml.push_str(&format!("  {name}: {command}\n"));
         }
-        serde_saphyr::from_str(&yaml).unwrap()
+        crate::yaml::parse(&yaml).unwrap()
     }
 
     async fn resolve(

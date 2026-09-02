@@ -340,9 +340,9 @@ pub(crate) fn parse_top_level(
     // and a YAML value it cannot hold, such as a mapping keyed by a sequence, is
     // what makes this parse fail where the package's own parse succeeded.
     //
-    // The error is rendered here rather than carried: `serde_saphyr::Error` is
-    // not `Clone`, and `Package` is.
-    serde_saphyr::from_str(raw_yaml).map_err(|e| e.to_string())
+    // The failure is rendered here rather than carried, because the caller stores
+    // it in a `TopLevelKeys` that a `Package` clones.
+    crate::yaml::parse(raw_yaml).map_err(|e| e.to_string())
 }
 
 /// What a package file's top level holds that a package does not accept.
@@ -1293,8 +1293,7 @@ mod package_tests {
     #[test]
     fn a_parsed_dotfile_entry_carries_the_lines_its_fields_were_written_on() {
         let entry: DotfileEntry =
-            serde_saphyr::from_str("source: creds.tpl\ncommand: \"true\"\ntarget: ~/.creds\n")
-                .unwrap();
+            crate::yaml::parse("source: creds.tpl\ncommand: \"true\"\ntarget: ~/.creds\n").unwrap();
 
         assert_eq!(entry.source_location().unwrap().line(), 1);
         assert_eq!(entry.command_location().unwrap().line(), 2);
@@ -1309,7 +1308,7 @@ mod package_tests {
     #[test]
     fn spanned_fields_serialize_as_bare_scalars() {
         let entry: DotfileEntry =
-            serde_saphyr::from_str("source: creds.tpl\ntarget: ~/.creds\n").unwrap();
+            crate::yaml::parse("source: creds.tpl\ntarget: ~/.creds\n").unwrap();
 
         let yaml = serde_saphyr::to_string(&entry).unwrap();
 
@@ -1323,7 +1322,7 @@ mod package_tests {
         }
 
         // And it parses back to the same entry, which is what a rewrite depends on.
-        let round_tripped: DotfileEntry = serde_saphyr::from_str(&yaml).unwrap();
+        let round_tripped: DotfileEntry = crate::yaml::parse(&yaml).unwrap();
         assert_eq!(round_tripped, entry);
     }
 
@@ -1341,7 +1340,7 @@ mod package_tests {
     #[test]
     fn an_environment_records_a_key_it_does_not_model() {
         let env: EnvironmentConfig =
-            serde_saphyr::from_str("install: \"echo i\"\naudt: \"echo a\"\n").unwrap();
+            crate::yaml::parse("install: \"echo i\"\naudt: \"echo a\"\n").unwrap();
 
         assert_eq!(env.unknown_keys(), ["audt"]);
         assert_eq!(env.install(), "echo i");
@@ -1352,7 +1351,7 @@ mod package_tests {
     #[test]
     fn an_environment_anchor_is_recorded_only_when_it_shadows_a_field() {
         let plain: EnvironmentConfig =
-            serde_saphyr::from_str("install: \"echo i\"\n_shared: \"x\"\n").unwrap();
+            crate::yaml::parse("install: \"echo i\"\n_shared: \"x\"\n").unwrap();
         assert!(
             plain.unknown_keys().is_empty(),
             "got: {:?}",
@@ -1360,7 +1359,7 @@ mod package_tests {
         );
 
         let shadowing: EnvironmentConfig =
-            serde_saphyr::from_str("install: \"echo i\"\n_check: \"x\"\n").unwrap();
+            crate::yaml::parse("install: \"echo i\"\n_check: \"x\"\n").unwrap();
         assert_eq!(shadowing.unknown_keys(), ["_check"]);
     }
 
@@ -1392,7 +1391,7 @@ mod package_tests {
     use super::*;
 
     fn entry_from_yaml(yaml: &str) -> DotfileEntry {
-        serde_saphyr::from_str(yaml).expect("dotfile entry should parse")
+        crate::yaml::parse(yaml).expect("dotfile entry should parse")
     }
 
     #[test]
@@ -1686,7 +1685,7 @@ vars: {}
             ));
             let refused_by_apply = matches!(entry.content_source(), Err(InvalidEntry::VarName(_)));
 
-            let package: Package = serde_saphyr::from_str(&format!(
+            let package: Package = crate::yaml::parse(&format!(
                 "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
                  - source: creds.tpl\n    target: ~/.x\n    vars:\n      \"{name}\": op read x\n"
             ))
@@ -1712,7 +1711,7 @@ vars: {}
 
         assert!(!yaml.contains("command"), "got: {yaml}");
         assert!(!yaml.contains("vars"), "got: {yaml}");
-        assert_eq!(entry, serde_saphyr::from_str(&yaml).unwrap());
+        assert_eq!(entry, crate::yaml::parse(&yaml).unwrap());
     }
 
     #[test]
@@ -1721,7 +1720,7 @@ vars: {}
         let yaml = serde_saphyr::to_string(&entry).unwrap();
 
         assert!(!yaml.contains("source"), "got: {yaml}");
-        assert_eq!(entry, serde_saphyr::from_str(&yaml).unwrap());
+        assert_eq!(entry, crate::yaml::parse(&yaml).unwrap());
     }
 
     #[test]
@@ -1751,7 +1750,7 @@ vars: {}
         // The control for the test above: `target` is required and non-optional,
         // so relaxing `source`/`command` must not relax it too.
         assert!(
-            serde_saphyr::from_str::<DotfileEntry>("source: a\ntarget: ~\n").is_err(),
+            crate::yaml::parse::<DotfileEntry>("source: a\ntarget: ~\n").is_err(),
             "a null target must not deserialize"
         );
     }
@@ -1901,7 +1900,7 @@ environments:
     #[test]
     fn a_file_that_cannot_be_re_read_is_unchecked_rather_than_clean() {
         assert!(
-            serde_saphyr::from_str::<Package>(YAML_THAT_CANNOT_BE_RE_READ).is_ok(),
+            crate::yaml::parse::<Package>(YAML_THAT_CANNOT_BE_RE_READ).is_ok(),
             "the fixture must parse as a package, or the two views never disagreed"
         );
 
@@ -1975,7 +1974,7 @@ environments:
         let mut seen = std::collections::BTreeSet::new();
         for entry in [&template, &provider] {
             let yaml = serde_saphyr::to_string(entry).unwrap();
-            let raw: HashMap<String, serde_json::Value> = serde_saphyr::from_str(&yaml).unwrap();
+            let raw: HashMap<String, serde_json::Value> = crate::yaml::parse(&yaml).unwrap();
             seen.extend(raw.into_keys());
         }
 
@@ -2282,15 +2281,12 @@ environments:
     #[test]
     fn test_parse_error_contains_file_metadata() {
         use crate::package::port::PackageParseError;
-        use std::sync::Arc;
 
         // Create a realistic parse error
         let parse_error = PackageParseError::YamlParse {
             package_path: PathBuf::from("/packages/broken.yml"),
-            source: Arc::new(
-                serde_saphyr::from_str::<serde_json::Value>("invalid: yaml: [unclosed")
-                    .unwrap_err(),
-            ),
+            source: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
+                .unwrap_err(),
         };
 
         let error = PackageError::ParseError {

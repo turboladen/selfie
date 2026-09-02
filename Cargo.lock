@@ -2856,7 +2856,6 @@ dependencies = [
  "schemars",
  "selfie",
  "serde",
- "serde-saphyr",
  "serde_json",
  "test-common",
  "tokio",

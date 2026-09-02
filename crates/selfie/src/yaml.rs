@@ -1,19 +1,31 @@
 //! Reading YAML, and describing a file that would not parse.
 //!
-//! Every YAML file selfie reads comes through [`parse`], which suppresses
-//! serde-saphyr's source snippets and answers a [`ParseFailure`] rather than the
-//! parser's own error. No parse failure here quotes the text it was reading.
-//!
-//! That rule is one rule and not two. A deploy state file is machine-written and
-//! its keys are dotfile source paths, so quoting it is egress. A package file is
-//! hand-authored, and quoting one would seem harmless -- except that a package
-//! file carries `command:` and `vars:` entries naming credential stores and vault
-//! items, and serde-saphyr's snippet quotes a window of lines around the failure
-//! rather than the failing line alone. Both files therefore get the same answer.
+//! Every YAML file selfie deserializes into its own types comes through
+//! [`parse`], which suppresses serde-saphyr's source snippets and answers a
+//! [`ParseFailure`] rather than the parser's own error. No parse failure here
+//! quotes the text it was reading. Selfie's own config file is the one YAML it
+//! reads by another route: [`config::yaml`](crate::config::yaml) hands it to the
+//! `config` crate, which classifies nothing.
 //!
 //! What still escapes is a failure class, a noun drawn from the deserializer's
-//! own vocabulary, and a line and column. See [`ParseFailure`] for why that is
-//! accepted.
+//! own vocabulary, a line and column, and -- where the scanner's own sentence is
+//! forwarded -- the bracket or single character it stopped on. See
+//! [`ParseFailure`] for why that is accepted.
+
+// One rule for both kinds of file, rather than two. A deploy state file is
+// machine-written and its keys are dotfile source paths, so quoting it is egress.
+// A package file is hand-authored, and quoting one would seem harmless -- except
+// that it carries `command:` and `vars:` entries naming credential stores, and the
+// snippet quotes a window of lines around the failure rather than the failing line.
+//
+// The exception `clippy.toml` exists to create. This module holds the workspace's
+// only deserializing call of serde-saphyr, and the classifier has to name the
+// parser's own error type to take one apart. Everywhere else, both are denied.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the entry point and classifier every other caller is funneled into"
+)]
 
 use serde::de::DeserializeOwned;
 
@@ -26,13 +38,6 @@ use serde::de::DeserializeOwned;
 ///
 /// [`ParseFailure`] when `content` is not valid YAML, or does not describe a `T`.
 pub fn parse<T: DeserializeOwned>(content: &str) -> Result<T, ParseFailure> {
-    // The only call of serde-saphyr in the workspace that is not a test fixture,
-    // which is what makes the no-quoting rule checkable rather than a convention.
-    // `clippy.toml` denies the rest.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the single entry point the lint exists to funnel callers into"
-    )]
     // `ParseFailure` is what keeps the file's text out of the answer; suppressing
     // the snippet means the parser never builds the quoted window in the first
     // place. Set here rather than at each call site so a new caller cannot omit it.
@@ -51,10 +56,9 @@ pub fn parse<T: DeserializeOwned>(content: &str) -> Result<T, ParseFailure> {
 /// string, save for the bracket or single character a scanner failure stopped on;
 /// the location is a pair of numbers.
 ///
-/// **This is not a guarantee that nothing about the file escapes** — see the note
-/// beside the struct for what the location and that character disclose.
-// What the location and the forwarded character disclose, which is why the doc
-// above stops short of an absolute.
+/// **This is not a guarantee that nothing about the file escapes**: a column is an
+/// offset into the offending line, so it discloses that line's layout.
+// Why the doc above stops short of an absolute.
 //
 // Both numbers are derived from the file. The column is an offset into the
 // offending line, so it encodes that line's layout: for `  <key>: <value>` a type
@@ -206,6 +210,27 @@ impl ParseFailure {
             location: located(error),
         }
     }
+
+    /// Where the parser stopped, as a line and column, when it reported one.
+    #[must_use]
+    pub fn location(&self) -> Option<(u64, u64)> {
+        self.location
+    }
+
+    /// What went wrong, without the line and column.
+    ///
+    /// Use this where the location has a field of its own and the prose would
+    /// otherwise state it twice. Where it does not, render the failure itself.
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match &self.wording {
+            Wording::Classified { kind, detail } => match detail {
+                Some(detail) => format!("{kind} {detail}"),
+                None => (*kind).to_string(),
+            },
+            Wording::Parser(sentence) => sentence.clone(),
+        }
+    }
 }
 
 // The scanner's own sentence for `scan`, or `None` where that sentence could quote
@@ -314,6 +339,10 @@ fn parser_wording(scan: &serde_saphyr::granit_parser::ScanError) -> Option<Strin
         // `InputIo`, `InputDecoding` and `InputByteLimitExceeded` interpolate what
         // an input adapter supplied and `Custom` what an include resolver
         // supplied. Anything else is a kind this list has never seen.
+        //
+        // The allowed struct variants are matched as `{ .. }`, so a field added to
+        // one of them compiles here and is forwarded; a field added to a unit
+        // variant is a compile error, which covers all but three of them.
         _ => None,
     }
 }
@@ -330,6 +359,8 @@ fn located(error: &serde_saphyr::Error) -> Option<(u64, u64)> {
 }
 
 impl std::fmt::Display for ParseFailure {
+    // Written into the formatter rather than through `reason`, which would build a
+    // `String` every time a failure is rendered.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.wording {
             Wording::Classified { kind, detail } => {
@@ -344,14 +375,6 @@ impl std::fmt::Display for ParseFailure {
             write!(f, " at line {line}, column {column}")?;
         }
         Ok(())
-    }
-}
-
-impl ParseFailure {
-    /// Where the parser stopped, as a line and column, when it reported one.
-    #[must_use]
-    pub fn location(&self) -> Option<(u64, u64)> {
-        self.location
     }
 }
 
@@ -532,8 +555,11 @@ mod tests {
                 );
             }
 
+            // From the right, because `Display` appends the location last. A
+            // sentence holding those words itself would otherwise be cut in half
+            // and compared against the wrong half of the expectation.
             let sentence = rendered
-                .split_once(" at line ")
+                .rsplit_once(" at line ")
                 .map_or(rendered.as_str(), |(sentence, _)| sentence);
             assert_eq!(&sentence, expected, "{label}");
         }

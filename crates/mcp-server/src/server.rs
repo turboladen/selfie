@@ -996,7 +996,7 @@ mod tests {
     // ones — so testing how a refused entry is reported means parsing YAML, as
     // the repository does.
     fn entry(yaml: &str) -> selfie::package::DotfileEntry {
-        serde_saphyr::from_str(yaml).expect("fixture must parse")
+        selfie::yaml::parse(yaml).expect("fixture must parse")
     }
 
     #[test]

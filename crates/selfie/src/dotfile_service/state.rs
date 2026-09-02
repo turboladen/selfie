@@ -197,7 +197,7 @@ mod tests {
         let mut state = DeployState::empty();
         state.record_deployment("a/b.txt", "hash1");
         let yaml = serde_saphyr::to_string(&state).unwrap();
-        let loaded: DeployState = serde_saphyr::from_str(&yaml).unwrap();
+        let loaded: DeployState = crate::yaml::parse(&yaml).unwrap();
         assert_eq!(loaded.entries().len(), 1);
     }
 

@@ -4264,7 +4264,7 @@ mod symlinked_targets {
         // another.
         let written =
             std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).expect("state file");
-        let state: DeployState = serde_saphyr::from_str(&written).expect("state file parses");
+        let state: DeployState = selfie::yaml::parse(&written).expect("state file parses");
 
         assert!(
             state.get("myapp/plain.toml").is_some(),

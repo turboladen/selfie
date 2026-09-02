@@ -811,17 +811,16 @@ fn validate_changed_packages(
             }
         };
 
-        let mut package: crate::package::Package = match serde_saphyr::from_str(&content) {
+        let mut package: crate::package::Package = match crate::yaml::parse(&content) {
             Ok(p) => p,
             Err(e) => {
+                // The location is its own field here, so the message must not repeat
+                // it. `ParseFailure` appends it when rendered, so the sentence is
+                // built from the parts rather than rendered and cut back down.
                 let location = e
                     .location()
-                    .map(|loc| format!("line {} column {}", loc.line(), loc.column()));
-                // Strip the " at line N column N" suffix since we capture it separately.
-                let msg = e.to_string();
-                let message = msg
-                    .rfind(" at line ")
-                    .map_or_else(|| msg.clone(), |idx| msg[..idx].to_string());
+                    .map(|(line, column)| format!("line {line} column {column}"));
+                let message = e.reason();
 
                 failures.push(PackageValidationFailure {
                     path: path_str,
@@ -1870,6 +1869,40 @@ mod push_validation_tests {
             matches!(result, Err(SyncError::ValidationFailed { .. })),
             "a package with a real error must still fail, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn an_unparsable_package_reports_where_without_saying_it_twice() {
+        // The issue carries the line and column in a field of its own, so the
+        // message beside it must not restate them, and must not quote the file: a
+        // spec's `command:` entries name credential stores, and this issue reaches
+        // the MCP server's JSON.
+        let temp = tempfile::TempDir::new().unwrap();
+        let relative = write_package(
+            temp.path(),
+            "broken",
+            "name: broken\ndotfiles:\n  - command: op read op://Private/token\n    \
+             target: ~/.creds\nenvironments: {oops\n",
+        );
+
+        let result = validate_changed_packages(
+            temp.path(),
+            temp.path(),
+            &[(relative, FileChangeKind::Modified)],
+            "test",
+        );
+
+        let Err(SyncError::ValidationFailed { failures, .. }) = result else {
+            panic!("an unparsable package must fail the push, got: {result:?}");
+        };
+        let issue = failures
+            .first()
+            .and_then(|failure| failure.issues.first())
+            .expect("the failure must carry an issue");
+
+        assert_eq!(issue.category, "ParseError");
+        assert_eq!(issue.message, "unclosed bracket '{'");
+        assert_eq!(issue.location.as_deref(), Some("line 5 column 15"));
     }
 }
 

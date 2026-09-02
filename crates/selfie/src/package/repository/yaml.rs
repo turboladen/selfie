@@ -146,9 +146,9 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         let content = self.read_spec_file(path)?;
 
         let mut package: Package =
-            serde_saphyr::from_str(&content).map_err(|e| PackageParseError::YamlParse {
+            crate::yaml::parse(&content).map_err(|source| PackageParseError::YamlParse {
                 package_path: path.to_path_buf(),
-                source: Arc::new(e),
+                source,
             })?;
         package.set_source(path.to_path_buf(), content);
 
@@ -1636,7 +1636,7 @@ environments:
 
     // A package YAML with one well-formed dotfile and one carrying `var:`.
     fn package_with_typo() -> Package {
-        serde_saphyr::from_str(
+        crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n",
         )
@@ -1652,7 +1652,7 @@ environments:
     #[test]
     fn save_package_refuses_a_file_whose_top_level_could_not_be_read() {
         let yaml = "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \"echo i\"\n";
-        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
         assert!(
             matches!(package.top_level_keys(), TopLevelKeys::Unchecked(_)),
@@ -1680,9 +1680,8 @@ environments:
             !rendered.contains("unrecognized"),
             "the refusal must not claim it found keys, got: {err}"
         );
-        // The parse failure has to come last. It renders as several lines of
-        // source snippet with a `|` gutter, so a remedy placed after it arrives
-        // as `  |. Edit /packages/creds.yml directly` and reads as snippet.
+        // The parse failure has to come last, so the remedy is the part the reader
+        // reaches first. Both messages that carry a parse failure order it this way.
         let remedy = rendered
             .find("simplify it until selfie can read it")
             .expect("the refusal must give a remedy");
@@ -1701,7 +1700,7 @@ environments:
     #[test]
     fn save_package_refuses_a_top_level_key_carrying_an_anchor_name() {
         let yaml = "name: creds\n_dotfiles:\n  - source: a\n    target: ~/.a\nenvironments:\n  work:\n    install: \"echo i\"\n";
-        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
 
         let mut fs = MockFileSystem::default();
@@ -1735,7 +1734,7 @@ environments:
     // would already have destroyed the text.
     #[test]
     fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
         )
         .expect("fixture must parse -- the typo is a validation error, not a parse error");
@@ -1817,7 +1816,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    _vars:\n      k: op read x\n",
         )
@@ -1846,7 +1845,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
              - source: creds.tpl\n        target: ~/.creds\n        var:\n          k: op read x\n",
         )
@@ -1874,7 +1873,7 @@ environments:
 
         fs.mock_write_file_no_follow(&package_path);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    vars:\n      k: op read x\n",
         )

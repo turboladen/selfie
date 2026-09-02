@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn every_variant_names_the_package_file_exactly_once() {
         let path = std::path::PathBuf::from("/test/packages/ghost.yml");
-        let yaml_error = serde_saphyr::from_str::<crate::package::Package>("name: [oops")
+        let yaml_error = crate::yaml::parse::<crate::package::Package>("name: [oops")
             .expect_err("fixture must fail to parse");
 
         let cases: Vec<(&str, PackageParseError)> = vec![
@@ -670,7 +670,7 @@ mod tests {
                 "YamlParse",
                 PackageParseError::YamlParse {
                     package_path: path.clone(),
-                    source: Arc::new(yaml_error),
+                    source: yaml_error,
                 },
             ),
             (

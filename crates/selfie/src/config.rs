@@ -329,7 +329,7 @@ mod tests {
             max_concurrency: 4
         "#;
 
-        let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
+        let config: SelfieConfig = crate::yaml::parse(yaml).unwrap();
 
         assert_eq!(config.environment, "prod");
         assert_eq!(config.package_directory, PathBuf::from("/opt/packages"));
@@ -346,7 +346,7 @@ mod tests {
             package_directory: "/dev/packages"
         "#;
 
-        let config: SelfieConfig = serde_saphyr::from_str(yaml).unwrap();
+        let config: SelfieConfig = crate::yaml::parse(yaml).unwrap();
 
         // Explicit values
         assert_eq!(config.environment, "dev");
@@ -388,7 +388,7 @@ mod tests {
     "#;
 
         // Unknown fields are ignored, not denied.
-        let result: Result<SelfieConfig, _> = serde_saphyr::from_str(yaml);
+        let result: Result<SelfieConfig, _> = crate::yaml::parse(yaml);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.environment, "prod");
