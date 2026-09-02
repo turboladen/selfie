@@ -952,10 +952,12 @@ mod tests {
         mock_repo.expect_list_packages().returning(move || {
             Ok(ListPackagesOutput(vec![
                 Ok(good.clone()),
-                Err(PackageParseError::IrregularFile {
-                    package_path: ghost_for_list.clone(),
-                    kind: "named pipe (fifo)",
-                }),
+                Err(PackageParseError::new(
+                    ghost_for_list.clone(),
+                    crate::package::port::PackageParseKind::IrregularFile {
+                        kind: "named pipe (fifo)",
+                    },
+                )),
             ]))
         });
         mock_repo.expect_get_package().returning(move |_| {

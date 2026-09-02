@@ -67,28 +67,18 @@ use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 // One shared function rather than a loop per caller, so every command names a
 // skipped file the same way and no caller can quietly omit it.
 //
+// This is the only place a `PackageParseError` is rendered with the file named in
+// prose. Nothing here has to decide whether the path is already in the message,
+// because a `PackageParseKind` has no field to put one in.
+//
 // The wording avoids both "invalid" and "unparsable". A fifo is neither: it was
 // never opened, let alone parsed.
 #[must_use]
 pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String {
-    use super::port::PackageParseError as E;
-
-    // Matched rather than always prefixing the path, because half the variants
-    // already name the file in their own `Display` and the other half
-    // deliberately do not. Prefixing every variant would render "Skipping
-    // package file /x/bad.yml: YAML parsing error reading package file
-    // `/x/bad.yml`: …", naming the path twice.
-    //
-    // Exhaustive on purpose: a new variant has to declare which half it is in.
-    match invalid {
-        E::YamlParse { .. } | E::IoError { .. } | E::FileSystemError { .. } => {
-            format!("Skipping package: {invalid}")
-        }
-        E::IrregularFile { .. } | E::RefusedFile { .. } => format!(
-            "Skipping package file {}: {invalid}",
-            invalid.package_path().display()
-        ),
-    }
+    format!(
+        "Skipping package file {}: {invalid}",
+        invalid.package_path().display()
+    )
 }
 
 /// Helper for tracking progress through operation steps
@@ -650,48 +640,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::skipped_spec_warning;
-    use crate::package::port::PackageParseError;
+    use crate::package::port::{PackageParseError, PackageParseKind};
     use std::sync::Arc;
 
-    // Every variant, not just the one an end-to-end test happens to reach.
-    // `skipped_spec_warning` splits the enum in half -- variants that name the
-    // file in their own `Display` against variants that leave it to the caller --
-    // and filing a new variant in the wrong half is silent: too few paths leaves
-    // the user unable to tell which spec was skipped, too many is the
-    // duplication the split exists to prevent. Exactly one is the invariant.
+    // Every kind, not just the one an end-to-end test happens to reach.
+    //
+    // A `PackageParseKind` has no path field, so no kind can name the file in its
+    // own wording. What it can do is carry one at runtime: `Io` holds an
+    // `io::Error` and `Refused` a `String`, and either can be built from something
+    // that already names the path -- `RealFileSystem::write_file_private` re-tags
+    // its io errors with the target for exactly that reason. A read-side re-tag
+    // would double the path here and the type could not stop it.
     #[test]
-    fn every_variant_names_the_package_file_exactly_once() {
+    fn every_kind_names_the_package_file_exactly_once() {
         let path = std::path::PathBuf::from("/test/packages/ghost.yml");
-        let yaml_error = crate::yaml::parse::<crate::package::Package>("name: [oops")
+        let yaml_failure = crate::yaml::parse::<crate::package::Package>("name: [oops")
             .expect_err("fixture must fail to parse");
 
-        let cases: Vec<(&str, PackageParseError)> = vec![
+        let cases: Vec<(&str, PackageParseKind)> = vec![
             (
-                "YamlParse",
-                PackageParseError::YamlParse {
-                    package_path: path.clone(),
-                    source: yaml_error,
+                "Yaml",
+                PackageParseKind::Yaml {
+                    source: yaml_failure,
                 },
             ),
             (
-                "IoError",
-                PackageParseError::IoError {
-                    package_path: path.clone(),
+                "Io",
+                PackageParseKind::Io {
                     source: Arc::new(std::io::Error::other("permission denied")),
                 },
             ),
+            // A refusal source, which the read path cannot produce today but which
+            // this kind's `Display` would forward if it ever did: every refusal
+            // variant names a target and calls it a write.
             (
-                // An `IoError` source rather than a refusal, because that is what
-                // is reachable: `RealFileSystem::read_file` only ever returns
-                // `FileSystemError::IoError`, and `irregular_spec_refusal` routes
-                // refusals to `RefusedFile` instead, so this variant never carries
-                // one. Built with a refusal source this case fails -- the inner
-                // `Display` names the path a second time and calls it a write --
-                // but that state is unconstructible by production code. See
-                // selfie-l10c.
-                "FileSystemError",
-                PackageParseError::FileSystemError {
-                    package_path: path.clone(),
+                "FileSystem",
+                PackageParseKind::FileSystem {
                     source: Arc::new(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
                         std::io::Error::other("permission denied"),
                     ))),
@@ -699,24 +683,23 @@ mod tests {
             ),
             (
                 "IrregularFile",
-                PackageParseError::IrregularFile {
-                    package_path: path.clone(),
+                PackageParseKind::IrregularFile {
                     kind: "named pipe (fifo)",
                 },
             ),
             (
-                "RefusedFile",
-                PackageParseError::RefusedFile {
-                    package_path: path.clone(),
+                "Refused",
+                PackageParseKind::Refused {
                     reason: "it is a symlink".to_string(),
                 },
             ),
         ];
 
-        for (variant, error) in cases {
+        for (kind, parse_kind) in cases {
+            let error = PackageParseError::new(path.clone(), parse_kind);
             let message = skipped_spec_warning(&error);
             let count = message.matches("/test/packages/ghost.yml").count();
-            assert_eq!(count, 1, "{variant}: named {count} times in: {message}");
+            assert_eq!(count, 1, "{kind}: named {count} times in: {message}");
         }
     }
 }

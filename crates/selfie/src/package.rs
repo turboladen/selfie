@@ -2283,11 +2283,13 @@ environments:
         use crate::package::port::PackageParseError;
 
         // Create a realistic parse error
-        let parse_error = PackageParseError::YamlParse {
-            package_path: PathBuf::from("/packages/broken.yml"),
-            source: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
-                .unwrap_err(),
-        };
+        let parse_error = PackageParseError::new(
+            PathBuf::from("/packages/broken.yml"),
+            crate::package::port::PackageParseKind::Yaml {
+                source: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
+                    .unwrap_err(),
+            },
+        );
 
         let error = PackageError::ParseError {
             name: "broken-package".to_string(),
@@ -2309,12 +2311,14 @@ environments:
                 assert_eq!(failed_file, PathBuf::from("/packages/broken.yml"));
 
                 // Verify the parse error is preserved
-                match source {
-                    PackageParseError::YamlParse { package_path, .. } => {
-                        assert_eq!(package_path, PathBuf::from("/packages/broken.yml"));
-                    }
-                    _ => panic!("Expected YamlParse error"),
-                }
+                assert!(
+                    matches!(
+                        source.kind(),
+                        crate::package::port::PackageParseKind::Yaml { .. }
+                    ),
+                    "expected a YAML parse failure, got: {source:?}"
+                );
+                assert_eq!(source.package_path(), PathBuf::from("/packages/broken.yml"));
             }
             _ => panic!("Expected ParseError"),
         }

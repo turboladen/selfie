@@ -210,9 +210,7 @@ fn handle_list_event(
             if !package_list.invalid_packages.is_empty() {
                 let current_env = config.environment();
                 for invalid in &package_list.invalid_packages {
-                    let clean_error = clean_error_message(&invalid.error, &invalid.path);
-
-                    if !show_all && !error_matches_environment(&clean_error, current_env) {
+                    if !show_all && !error_matches_environment(&invalid.error, current_env) {
                         continue;
                     }
 
@@ -221,23 +219,15 @@ fn handle_list_event(
                         .and_then(|n| n.to_str())
                         .unwrap_or(&invalid.path);
 
-                    let error_text = if use_colors {
-                        style(clean_error).red().to_string()
-                    } else {
-                        clean_error
-                    };
+                    let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
+                    let name_column =
+                        format!("{prefix} {filename:<width$}", width = state.max_name_len);
 
-                    let prefix = if use_colors {
-                        style("✗").red().bold().to_string()
+                    let line = if use_colors {
+                        format!("{name_column}  {}", style(&invalid.error).red())
                     } else {
-                        "✗".to_string()
+                        format!("{name_column}  {}", invalid.error)
                     };
-
-                    let line = format!(
-                        "{prefix} {:<width$}  {error_text}",
-                        filename,
-                        width = state.max_name_len
-                    );
 
                     display.println(line);
                 }
@@ -290,33 +280,6 @@ fn error_matches_environment(error: &str, environment: &str) -> bool {
     } else {
         // Error is not environment-specific (e.g., missing `name` field) — always show
         true
-    }
-}
-
-fn clean_error_message(error: &str, file_path: &str) -> String {
-    // Remove redundant file path information from error messages
-    let error = error.replace(
-        &format!("YAML parsing error reading package file `{file_path}`:"),
-        "",
-    );
-    let error = error.trim();
-
-    // Clean up common patterns
-    if error.starts_with("missing field") {
-        error.to_string()
-    } else if error.contains("missing field") {
-        // For environment-specific errors, simplify the format
-        if let Some(env_part) = error.split(':').next() {
-            if env_part.contains("environments.") {
-                format!("{}: missing field", env_part.trim())
-            } else {
-                error.to_string()
-            }
-        } else {
-            error.to_string()
-        }
-    } else {
-        error.to_string()
     }
 }
 
@@ -430,27 +393,6 @@ mod tests {
 
         // Just test that it doesn't panic and returns something
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_clean_error_message() {
-        let file_path = "/path/to/package.yml";
-
-        // Test removing redundant file path
-        let error1 =
-            "YAML parsing error reading package file `/path/to/package.yml`: missing field `name`";
-        let cleaned1 = clean_error_message(error1, file_path);
-        assert_eq!(cleaned1, "missing field `name`");
-
-        // Test environment-specific error
-        let error2 = "environments.macos-work: missing field `install` at line 15 column 5";
-        let cleaned2 = clean_error_message(error2, file_path);
-        assert_eq!(cleaned2, "environments.macos-work: missing field");
-
-        // Test simple missing field error
-        let error3 = "missing field `name`";
-        let cleaned3 = clean_error_message(error3, file_path);
-        assert_eq!(cleaned3, "missing field `name`");
     }
 
     #[test]

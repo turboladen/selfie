@@ -500,33 +500,76 @@ impl ListPackagesOutput {
     }
 }
 
-/// Errors related to package parsing
+/// A package file that could not be turned into a package.
 ///
-/// Represents specific failures that can occur when attempting to parse
-/// package definition files. These errors provide detailed context about
-/// what went wrong during the parsing process.
+/// Carries the file it was reading and why. No [`PackageParseKind`]'s own wording
+/// names the file, so renderers put the path where their own layout wants it -- a
+/// column, a label, a JSON field -- and
+/// [`skipped_spec_warning`](crate::package::service::skipped_spec_warning) is the
+/// one that puts it in prose.
+// Split into a path and a path-free reason so that "the message names the file
+// exactly once" holds for every `#[error]` attribute at once rather than for each
+// of them separately. The kinds carrying free text -- `Io`, `Unreadable`,
+// `Refused` -- can still hold a path at runtime, so nothing building one of them
+// may re-tag a failure with the path it was reading.
 #[derive(Error, Debug, Clone)]
-pub enum PackageParseError {
+#[error("{kind}")]
+pub struct PackageParseError {
+    package_path: PathBuf,
+    // `#[source]` as well as interpolated, so a caller walking the chain reaches
+    // the `ParseFailure` or the `io::Error` underneath. Every other error in this
+    // module carries its payload both ways.
+    #[source]
+    kind: PackageParseKind,
+}
+
+impl PackageParseError {
+    /// Report `kind` against the package file at `package_path`.
+    #[must_use]
+    pub fn new(package_path: impl Into<PathBuf>, kind: PackageParseKind) -> Self {
+        Self {
+            package_path: package_path.into(),
+            kind,
+        }
+    }
+
+    /// The package file that failed to parse.
+    #[must_use]
+    pub fn package_path(&self) -> &Path {
+        &self.package_path
+    }
+
+    /// What went wrong, for a caller that has to tell the cases apart.
+    #[must_use]
+    pub fn kind(&self) -> &PackageParseKind {
+        &self.kind
+    }
+}
+
+/// Why a package file could not be turned into a package.
+///
+/// No variant names the file: the path lives on
+/// [`PackageParseError`](PackageParseError::package_path), and a renderer that
+/// wants it in the sentence asks for it there.
+#[derive(Error, Debug, Clone)]
+pub enum PackageParseKind {
     /// YAML syntax or structure error in the package file
-    #[error("YAML parsing error reading package file `{}`: {source}", package_path.display())]
-    YamlParse {
-        package_path: PathBuf,
+    #[error("YAML parsing error: {source}")]
+    Yaml {
         #[source]
         source: crate::yaml::ParseFailure,
     },
 
     /// IO error occurred while reading the package file
-    #[error("I/O error reading package file `{}`: {source}", package_path.display())]
-    IoError {
-        package_path: PathBuf,
+    #[error("I/O error reading the package file: {source}")]
+    Io {
         #[source]
         source: Arc<std::io::Error>,
     },
 
     /// File system abstraction error during package file access
-    #[error("File system error reading package file `{}`: {source}", package_path.display())]
-    FileSystemError {
-        package_path: PathBuf,
+    #[error("file system error reading the package file: {source}")]
+    FileSystem {
         #[source]
         source: Arc<crate::fs::filesystem::FileSystemError>,
     },
@@ -535,56 +578,23 @@ pub enum PackageParseError {
     ///
     /// Reading one blocks until a writer arrives, so it is refused before the
     /// read rather than reported after it.
-    // The only variant here whose message omits the path, deliberately: it is
-    // always rendered beside one. `InvalidPackageInfo` carries `path` as its own
-    // field for both renderers, and every site that warns about a skipped file
-    // goes through `skipped_spec_warning`, which prefixes
-    // "Skipping package file {path}: ". The one exception is
-    // `PackageError::UnreadableFile`, which names the package and the directory
-    // instead of the file -- unambiguous, since a spec file is `<name>.yml` in
-    // that directory. Self-naming would double the path in `package list`, whose
-    // rows are already labeled with the filename.
     #[error(
         "the package file is a {kind}, not a regular file. Replace it with a regular file or remove it from the package directory."
     )]
-    IrregularFile {
-        package_path: PathBuf,
-        kind: &'static str,
-    },
+    IrregularFile { kind: &'static str },
 
     /// Some other refusal from the filesystem port, worded for a read
     ///
     /// Carries a `reason` rather than the [`FileSystemError`] itself.
     // Every refusal variant's own `Display` names a *target* and says selfie
     // will not **write** through it, having been written for the deploy side.
-    // Rendering one here would report a write refusal on a read path, and would
-    // print the path a second time.
+    // Rendering one here would report a write refusal on a read path.
     //
     // Reached only if `irregular_target_refusal` ever returns something other
     // than `IrregularTarget`. It exists so that growth fails closed with
     // sensible wording rather than falling through to the read.
     #[error("selfie will not read the package file: {reason}")]
-    RefusedFile {
-        package_path: PathBuf,
-        reason: String,
-    },
-}
-
-impl PackageParseError {
-    /// Get the path to the package file that failed to parse
-    ///
-    /// Returns the file path regardless of the specific parse error type.
-    /// This is useful for error reporting and debugging.
-    #[must_use]
-    pub fn package_path(&self) -> &Path {
-        match self {
-            PackageParseError::YamlParse { package_path, .. }
-            | PackageParseError::IoError { package_path, .. }
-            | PackageParseError::FileSystemError { package_path, .. }
-            | PackageParseError::IrregularFile { package_path, .. }
-            | PackageParseError::RefusedFile { package_path, .. } => package_path,
-        }
-    }
+    Refused { reason: String },
 }
 
 #[cfg(test)]

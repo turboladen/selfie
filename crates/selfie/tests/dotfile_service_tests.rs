@@ -3119,11 +3119,9 @@ mod secret_bearing {
             rendered.contains("YAML parsing error"),
             "the warning must say why it was skipped, got: {events:?}"
         );
-        // Exactly once. `YamlParse` names the file in its own `Display`, so the
-        // shared warning must not prefix it again -- and this is the only half of
-        // that decision anything pins. Without it, collapsing
-        // `skipped_spec_warning` back to unconditional prefixing passes the whole
-        // suite, which is the behavior this change exists to remove.
+        // Exactly once. The warning prefixes the file it skipped, and a reason that
+        // named the file as well would print it twice -- which is what a payload
+        // carrying an already-tagged path would do, since no type stops that.
         assert_eq!(
             rendered.matches("creds.yml").count(),
             1,

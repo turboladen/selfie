@@ -166,10 +166,10 @@ mod tests {
             name: "myapp".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/myapp.yml"),
-            source: PackageParseError::YamlParse {
-                package_path: PathBuf::from("/packages/myapp.yml"),
-                source,
-            },
+            source: PackageParseError::new(
+                PathBuf::from("/packages/myapp.yml"),
+                crate::package::port::PackageParseKind::Yaml { source },
+            ),
         }
     }
 

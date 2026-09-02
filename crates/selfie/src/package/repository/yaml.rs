@@ -10,7 +10,7 @@ use crate::{
         GetPackage, Package, TopLevelKeys,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
-            PackageRepoError, PackageRepository,
+            PackageParseKind, PackageRepoError, PackageRepository,
         },
     },
     validation::ValidationIssue,
@@ -133,23 +133,22 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             return Err(irregular_spec_refusal(path, refusal));
         }
 
-        self.fs
-            .read_file(path)
-            .map_err(|e| PackageParseError::FileSystemError {
-                package_path: path.to_path_buf(),
-                source: Arc::new(e),
-            })
+        self.fs.read_file(path).map_err(|e| {
+            PackageParseError::new(
+                path,
+                PackageParseKind::FileSystem {
+                    source: Arc::new(e),
+                },
+            )
+        })
     }
 
     // Load a Package from a file using the FileSystem trait
     fn load_package_from_file(&self, path: &Path) -> Result<Package, PackageParseError> {
         let content = self.read_spec_file(path)?;
 
-        let mut package: Package =
-            crate::yaml::parse(&content).map_err(|source| PackageParseError::YamlParse {
-                package_path: path.to_path_buf(),
-                source,
-            })?;
+        let mut package: Package = crate::yaml::parse(&content)
+            .map_err(|source| PackageParseError::new(path, PackageParseKind::Yaml { source }))?;
         package.set_source(path.to_path_buf(), content);
 
         Ok(package)
@@ -168,21 +167,24 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 // twice over on a read, and would print the path a second time.
 fn irregular_spec_refusal(path: &Path, refusal: FileSystemError) -> PackageParseError {
     match refusal {
-        FileSystemError::IrregularTarget { kind, .. } => PackageParseError::IrregularFile {
-            package_path: path.to_path_buf(),
-            kind,
-        },
-        FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseError::RefusedFile {
-            package_path: path.to_path_buf(),
-            reason: match points_to {
-                Some(dest) => format!("it is a symlink to '{}'", dest.display()),
-                None => "it is a symlink".to_string(),
+        FileSystemError::IrregularTarget { kind, .. } => {
+            PackageParseError::new(path, PackageParseKind::IrregularFile { kind })
+        }
+        FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseError::new(
+            path,
+            PackageParseKind::Refused {
+                reason: match points_to {
+                    Some(dest) => format!("it is a symlink to '{}'", dest.display()),
+                    None => "it is a symlink".to_string(),
+                },
             },
-        },
-        other => PackageParseError::RefusedFile {
-            package_path: path.to_path_buf(),
-            reason: other.to_string(),
-        },
+        ),
+        other => PackageParseError::new(
+            path,
+            PackageParseKind::Refused {
+                reason: other.to_string(),
+            },
+        ),
     }
 }
 
@@ -277,15 +279,16 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // in a file that was never opened.
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| match source {
-                refusal @ (PackageParseError::IrregularFile { .. }
-                | PackageParseError::RefusedFile { .. }) => PackageError::UnreadableFile {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    source: refusal,
-                },
-                source => PackageError::ParseError {
+            .map_err(|source| match source.kind() {
+                PackageParseKind::IrregularFile { .. } | PackageParseKind::Refused { .. } => {
+                    PackageError::UnreadableFile {
+                        name: name.to_string(),
+                        packages_path: self.package_dir.clone(),
+                        failed_file: package_file.clone(),
+                        source,
+                    }
+                }
+                _ => PackageError::ParseError {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
@@ -956,15 +959,11 @@ mod tests {
                 } => {
                     assert_eq!(name, "invalid");
                     assert_eq!(packages_path, package_dir);
-                    match source {
-                        PackageParseError::YamlParse {
-                            package_path: error_path,
-                            ..
-                        } => {
-                            assert_eq!(error_path, package_path);
-                        }
-                        _ => panic!("Expected YamlParse error"),
-                    }
+                    assert!(
+                        matches!(source.kind(), PackageParseKind::Yaml { .. }),
+                        "expected a YAML parse failure, got: {source:?}"
+                    );
+                    assert_eq!(source.package_path(), package_path);
                 }
                 _ => panic!("Expected ParseError"),
             },
