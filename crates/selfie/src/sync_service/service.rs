@@ -639,16 +639,6 @@ enum FileChangeKind {
     Deleted,
 }
 
-/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
-/// if any have errors.
-///
-/// Only non-deleted YAML files are validated — deleted files are obviously not
-/// parseable, and non-YAML files (dotfile sources) don't have a schema to validate.
-///
-/// Informational notices are excluded. This is a gate on pushing, and an `Info`
-/// issue is by definition not a defect — a package with a provider-sourced
-/// dotfile always carries one, so counting it here would block `sync push` for
-/// every correct package that uses the feature.
 // Spec files in `dir` that resolve to one package name, grouped under that
 // name. Only groups of two or more are returned.
 //
@@ -726,6 +716,17 @@ fn name_collision_message(names: &[String]) -> String {
     }
 }
 
+/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
+/// if any have errors.
+///
+/// Only non-deleted specs in `package_dir` are validated — deleted files are
+/// obviously not parseable, and neither a dotfile source nor YAML belonging to
+/// some other tool has this schema to validate against.
+///
+/// Informational notices are excluded. This is a gate on pushing, and an `Info`
+/// issue is by definition not a defect — a package with a provider-sourced
+/// dotfile always carries one, so counting it here would block `sync push` for
+/// every correct package that uses the feature.
 fn validate_changed_packages(
     repo_root: &Path,
     package_dir: &Path,
