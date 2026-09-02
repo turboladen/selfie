@@ -286,7 +286,14 @@ where
             });
         }
 
-        let (commits, warnings) = group_changes_by_package(all_changed, options, &repo_info.root);
+        // From the package directory, not the repo root. The repository loads
+        // specs from there, and the repo is discovered by walking up from it,
+        // so the two are the same directory only in the flat layout. Built from
+        // the root, this set is empty whenever specs live in a subdirectory,
+        // and every dotfile source is reported ungrouped instead of committed
+        // with its package.
+        let spec_names = spec_names_in(self.config.package_directory());
+        let (commits, warnings) = group_changes_by_package(all_changed, options, &spec_names);
 
         Ok(PrepareResult {
             pending_commits: commits,
@@ -576,10 +583,13 @@ where
                         }
                     };
 
-                    let (packages_updated, packages_added, packages_removed) =
-                        categorize_pull_changes(&changed_files, &repo_info.root);
+                    // One read of the package directory for both consumers.
+                    let spec_names = spec_names_in(config.package_directory());
 
-                    if has_dotfile_changes(&changed_files, &spec_names_in(&repo_info.root)) {
+                    let (packages_updated, packages_added, packages_removed) =
+                        categorize_pull_changes(&changed_files, &spec_names);
+
+                    if has_dotfile_changes(&changed_files, &spec_names) {
                         sender
                             .send_log(
                                 crate::package::event::LogLevel::Warning,
@@ -907,17 +917,13 @@ fn collect_changed_files(
 fn group_changes_by_package(
     changes: Vec<(PathBuf, FileChangeKind)>,
     options: &PushOptions,
-    repo_root: &Path,
+    spec_names: &BTreeSet<String>,
 ) -> (Vec<PendingCommit>, Vec<String>) {
     let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
     let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
 
-    // Built once and shared by every file below; each of these lookups would
-    // otherwise read the repo root again.
-    let spec_names = spec_names_in(repo_root);
-
     for (path, kind) in &changes {
-        match infer_package_name(path, &spec_names) {
+        match infer_package_name(path, spec_names) {
             Some(name) => groups.entry(name).or_default().push((path.clone(), *kind)),
             None => ungrouped.push((path.clone(), *kind)),
         }
@@ -1068,17 +1074,21 @@ fn is_spec_file(path: &Path) -> bool {
         .is_some()
 }
 
-/// The folded names of every spec sitting directly in `repo_root`.
+/// The folded names of every spec sitting directly in `spec_dir`.
 ///
-/// Built once per push. Grouping consults it for each changed file, so reading
-/// the directory inside that loop would cost one `read_dir` per change.
-fn spec_names_in(repo_root: &Path) -> BTreeSet<String> {
+/// That is the package directory, not the repo root: the repository loads specs
+/// from there, and the repo is discovered by walking up from it. Callers pass
+/// the configured package directory.
+///
+/// Built once per operation. Grouping consults it for each changed file, so
+/// reading the directory inside that loop would cost one `read_dir` per change.
+fn spec_names_in(spec_dir: &Path) -> BTreeSet<String> {
     // Reading the directory rather than probing `{name}.yml` and `{name}.yaml`.
     // Those two paths answer for one capitalization only, so a spec stored as
     // `Starship.YML` left `starship/starship.toml` unmatched on a
     // case-sensitive file system and matched on a case-insensitive one -- the
     // per-machine split that folding names exists to remove.
-    let Ok(entries) = std::fs::read_dir(repo_root) else {
+    let Ok(entries) = std::fs::read_dir(spec_dir) else {
         return BTreeSet::new();
     };
 
@@ -1169,7 +1179,7 @@ async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Opti
 /// Categorize changed files from a pull into updated, added, and removed package names.
 fn categorize_pull_changes(
     changed_files: &[crate::git::ChangedFile],
-    repo_root: &Path,
+    spec_names: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut updated = Vec::new();
     let mut added = Vec::new();
@@ -1179,10 +1189,8 @@ fn categorize_pull_changes(
     let mut seen_added = std::collections::HashSet::new();
     let mut seen_removed = std::collections::HashSet::new();
 
-    let spec_names = spec_names_in(repo_root);
-
     for file in changed_files {
-        if let Some(name) = infer_package_name(&file.path, &spec_names) {
+        if let Some(name) = infer_package_name(&file.path, spec_names) {
             match file.change_type {
                 ChangeType::Added => {
                     if seen_added.insert(name.clone()) {
@@ -1432,7 +1440,8 @@ mod tests {
         ];
 
         let temp = tempfile::TempDir::new().unwrap();
-        let (updated, added, removed) = categorize_pull_changes(&changed, temp.path());
+        let (updated, added, removed) =
+            categorize_pull_changes(&changed, &spec_names_in(temp.path()));
         assert_eq!(updated, vec!["starship"]);
         assert_eq!(added, vec!["fnm"]);
         assert_eq!(removed, vec!["old-tool"]);
@@ -1454,7 +1463,7 @@ mod tests {
             },
         ];
 
-        let (updated, added, removed) = categorize_pull_changes(&changed, &root);
+        let (updated, added, removed) = categorize_pull_changes(&changed, &spec_names_in(&root));
         assert_eq!(updated, vec!["starship"]);
         assert!(added.is_empty());
         assert!(removed.is_empty());
@@ -1533,7 +1542,8 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].name, "fnm");
@@ -1550,7 +1560,8 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(warnings.len(), 1);
@@ -1569,7 +1580,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, temp.path());
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(temp.path()));
 
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[1].name, "housekeeping");
@@ -1588,7 +1600,7 @@ mod tests {
         ];
         let options = PushOptions::default();
 
-        let (commits, _) = group_changes_by_package(changes, &options, &root);
+        let (commits, _) = group_changes_by_package(changes, &options, &spec_names_in(&root));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].name, "starship");
@@ -1609,7 +1621,8 @@ mod tests {
         )];
         let options = PushOptions::default();
 
-        let (commits, warnings) = group_changes_by_package(changes, &options, &root);
+        let (commits, warnings) =
+            group_changes_by_package(changes, &options, &spec_names_in(&root));
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].name, "starship");
@@ -1921,7 +1934,7 @@ mod credential_egress_tests {
 
     // Never called: neither `prepare_push` nor `execute_push` touches it.
     #[derive(Clone)]
-    struct UnusedDotfileService;
+    pub(super) struct UnusedDotfileService;
 
     impl DotfileService for UnusedDotfileService {
         async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
@@ -1952,7 +1965,7 @@ mod credential_egress_tests {
     // A privilege port reporting a fixed answer, so these tests do not depend on
     // how the suite was invoked.
     #[derive(Clone, Copy, Debug)]
-    struct RunningAs(Elevation);
+    pub(super) struct RunningAs(pub(super) Elevation);
 
     impl Privilege for RunningAs {
         fn elevation(&self) -> Elevation {
@@ -2210,6 +2223,127 @@ mod credential_egress_tests {
 
 #[cfg(test)]
 mod name_collision_tests {
+    use crate::git::{
+        CommitId, FastForwardResult, GitSyncError, GitSyncProvider, RepoInfo, RepoStatus,
+    };
+    use std::path::{Path, PathBuf};
+
+    // The repo is discovered by walking up from the package directory, so a
+    // package directory below the repo root leaves the two distinct. Nothing
+    // else in this file models that: the other git fake returns the path it was
+    // handed, which makes root and package directory the same and hides every
+    // bug about confusing them.
+    #[derive(Clone)]
+    struct GitWithRepoAboveThePackageDir {
+        status: RepoStatus,
+    }
+
+    impl GitSyncProvider for GitWithRepoAboveThePackageDir {
+        fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
+            Ok(RepoInfo {
+                root: path
+                    .parent()
+                    .expect("the fixture nests the package directory")
+                    .to_path_buf(),
+                branch: Some("main".to_string()),
+                remote_name: Some("origin".to_string()),
+            })
+        }
+
+        fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+            Ok(self.status.clone())
+        }
+
+        fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push stages nothing")
+        }
+
+        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            unreachable!("preparing a push commits nothing")
+        }
+
+        fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push pushes nothing")
+        }
+
+        fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("preparing a push fetches nothing")
+        }
+
+        fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+            unreachable!("preparing a push merges nothing")
+        }
+
+        fn diff_commits(
+            &self,
+            _: &Path,
+            _: &CommitId,
+            _: &CommitId,
+        ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+            unreachable!("only pull diffs commits")
+        }
+    }
+
+    // A dotfile source belongs to the package its parent directory names, and
+    // the spec that answers to that name lives in the package directory. Built
+    // from the repo root instead, the set is empty whenever the package
+    // directory is a subdirectory, so this file is reported ungrouped and left
+    // out of the push -- the user's dotfile edit silently does not sync.
+    #[tokio::test]
+    async fn a_dotfile_source_is_grouped_when_the_package_dir_is_below_the_repo_root() {
+        use crate::sync_service::port::{PushOptions, SyncService};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(packages.join("starship")).unwrap();
+        std::fs::write(
+            packages.join("starship.yml"),
+            "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(packages.join("starship/starship.toml"), "x = 1\n").unwrap();
+
+        let service = super::SyncServiceImpl::new(
+            GitWithRepoAboveThePackageDir {
+                status: RepoStatus {
+                    modified: vec![PathBuf::from("packages/starship/starship.toml")],
+                    staged: vec![],
+                    untracked: vec![],
+                    deleted: vec![],
+                    ahead: 0,
+                    behind: 0,
+                },
+            },
+            crate::sync_service::service::credential_egress_tests::UnusedDotfileService,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(&packages)
+                .build(),
+            super::SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let prepared = service
+            .prepare_push(&PushOptions::default())
+            .await
+            .expect("the fixture is valid, so preparing must succeed");
+
+        assert!(
+            prepared.warnings.is_empty(),
+            "the file belongs to `starship`, so nothing is ungrouped: {:?}",
+            prepared.warnings
+        );
+        let names: Vec<&str> = prepared
+            .pending_commits
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["starship"], "got: {names:?}");
+    }
+
     use super::{colliding_specs, group_name_collisions, name_collision_message};
 
     // The guard is only worth anything if a push actually refuses. Detection
