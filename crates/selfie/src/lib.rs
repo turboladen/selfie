@@ -13,6 +13,7 @@
 //! - [`fs`] — file system access
 //! - [`privilege`] — whether the process holds privilege it should not write with
 //! - [`validation`] — validation types
+//! - [`yaml`] — reading YAML files
 
 pub mod commands;
 pub mod config;
@@ -25,6 +26,7 @@ pub(crate) mod paths;
 pub mod privilege;
 pub mod sync_service;
 pub mod validation;
+pub mod yaml;
 
 /// Returns `singular` when `count == 1`, otherwise `plural`.
 pub fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
