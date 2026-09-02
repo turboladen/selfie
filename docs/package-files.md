@@ -42,8 +42,12 @@ environments:
 
 ### `name`
 
-The package name, which must match the filename without its extension. Both `.yml` and `.yaml` are
-accepted.
+The package name. It should agree with the file name without its extension. Both `.yml` and `.yaml`
+are accepted.
+
+selfie resolves a package from the **file name**, not from this field, so `Neovim.yml` answers to
+`neovim` whatever `name:` says. `selfie spec validate` reports a disagreement between the two as a
+warning and still loads the file.
 
 ```yaml
 name: ripgrep # for file ripgrep.yaml
