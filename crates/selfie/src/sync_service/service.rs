@@ -1042,13 +1042,28 @@ fn is_spec_file(path: &Path) -> bool {
         .is_some()
 }
 
-/// Check if a YAML spec file (`{name}.yml` or `{name}.yaml`) exists on disk
-/// in the repo root. Used to associate subdirectory files with their package.
+/// Check whether a spec naming `name` sits in the repo root. Used to associate
+/// subdirectory files with their package.
 fn has_spec_on_disk(repo_root: &Path, name: &str) -> bool {
-    repo_root.join(format!("{name}.yml")).exists()
-        || repo_root.join(format!("{name}.yaml")).exists()
-}
+    // Reads the directory rather than probing `{name}.yml` and `{name}.yaml`.
+    // Those two paths answer only for one capitalization, so a spec stored as
+    // `Starship.yml` left `starship/starship.toml` unmatched on a
+    // case-sensitive file system and matched on a case-insensitive one -- the
+    // per-machine split that folding names exists to remove.
+    let wanted = name.to_lowercase();
 
+    let Ok(entries) = std::fs::read_dir(repo_root) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let file_name = entry.file_name();
+        file_name
+            .to_str()
+            .and_then(crate::package::spec_name_from_file_name)
+            .is_some_and(|spec_name| spec_name == wanted)
+    })
+}
 
 /// Extract the package name from a conventional commit message.
 ///
@@ -2214,6 +2229,41 @@ mod name_collision_tests {
     #[test]
     fn a_single_file_is_not_a_collision() {
         assert!(group(&["Neovim.yml"]).is_empty());
+    }
+
+    // A dotfile source is associated with its package by looking for a spec of
+    // the same name in the repo root. Probing `{name}.yml` and `{name}.yaml`
+    // answers for one capitalization only, so a spec stored as `Starship.YML`
+    // left `starship/starship.toml` ungrouped and out of the push.
+    //
+    // Only a case-sensitive file system separates the two implementations: on
+    // one that folds case, `starship.yml` resolves to `Starship.YML` and the
+    // path probe is rescued by the file system rather than by being right.
+    // Skipping is loud, because a quietly-skipped test reads as a passing one.
+    #[test]
+    fn a_dotfile_source_finds_its_spec_under_any_capitalization() {
+        use super::has_spec_on_disk;
+
+        let root = tempfile::tempdir().unwrap();
+        let spec = "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(root.path().join("Starship.YML"), spec).unwrap();
+
+        if root.path().join("starship.yml").exists() {
+            eprintln!(
+                "SKIPPED a_dotfile_source_finds_its_spec_under_any_capitalization: this file \
+                 system folds case, so a path probe finds the spec without folding names"
+            );
+            return;
+        }
+
+        assert!(
+            has_spec_on_disk(root.path(), "starship"),
+            "a spec stored as `Starship.YML` must answer to `starship`"
+        );
+        assert!(
+            !has_spec_on_disk(root.path(), "neovim"),
+            "a name with no spec behind it must not match"
+        );
     }
 
     // The end-to-end half of the extension case, and it runs on every machine:
