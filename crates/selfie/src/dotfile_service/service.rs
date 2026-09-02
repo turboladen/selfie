@@ -287,11 +287,11 @@ fn load_deploy_state<F: FileSystem>(
     // repository-file dotfile on the machine, each with a checksum, which is why
     // `save_deploy_state` writes it owner-only.
     //
-    // `crate::yaml::parse` is what keeps the file's text out: serde-saphyr's
-    // `Display` interpolates parsed content into several messages, and the
-    // duplicate-key one quotes the key, which here is a dotfile source path. The
-    // failure still reports a line and column; the reasoning for accepting that is
-    // on `ParseFailure`.
+    // `crate::yaml::parse` is what keeps the file's keys and values out:
+    // serde-saphyr's `Display` interpolates parsed content into several messages,
+    // and the duplicate-key one quotes the key, which here is a dotfile source
+    // path. A line, a column, and the single character a scanner failure stopped
+    // on still get through; the reasoning for accepting those is on `ParseFailure`.
     match crate::yaml::parse(&content) {
         Ok(state) => (state, None),
         Err(e) => (
@@ -2482,7 +2482,10 @@ mod tests {
     fn no_malformed_state_file_shape_quotes_its_contents() {
         const DUPLICATE: &str = "a key is listed twice";
         const WRONG_SHAPE: &str = "the file has the wrong shape";
-        const UNPARSABLE: &str = "the file is not valid YAML";
+        // The parser's own words. Only the bracket character reaches the message,
+        // never the key or value the row plants around it.
+        const UNCLOSED: &str = "unclosed bracket";
+        const TABS: &str = "tabs disallowed within this context";
 
         let entry = "{source_checksum: x, deployed_checksum: y, deployed_at: z}";
         // YAML escapes, so the key this builds is ordinary UTF-8 text holding
@@ -2543,11 +2546,11 @@ mod tests {
                 WRONG_SHAPE,
             ),
             ("top level is a scalar", format!("{VALUE}\n"), WRONG_SHAPE),
-            ("unclosed bracket", unclosed_bracket(KEY, VALUE), UNPARSABLE),
+            ("unclosed bracket", unclosed_bracket(KEY, VALUE), UNCLOSED),
             (
                 "tab indentation",
                 format!("deployed:\n\t{KEY}: {VALUE}\n"),
-                UNPARSABLE,
+                TABS,
             ),
             (
                 "unknown anchor",

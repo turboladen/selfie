@@ -141,12 +141,12 @@ mod tests {
             (
                 "unexpected character",
                 "deployed: @nope\n",
-                "the file is not valid YAML at line 1, column 11",
+                "unexpected character: `@' at line 1, column 11",
             ),
             (
                 "tab indentation",
                 "deployed:\n\ta: 1\n",
-                "the file is not valid YAML at line 2, column 2",
+                "tabs disallowed within this context (block indentation) at line 2, column 2",
             ),
             (
                 "multiple documents",
@@ -161,7 +161,7 @@ mod tests {
             (
                 "unclosed flow mapping",
                 "deployed: {oops\n",
-                "the file is not valid YAML at line 1, column 11",
+                "unclosed bracket '{' at line 1, column 11",
             ),
             (
                 "unknown anchor",
