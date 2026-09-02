@@ -262,7 +262,12 @@ where
 
         // Validate changed YAML files before proposing commits.
         let environment = self.config.environment();
-        validate_changed_packages(&repo_info.root, &all_changed, environment)?;
+        validate_changed_packages(
+            &repo_info.root,
+            self.config.package_directory(),
+            &all_changed,
+            environment,
+        )?;
 
         if options.batch {
             let files: Vec<PathBuf> = all_changed.iter().map(|(p, _)| p.clone()).collect();
@@ -713,6 +718,7 @@ fn name_collision_message(names: &[String]) -> String {
 
 fn validate_changed_packages(
     repo_root: &Path,
+    package_dir: &Path,
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
@@ -724,16 +730,24 @@ fn validate_changed_packages(
     // specs is invisible to the per-file loop below, which sees one file at a
     // time and finds each of them individually valid.
     //
-    // The repo root is always scanned, not only when a spec in it changed.
-    // Specs live there, and a push carrying nothing but dotfile sources --
-    // `starship/starship.toml` -- would otherwise propagate a collision that
-    // was already on disk while touching no spec that would reveal it.
+    // The package directory is always scanned, not only when a spec in it
+    // changed. Specs live there, and a push carrying nothing but dotfile
+    // sources -- `starship/starship.toml` -- would otherwise propagate a
+    // collision that was already on disk while touching no spec that would
+    // reveal it.
+    //
+    // The repo root is scanned as well, and is not the same directory: the repo
+    // is discovered by walking up from the package directory, so a package
+    // directory nested inside a larger dotfiles repository leaves the two
+    // distinct, and scanning only the root would look everywhere except where
+    // the specs are.
     let mut touched_dirs: BTreeSet<PathBuf> = changes
         .iter()
         .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_spec_file(path))
         .filter_map(|(path, _)| repo_root.join(path).parent().map(Path::to_path_buf))
         .collect();
     touched_dirs.insert(repo_root.to_path_buf());
+    touched_dirs.insert(package_dir.to_path_buf());
 
     // Refusing the push is the only place the damage can still be prevented.
     // The machine that loses a spec is the one that pulls, and by then the file
@@ -1756,8 +1770,12 @@ mod push_validation_tests {
              - command: op read op://Private/token\n    target: ~/.creds\n",
         );
 
-        let result =
-            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+        let result = validate_changed_packages(
+            temp.path(),
+            temp.path(),
+            &[(relative, FileChangeKind::Modified)],
+            "test",
+        );
 
         assert!(
             result.is_ok(),
@@ -1776,8 +1794,12 @@ mod push_validation_tests {
              - source: a.tpl\n    command: op read x\n    target: ~/.creds\n",
         );
 
-        let result =
-            validate_changed_packages(temp.path(), &[(relative, FileChangeKind::Modified)], "test");
+        let result = validate_changed_packages(
+            temp.path(),
+            temp.path(),
+            &[(relative, FileChangeKind::Modified)],
+            "test",
+        );
 
         assert!(
             matches!(result, Err(SyncError::ValidationFailed { .. })),
@@ -2217,7 +2239,7 @@ mod name_collision_tests {
             PathBuf::from("packages/neovim.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -2337,7 +2359,7 @@ mod name_collision_tests {
         );
 
         let changes = vec![(PathBuf::from("neovim.yml"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying two extensions of one name must be refused");
@@ -2437,7 +2459,7 @@ mod name_collision_tests {
             PathBuf::from("starship/starship.toml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &changes, "test-env");
+        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -2445,6 +2467,34 @@ mod name_collision_tests {
         let rendered = format!("{error:?}");
         assert!(rendered.contains("NameCollision"), "got: {rendered}");
         assert!(rendered.contains("Neovim.yml"), "got: {rendered}");
+    }
+
+    // The repo is discovered by walking up from the package directory, so the
+    // two are the same directory only when the package directory happens to be
+    // the top of the repository. Scanning the root alone looks at a directory
+    // that holds no specs and lets the collision through.
+    #[test]
+    fn a_package_directory_below_the_repo_root_is_still_scanned() {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let spec = "name: neovim\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        std::fs::write(packages.join("neovim.yml"), spec).unwrap();
+        std::fs::write(packages.join("neovim.yaml"), spec).unwrap();
+
+        std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
+        let changes = vec![(PathBuf::from("README.md"), FileChangeKind::Modified)];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        let Err(error) = result else {
+            panic!("a push must be refused over a collision in the package directory");
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("NameCollision"), "got: {rendered}");
+        assert!(rendered.contains("neovim.yaml"), "got: {rendered}");
     }
 
     // The package repository folds the extension as well as the stem, so
