@@ -60,11 +60,11 @@ where
 
     // The name said nothing was there; ask the file system about the path.
     //
-    // Name matching is exact, so an existing `Neovim.yml` does not answer to
-    // `neovim`. On a case-insensitive file system the write then resolves to
-    // that same file and truncates it, and selfie reports success naming a path
-    // that is not what is on disk. On a case-sensitive one the two really are
-    // different files and this does not fire (selfie-6cg2).
+    // Names fold, so a differently-capitalized spec is already caught above.
+    // What the name check cannot see is a path held by something that is not a
+    // spec at all -- a directory, or a `neovim.yml` selfie will not treat as a
+    // package. Writing there would replace it and report success naming a path
+    // that is not what is on disk (selfie-6cg2).
     if repo.path_is_occupied(package.path()) {
         let path = package.path().to_path_buf();
         sender
@@ -173,10 +173,9 @@ mod tests {
         }
     }
 
-    // Name matching is exact, so an existing `Neovim.yml` does not answer to the
-    // name `neovim`. On a case-insensitive file system the write resolves to
-    // that same file and truncates it, so the file system has to be asked about
-    // the path even when the name check came back clean.
+    // A path can be held by something no name resolves to -- a directory, or a
+    // file selfie will not load as a spec -- so the file system has to be asked
+    // about the path even when the name check came back clean.
     #[tokio::test]
     async fn create_refuses_when_the_path_is_already_taken() {
         let (_temp, config, package) = fixture();

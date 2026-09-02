@@ -227,10 +227,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         self.fs.read_file(&resolved)
     }
 
-    // Name matching here is exact, so an existing `Neovim.yml` does not match
-    // the name `neovim` -- but on a case-insensitive file system, opening
-    // `neovim.yml` resolves to that same file and truncates it. Only the file
-    // system knows which of the two it is, so ask it rather than compare names.
+    // A path can be taken by something that answers to no package name at all:
+    // a directory, a `.txt` file, or a spec the name folding does not reach.
+    // Only the file system knows, so ask it rather than compare names.
     fn path_is_occupied(&self, path: &Path) -> bool {
         self.fs.path_exists(path)
     }

@@ -47,9 +47,9 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
         pkg
     } else {
         // Before offering to create, ask the file system whether the path is
-        // free. Names match exactly, so an existing `Neovim.yml` does not answer
-        // to `neovim`, but on a case-insensitive file system writing
-        // `neovim.yml` resolves to it and truncates it (selfie-6cg2).
+        // free. Names fold, so a differently-capitalized spec was already found
+        // above; what the name check cannot see is a path held by something no
+        // name resolves to, and writing there would replace it (selfie-6cg2).
         //
         // Ahead of the prompt on purpose: asking someone to confirm a create
         // that is about to be refused wastes the answer, and it is the only
