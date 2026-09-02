@@ -649,7 +649,7 @@ fn colliding_specs(dir: &Path) -> Vec<(String, Vec<String>)> {
     let names = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_yaml_file(Path::new(name)));
+        .filter(|name| is_spec_file(Path::new(name)));
 
     group_name_collisions(names)
 }
@@ -670,11 +670,10 @@ where
     let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for file_name in names {
-        let stem = file_name
-            .rsplit_once('.')
-            .map_or(file_name.as_str(), |(stem, _)| stem)
-            .to_lowercase();
-        by_name.entry(stem).or_default().push(file_name);
+        let Some(name) = crate::package::spec_name_from_file_name(&file_name) else {
+            continue;
+        };
+        by_name.entry(name).or_default().push(file_name);
     }
 
     by_name
@@ -731,7 +730,7 @@ fn validate_changed_packages(
     // was already on disk while touching no spec that would reveal it.
     let mut touched_dirs: BTreeSet<PathBuf> = changes
         .iter()
-        .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_yaml_file(path))
+        .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_spec_file(path))
         .filter_map(|(path, _)| repo_root.join(path).parent().map(Path::to_path_buf))
         .collect();
     touched_dirs.insert(repo_root.to_path_buf());
@@ -756,7 +755,7 @@ fn validate_changed_packages(
     }
 
     for (path, kind) in changes {
-        if *kind == FileChangeKind::Deleted || !is_yaml_file(path) {
+        if *kind == FileChangeKind::Deleted || !is_spec_file(path) {
             continue;
         }
 
@@ -953,7 +952,7 @@ fn group_changes_by_package(
 /// on disk, even if `starship.yml` itself didn't change).
 fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile], repo_root: &Path) -> bool {
     changed_files.iter().any(|f| {
-        !is_yaml_file(&f.path)
+        !is_spec_file(&f.path)
             && f.path
                 .parent()
                 .and_then(|p| p.file_name())
@@ -973,7 +972,7 @@ fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile], repo_root: &Pa
 /// - Everything else → `None` (ungrouped)
 fn infer_package_name(path: &Path, repo_root: &Path) -> Option<String> {
     // YAML files → package name is the file stem
-    if is_yaml_file(path) {
+    if is_spec_file(path) {
         return path.file_stem().map(|s| s.to_string_lossy().to_string());
     }
 
@@ -993,14 +992,14 @@ fn infer_package_name(path: &Path, repo_root: &Path) -> Option<String> {
 
 /// Generate a conventional commit message for a package's changes.
 fn generate_commit_message(name: &str, entries: &[(PathBuf, FileChangeKind)]) -> String {
-    let has_yaml_changes = entries.iter().any(|(p, _)| is_yaml_file(p));
-    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_yaml_file(p));
+    let has_yaml_changes = entries.iter().any(|(p, _)| is_spec_file(p));
+    let has_non_yaml_changes = entries.iter().any(|(p, _)| !is_spec_file(p));
     let has_new_yaml = entries
         .iter()
-        .any(|(p, k)| is_yaml_file(p) && *k == FileChangeKind::Added);
+        .any(|(p, k)| is_spec_file(p) && *k == FileChangeKind::Added);
     let has_deleted_yaml = entries
         .iter()
-        .any(|(p, k)| is_yaml_file(p) && *k == FileChangeKind::Deleted);
+        .any(|(p, k)| is_spec_file(p) && *k == FileChangeKind::Deleted);
 
     if has_deleted_yaml && !has_non_yaml_changes {
         return format!("chore({name}): remove package spec");
@@ -1029,14 +1028,18 @@ fn generate_batch_message(entries: &[(PathBuf, FileChangeKind)]) -> String {
     format!("chore: update {count} {label}")
 }
 
-/// Check if a path is a YAML file.
-fn is_yaml_file(path: &Path) -> bool {
-    // Ignoring case because the package repository does: it resolves a name by
-    // folding both stem and extension, so `Neovim.YML` loads as `neovim`. A
-    // case-sensitive answer here would hide such a file from the collision
-    // check and from validation while it remained a real spec.
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
+/// Check whether a path names a package spec.
+///
+/// Not the same question as whether it is YAML: `.yml` is a hidden file with
+/// no stem, so it names no package and this returns false for it.
+fn is_spec_file(path: &Path) -> bool {
+    // Answered by the same function the package repository resolves names
+    // with. When these disagreed, a `Neovim.YML` the loader read as a spec was
+    // invisible here, so the push guard and per-file validation both skipped it.
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::package::spec_name_from_file_name)
+        .is_some()
 }
 
 /// Check if a YAML spec file (`{name}.yml` or `{name}.yaml`) exists on disk
@@ -1045,6 +1048,7 @@ fn has_spec_on_disk(repo_root: &Path, name: &str) -> bool {
     repo_root.join(format!("{name}.yml")).exists()
         || repo_root.join(format!("{name}.yaml")).exists()
 }
+
 
 /// Extract the package name from a conventional commit message.
 ///
@@ -2349,14 +2353,14 @@ mod name_collision_tests {
     // a push that reports no problem.
     #[test]
     fn an_uppercase_extension_still_names_a_spec() {
-        use super::is_yaml_file;
+        use super::is_spec_file;
         use std::path::Path;
 
-        assert!(is_yaml_file(Path::new("Neovim.YML")));
-        assert!(is_yaml_file(Path::new("neovim.Yaml")));
-        assert!(is_yaml_file(Path::new("neovim.yml")));
-        assert!(is_yaml_file(Path::new("neovim.yaml")));
-        assert!(!is_yaml_file(Path::new("neovim.toml")));
-        assert!(!is_yaml_file(Path::new("neovim")));
+        assert!(is_spec_file(Path::new("Neovim.YML")));
+        assert!(is_spec_file(Path::new("neovim.Yaml")));
+        assert!(is_spec_file(Path::new("neovim.yml")));
+        assert!(is_spec_file(Path::new("neovim.yaml")));
+        assert!(!is_spec_file(Path::new("neovim.toml")));
+        assert!(!is_spec_file(Path::new("neovim")));
     }
 }

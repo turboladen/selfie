@@ -203,6 +203,37 @@ fn shadows_field<F: KnownFields>(key: &str) -> bool {
     key.strip_prefix('_').is_some_and(F::accepts)
 }
 
+/// The package name a spec file name claims, or `None` if it names no spec.
+///
+/// A name is the stem with case folded. The extension must be `.yml` or
+/// `.yaml`, compared ignoring case, and never distinguishes one package from
+/// another: `Neovim.YML`, `neovim.yml` and `neovim.yaml` all yield `neovim`.
+pub(crate) fn spec_name_from_file_name(file_name: &str) -> Option<String> {
+    // One definition of package identity, because every copy that drifted from
+    // it became a defect: a case-sensitive extension test hid `Neovim.YML` from
+    // the push guard while the loader still read it as a spec, and a
+    // whole-file-name key let `neovim.yml` and `neovim.yaml` past that guard
+    // while the loader called them ambiguous.
+    //
+    // The stem folds with `to_lowercase` rather than `eq_ignore_ascii_case`
+    // because a name admits any Unicode alphanumeric, so `Ünicode` and
+    // `ünicode` are one name. Extensions are a closed ASCII set, so they need
+    // no allocation to compare.
+    let (stem, extension) = file_name.rsplit_once('.')?;
+
+    // An empty stem means a leading dot and nothing before it, so `.yml` is a
+    // hidden file rather than a package whose name is the empty string.
+    // `Path::extension` reports no extension for such a name, and a caller that
+    // disagreed with it would start grouping every hidden YAML file in a
+    // directory under one name.
+    if stem.is_empty() {
+        return None;
+    }
+
+    (extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml"))
+        .then(|| stem.to_lowercase())
+}
+
 /// [`shadows_field`] against a dotfile entry's own fields.
 ///
 /// Applied only inside a dotfile entry. A package's top-level `_target: &target
@@ -2346,5 +2377,54 @@ environments:
         assert!(debug_output.contains("files_examined: 5"));
         assert!(debug_output.contains("search_patterns"));
         assert!(debug_output.contains("conflicting_paths"));
+    }
+}
+
+#[cfg(test)]
+mod spec_name_tests {
+    use super::spec_name_from_file_name;
+
+    // Every place that decides whether two files are one package now asks this
+    // one function, so these cases are the contract the loader, the push guard
+    // and the dotfile-source lookup all share.
+    #[test]
+    fn capitalization_and_extension_are_both_invisible() {
+        let one = Some("neovim".to_string());
+
+        assert_eq!(spec_name_from_file_name("neovim.yml"), one);
+        assert_eq!(spec_name_from_file_name("Neovim.yml"), one);
+        assert_eq!(spec_name_from_file_name("NEOVIM.YML"), one);
+        assert_eq!(spec_name_from_file_name("neovim.yaml"), one);
+        assert_eq!(spec_name_from_file_name("Neovim.YAML"), one);
+    }
+
+    // Matching the loader, which admits any Unicode alphanumeric in a name, so
+    // an ASCII-only fold would call these two separate packages.
+    #[test]
+    fn the_stem_folds_beyond_ascii() {
+        assert_eq!(
+            spec_name_from_file_name("\u{dc}nicode.yml"),
+            spec_name_from_file_name("\u{fc}nicode.yml")
+        );
+    }
+
+    // A dotfile source sitting beside a spec must not be read as one, or every
+    // `starship/starship.toml` would claim a package of its own.
+    #[test]
+    fn only_a_yaml_extension_names_a_spec() {
+        assert_eq!(spec_name_from_file_name("neovim.toml"), None);
+        assert_eq!(spec_name_from_file_name("neovim.yml.bak"), None);
+        assert_eq!(spec_name_from_file_name("neovim"), None);
+        assert_eq!(spec_name_from_file_name(""), None);
+    }
+
+    // A leading dot is the whole file name, not an empty stem with an
+    // extension, so `.yml` is a hidden file rather than a package named "".
+    // `Path::extension` says the same, and the push guard would otherwise
+    // group every hidden YAML file in a directory as one colliding package.
+    #[test]
+    fn a_dotfile_named_for_the_extension_is_not_a_spec() {
+        assert_eq!(spec_name_from_file_name(".yml"), None);
+        assert_eq!(spec_name_from_file_name(".yaml"), None);
     }
 }
