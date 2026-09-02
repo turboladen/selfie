@@ -574,7 +574,7 @@ where
                     let (packages_updated, packages_added, packages_removed) =
                         categorize_pull_changes(&changed_files, &repo_info.root);
 
-                    if has_dotfile_changes(&changed_files, &repo_info.root) {
+                    if has_dotfile_changes(&changed_files, &spec_names_in(&repo_info.root)) {
                         sender
                             .send_log(
                                 crate::package::event::LogLevel::Warning,
@@ -898,8 +898,12 @@ fn group_changes_by_package(
     let mut groups: HashMap<String, Vec<(PathBuf, FileChangeKind)>> = HashMap::new();
     let mut ungrouped: Vec<(PathBuf, FileChangeKind)> = Vec::new();
 
+    // Built once and shared by every file below; each of these lookups would
+    // otherwise read the repo root again.
+    let spec_names = spec_names_in(repo_root);
+
     for (path, kind) in &changes {
-        match infer_package_name(path, repo_root) {
+        match infer_package_name(path, &spec_names) {
             Some(name) => groups.entry(name).or_default().push((path.clone(), *kind)),
             None => ungrouped.push((path.clone(), *kind)),
         }
@@ -950,13 +954,16 @@ fn group_changes_by_package(
 /// a YAML spec with the same name as its parent directory exists in the repo
 /// (e.g., `starship/starship.toml` is a dotfile source if `starship.yml` exists
 /// on disk, even if `starship.yml` itself didn't change).
-fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile], repo_root: &Path) -> bool {
+fn has_dotfile_changes(
+    changed_files: &[crate::git::ChangedFile],
+    spec_names: &BTreeSet<String>,
+) -> bool {
     changed_files.iter().any(|f| {
         !is_spec_file(&f.path)
             && f.path
                 .parent()
                 .and_then(|p| p.file_name())
-                .is_some_and(|dir| has_spec_on_disk(repo_root, &dir.to_string_lossy()))
+                .is_some_and(|dir| contains_spec(spec_names, &dir.to_string_lossy()))
     })
 }
 
@@ -970,7 +977,7 @@ fn has_dotfile_changes(changed_files: &[crate::git::ChangedFile], repo_root: &Pa
 ///   (e.g., `starship/starship.toml` → `starship` if `starship.yml` exists
 ///   in the repo, even if it wasn't modified)
 /// - Everything else → `None` (ungrouped)
-fn infer_package_name(path: &Path, repo_root: &Path) -> Option<String> {
+fn infer_package_name(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
     // YAML files → package name is the file stem
     if is_spec_file(path) {
         return path.file_stem().map(|s| s.to_string_lossy().to_string());
@@ -983,7 +990,7 @@ fn infer_package_name(path: &Path, repo_root: &Path) -> Option<String> {
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())?;
 
-    if has_spec_on_disk(repo_root, &dir_name) {
+    if contains_spec(spec_names, &dir_name) {
         Some(dir_name)
     } else {
         None
@@ -1042,27 +1049,36 @@ fn is_spec_file(path: &Path) -> bool {
         .is_some()
 }
 
-/// Check whether a spec naming `name` sits in the repo root. Used to associate
-/// subdirectory files with their package.
-fn has_spec_on_disk(repo_root: &Path, name: &str) -> bool {
-    // Reads the directory rather than probing `{name}.yml` and `{name}.yaml`.
-    // Those two paths answer only for one capitalization, so a spec stored as
-    // `Starship.yml` left `starship/starship.toml` unmatched on a
+/// The folded names of every spec sitting directly in `repo_root`.
+///
+/// Built once per push. Grouping consults it for each changed file, so reading
+/// the directory inside that loop would cost one `read_dir` per change.
+fn spec_names_in(repo_root: &Path) -> BTreeSet<String> {
+    // Reading the directory rather than probing `{name}.yml` and `{name}.yaml`.
+    // Those two paths answer for one capitalization only, so a spec stored as
+    // `Starship.YML` left `starship/starship.toml` unmatched on a
     // case-sensitive file system and matched on a case-insensitive one -- the
     // per-machine split that folding names exists to remove.
-    let wanted = name.to_lowercase();
-
     let Ok(entries) = std::fs::read_dir(repo_root) else {
-        return false;
+        return BTreeSet::new();
     };
 
-    entries.flatten().any(|entry| {
-        let file_name = entry.file_name();
-        file_name
-            .to_str()
-            .and_then(crate::package::spec_name_from_file_name)
-            .is_some_and(|spec_name| spec_name == wanted)
-    })
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name();
+            file_name
+                .to_str()
+                .and_then(crate::package::spec_name_from_file_name)
+        })
+        .collect()
+}
+
+/// Whether `name` is one of `spec_names`, compared the way a name is resolved.
+fn contains_spec(spec_names: &BTreeSet<String>, name: &str) -> bool {
+    // Folded here rather than at each call site, so a caller cannot compare a
+    // raw directory name against a set that holds only folded ones.
+    spec_names.contains(&name.to_lowercase())
 }
 
 /// Extract the package name from a conventional commit message.
@@ -1140,8 +1156,10 @@ fn categorize_pull_changes(
     let mut seen_added = std::collections::HashSet::new();
     let mut seen_removed = std::collections::HashSet::new();
 
+    let spec_names = spec_names_in(repo_root);
+
     for file in changed_files {
-        if let Some(name) = infer_package_name(&file.path, repo_root) {
+        if let Some(name) = infer_package_name(&file.path, &spec_names) {
             match file.change_type {
                 ChangeType::Added => {
                     if seen_added.insert(name.clone()) {
@@ -1185,11 +1203,11 @@ mod tests {
     fn infer_from_yaml_file_stem() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("starship.yml"), temp.path()),
+            infer_package_name(Path::new("starship.yml"), &spec_names_in(temp.path())),
             Some("starship".to_string())
         );
         assert_eq!(
-            infer_package_name(Path::new("fnm.yaml"), temp.path()),
+            infer_package_name(Path::new("fnm.yaml"), &spec_names_in(temp.path())),
             Some("fnm".to_string())
         );
     }
@@ -1198,7 +1216,10 @@ mod tests {
     fn infer_from_nested_yaml() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("packages/starship.yml"), temp.path()),
+            infer_package_name(
+                Path::new("packages/starship.yml"),
+                &spec_names_in(temp.path())
+            ),
             Some("starship".to_string())
         );
     }
@@ -1208,11 +1229,11 @@ mod tests {
         let (_temp, root) = repo_with_specs(&["starship.yml", "fnm.yml"]);
 
         assert_eq!(
-            infer_package_name(Path::new("starship/starship.toml"), &root),
+            infer_package_name(Path::new("starship/starship.toml"), &spec_names_in(&root)),
             Some("starship".to_string())
         );
         assert_eq!(
-            infer_package_name(Path::new("fnm/init.fish"), &root),
+            infer_package_name(Path::new("fnm/init.fish"), &spec_names_in(&root)),
             Some("fnm".to_string())
         );
     }
@@ -1223,7 +1244,7 @@ mod tests {
         // should be grouped under the package (spec exists on disk).
         let (_temp, root) = repo_with_specs(&["starship.yml"]);
         assert_eq!(
-            infer_package_name(Path::new("starship/starship.toml"), &root),
+            infer_package_name(Path::new("starship/starship.toml"), &spec_names_in(&root)),
             Some("starship".to_string())
         );
     }
@@ -1233,7 +1254,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         // No docs.yml on disk → should NOT be grouped
         assert_eq!(
-            infer_package_name(Path::new("docs/sync.md"), temp.path()),
+            infer_package_name(Path::new("docs/sync.md"), &spec_names_in(temp.path())),
             None
         );
     }
@@ -1242,11 +1263,11 @@ mod tests {
     fn infer_returns_none_for_root_non_yaml() {
         let temp = tempfile::TempDir::new().unwrap();
         assert_eq!(
-            infer_package_name(Path::new("README.md"), temp.path()),
+            infer_package_name(Path::new("README.md"), &spec_names_in(temp.path())),
             None
         );
         assert_eq!(
-            infer_package_name(Path::new(".gitignore"), temp.path()),
+            infer_package_name(Path::new(".gitignore"), &spec_names_in(temp.path())),
             None
         );
     }
@@ -1563,7 +1584,7 @@ mod tests {
             path: PathBuf::from("starship/starship.toml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(has_dotfile_changes(&files, &root));
+        assert!(has_dotfile_changes(&files, &spec_names_in(&root)));
     }
 
     #[test]
@@ -1576,7 +1597,7 @@ mod tests {
             path: PathBuf::from("starship/starship.toml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(has_dotfile_changes(&files, &root));
+        assert!(has_dotfile_changes(&files, &spec_names_in(&root)));
     }
 
     #[test]
@@ -1588,7 +1609,7 @@ mod tests {
             path: PathBuf::from("docs/sync.md"),
             change_type: ChangeType::Modified,
         }];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     #[test]
@@ -1606,7 +1627,7 @@ mod tests {
                 change_type: ChangeType::Modified,
             },
         ];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     #[test]
@@ -1618,7 +1639,7 @@ mod tests {
             path: PathBuf::from("starship.yml"),
             change_type: ChangeType::Modified,
         }];
-        assert!(!has_dotfile_changes(&files, temp.path()));
+        assert!(!has_dotfile_changes(&files, &spec_names_in(temp.path())));
     }
 
     // ─── collect_drift_summary tests ──────────────────────────────────────────
@@ -2242,7 +2263,7 @@ mod name_collision_tests {
     // Skipping is loud, because a quietly-skipped test reads as a passing one.
     #[test]
     fn a_dotfile_source_finds_its_spec_under_any_capitalization() {
-        use super::has_spec_on_disk;
+        use super::{contains_spec, spec_names_in};
 
         let root = tempfile::tempdir().unwrap();
         let spec = "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n";
@@ -2256,12 +2277,14 @@ mod name_collision_tests {
             return;
         }
 
+        let spec_names = spec_names_in(root.path());
+
         assert!(
-            has_spec_on_disk(root.path(), "starship"),
+            contains_spec(&spec_names, "starship"),
             "a spec stored as `Starship.YML` must answer to `starship`"
         );
         assert!(
-            !has_spec_on_disk(root.path(), "neovim"),
+            !contains_spec(&spec_names, "neovim"),
             "a name with no spec behind it must not match"
         );
     }
