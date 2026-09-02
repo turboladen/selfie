@@ -737,13 +737,25 @@ fn validate_changed_packages(
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
+    // Both spellings resolved before either is compared. The two arrive by
+    // different routes -- the git adapter canonicalizes the root it discovers,
+    // while a package directory named with `--package-directory` is stored
+    // exactly as typed -- so one symlinked path, or a `/tmp` that resolves to
+    // `/private/tmp`, makes the same directory compare unequal to itself. Every
+    // changed file then fails the test below, and the per-file gate, credential
+    // egress included, stops running with nothing said.
+    let resolve = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let repo_root = resolve(repo_root);
+    let package_dir = resolve(package_dir);
+
     // A spec is a direct child of the package directory, which is where the
     // repository loads them from and how deep it looks. Anything else ending in
     // `.yml` belongs to someone else -- a CI workflow, a linter config, a
     // Compose file -- and parsing one as a package refuses the push over fields
     // it was never going to have.
-    let names_a_spec =
-        |path: &Path| is_spec_file(path) && repo_root.join(path).parent() == Some(package_dir);
+    let names_a_spec = |path: &Path| {
+        is_spec_file(path) && repo_root.join(path).parent() == Some(package_dir.as_path())
+    };
 
     // The package directory is scanned whether or not a spec in it changed. A
     // collision is a property of the directory, not of any one file, so the
@@ -758,8 +770,10 @@ fn validate_changed_packages(
     // Refusing the push is the only place the damage can still be prevented.
     // The machine that loses a spec is the one that pulls, and by then the file
     // is gone with nothing left to warn about.
-    for (_name, names) in colliding_specs(package_dir) {
-        let relative = package_dir.strip_prefix(repo_root).unwrap_or(package_dir);
+    for (_name, names) in colliding_specs(&package_dir) {
+        let relative = package_dir
+            .strip_prefix(&repo_root)
+            .unwrap_or(package_dir.as_path());
         failures.push(PackageValidationFailure {
             path: relative.join(&names[0]).display().to_string(),
             issues: vec![PackageValidationIssue {
@@ -2431,6 +2445,49 @@ mod name_collision_tests {
     #[test]
     fn a_single_file_is_not_a_collision() {
         assert!(group(&["Neovim.yml"]).is_empty());
+    }
+
+    // The repo root arrives canonicalized from the git adapter, while a package
+    // directory named on the command line arrives exactly as typed. Comparing
+    // the two verbatim decides that no changed file is a spec, and the whole
+    // per-file gate -- the credential-egress refusal among it -- passes a push
+    // it must refuse.
+    //
+    // A symlink is how the two spellings are made to differ on demand; a
+    // `--package-directory /tmp/...` on a host where `/tmp` resolves elsewhere
+    // reaches the same state without one.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_directory_named_through_a_symlink_is_still_validated() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("repo");
+        std::fs::create_dir_all(real_root.join("packages")).unwrap();
+        std::fs::write(
+            real_root.join("packages/neovim.yml"),
+            "name: neovim\nenvironments: {}\n",
+        )
+        .unwrap();
+
+        let linked_root = temp.path().join("link");
+        std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
+
+        let repo_root = dunce::canonicalize(&real_root).unwrap();
+        let changes = vec![(
+            PathBuf::from("packages/neovim.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result =
+            validate_changed_packages(&repo_root, &linked_root.join("packages"), &changes, "test");
+
+        let Err(error) = result else {
+            panic!("a spec defining no environment must be refused however its directory is named");
+        };
+        assert!(
+            format!("{error:?}").contains("neovim.yml"),
+            "got: {error:?}"
+        );
     }
 
     // A sync repository holds more YAML than selfie's. Treating all of it as
