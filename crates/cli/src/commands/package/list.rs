@@ -205,32 +205,26 @@ fn handle_list_event(
                 display.println(line);
             }
 
-            // Print invalid packages inline with error status,
-            // filtered to the current environment (unless --all)
-            if !package_list.invalid_packages.is_empty() {
-                let current_env = config.environment();
-                for invalid in &package_list.invalid_packages {
-                    if !show_all && !error_matches_environment(&invalid.error, current_env) {
-                        continue;
-                    }
+            // Every invalid package, whatever environment is selected. A spec that
+            // failed to parse has no environment list to filter on, so leaving one
+            // out would report a clean run over a broken file.
+            for invalid in &package_list.invalid_packages {
+                let filename = std::path::Path::new(&invalid.path)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&invalid.path);
 
-                    let filename = std::path::Path::new(&invalid.path)
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&invalid.path);
+                let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
+                let name_column =
+                    format!("{prefix} {filename:<width$}", width = state.max_name_len);
 
-                    let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
-                    let name_column =
-                        format!("{prefix} {filename:<width$}", width = state.max_name_len);
+                let line = if use_colors {
+                    format!("{name_column}  {}", style(&invalid.error).red())
+                } else {
+                    format!("{name_column}  {}", invalid.error)
+                };
 
-                    let line = if use_colors {
-                        format!("{name_column}  {}", style(&invalid.error).red())
-                    } else {
-                        format!("{name_column}  {}", invalid.error)
-                    };
-
-                    display.println(line);
-                }
+                display.println(line);
             }
 
             display.println("");
@@ -264,22 +258,6 @@ fn handle_list_event(
         }
 
         _ => false,
-    }
-}
-
-/// Check if an error message is relevant to a specific environment.
-///
-/// Since invalid packages failed to parse, we can't inspect their environment
-/// list directly. Instead, check if the error mentions the environment name
-/// (e.g., "environments.macos-home: missing field"). Errors that don't mention
-/// any environment are shown regardless (they affect all environments).
-fn error_matches_environment(error: &str, environment: &str) -> bool {
-    if error.contains("environments.") {
-        // Error is environment-specific — only show if it matches
-        error.contains(&format!("environments.{environment}"))
-    } else {
-        // Error is not environment-specific (e.g., missing `name` field) — always show
-        true
     }
 }
 
