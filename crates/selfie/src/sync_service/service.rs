@@ -963,7 +963,7 @@ fn has_dotfile_changes(
             && f.path
                 .parent()
                 .and_then(|p| p.file_name())
-                .is_some_and(|dir| contains_spec(spec_names, &dir.to_string_lossy()))
+                .is_some_and(|dir| spec_named(spec_names, &dir.to_string_lossy()).is_some())
     })
 }
 
@@ -978,23 +978,28 @@ fn has_dotfile_changes(
 ///   in the repo, even if it wasn't modified)
 /// - Everything else → `None` (ungrouped)
 fn infer_package_name(path: &Path, spec_names: &BTreeSet<String>) -> Option<String> {
-    // YAML files → package name is the file stem
-    if is_spec_file(path) {
-        return path.file_stem().map(|s| s.to_string_lossy().to_string());
+    // Folded, because this is the key changes are grouped under and identity is
+    // folded everywhere else. Returning the spelling on disk splits one package
+    // into two commits as soon as two of its files disagree about case --
+    // `Neovim.yml` grouping as `Neovim` while `neovim/starship.toml` groups as
+    // `neovim`.
+    if let Some(name) = path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .and_then(crate::package::spec_name_from_file_name)
+    {
+        return Some(name);
     }
 
-    // Non-YAML files → use parent directory name if a matching YAML spec
-    // exists on disk (prevents `docs/sync.md` from being grouped as "docs").
+    // Not a spec, so it belongs to the package its parent directory names --
+    // if a spec answers to that name. Without the check, `docs/sync.md` would
+    // be grouped as the package "docs".
     let dir_name = path
         .parent()
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())?;
 
-    if contains_spec(spec_names, &dir_name) {
-        Some(dir_name)
-    } else {
-        None
-    }
+    spec_named(spec_names, &dir_name)
 }
 
 /// Generate a conventional commit message for a package's changes.
@@ -1074,11 +1079,15 @@ fn spec_names_in(repo_root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// Whether `name` is one of `spec_names`, compared the way a name is resolved.
-fn contains_spec(spec_names: &BTreeSet<String>, name: &str) -> bool {
+/// The folded form of `name` if a spec answers to it.
+///
+/// Returns the folded name rather than a `bool` so a caller that needs it --
+/// grouping keys on it -- does not fold a second time.
+fn spec_named(spec_names: &BTreeSet<String>, name: &str) -> Option<String> {
     // Folded here rather than at each call site, so a caller cannot compare a
     // raw directory name against a set that holds only folded ones.
-    spec_names.contains(&name.to_lowercase())
+    let folded = name.to_lowercase();
+    spec_names.contains(&folded).then_some(folded)
 }
 
 /// Extract the package name from a conventional commit message.
@@ -1197,6 +1206,26 @@ mod tests {
             std::fs::write(root.join(spec), "name: test\n").unwrap();
         }
         (temp, root)
+    }
+
+    // The name is the grouping key, so an unfolded one splits a single package
+    // across two commits as soon as two of its files disagree about case. Both
+    // of these belong to the package `neovim` and have to report it identically.
+    #[test]
+    fn a_package_groups_under_one_name_however_its_files_are_spelled() {
+        let (_temp, root) = repo_with_specs(&["Neovim.YML"]);
+        let spec_names = spec_names_in(&root);
+
+        assert_eq!(
+            infer_package_name(Path::new("Neovim.YML"), &spec_names),
+            Some("neovim".to_string()),
+            "the spec itself"
+        );
+        assert_eq!(
+            infer_package_name(Path::new("Neovim/init.lua"), &spec_names),
+            Some("neovim".to_string()),
+            "a dotfile source beside it"
+        );
     }
 
     #[test]
@@ -2263,7 +2292,7 @@ mod name_collision_tests {
     // Skipping is loud, because a quietly-skipped test reads as a passing one.
     #[test]
     fn a_dotfile_source_finds_its_spec_under_any_capitalization() {
-        use super::{contains_spec, spec_names_in};
+        use super::{spec_named, spec_names_in};
 
         let root = tempfile::tempdir().unwrap();
         let spec = "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n";
@@ -2280,11 +2309,11 @@ mod name_collision_tests {
         let spec_names = spec_names_in(root.path());
 
         assert!(
-            contains_spec(&spec_names, "starship"),
+            spec_named(&spec_names, "starship").is_some(),
             "a spec stored as `Starship.YML` must answer to `starship`"
         );
         assert!(
-            !contains_spec(&spec_names, "neovim"),
+            spec_named(&spec_names, "neovim").is_none(),
             "a name with no spec behind it must not match"
         );
     }
