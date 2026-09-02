@@ -736,50 +736,43 @@ fn validate_changed_packages(
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
-    // Directories this push touches, each checked once. A collision between two
-    // specs is invisible to the per-file loop below, which sees one file at a
-    // time and finds each of them individually valid.
-    //
-    // The package directory is always scanned, not only when a spec in it
-    // changed. Specs live there, and a push carrying nothing but dotfile
-    // sources -- `starship/starship.toml` -- would otherwise propagate a
-    // collision that was already on disk while touching no spec that would
-    // reveal it.
-    //
-    // The repo root is scanned as well, and is not the same directory: the repo
-    // is discovered by walking up from the package directory, so a package
-    // directory nested inside a larger dotfiles repository leaves the two
-    // distinct, and scanning only the root would look everywhere except where
-    // the specs are.
-    let mut touched_dirs: BTreeSet<PathBuf> = changes
-        .iter()
-        .filter(|(path, kind)| *kind != FileChangeKind::Deleted && is_spec_file(path))
-        .filter_map(|(path, _)| repo_root.join(path).parent().map(Path::to_path_buf))
-        .collect();
-    touched_dirs.insert(repo_root.to_path_buf());
-    touched_dirs.insert(package_dir.to_path_buf());
+    // A spec is a direct child of the package directory, which is where the
+    // repository loads them from and how deep it looks. Anything else ending in
+    // `.yml` belongs to someone else -- a CI workflow, a linter config, a
+    // Compose file -- and parsing one as a package refuses the push over fields
+    // it was never going to have.
+    let names_a_spec =
+        |path: &Path| is_spec_file(path) && repo_root.join(path).parent() == Some(package_dir);
 
+    // The package directory is scanned whether or not a spec in it changed. A
+    // collision is a property of the directory, not of any one file, so the
+    // per-file loop below cannot see it: each colliding file is individually
+    // valid, and a push carrying nothing but dotfile sources touches none of
+    // them at all.
+    //
+    // Only that directory. The repo root is a different one whenever the
+    // package directory sits inside a larger dotfiles repository, and scanning
+    // it would report two unrelated YAML files there as one package.
+    //
     // Refusing the push is the only place the damage can still be prevented.
     // The machine that loses a spec is the one that pulls, and by then the file
     // is gone with nothing left to warn about.
-    for dir in touched_dirs {
-        for (_name, names) in colliding_specs(&dir) {
-            let relative = dir.strip_prefix(repo_root).unwrap_or(&dir);
-            failures.push(PackageValidationFailure {
-                path: relative.join(&names[0]).display().to_string(),
-                issues: vec![PackageValidationIssue {
-                    level: "ERROR".to_string(),
-                    category: "NameCollision".to_string(),
-                    field: "-".to_string(),
-                    message: name_collision_message(&names),
-                    location: None,
-                }],
-            });
-        }
+    for (_name, names) in colliding_specs(package_dir) {
+        let relative = package_dir.strip_prefix(repo_root).unwrap_or(package_dir);
+        failures.push(PackageValidationFailure {
+            path: relative.join(&names[0]).display().to_string(),
+            issues: vec![PackageValidationIssue {
+                level: "ERROR".to_string(),
+                category: "NameCollision".to_string(),
+                field: "-".to_string(),
+                message: name_collision_message(&names),
+                location: None,
+            }],
+        });
     }
 
     for (path, kind) in changes {
-        if *kind == FileChangeKind::Deleted || !is_spec_file(path) {
+        if *kind == FileChangeKind::Deleted || !names_a_spec(path) {
             continue;
         }
 
@@ -2373,7 +2366,9 @@ mod name_collision_tests {
             PathBuf::from("packages/neovim.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
+        // `packages`, not the root: that is where this fixture puts the specs,
+        // and the scan looks where the repository loads them from.
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -2435,6 +2430,69 @@ mod name_collision_tests {
     #[test]
     fn a_single_file_is_not_a_collision() {
         assert!(group(&["Neovim.yml"]).is_empty());
+    }
+
+    // A sync repository holds more YAML than selfie's. Treating all of it as
+    // specs parses a CI workflow as a package and refuses the push over fields
+    // it was never going to have -- `unknown field 'jobs'`, `unknown field
+    // 'on'`, `at least one environment must be defined`. The repository reads
+    // specs from the package directory and looks no deeper, so that is the rule
+    // the push gate has to use as well.
+    //
+    // Needs no particular file system: nothing here depends on how the disk
+    // compares names.
+    #[test]
+    fn yaml_that_is_not_a_spec_does_not_fail_a_push() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            root.path().join(".github/workflows/ci.yml"),
+            "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        )
+        .unwrap();
+
+        let changes = vec![(
+            PathBuf::from(".github/workflows/ci.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        assert!(
+            result.is_ok(),
+            "a workflow file is not a package spec: {result:?}"
+        );
+    }
+
+    // The other half of the same rule: a `.yml` sitting in a subdirectory of
+    // the package directory is not a spec either, because the repository lists
+    // that directory without descending into it.
+    #[test]
+    fn yaml_below_the_package_directory_is_not_a_spec() {
+        use super::{FileChangeKind, validate_changed_packages};
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(packages.join("starship")).unwrap();
+        std::fs::write(
+            packages.join("starship/config.yml"),
+            "format: \"$all\"\nnot_a_selfie_spec: true\n",
+        )
+        .unwrap();
+
+        let changes = vec![(
+            PathBuf::from("packages/starship/config.yml"),
+            FileChangeKind::Modified,
+        )];
+        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+
+        assert!(
+            result.is_ok(),
+            "a dotfile source that happens to be YAML is not a spec: {result:?}"
+        );
     }
 
     // A dotfile source is associated with its package by looking for a spec of
