@@ -127,7 +127,7 @@ mod tests {
             },
         },
     };
-    use std::{path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
     use tokio::sync::mpsc;
 
     fn test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
@@ -160,16 +160,16 @@ mod tests {
     // A real parse failure, not a synthesized one, so the fixture cannot drift
     // from what the repository actually returns.
     fn a_real_parse_error() -> PackageError {
-        let source = serde_saphyr::from_str::<Package>("name: [unclosed")
+        let source = crate::yaml::parse::<Package>("name: [unclosed")
             .expect_err("fixture must fail to parse");
         PackageError::ParseError {
             name: "myapp".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/myapp.yml"),
-            source: PackageParseError::YamlParse {
-                package_path: PathBuf::from("/packages/myapp.yml"),
-                source: Arc::new(source),
-            },
+            source: PackageParseError::new(
+                PathBuf::from("/packages/myapp.yml"),
+                crate::package::port::PackageParseKind::Yaml { source },
+            ),
         }
     }
 

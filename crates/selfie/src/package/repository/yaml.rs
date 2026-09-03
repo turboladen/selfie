@@ -10,7 +10,7 @@ use crate::{
         GetPackage, Package, TopLevelKeys,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
-            PackageRepoError, PackageRepository,
+            PackageParseKind, PackageRepoError, PackageRepository,
         },
     },
     validation::ValidationIssue,
@@ -130,60 +130,54 @@ impl<F: FileSystem> YamlPackageRepository<F> {
     // something a new caller can forget.
     fn read_spec_file(&self, path: &Path) -> Result<String, PackageParseError> {
         if let Some(refusal) = self.fs.irregular_target_refusal(&repository_path(path)) {
-            return Err(irregular_spec_refusal(path, refusal));
+            return Err(spec_read_failure(path, refusal));
         }
 
         self.fs
             .read_file(path)
-            .map_err(|e| PackageParseError::FileSystemError {
-                package_path: path.to_path_buf(),
-                source: Arc::new(e),
-            })
+            .map_err(|e| spec_read_failure(path, e))
     }
 
     // Load a Package from a file using the FileSystem trait
     fn load_package_from_file(&self, path: &Path) -> Result<Package, PackageParseError> {
         let content = self.read_spec_file(path)?;
 
-        let mut package: Package =
-            serde_saphyr::from_str(&content).map_err(|e| PackageParseError::YamlParse {
-                package_path: path.to_path_buf(),
-                source: Arc::new(e),
-            })?;
+        let mut package: Package = crate::yaml::parse(&content)
+            .map_err(|source| PackageParseError::new(path, PackageParseKind::Yaml { source }))?;
         package.set_source(path.to_path_buf(), content);
 
         Ok(package)
     }
 }
 
-// The third wording frame on the shared classifier. `IrregularTarget`'s `Display`
-// is worded for a deploy target and `repository_read_refusal` for a file in the
-// dotfiles repository; neither describes a package spec. Only the wording is new.
+// Everything that stops a spec file reaching the parser, whether selfie declined
+// the read or the read itself failed. The third wording frame on the shared
+// classifier, after `IrregularTarget`'s own `Display` and
+// `repository_read_refusal`: each refusal variant says selfie will not *write*
+// through a *target*, false twice over on a read, so the refusals are re-worded
+// rather than carried through. An `IoError` has no such wording to correct and is
+// carried as it stands.
 //
-// The `other` arm fails **closed** rather than returning the content. Nothing
-// reaches it today, and letting a future variant through would un-guard the read.
-//
-// It re-words rather than carrying the `FileSystemError` through: every refusal
-// variant's `Display` says selfie will not *write* through a *target*, false
-// twice over on a read, and would print the path a second time.
-fn irregular_spec_refusal(path: &Path, refusal: FileSystemError) -> PackageParseError {
-    match refusal {
-        FileSystemError::IrregularTarget { kind, .. } => PackageParseError::IrregularFile {
-            package_path: path.to_path_buf(),
-            kind,
-        },
-        FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseError::RefusedFile {
-            package_path: path.to_path_buf(),
+// Exhaustive, so a fifth variant is worded for a read here rather than inheriting
+// a sentence meant for elsewhere.
+fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError {
+    let kind = match failure {
+        FileSystemError::IoError(source) => PackageParseKind::Io { source },
+        FileSystemError::IrregularTarget { kind, .. } => PackageParseKind::IrregularFile { kind },
+        FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseKind::Refused {
             reason: match points_to {
                 Some(dest) => format!("it is a symlink to '{}'", dest.display()),
                 None => "it is a symlink".to_string(),
             },
         },
-        other => PackageParseError::RefusedFile {
-            package_path: path.to_path_buf(),
-            reason: other.to_string(),
+        // Not reachable from either call site -- neither expands a `~` -- and
+        // worded so that if one ever does, it does not claim a refusal.
+        FileSystemError::HomeDirNotFound => PackageParseKind::Unreadable {
+            reason: "the home directory could not be determined".to_string(),
         },
-    }
+    };
+
+    PackageParseError::new(path, kind)
 }
 
 impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
@@ -272,20 +266,25 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         let package_file = &package_files[0];
 
-        // A refused file gets its own variant. `ParseError` renders as "Parse
-        // error in package `ghost`", which would send the user to inspect YAML
-        // in a file that was never opened.
+        // A file that was never parsed gets its own variant. `ParseError` renders
+        // as "Parse error in package `ghost`", which would send the user to
+        // inspect YAML in a file selfie could not open -- whether it declined to
+        // open it or the open failed.
+        //
+        // Exhaustive, so a new kind has to say which of the two it is here.
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| match source {
-                refusal @ (PackageParseError::IrregularFile { .. }
-                | PackageParseError::RefusedFile { .. }) => PackageError::UnreadableFile {
+            .map_err(|source| match source.kind() {
+                PackageParseKind::IrregularFile { .. }
+                | PackageParseKind::Refused { .. }
+                | PackageParseKind::Unreadable { .. }
+                | PackageParseKind::Io { .. } => PackageError::UnreadableFile {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
-                    source: refusal,
+                    source,
                 },
-                source => PackageError::ParseError {
+                PackageParseKind::Yaml { .. } => PackageError::ParseError {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
@@ -956,15 +955,11 @@ mod tests {
                 } => {
                     assert_eq!(name, "invalid");
                     assert_eq!(packages_path, package_dir);
-                    match source {
-                        PackageParseError::YamlParse {
-                            package_path: error_path,
-                            ..
-                        } => {
-                            assert_eq!(error_path, package_path);
-                        }
-                        _ => panic!("Expected YamlParse error"),
-                    }
+                    assert!(
+                        matches!(source.kind(), PackageParseKind::Yaml { .. }),
+                        "expected a YAML parse failure, got: {source:?}"
+                    );
+                    assert_eq!(source.package_path(), package_path);
                 }
                 _ => panic!("Expected ParseError"),
             },
@@ -1237,6 +1232,87 @@ mod tests {
         assert!(message.contains("will not read"), "got: {message}");
         assert!(!message.contains("write"), "got: {message}");
         assert!(!message.contains("target"), "got: {message}");
+        assert_eq!(message.matches("ghost.yml").count(), 0, "got: {message}");
+    }
+
+    // The read path against a real file system, holding the producers to the
+    // constraint the type cannot carry: nothing may hand `Io` a payload that
+    // already names the file. `RealFileSystem::write_file_private` re-tags its io
+    // errors with the target, so a read-side re-tag is a plausible edit rather than
+    // a hypothetical, and `skipped_spec_warning` would then print the path twice.
+    //
+    // Invalid UTF-8 rather than a permission bit: `read_to_string` refuses it for
+    // every user, so the assertion cannot go vacuous when the suite runs as root.
+    #[test]
+    fn a_real_unreadable_spec_is_named_once() {
+        let temp = TempDir::new().unwrap();
+        let package_dir = temp.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let ghost = package_dir.join("ghost.yml");
+        std::fs::write(&ghost, [b'n', b'a', b'm', b'e', b':', b' ', 0xff, 0xfe]).unwrap();
+
+        let output = YamlPackageRepository::new(crate::fs::real::RealFileSystem, package_dir)
+            .list_packages()
+            .expect("listing must succeed despite the unreadable spec");
+
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(invalid.len(), 1, "the spec must be reported as invalid");
+
+        let message = crate::package::service::skipped_spec_warning(invalid[0]);
+        let path = ghost.display().to_string();
+        assert_eq!(
+            message.matches(path.as_str()).count(),
+            1,
+            "the read path re-tagged its error with the file: {message}"
+        );
+        // Naming the file once is also what an empty reason would do, so the count
+        // above needs a reason beside it to be worth anything.
+        assert!(
+            message.contains("UTF-8"),
+            "the warning must say why the file could not be read: {message}"
+        );
+    }
+
+    // A read that fails is not a parse failure, and `get_package` is where saying
+    // so matters: `PackageError::ParseError` renders as "Parse error in package
+    // `ghost`", sending the reader to inspect YAML in a file that never opened.
+    #[test]
+    fn get_package_reports_a_failed_read_as_unreadable() {
+        let package_dir = PathBuf::from("/test/packages");
+        let ghost = package_dir.join("ghost.yml");
+
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(&package_dir, true);
+        fs.mock_list_directory(&package_dir, &[&ghost]);
+        fs.expect_irregular_target_refusal().returning(|_| None);
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(Arc::new(std::io::Error::other(
+                "permission denied",
+            ))))
+        });
+
+        let error = YamlPackageRepository::new(fs, package_dir)
+            .get_package("ghost")
+            .expect_err("an unreadable spec must be an error");
+
+        let message = error.to_string();
+        assert!(message.contains("permission denied"), "got: {message}");
+        assert!(!message.contains("Parse error"), "got: {message}");
+        assert!(!message.contains("YAML"), "got: {message}");
+    }
+
+    // A refusal the read path cannot produce today, worded so that if one ever
+    // arrives it does not claim selfie declined to read a file it never reached.
+    #[test]
+    fn a_read_that_could_not_be_attempted_does_not_claim_a_refusal() {
+        let error = spec_read_failure(
+            Path::new("/test/packages/ghost.yml"),
+            FileSystemError::HomeDirNotFound,
+        );
+
+        let message = error.to_string();
+        assert!(message.contains("could not be read"), "got: {message}");
+        assert!(!message.contains("will not read"), "got: {message}");
         assert_eq!(message.matches("ghost.yml").count(), 0, "got: {message}");
     }
 
@@ -1636,7 +1712,7 @@ environments:
 
     // A package YAML with one well-formed dotfile and one carrying `var:`.
     fn package_with_typo() -> Package {
-        serde_saphyr::from_str(
+        crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    var:\n      k: op read x\n",
         )
@@ -1652,7 +1728,7 @@ environments:
     #[test]
     fn save_package_refuses_a_file_whose_top_level_could_not_be_read() {
         let yaml = "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \"echo i\"\n";
-        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
         assert!(
             matches!(package.top_level_keys(), TopLevelKeys::Unchecked(_)),
@@ -1680,9 +1756,8 @@ environments:
             !rendered.contains("unrecognized"),
             "the refusal must not claim it found keys, got: {err}"
         );
-        // The parse failure has to come last. It renders as several lines of
-        // source snippet with a `|` gutter, so a remedy placed after it arrives
-        // as `  |. Edit /packages/creds.yml directly` and reads as snippet.
+        // The parse failure has to come last, so the remedy is the part the reader
+        // reaches first. Both messages that carry a parse failure order it this way.
         let remedy = rendered
             .find("simplify it until selfie can read it")
             .expect("the refusal must give a remedy");
@@ -1701,7 +1776,7 @@ environments:
     #[test]
     fn save_package_refuses_a_top_level_key_carrying_an_anchor_name() {
         let yaml = "name: creds\n_dotfiles:\n  - source: a\n    target: ~/.a\nenvironments:\n  work:\n    install: \"echo i\"\n";
-        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
 
         let mut fs = MockFileSystem::default();
@@ -1735,7 +1810,7 @@ environments:
     // would already have destroyed the text.
     #[test]
     fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
         )
         .expect("fixture must parse -- the typo is a validation error, not a parse error");
@@ -1817,7 +1892,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    _vars:\n      k: op read x\n",
         )
@@ -1846,7 +1921,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
              - source: creds.tpl\n        target: ~/.creds\n        var:\n          k: op read x\n",
         )
@@ -1874,7 +1949,7 @@ environments:
 
         fs.mock_write_file_no_follow(&package_path);
 
-        let package: Package = serde_saphyr::from_str(
+        let package: Package = crate::yaml::parse(
             "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
              - source: creds.tpl\n    target: ~/.creds\n    vars:\n      k: op read x\n",
         )

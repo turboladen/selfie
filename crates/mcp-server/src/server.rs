@@ -996,7 +996,7 @@ mod tests {
     // ones — so testing how a refused entry is reported means parsing YAML, as
     // the repository does.
     fn entry(yaml: &str) -> selfie::package::DotfileEntry {
-        serde_saphyr::from_str(yaml).expect("fixture must parse")
+        selfie::yaml::parse(yaml).expect("fixture must parse")
     }
 
     #[test]
@@ -1069,10 +1069,12 @@ mod tests {
 
         let output = ListPackagesOutput::from_results(vec![
             Ok(package_with_a_dotfile("starship")),
-            Err(PackageParseError::IrregularFile {
-                package_path: "/test/packages/ghost.yml".into(),
-                kind: "named pipe (fifo)",
-            }),
+            Err(PackageParseError::new(
+                "/test/packages/ghost.yml",
+                selfie::package::port::PackageParseKind::IrregularFile {
+                    kind: "named pipe (fifo)",
+                },
+            )),
         ]);
 
         let mut entries = Vec::new();

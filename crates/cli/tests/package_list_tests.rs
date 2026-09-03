@@ -493,3 +493,56 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("--environment <env>"))
         .stdout(predicate::str::contains("--all"));
 }
+
+// The row's first column is the file's own name, so a reason that named the file
+// again would print it twice across one line. The reason has no path in it, and
+// this is where that shows.
+#[test]
+fn an_invalid_package_row_names_the_file_once_and_fits_one_line() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages_dir).unwrap();
+    fs::write(
+        packages_dir.join("broken.yml"),
+        "name: broken\ndotfiles:\n  - command: op read op://vault/private/token\n    \
+         target: ~/.creds\nenvironments: {oops\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["package", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("stdout must be UTF-8");
+
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("broken"))
+        .unwrap_or_else(|| panic!("the invalid package must be listed, got: {stdout}"));
+
+    assert_eq!(
+        row.matches("broken").count(),
+        1,
+        "the file must be named once in the row, got: {row}"
+    );
+    // The whole listing, not the row alone: text the row does not have room for
+    // lands on the lines after it, so a scan bounded by the row reports a clean
+    // run over a message that quoted the spec.
+    //
+    // Fragments no path can hold, because the listing also prints the sandbox
+    // directory and a bare word could match its random name.
+    assert!(
+        !stdout.contains("op://") && !stdout.contains("op read"),
+        "the listing must not quote the file, got: {stdout}"
+    );
+    // The whole reason, head and tail, on the row the name column is on. A message
+    // that still carried a source snippet would put its tail on later lines, and
+    // the column layout would survive that unremarked.
+    assert!(
+        row.contains("YAML parsing error") && row.contains("at line 5, column 15"),
+        "the row must carry the entire reason, got: {row}"
+    );
+}

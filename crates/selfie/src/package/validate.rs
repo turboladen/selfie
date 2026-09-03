@@ -952,7 +952,7 @@ mod tests {
     use super::*;
 
     fn entry_from_yaml(yaml: &str) -> DotfileEntry {
-        serde_saphyr::from_str(yaml).expect("dotfile entry should parse")
+        crate::yaml::parse(yaml).expect("dotfile entry should parse")
     }
 
     fn entry_issues(yaml: &str) -> Vec<ValidationIssue> {
@@ -964,7 +964,7 @@ mod tests {
     // Deliberately not `PackageBuilder`: a built package has no unrecognized
     // keys to find, so a builder-based fixture would pass whatever the check did.
     fn package_from_yaml(yaml: &str) -> Package {
-        serde_saphyr::from_str(yaml).expect("package should parse")
+        crate::yaml::parse(yaml).expect("package should parse")
     }
 
     fn unknown_dotfile_fields(yaml: &str) -> Vec<(String, String)> {
@@ -1447,7 +1447,7 @@ environments:
         vars:
           b: teller get B
 "#;
-        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+        let package: Package = crate::yaml::parse(yaml).unwrap();
 
         let refs = package.template_dotfiles();
         let sources: Vec<_> = refs.iter().map(|r| r.source).collect();
@@ -1473,7 +1473,7 @@ dotfiles:
       api_key: op read a
       corp: teller get B
 "#;
-        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+        let package: Package = crate::yaml::parse(yaml).unwrap();
 
         let issues = package.validate_dotfiles();
         let notice = issues
@@ -1511,7 +1511,7 @@ environments:
       - command: teller get work
         target: ~/.creds
 "#;
-        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+        let package: Package = crate::yaml::parse(yaml).unwrap();
 
         let issues = package.validate_dotfiles();
         let notice = issues
@@ -1556,7 +1556,7 @@ dotfiles:
   - command: op read op://Private/key
     target: ~/.ssh/id_ed25519
 "#;
-        let package: Package = serde_saphyr::from_str(yaml).unwrap();
+        let package: Package = crate::yaml::parse(yaml).unwrap();
 
         assert!(package.validate("test").issues().is_valid());
     }
@@ -1879,7 +1879,7 @@ dotfiles:
     // `validate_unknown_fields` returns early and the test passes without
     // looking at anything.
     fn package_with_raw_yaml(yaml: &str) -> Package {
-        let mut package: Package = serde_saphyr::from_str(yaml).expect("fixture must parse");
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(
             std::path::PathBuf::from("/packages/myapp.yml"),
             yaml.to_string(),
@@ -2313,7 +2313,7 @@ environments:
 
         let yaml = serde_saphyr::to_string(&full).unwrap();
         let emitted: std::collections::BTreeSet<String> =
-            serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
+            crate::yaml::parse::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
                 .unwrap()
                 .into_keys()
                 .collect();
@@ -2353,7 +2353,7 @@ environments:
 
         let yaml = serde_saphyr::to_string(&full).unwrap();
         let emitted: std::collections::BTreeSet<String> =
-            serde_saphyr::from_str::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
+            crate::yaml::parse::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
                 .unwrap()
                 .into_keys()
                 .collect();

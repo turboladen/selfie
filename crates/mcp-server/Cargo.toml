@@ -24,6 +24,5 @@ tracing-subscriber.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-serde-saphyr.workspace = true
 test-common = { path = "../test-common/" }
 uuid.workspace = true

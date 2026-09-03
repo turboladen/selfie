@@ -156,7 +156,7 @@ dotfiles:
 post_install_note: |
   Configure your shell for fnm.
 "#;
-    let package: selfie::package::Package = serde_saphyr::from_str(yaml).unwrap();
+    let package: selfie::package::Package = selfie::yaml::parse(yaml).unwrap();
     assert_eq!(package.dotfiles().len(), 2);
     assert_eq!(package.dotfiles()[0].source(), Some("fnm/fish-conf.fish"));
     assert_eq!(
@@ -177,7 +177,7 @@ environments:
   linux:
     install: apt install basic
 "#;
-    let package: selfie::package::Package = serde_saphyr::from_str(yaml).unwrap();
+    let package: selfie::package::Package = selfie::yaml::parse(yaml).unwrap();
     assert!(package.dotfiles().is_empty());
     assert!(package.post_install_note().is_none());
 }

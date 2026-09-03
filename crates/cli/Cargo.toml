@@ -21,7 +21,6 @@ futures.workspace = true
 human-panic = "2"
 selfie = { path = "../selfie/" }
 serde.workspace = true
-serde-saphyr.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tokio-util.workspace = true
 tracing.workspace = true
@@ -33,6 +32,14 @@ uuid.workspace = true
 mockall.workspace = true
 predicates = "3.1"
 selfie = { path = "../selfie/", features = ["with_mocks"] }
+serde-saphyr.workspace = true
 tempfile.workspace = true
 test-common = { path = "../test-common/" }
 tokio-test = "0.4"
+
+[target.'cfg(unix)'.dev-dependencies]
+# "fs" is for `mkfifo`. The snippet reader opens a file the repository already
+# read, and a fifo at that path blocks on open — the guard against that is only
+# watchable with a real one, since a mock cannot block. Same reason as the
+# entry in `crates/selfie/Cargo.toml`.
+nix = { version = "0.31", features = ["fs"] }

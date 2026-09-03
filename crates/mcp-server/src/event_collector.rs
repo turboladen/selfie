@@ -517,6 +517,61 @@ mod tests {
         assert_eq!(result.data["data"][0]["status"], "installed");
     }
 
+    // A fixture value, never a real credential. Not path-shaped: the scan uses a
+    // twelve-character window, so a path-like value matches ordinary output and
+    // passes for the wrong reason.
+    const SECRET: &str = "Xq7Rm2Kz9Wp4Ns6Tv8Bh3Gd5";
+
+    // The other half of the CLI's window: the terminal gets the file's text, this
+    // does not. Both halves read the same failure.
+    //
+    // The JSON carries the location in prose rather than in fields of its own,
+    // which is what the positive assertions below pin. Their other job is to prove
+    // an event was collected at all -- a scan for absence passes an empty stream.
+    #[tokio::test]
+    async fn a_parse_failure_reaches_the_json_without_the_file_it_read() {
+        let spec = format!(
+            "name: creds\ndotfiles:\n  - command: op read op://vault/item/field\n    \
+             vars:\n      token: {SECRET}\n    target: ~/.npmrc\nenvironments: {{oops\n"
+        );
+        let source = selfie::yaml::parse::<selfie::package::Package>(&spec)
+            .expect_err("the fixture must not parse");
+
+        let failure = selfie::package::port::PackageError::ParseError {
+            name: "creds".to_string(),
+            packages_path: std::path::PathBuf::from("/packages"),
+            failed_file: std::path::PathBuf::from("/packages/creds.yml"),
+            source: selfie::package::port::PackageParseError::new(
+                "/packages/creds.yml",
+                selfie::package::port::PackageParseKind::Yaml { source },
+            ),
+        };
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Failure(OperationFailure::Package(failure)),
+        }];
+
+        let stream: EventStream = Box::pin(stream::iter(events.clone()));
+        let result = collect_events(stream).await;
+
+        // Positive control: the failure was collected and says why and where.
+        // Without these the scan below passes on an empty stream.
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "failure");
+        let error = result.data["result"]["error"]
+            .as_str()
+            .expect("the failure must carry prose");
+        assert!(error.contains("YAML parsing error"), "got: {error}");
+        assert!(error.contains("at line"), "got: {error}");
+
+        // And the file's own text is in none of it.
+        test_common::assert_secret_free(&result.data.to_string(), SECRET, "the collected JSON");
+        for event in &events {
+            test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
+        }
+    }
+
     #[tokio::test]
     async fn test_collect_failure() {
         let events = vec![PackageEvent::Completed {

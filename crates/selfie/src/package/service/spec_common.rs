@@ -200,13 +200,15 @@ mod tests {
     }
 
     fn make_invalid_package(path: PathBuf) -> crate::package::port::PackageParseError {
-        crate::package::port::PackageParseError::IoError {
-            package_path: path,
-            source: std::sync::Arc::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "file not found",
-            )),
-        }
+        crate::package::port::PackageParseError::new(
+            path,
+            crate::package::port::PackageParseKind::Io {
+                source: std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file not found",
+                )),
+            },
+        )
     }
 
     #[tokio::test]

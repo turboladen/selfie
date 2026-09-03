@@ -300,6 +300,24 @@ impl DisplayManager {
         }
     }
 
+    /// Print supporting lines under an error (stderr), one per line.
+    ///
+    /// For a block a reader looks at rather than reads — a source window under a
+    /// parse failure. `block` is split on its own line breaks, so a trailing
+    /// newline costs nothing. Each line is indented and dimmed and carries no `✗`;
+    /// the marker belongs to the sentence above, not to every line of its evidence.
+    pub(crate) fn print_error_context(&self, block: &str) {
+        self.mp.suspend(|| {
+            for line in block.lines() {
+                if self.use_colors {
+                    eprintln!("  {}", style(line).dim());
+                } else {
+                    eprintln!("  {line}");
+                }
+            }
+        });
+    }
+
     /// Print a success message (stdout)
     pub(crate) fn print_success(&self, message: impl Display) {
         if self.use_colors {

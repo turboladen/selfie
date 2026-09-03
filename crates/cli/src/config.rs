@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn test_cli_section_deserialization() {
         let yaml = "verbose: true\nuse_colors: false\n";
-        let cli: CliSection = serde_saphyr::from_str(yaml).unwrap();
+        let cli: CliSection = selfie::yaml::parse(yaml).unwrap();
         assert!(cli.verbose);
         assert!(!cli.use_colors);
     }
@@ -518,7 +518,7 @@ mod tests {
     fn test_cli_section_deserialization_defaults() {
         // An empty section: every field takes its own default, and `use_colors`
         // stays true rather than falling to `bool::default()`.
-        let cli: CliSection = serde_saphyr::from_str("{}").unwrap();
+        let cli: CliSection = selfie::yaml::parse("{}").unwrap();
         assert!(!cli.verbose);
         assert!(cli.use_colors);
     }
@@ -547,7 +547,7 @@ mod tests {
     // opening the route.
     #[test]
     fn a_config_file_cannot_turn_the_sudo_guard_off() {
-        let cli: CliSection = serde_saphyr::from_str("allow_sudo: true\n").unwrap();
+        let cli: CliSection = selfie::yaml::parse("allow_sudo: true\n").unwrap();
 
         let args = ClapCli::parse_from(["selfie", "apply"]);
         let config = args.build_cli_config(default_selfie_config(), cli);
