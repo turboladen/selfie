@@ -128,6 +128,16 @@ impl EventProcessor {
                 tracing::debug!("{}", message);
             }
 
+            // One line per skipped file, whatever the reason. A source window
+            // belongs to a command asked about one spec: `apply` over N unparsable
+            // specs would print N windows, which is the output that made
+            // `package list` unreadable, and each is text from a file the reader
+            // never asked about.
+            PackageEvent::SpecSkipped { error, .. } => {
+                self.display
+                    .print_warning(selfie::package::service::skipped_spec_warning(&error));
+            }
+
             PackageEvent::Warning { message, .. } => {
                 self.display.print_warning(message);
                 // Warnings don't set failure exit code by default
@@ -260,14 +270,18 @@ impl EventProcessor {
                                         failure.reason()
                                     ));
 
-                                    if let Some((line, column)) = failure.location() {
+                                    if let Some(at) = failure.location() {
                                         self.display.print_error_context(&format!(
-                                            "{}:{line}:{column}",
-                                            failed_file.display()
+                                            "{}:{}:{}",
+                                            failed_file.display(),
+                                            at.line(),
+                                            at.column()
                                         ));
-                                        if let Some(window) =
-                                            crate::snippet::window(&failed_file, line, column)
-                                        {
+                                        if let Some(window) = crate::snippet::window(
+                                            &failed_file,
+                                            at.line(),
+                                            at.column(),
+                                        ) {
                                             self.display.print_error_context(&window);
                                         }
                                     }

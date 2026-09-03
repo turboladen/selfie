@@ -99,9 +99,7 @@ where
     // A warning rather than an error: whether `audit --all` exits non-zero on an
     // unparsable file is user-visible behavior and belongs to its own change.
     for invalid in packages.invalid_packages() {
-        sender
-            .send_warning(super::skipped_spec_warning(invalid))
-            .await;
+        sender.send_spec_skipped(invalid.clone()).await;
     }
 
     let package_names: Vec<String> = packages
@@ -997,8 +995,10 @@ mod tests {
         let mut audit_results = 0;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::package::event::PackageEvent::Warning { message, .. } => {
-                    warnings.push(message);
+                // The typed event, not a `Warning`: the service reports the
+                // failure and the adapter decides how to say it.
+                crate::package::event::PackageEvent::SpecSkipped { error, .. } => {
+                    warnings.push(crate::package::service::skipped_spec_warning(&error));
                 }
                 crate::package::event::PackageEvent::AuditResultCompleted { .. } => {
                     audit_results += 1;

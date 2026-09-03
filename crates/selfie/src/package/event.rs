@@ -288,6 +288,18 @@ impl EventSender {
         self.send_log(LogLevel::Warning, message).await;
     }
 
+    /// Report a package file that could not be parsed.
+    ///
+    /// The failure travels whole; nothing here renders a sentence.
+    pub(crate) async fn send_spec_skipped(&self, error: crate::package::port::PackageParseError) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::SpecSkipped {
+            operation_info,
+            error,
+        })
+        .await;
+    }
+
     /// Send a cancellation event
     pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
@@ -1964,6 +1976,22 @@ pub enum PackageEvent {
     RecommendSucceeded {
         operation_info: OperationInfo,
         recommend_name: String,
+    },
+
+    /// A package file was found but could not be turned into a package
+    ///
+    /// Carries the failure itself rather than a rendered sentence, so a consumer
+    /// renders it the way its own surface wants.
+    // A terminal wants one line; a structured consumer wants the reason, the kind
+    // and the location as separate fields. Neither shape can be recovered from the
+    // other, so the event carries neither.
+    //
+    // Its own variant rather than a typed `Warning`. That variant's message field
+    // is shared by dozens of unrelated callers, almost none of them about parse
+    // failures, so typing it would reach far past this problem.
+    SpecSkipped {
+        operation_info: OperationInfo,
+        error: crate::package::port::PackageParseError,
     },
 
     /// A recommended (soft) dependency failed to install (non-fatal)

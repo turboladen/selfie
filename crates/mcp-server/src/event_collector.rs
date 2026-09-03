@@ -288,6 +288,35 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "message": message,
         })),
 
+        // The reason, the kind and the location as separate fields. A caller
+        // branches on `kind` rather than reading the sentence: `reason` is prose to
+        // display, and matching on it is what this whole area was rewritten to stop
+        // callers having to do.
+        //
+        // `line` and `column` are null for the four kinds that have no location.
+        // Absent because there is none, not because nobody wired it.
+        PackageEvent::SpecSkipped { error, .. } => {
+            let at = match error.kind() {
+                selfie::package::port::PackageParseKind::Yaml { source } => source.location(),
+                selfie::package::port::PackageParseKind::Io { .. }
+                | selfie::package::port::PackageParseKind::Unreadable { .. }
+                | selfie::package::port::PackageParseKind::IrregularFile { .. }
+                | selfie::package::port::PackageParseKind::Refused { .. } => None,
+            };
+            let reason = match error.kind() {
+                selfie::package::port::PackageParseKind::Yaml { source } => source.reason(),
+                other => other.to_string(),
+            };
+            Some(serde_json::json!({
+                "type": "spec_skipped",
+                "path": error.package_path().display().to_string(),
+                "kind": error.kind().label(),
+                "reason": reason,
+                "line": at.map(|at| at.line()),
+                "column": at.map(|at| at.column()),
+            }))
+        }
+
         // Listed rather than matched with `_`, so a variant added later is a
         // compile error here instead of vanishing from every tool's output.
         //
@@ -539,12 +568,74 @@ mod tests {
     // passes for the wrong reason.
     const SECRET: &str = "Xq7Rm2Kz9Wp4Ns6Tv8Bh3Gd5";
 
+    // A skipped spec reaches a tool caller as fields it can branch on, and the
+    // kind is what it branches on: `reason` is prose to display, and matching on
+    // prose is what the fields exist to spare a caller.
+    #[tokio::test]
+    async fn a_skipped_spec_carries_its_kind_and_location_as_fields() {
+        let spec = format!(
+            "name: creds\ndotfiles:\n  - command: op read op://vault/item/field\n    \
+             vars:\n      token: {SECRET}\n    target: ~/.npmrc\nenvironments: {{oops\n"
+        );
+        let source = selfie::yaml::parse::<selfie::package::Package>(&spec)
+            .expect_err("the fixture must not parse");
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/creds.yml",
+            selfie::package::port::PackageParseKind::Yaml { source },
+        );
+
+        let events = vec![PackageEvent::SpecSkipped {
+            operation_info: test_op_info(),
+            error,
+        }];
+        let stream: EventStream = Box::pin(stream::iter(events.clone()));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["type"], "spec_skipped");
+        assert_eq!(row["path"], "/packages/creds.yml");
+        assert_eq!(row["kind"], "yaml");
+        assert_eq!(row["line"], 7);
+        assert_eq!(row["column"], 15);
+        // The location is in its own fields, so the sentence must not repeat it.
+        assert_eq!(row["reason"], "unclosed bracket '{'");
+
+        // And none of the file it was reading.
+        test_common::assert_secret_free(&result.data.to_string(), SECRET, "the collected JSON");
+        for event in &events {
+            test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
+        }
+    }
+
+    // A kind with no location says so, rather than inventing one.
+    #[tokio::test]
+    async fn a_skipped_spec_with_no_location_reports_null() {
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/ghost.yml",
+            selfie::package::port::PackageParseKind::IrregularFile {
+                kind: "named pipe (fifo)",
+            },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecSkipped {
+            operation_info: test_op_info(),
+            error,
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["kind"], "irregular_file");
+        assert!(row["line"].is_null(), "got: {row}");
+        assert!(row["column"].is_null(), "got: {row}");
+    }
+
     // The other half of the CLI's window: the terminal gets the file's text, this
     // does not. Both halves read the same failure.
     //
-    // The JSON carries the location in prose rather than in fields of its own,
-    // which is what the positive assertions below pin. Their other job is to prove
-    // an event was collected at all -- a scan for absence passes an empty stream.
+    // A failure that arrives on the operation's result carries the location in
+    // prose rather than in fields of its own, which is what the positive
+    // assertions below pin. Their other job is to prove an event was collected at
+    // all -- a scan for absence passes an empty stream.
     #[tokio::test]
     async fn a_parse_failure_reaches_the_json_without_the_file_it_read() {
         let spec = format!(

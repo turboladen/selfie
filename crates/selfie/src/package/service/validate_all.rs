@@ -43,9 +43,7 @@ where
 
     // Emit warnings for invalid (unparsable) package files
     for invalid in &invalid_packages {
-        sender
-            .send_warning(super::skipped_spec_warning(invalid))
-            .await;
+        sender.send_spec_skipped((*invalid).clone()).await;
     }
 
     // Step 2: Validate each package
@@ -122,6 +120,60 @@ mod tests {
             crate::package::event::OperationContext::default(),
         );
         (sender, rx)
+    }
+
+    // A fixture value, never a real credential. High-entropy and not path-shaped:
+    // the scan uses a twelve-character window, so a path-like value would match
+    // ordinary output and pass for the wrong reason.
+    const SECRET: &str = "Xq7Rm2Kz9Wp4Ns6Tv8Bh3Gd5";
+
+    // The event carries a `PackageParseError` now, so someone will eventually be
+    // tempted to hang the file's text off it. This is what says no.
+    //
+    // The control matters as much as the scan: without it a run that emitted no
+    // event at all would pass, and a scan for absence over an empty stream proves
+    // nothing.
+    #[tokio::test]
+    async fn a_skipped_spec_carries_none_of_the_file_it_could_not_parse() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("creds.yml"),
+            format!(
+                "name: creds\ndotfiles:\n  - command: op read op://vault/item/field\n    \
+                 vars:\n      token: {SECRET}\n    target: ~/.npmrc\nenvironments: {{oops\n"
+            ),
+        )
+        .unwrap();
+
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let mut repo = MockPackageRepository::new();
+        let dir = temp_dir.path().to_path_buf();
+        repo.expect_list_packages().returning(move || {
+            let repo = crate::package::repository::yaml::YamlPackageRepository::new(
+                crate::fs::real::RealFileSystem,
+                dir.clone(),
+            );
+            crate::package::port::PackageRepository::list_packages(&repo)
+        });
+
+        let (sender, mut rx) = test_sender();
+        let _ = handle_validate_all(&repo, &config, &sender, &mut ProgressTracker::new(1)).await;
+        drop(sender);
+
+        let mut skipped = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, PackageEvent::SpecSkipped { .. }) {
+                skipped += 1;
+            }
+            test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
+        }
+
+        // The control: the scan above proves nothing about a stream that was empty.
+        assert_eq!(skipped, 1, "the unparsable spec must have been reported");
     }
 
     #[tokio::test]

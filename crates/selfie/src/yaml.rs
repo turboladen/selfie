@@ -50,6 +50,33 @@ pub fn parse<T: DeserializeOwned>(content: &str) -> Result<T, ParseFailure> {
     parsed.map_err(|e| ParseFailure::of(&e))
 }
 
+/// Where a parser stopped, as a line and a column.
+///
+/// Both are 1-indexed and count **characters**, which is what serde-saphyr
+/// reports: a tab is one column and a multi-byte character is one column.
+// A named pair rather than `(u64, u64)` because it is serialized as two JSON
+// fields and destructured by three adapters; a tuple makes `line` and `column`
+// swappable without a compile error at every one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    line: u64,
+    column: u64,
+}
+
+impl SourceLocation {
+    /// The 1-indexed line.
+    #[must_use]
+    pub fn line(&self) -> u64 {
+        self.line
+    }
+
+    /// The 1-indexed column, counted in characters.
+    #[must_use]
+    pub fn column(&self) -> u64 {
+        self.column
+    }
+}
+
 /// Reports why a YAML file could not be parsed, without quoting the file.
 ///
 /// Renders the failure class and the line and column. The class is a fixed
@@ -70,7 +97,7 @@ pub fn parse<T: DeserializeOwned>(content: &str) -> Result<T, ParseFailure> {
 #[derive(Debug, Clone)]
 pub struct ParseFailure {
     wording: Wording,
-    location: Option<(u64, u64)>,
+    location: Option<SourceLocation>,
 }
 
 /// Where a [`ParseFailure`]'s sentence comes from.
@@ -211,9 +238,9 @@ impl ParseFailure {
         }
     }
 
-    /// Where the parser stopped, as a line and column, when it reported one.
+    /// Where the parser stopped, when it reported a location.
     #[must_use]
-    pub fn location(&self) -> Option<(u64, u64)> {
+    pub fn location(&self) -> Option<SourceLocation> {
         self.location
     }
 
@@ -351,11 +378,14 @@ fn parser_wording(scan: &serde_saphyr::granit_parser::ScanError) -> Option<Strin
 // instead would miss it: that constant carries a span and a source id, which the
 // derived `PartialEq` compares as well, so a located-but-line-0 value would render
 // as "at line 0, column 0".
-fn located(error: &serde_saphyr::Error) -> Option<(u64, u64)> {
+fn located(error: &serde_saphyr::Error) -> Option<SourceLocation> {
     error
         .location()
         .filter(|l| l.line() != 0)
-        .map(|l| (l.line(), l.column()))
+        .map(|l| SourceLocation {
+            line: l.line(),
+            column: l.column(),
+        })
 }
 
 impl std::fmt::Display for ParseFailure {
@@ -371,8 +401,8 @@ impl std::fmt::Display for ParseFailure {
             }
             Wording::Parser(sentence) => f.write_str(sentence)?,
         }
-        if let Some((line, column)) = self.location {
-            write!(f, " at line {line}, column {column}")?;
+        if let Some(at) = self.location {
+            write!(f, " at line {}, column {}", at.line(), at.column())?;
         }
         Ok(())
     }
@@ -602,6 +632,7 @@ mod tests {
     fn a_located_failure_answers_with_the_line_and_column() {
         let failure = parse::<Spec>("name: pkg\nenvironments: 3\n").expect_err("must fail");
 
-        assert_eq!(failure.location(), Some((2, 15)));
+        let at = failure.location().expect("the fixture reports a location");
+        assert_eq!((at.line(), at.column()), (2, 15));
     }
 }
