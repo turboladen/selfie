@@ -53,6 +53,33 @@ const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 /// different ways.
 const APPLY_CANCELLED: &str = "Apply cancelled";
 
+/// A non-fatal warning raised while collecting packages, before any event stream
+/// exists to send it on.
+///
+/// Two kinds travel together because they are produced in one pass, and they are
+/// kept apart because they leave as different events: a skipped spec is reported
+/// whole so each adapter can render it, and everything else is already prose.
+enum ApplyWarning {
+    /// A package file that could not be parsed.
+    SkippedSpec(crate::package::port::PackageParseError),
+    /// Anything else worth saying, already worded.
+    Other(String),
+}
+
+impl ApplyWarning {
+    /// Emit this warning on the event stream it belongs to.
+    ///
+    /// The two kinds leave differently on purpose: a skipped spec travels typed so
+    /// each adapter renders it, and everything else is already a sentence. Written
+    /// once here rather than at each drain, so three call sites cannot disagree.
+    async fn send(self, sender: &crate::package::event::EventSender) {
+        match self {
+            Self::SkippedSpec(error) => sender.send_spec_skipped(error).await,
+            Self::Other(message) => sender.send_warning(message).await,
+        }
+    }
+}
+
 /// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
@@ -145,13 +172,13 @@ where
     /// Collect packages from both the main package repository and the optional
     /// dotfiles repository, returning a combined list and any non-fatal warnings.
     ///
-    /// Warnings are returned (rather than emitted directly) because collection
-    /// happens before the event channel exists — callers emit them as
-    /// `PackageEvent::Warning` once the stream is set up.
+    /// Warnings are returned rather than emitted because collection happens before
+    /// the event channel exists. Each caller sends them once its stream is up, and
+    /// [`ApplyWarning`] is what tells it which event each one is.
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
-    ) -> Result<(Vec<Package>, Vec<String>), String> {
+    ) -> Result<(Vec<Package>, Vec<ApplyWarning>), String> {
         let mut warnings = Vec::new();
 
         // A package file that does not parse is dropped by `valid_packages`, and
@@ -160,9 +187,9 @@ where
         // later as an authentication failure nobody traces back to a typo. The
         // run would otherwise report success having done nothing at all.
         let note_unparsable = |output: &crate::package::port::ListPackagesOutput,
-                               warnings: &mut Vec<String>| {
+                               warnings: &mut Vec<ApplyWarning>| {
             for invalid in output.invalid_packages() {
-                warnings.push(crate::package::service::skipped_spec_warning(invalid));
+                warnings.push(ApplyWarning::SkippedSpec(invalid.clone()));
             }
         };
 
@@ -183,7 +210,9 @@ where
                     packages.extend(output.valid_packages().cloned());
                 }
                 Err(e) => {
-                    warnings.push(format!("Failed to load standalone dotfiles: {e}"));
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Failed to load standalone dotfiles: {e}"
+                    )));
                 }
             }
         }
@@ -199,11 +228,11 @@ where
             let mut deduped_dotfiles = Vec::new();
             for pkg in packages.drain(packages_count..) {
                 if seen.contains(pkg.name()) {
-                    warnings.push(format!(
+                    warnings.push(ApplyWarning::Other(format!(
                         "Duplicate name '{}' found in both packages/ and dotfiles/ — \
                          using the packages/ version",
                         pkg.name()
-                    ));
+                    )));
                 } else {
                     seen.insert(pkg.name().to_string());
                     deduped_dotfiles.push(pkg);
@@ -378,7 +407,7 @@ where
                 }
                 (None, Ok((packages, warnings))) => {
                     for warning in warnings {
-                        sender.send_warning(&warning).await;
+                        warning.send(&sender).await;
                     }
                     let ctx = ApplyContext {
                         filesystem: &fs,
@@ -426,7 +455,7 @@ where
                 }
                 (None, Ok((packages, warnings))) => {
                     for warning in warnings {
-                        sender.send_warning(&warning).await;
+                        warning.send(&sender).await;
                     }
                     let ctx = ApplyContext {
                         filesystem: &fs,
@@ -467,7 +496,7 @@ where
             let result = match collected {
                 Ok((packages, warnings)) => {
                     for warning in warnings {
-                        sender.send_warning(&warning).await;
+                        warning.send(&sender).await;
                     }
                     handle_check_drift(&packages, &fs, &config, &sender).await
                 }
