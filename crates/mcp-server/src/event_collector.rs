@@ -287,7 +287,24 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "package": package_name,
             "message": message,
         })),
-        _ => None,
+
+        // Listed rather than matched with `_`, so a variant added later is a
+        // compile error here instead of vanishing from every tool's output.
+        //
+        // `Completed` is read by `collect_events` for the operation's result
+        // rather than emitted as a data event, and the lifecycle and log variants
+        // carry nothing a tool caller acts on.
+        //
+        // `PackageListLoaded` is a gap, not a decision: `selfie_package_list`
+        // drops its invalid packages because nothing here reads them.
+        PackageEvent::Started { .. }
+        | PackageEvent::Progress { .. }
+        | PackageEvent::Completed { .. }
+        | PackageEvent::Canceled { .. }
+        | PackageEvent::Trace { .. }
+        | PackageEvent::Debug { .. }
+        | PackageEvent::Error { .. }
+        | PackageEvent::PackageListLoaded { .. } => None,
     }
 }
 
