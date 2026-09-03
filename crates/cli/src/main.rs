@@ -11,6 +11,7 @@ mod display_manager;
 mod event_processor;
 mod formatters;
 mod git_style;
+mod snippet;
 mod status_style;
 mod tables;
 

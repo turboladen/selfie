@@ -36,3 +36,10 @@ serde-saphyr.workspace = true
 tempfile.workspace = true
 test-common = { path = "../test-common/" }
 tokio-test = "0.4"
+
+[target.'cfg(unix)'.dev-dependencies]
+# "fs" is for `mkfifo`. The snippet reader opens a file the repository already
+# read, and a fifo at that path blocks on open — the guard against that is only
+# watchable with a real one, since a mock cannot block. Same reason as the
+# entry in `crates/selfie/Cargo.toml`.
+nix = { version = "0.31", features = ["fs"] }

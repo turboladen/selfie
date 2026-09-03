@@ -8,7 +8,7 @@
 use futures::StreamExt;
 use selfie::package::{
     event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
-    port::{PackageError, PackageListError},
+    port::{PackageError, PackageListError, PackageParseKind},
 };
 
 use crate::display_manager::{DisplayManager, ErrorDetail};
@@ -236,6 +236,51 @@ impl EventProcessor {
                         OperationFailure::Privilege(refusal) => {
                             self.display.print_error(refusal.message());
                             self.display.print_suggestion(refusal.suggestion());
+                        }
+                        // A parse failure reaches only this arm. The three
+                        // commands that render a failure themselves --
+                        // commands/package/check.rs, audit.rs and install.rs --
+                        // gate on `failure.is_environment_error()`, which a
+                        // `ParseError` does not satisfy, so none of them sees one.
+                        OperationFailure::Package(PackageError::ParseError {
+                            name,
+                            failed_file,
+                            source,
+                            ..
+                        }) => {
+                            // Built from the parts rather than from `Display`,
+                            // which interpolates the whole chain including the
+                            // "at line N, column M" suffix. The location header
+                            // below states it once, so `Display` would say it
+                            // twice.
+                            match source.kind() {
+                                PackageParseKind::Yaml { source: failure } => {
+                                    self.display.print_error(format!(
+                                        "Parse error in package `{name}`: {}",
+                                        failure.reason()
+                                    ));
+
+                                    if let Some((line, column)) = failure.location() {
+                                        self.display.print_error_context(&format!(
+                                            "{}:{line}:{column}",
+                                            failed_file.display()
+                                        ));
+                                        if let Some(window) =
+                                            crate::snippet::window(&failed_file, line, column)
+                                        {
+                                            self.display.print_error_context(&window);
+                                        }
+                                    }
+                                }
+                                // Every kind but `Yaml` is routed to
+                                // `UnreadableFile` before it gets here, so this
+                                // is growth insurance rather than a live case.
+                                other => {
+                                    self.display.print_error(format!(
+                                        "Parse error in package `{name}`: {other}"
+                                    ));
+                                }
+                            }
                         }
                         _ => {
                             self.display.print_error(err.to_string());

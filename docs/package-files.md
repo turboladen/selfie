@@ -755,6 +755,30 @@ A symlink at a path selfie is about to write **into** your repository is also re
 This holds wherever selfie writes a file itself. Git sync and the post-save formatter run through
 separate tools and are not covered.
 
+### When a spec will not parse
+
+A command that names one spec prints the lines around the failure, with a caret under the column the
+parser stopped at:
+
+```
+✗ Parse error in package `creds`: unclosed bracket '{'
+  /home/you/.selfie/packages/creds.yml:5:15
+  3 |   - command: op read op://vault/private/token
+  4 |     target: ~/.npmrc
+  5 | environments: {oops
+    |               ^
+```
+
+That window is a span of lines, so it shows whatever the neighboring lines hold — including a
+`command:` naming a credential store, or a `vars:` value. That is deliberate: the file is your own,
+the terminal is yours, and you are being sent to open it. **The same failure reported by the MCP
+server carries the reason, the line and the column and none of the file's text**, because a tool
+answer travels further than your terminal does.
+
+Commands that enumerate specs keep one line per file — a window for each would bury the list they
+exist to print. `selfie spec validate --all` names the broken file; `selfie spec validate <name>`
+shows you where.
+
 ### Package files that are not regular files
 
 The hazards above are about your dotfiles repository. Selfie refuses a package file that is a named

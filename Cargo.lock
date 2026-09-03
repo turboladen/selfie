@@ -2830,6 +2830,7 @@ dependencies = [
  "human-panic",
  "indicatif",
  "mockall",
+ "nix",
  "predicates",
  "selfie",
  "serde",

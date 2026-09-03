@@ -565,6 +565,23 @@ mod tests {
         }
     }
 
+    // The location suffix, pinned at its source rather than at a render site.
+    //
+    // Several surfaces carry a parse failure as prose and nothing else, so this
+    // suffix is the only thing telling a reader where to look. It is redundant
+    // beside the CLI's source window and someone will reasonably propose dropping
+    // it; this is what makes that a visible change rather than a silent one.
+    #[test]
+    fn a_located_failure_ends_with_its_line_and_column() {
+        let failure = parse::<Spec>(&spec_with("environments: {oops\n")).expect_err("must fail");
+
+        let rendered = failure.to_string();
+        assert!(
+            rendered.ends_with(" at line 5, column 15"),
+            "the rendering must end with the location, got: {rendered}"
+        );
+    }
+
     // The gate in `parser_wording`, from the other side: a message that would carry
     // a value is refused rather than trimmed.
     #[test]
