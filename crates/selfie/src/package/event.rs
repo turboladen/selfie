@@ -2128,7 +2128,7 @@ pub struct DependencyStatus {
 #[derive(Debug, Clone)]
 pub struct PackageListData {
     pub valid_packages: Vec<PackageListItem>,
-    pub invalid_packages: Vec<InvalidPackageInfo>,
+    pub invalid_packages: Vec<crate::package::port::PackageParseError>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
@@ -2140,13 +2140,6 @@ pub struct PackageListItem {
     pub name: String,
     pub environments: Vec<String>,
     pub status: Option<CheckResult>,
-}
-
-/// Information about an invalid package
-#[derive(Debug, Clone)]
-pub struct InvalidPackageInfo {
-    pub path: String,
-    pub error: String,
 }
 
 /// Information about a spec (definition only, no runtime status)
@@ -2162,7 +2155,7 @@ pub struct SpecListItem {
 #[derive(Debug, Clone)]
 pub struct SpecListData {
     pub specs: Vec<SpecListItem>,
-    pub invalid_packages: Vec<InvalidPackageInfo>,
+    pub invalid_packages: Vec<crate::package::port::PackageParseError>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,

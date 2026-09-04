@@ -63,6 +63,34 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
 }
 
+/// One parse failure as fields, shared by every surface that reports one.
+///
+/// `kind` is what a caller branches on; `reason` is prose to display. `line` and
+/// `column` are null for the kinds that carry no location — absent because there
+/// is none, not because nothing was wired.
+fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
+    use selfie::package::port::PackageParseKind;
+
+    // One match, and no catch-all: a sixth kind has to state here whether it
+    // reports a location, rather than inheriting `None` from an arm that never
+    // considered it.
+    let (at, reason) = match error.kind() {
+        PackageParseKind::Yaml { source } => (source.location(), source.reason()),
+        other @ (PackageParseKind::Io { .. }
+        | PackageParseKind::Unreadable { .. }
+        | PackageParseKind::IrregularFile { .. }
+        | PackageParseKind::Refused { .. }) => (None, other.to_string()),
+    };
+
+    serde_json::json!({
+        "path": error.package_path().display().to_string(),
+        "kind": error.kind().label(),
+        "reason": reason,
+        "line": at.map(|at| at.line()),
+        "column": at.map(|at| at.column()),
+    })
+}
+
 fn event_to_json(event: &PackageEvent) -> Option<Value> {
     match event {
         PackageEvent::CheckResultCompleted { check_result, .. } => Some(serde_json::json!({
@@ -165,7 +193,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             let invalid: Vec<Value> = spec_list
                 .invalid_packages
                 .iter()
-                .map(|ip| serde_json::json!({ "path": &ip.path, "error": &ip.error }))
+                .map(parse_failure_json)
                 .collect();
             Some(serde_json::json!({
                 "type": "spec_list_summary",
@@ -296,25 +324,11 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         // `line` and `column` are null for the four kinds that have no location.
         // Absent because there is none, not because nobody wired it.
         PackageEvent::SpecSkipped { error, .. } => {
-            let at = match error.kind() {
-                selfie::package::port::PackageParseKind::Yaml { source } => source.location(),
-                selfie::package::port::PackageParseKind::Io { .. }
-                | selfie::package::port::PackageParseKind::Unreadable { .. }
-                | selfie::package::port::PackageParseKind::IrregularFile { .. }
-                | selfie::package::port::PackageParseKind::Refused { .. } => None,
-            };
-            let reason = match error.kind() {
-                selfie::package::port::PackageParseKind::Yaml { source } => source.reason(),
-                other => other.to_string(),
-            };
-            Some(serde_json::json!({
-                "type": "spec_skipped",
-                "path": error.package_path().display().to_string(),
-                "kind": error.kind().label(),
-                "reason": reason,
-                "line": at.map(|at| at.line()),
-                "column": at.map(|at| at.column()),
-            }))
+            let mut row = parse_failure_json(error);
+            row.as_object_mut()
+                .expect("constructed as an object")
+                .insert("type".into(), "spec_skipped".into());
+            Some(row)
         }
 
         // Listed rather than matched with `_`, so a variant added later is a
@@ -605,6 +619,40 @@ mod tests {
         for event in &events {
             test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
         }
+    }
+
+    // The listing rows carry the same shape as a skipped spec, so a caller learns
+    // one contract rather than two: `reason` beside the kind and the location,
+    // never one rendered sentence to match on.
+    #[tokio::test]
+    async fn a_spec_list_row_reports_a_parse_failure_the_same_way() {
+        let source =
+            selfie::yaml::parse::<selfie::package::Package>("name: x\nenvironments: {oops\n")
+                .expect_err("the fixture must not parse");
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/creds.yml",
+            selfie::package::port::PackageParseKind::Yaml { source },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecListLoaded {
+            operation_info: test_op_info(),
+            spec_list: selfie::package::event::SpecListData {
+                specs: vec![],
+                invalid_packages: vec![error],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+                show_all: false,
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0]["invalid_packages"][0];
+        assert_eq!(row["path"], "/packages/creds.yml");
+        assert_eq!(row["kind"], "yaml");
+        assert_eq!(row["reason"], "unclosed bracket '{'");
+        assert_eq!(row["line"], 2);
+        assert_eq!(row["column"], 15);
     }
 
     // A kind with no location says so, rather than inventing one.
