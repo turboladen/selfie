@@ -178,7 +178,7 @@ where
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
-    ) -> Result<(Vec<Package>, Vec<ApplyWarning>), String> {
+    ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
         // A package file that does not parse is dropped by `valid_packages`, and
@@ -193,13 +193,12 @@ where
             }
         };
 
-        let mut packages = match package_repo.list_packages() {
-            Ok(output) => {
-                note_unparsable(&output, &mut warnings);
-                output.valid_packages().cloned().collect::<Vec<_>>()
-            }
-            Err(e) => return Err(format!("Failed to load packages: {e}")),
-        };
+        // The failure travels typed. Rendering it here hands the caller a bare
+        // sentence, leaving it able to say only that loading failed -- not which of
+        // the three fixes for a missing package directory applies.
+        let output = package_repo.list_packages()?;
+        note_unparsable(&output, &mut warnings);
+        let mut packages = output.valid_packages().cloned().collect::<Vec<_>>();
 
         let packages_count = packages.len();
 
@@ -419,9 +418,9 @@ where
                     };
                     handle_apply(&packages, &ctx, None).await
                 }
-                (None, Err(e)) => {
-                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
-                }
+                (None, Err(e)) => OperationResult::Failure(
+                    crate::package::event::OperationFailure::PackageList(e),
+                ),
             };
 
             sender.send_completed(result).await;
@@ -467,9 +466,9 @@ where
                     };
                     handle_apply(&packages, &ctx, Some(&name)).await
                 }
-                (None, Err(e)) => {
-                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
-                }
+                (None, Err(e)) => OperationResult::Failure(
+                    crate::package::event::OperationFailure::PackageList(e),
+                ),
             };
 
             sender.send_completed(result).await;
@@ -500,9 +499,9 @@ where
                     }
                     handle_check_drift(&packages, &fs, &config, &sender).await
                 }
-                Err(e) => {
-                    OperationResult::Failure(crate::package::event::OperationFailure::Generic(e))
-                }
+                Err(e) => OperationResult::Failure(
+                    crate::package::event::OperationFailure::PackageList(e),
+                ),
             };
 
             sender.send_completed(result).await;
