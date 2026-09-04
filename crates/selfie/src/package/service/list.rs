@@ -12,10 +12,7 @@ use crate::{
     commands::runner::CommandRunner,
     config::SelfieConfig,
     package::{
-        event::{
-            EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, PackageListData,
-            PackageListItem,
-        },
+        event::{EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem},
         port::PackageRepository,
         service::ProgressTracker,
     },
@@ -195,12 +192,12 @@ where
     let valid_package_items: Vec<PackageListItem> =
         results.into_iter().map(|(_, item)| item).collect();
 
-    let invalid_package_items: Vec<InvalidPackageInfo> = invalid_packages
+    // The failures themselves, not a path and a rendered sentence beside them:
+    // both of those are derived from this value, so carrying them separately keeps
+    // a duplicate nothing enforces.
+    let invalid_package_items: Vec<crate::package::port::PackageParseError> = invalid_packages
         .iter()
-        .map(|invalid_package| InvalidPackageInfo {
-            path: invalid_package.package_path().display().to_string(),
-            error: invalid_package.to_string(),
-        })
+        .map(|invalid| (*invalid).clone())
         .collect();
 
     // Calculate the count before moving the vector

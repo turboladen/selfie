@@ -85,14 +85,12 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
 
     // Show invalid packages
     for invalid in &data.invalid_packages {
+        // One sentence, styled or not, so the two branches cannot drift apart.
+        let text = format!("Invalid: {} — {invalid}", invalid.package_path().display());
         let msg = if use_colors {
-            format!(
-                "  {} {}",
-                style("⚠").yellow(),
-                style(format!("Invalid: {} — {}", invalid.path, invalid.error)).dim()
-            )
+            format!("  {} {}", style("⚠").yellow(), style(text).dim())
         } else {
-            format!("  Invalid: {} — {}", invalid.path, invalid.error)
+            format!("  {text}")
         };
         display.println(msg);
     }

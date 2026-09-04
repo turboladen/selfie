@@ -209,19 +209,21 @@ fn handle_list_event(
             // failed to parse has no environment list to filter on, so leaving one
             // out would report a clean run over a broken file.
             for invalid in &package_list.invalid_packages {
-                let filename = std::path::Path::new(&invalid.path)
+                let path = invalid.package_path().display().to_string();
+                let filename = invalid
+                    .package_path()
                     .file_stem()
                     .and_then(|n| n.to_str())
-                    .unwrap_or(&invalid.path);
+                    .unwrap_or(&path);
 
                 let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
                 let name_column =
                     format!("{prefix} {filename:<width$}", width = state.max_name_len);
 
                 let line = if use_colors {
-                    format!("{name_column}  {}", style(&invalid.error).red())
+                    format!("{name_column}  {}", style(invalid).red())
                 } else {
-                    format!("{name_column}  {}", invalid.error)
+                    format!("{name_column}  {invalid}")
                 };
 
                 display.println(line);
@@ -526,10 +528,12 @@ mod tests {
     #[test]
     fn test_handle_list_event_with_invalid_packages_only() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let invalid_package = selfie::package::event::InvalidPackageInfo {
-            path: "/test/invalid.yml".to_string(),
-            error: "missing field `name`".to_string(),
-        };
+        let invalid_package = selfie::package::port::PackageParseError::new(
+            "/test/invalid.yml",
+            selfie::package::port::PackageParseKind::Unreadable {
+                reason: "missing field `name`".to_string(),
+            },
+        );
 
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
@@ -562,10 +566,12 @@ mod tests {
             }),
         };
 
-        let invalid_package = selfie::package::event::InvalidPackageInfo {
-            path: "/test/invalid.yml".to_string(),
-            error: "missing field `name`".to_string(),
-        };
+        let invalid_package = selfie::package::port::PackageParseError::new(
+            "/test/invalid.yml",
+            selfie::package::port::PackageParseKind::Unreadable {
+                reason: "missing field `name`".to_string(),
+            },
+        );
 
         let mut environment_stats = std::collections::HashMap::new();
         environment_stats.insert(TEST_ENV.to_string(), 1);

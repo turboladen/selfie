@@ -8,10 +8,7 @@ use crate::{
     config::SelfieConfig,
     package::{
         Package,
-        event::{
-            EventSender, InvalidPackageInfo, OperationResult, OperationSuccess, SpecListData,
-            SpecListItem,
-        },
+        event::{EventSender, OperationResult, OperationSuccess, SpecListData, SpecListItem},
         git::GitStatusProvider,
         port::PackageRepository,
         service::ProgressTracker,
@@ -117,17 +114,12 @@ where
         spec_items.push(item);
     }
 
-    let invalid_package_items: Vec<InvalidPackageInfo> = if opts.include_invalid {
-        invalid_packages
-            .iter()
-            .map(|ip| InvalidPackageInfo {
-                path: ip.package_path().display().to_string(),
-                error: ip.to_string(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let invalid_package_items: Vec<crate::package::port::PackageParseError> =
+        if opts.include_invalid {
+            invalid_packages.iter().map(|ip| (*ip).clone()).collect()
+        } else {
+            Vec::new()
+        };
 
     let valid_count = spec_items.len();
     let invalid_count = invalid_package_items.len();

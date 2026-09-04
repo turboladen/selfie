@@ -175,7 +175,10 @@ async fn test_service_list_packages() {
 
         // Verify invalid package is listed
         assert_eq!(
-            package_list.invalid_packages[0].path,
+            package_list.invalid_packages[0]
+                .package_path()
+                .display()
+                .to_string(),
             format!("{}/invalid-package.yml", temp_dir.path().display())
         );
     } else {

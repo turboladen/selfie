@@ -63,6 +63,34 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
 }
 
+/// One parse failure as fields, shared by every surface that reports one.
+///
+/// `kind` is what a caller branches on; `reason` is prose to display. `line` and
+/// `column` are null for the kinds that carry no location — absent because there
+/// is none, not because nothing was wired.
+fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
+    use selfie::package::port::PackageParseKind;
+
+    // One match, and no catch-all: a sixth kind has to state here whether it
+    // reports a location, rather than inheriting `None` from an arm that never
+    // considered it.
+    let (at, reason) = match error.kind() {
+        PackageParseKind::Yaml { source } => (source.location(), source.reason()),
+        other @ (PackageParseKind::Io { .. }
+        | PackageParseKind::Unreadable { .. }
+        | PackageParseKind::IrregularFile { .. }
+        | PackageParseKind::Refused { .. }) => (None, other.to_string()),
+    };
+
+    serde_json::json!({
+        "path": error.package_path().display().to_string(),
+        "kind": error.kind().label(),
+        "reason": reason,
+        "line": at.map(|at| at.line()),
+        "column": at.map(|at| at.column()),
+    })
+}
+
 fn event_to_json(event: &PackageEvent) -> Option<Value> {
     match event {
         PackageEvent::CheckResultCompleted { check_result, .. } => Some(serde_json::json!({
@@ -165,7 +193,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             let invalid: Vec<Value> = spec_list
                 .invalid_packages
                 .iter()
-                .map(|ip| serde_json::json!({ "path": &ip.path, "error": &ip.error }))
+                .map(parse_failure_json)
                 .collect();
             Some(serde_json::json!({
                 "type": "spec_list_summary",
@@ -287,7 +315,39 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "package": package_name,
             "message": message,
         })),
-        _ => None,
+
+        // The reason, the kind and the location as separate fields. A caller
+        // branches on `kind` rather than reading the sentence: `reason` is prose to
+        // display, and matching on it is what this whole area was rewritten to stop
+        // callers having to do.
+        //
+        // `line` and `column` are null for the four kinds that have no location.
+        // Absent because there is none, not because nobody wired it.
+        PackageEvent::SpecSkipped { error, .. } => {
+            let mut row = parse_failure_json(error);
+            row.as_object_mut()
+                .expect("constructed as an object")
+                .insert("type".into(), "spec_skipped".into());
+            Some(row)
+        }
+
+        // Listed rather than matched with `_`, so a variant added later is a
+        // compile error here instead of vanishing from every tool's output.
+        //
+        // `Completed` is read by `collect_events` for the operation's result
+        // rather than emitted as a data event, and the lifecycle and log variants
+        // carry nothing a tool caller acts on.
+        //
+        // `PackageListLoaded` is a gap, not a decision: `selfie_package_list`
+        // drops its invalid packages because nothing here reads them.
+        PackageEvent::Started { .. }
+        | PackageEvent::Progress { .. }
+        | PackageEvent::Completed { .. }
+        | PackageEvent::Canceled { .. }
+        | PackageEvent::Trace { .. }
+        | PackageEvent::Debug { .. }
+        | PackageEvent::Error { .. }
+        | PackageEvent::PackageListLoaded { .. } => None,
     }
 }
 
@@ -522,12 +582,108 @@ mod tests {
     // passes for the wrong reason.
     const SECRET: &str = "Xq7Rm2Kz9Wp4Ns6Tv8Bh3Gd5";
 
+    // A skipped spec reaches a tool caller as fields it can branch on, and the
+    // kind is what it branches on: `reason` is prose to display, and matching on
+    // prose is what the fields exist to spare a caller.
+    #[tokio::test]
+    async fn a_skipped_spec_carries_its_kind_and_location_as_fields() {
+        let spec = format!(
+            "name: creds\ndotfiles:\n  - command: op read op://vault/item/field\n    \
+             vars:\n      token: {SECRET}\n    target: ~/.npmrc\nenvironments: {{oops\n"
+        );
+        let source = selfie::yaml::parse::<selfie::package::Package>(&spec)
+            .expect_err("the fixture must not parse");
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/creds.yml",
+            selfie::package::port::PackageParseKind::Yaml { source },
+        );
+
+        let events = vec![PackageEvent::SpecSkipped {
+            operation_info: test_op_info(),
+            error,
+        }];
+        let stream: EventStream = Box::pin(stream::iter(events.clone()));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["type"], "spec_skipped");
+        assert_eq!(row["path"], "/packages/creds.yml");
+        assert_eq!(row["kind"], "yaml");
+        assert_eq!(row["line"], 7);
+        assert_eq!(row["column"], 15);
+        // The location is in its own fields, so the sentence must not repeat it.
+        assert_eq!(row["reason"], "unclosed bracket '{'");
+
+        // And none of the file it was reading.
+        test_common::assert_secret_free(&result.data.to_string(), SECRET, "the collected JSON");
+        for event in &events {
+            test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
+        }
+    }
+
+    // The listing rows carry the same shape as a skipped spec, so a caller learns
+    // one contract rather than two: `reason` beside the kind and the location,
+    // never one rendered sentence to match on.
+    #[tokio::test]
+    async fn a_spec_list_row_reports_a_parse_failure_the_same_way() {
+        let source =
+            selfie::yaml::parse::<selfie::package::Package>("name: x\nenvironments: {oops\n")
+                .expect_err("the fixture must not parse");
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/creds.yml",
+            selfie::package::port::PackageParseKind::Yaml { source },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecListLoaded {
+            operation_info: test_op_info(),
+            spec_list: selfie::package::event::SpecListData {
+                specs: vec![],
+                invalid_packages: vec![error],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+                show_all: false,
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0]["invalid_packages"][0];
+        assert_eq!(row["path"], "/packages/creds.yml");
+        assert_eq!(row["kind"], "yaml");
+        assert_eq!(row["reason"], "unclosed bracket '{'");
+        assert_eq!(row["line"], 2);
+        assert_eq!(row["column"], 15);
+    }
+
+    // A kind with no location says so, rather than inventing one.
+    #[tokio::test]
+    async fn a_skipped_spec_with_no_location_reports_null() {
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/ghost.yml",
+            selfie::package::port::PackageParseKind::IrregularFile {
+                kind: "named pipe (fifo)",
+            },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecSkipped {
+            operation_info: test_op_info(),
+            error,
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["kind"], "irregular_file");
+        assert!(row["line"].is_null(), "got: {row}");
+        assert!(row["column"].is_null(), "got: {row}");
+    }
+
     // The other half of the CLI's window: the terminal gets the file's text, this
     // does not. Both halves read the same failure.
     //
-    // The JSON carries the location in prose rather than in fields of its own,
-    // which is what the positive assertions below pin. Their other job is to prove
-    // an event was collected at all -- a scan for absence passes an empty stream.
+    // A failure that arrives on the operation's result carries the location in
+    // prose rather than in fields of its own, which is what the positive
+    // assertions below pin. Their other job is to prove an event was collected at
+    // all -- a scan for absence passes an empty stream.
     #[tokio::test]
     async fn a_parse_failure_reaches_the_json_without_the_file_it_read() {
         let spec = format!(

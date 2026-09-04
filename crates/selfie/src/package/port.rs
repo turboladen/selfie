@@ -599,6 +599,35 @@ pub enum PackageParseKind {
     Refused { reason: String },
 }
 
+impl PackageParseKind {
+    /// A bare label for this kind, for a caller that has to tell them apart.
+    ///
+    /// Stable and machine-readable, so a consumer can branch on the kind without
+    /// reading the sentence beside it. Explanations belong in that sentence, never
+    /// here.
+    // `&'static str` and not `String`, so nothing can append prose to a value
+    // callers treat as an enum -- which is the defect selfie-c0vk exists to
+    // complain about on a neighboring event field.
+    //
+    // Matched here rather than in the adapter, and with no catch-all, so a sixth
+    // kind is a compile error beside the enum -- where whoever adds one is already
+    // looking -- rather than in a crate they may never open.
+    //
+    // Adding a kind also means editing the MCP tool descriptions in
+    // `selfie-mcp`, which spell these labels out for callers. Nothing makes
+    // that a compile error, so it is named here instead.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Yaml { .. } => "yaml",
+            Self::Io { .. } => "io",
+            Self::Unreadable { .. } => "unreadable",
+            Self::IrregularFile { .. } => "irregular_file",
+            Self::Refused { .. } => "refused",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

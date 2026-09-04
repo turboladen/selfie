@@ -288,6 +288,18 @@ impl EventSender {
         self.send_log(LogLevel::Warning, message).await;
     }
 
+    /// Report a package file that could not be parsed.
+    ///
+    /// The failure travels whole; nothing here renders a sentence.
+    pub(crate) async fn send_spec_skipped(&self, error: crate::package::port::PackageParseError) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::SpecSkipped {
+            operation_info,
+            error,
+        })
+        .await;
+    }
+
     /// Send a cancellation event
     pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
@@ -1966,6 +1978,22 @@ pub enum PackageEvent {
         recommend_name: String,
     },
 
+    /// A package file was found but could not be turned into a package
+    ///
+    /// Carries the failure itself rather than a rendered sentence, so a consumer
+    /// renders it the way its own surface wants.
+    // A terminal wants one line; a structured consumer wants the reason, the kind
+    // and the location as separate fields. Neither shape can be recovered from the
+    // other, so the event carries neither.
+    //
+    // Its own variant rather than a typed `Warning`. That variant's message field
+    // is shared by dozens of unrelated callers, almost none of them about parse
+    // failures, so typing it would reach far past this problem.
+    SpecSkipped {
+        operation_info: OperationInfo,
+        error: crate::package::port::PackageParseError,
+    },
+
     /// A recommended (soft) dependency failed to install (non-fatal)
     RecommendFailed {
         operation_info: OperationInfo,
@@ -2100,7 +2128,7 @@ pub struct DependencyStatus {
 #[derive(Debug, Clone)]
 pub struct PackageListData {
     pub valid_packages: Vec<PackageListItem>,
-    pub invalid_packages: Vec<InvalidPackageInfo>,
+    pub invalid_packages: Vec<crate::package::port::PackageParseError>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
@@ -2112,13 +2140,6 @@ pub struct PackageListItem {
     pub name: String,
     pub environments: Vec<String>,
     pub status: Option<CheckResult>,
-}
-
-/// Information about an invalid package
-#[derive(Debug, Clone)]
-pub struct InvalidPackageInfo {
-    pub path: String,
-    pub error: String,
 }
 
 /// Information about a spec (definition only, no runtime status)
@@ -2134,7 +2155,7 @@ pub struct SpecListItem {
 #[derive(Debug, Clone)]
 pub struct SpecListData {
     pub specs: Vec<SpecListItem>,
-    pub invalid_packages: Vec<InvalidPackageInfo>,
+    pub invalid_packages: Vec<crate::package::port::PackageParseError>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,

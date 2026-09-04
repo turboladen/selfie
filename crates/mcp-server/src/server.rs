@@ -514,7 +514,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, description, and environments. Fast — no commands executed."
+        description = "List all specs for the current environment with name, description, and environments. A spec that could not be parsed is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -524,7 +524,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. Fast — no commands executed."
+        description = "Validate all spec files for correctness. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. A spec that could not be parsed is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -562,7 +562,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit_all",
-        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A spec that could not be parsed is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn package_audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;
@@ -588,7 +588,8 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_list",
-        description = "List packages with installation status. Set all=true to include packages from other environments."
+        description = "List packages with installation status. Set all=true to include packages from other environments. \
+A spec that could not be parsed is not reported by this tool at all; use selfie_spec_list, which returns it with its kind, reason and location."
     )]
     async fn package_list(
         &self,
@@ -644,7 +645,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to, a source it cannot read — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to, a source it cannot read — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal. A spec that could not be parsed is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -669,7 +670,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. A spec this tool could not parse is reported as prose in `skipped`, not as fields: this tool reads the package directory directly rather than through the event stream every other tool uses, so the location is in the message text. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::package::port::PackageRepository;
@@ -711,7 +712,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_dotfiles_drift",
-        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status."
+        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. A spec that could not be parsed is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;

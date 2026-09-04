@@ -3108,24 +3108,33 @@ mod secret_bearing {
         let service = dirs.service();
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
-        let rendered = format!("{events:?}");
-        assert!(
-            rendered.contains("creds.yml"),
-            "the warning must name the file, got: {events:?}"
-        );
-        // The reason, not an adjective: the wording is shared with every command
-        // that skips a spec file, and a fifo is not unparsable.
-        assert!(
-            rendered.contains("YAML parsing error"),
-            "the warning must say why it was skipped, got: {events:?}"
-        );
-        // Exactly once. The warning prefixes the file it skipped, and a reason that
-        // named the file as well would print it twice -- which is what a payload
-        // carrying an already-tagged path would do, since no type stops that.
+        // The event, not its rendering. Apply's job here is to report the file at
+        // all; what a reader sees is asserted where a reader sees it, in
+        // `crates/cli/tests/skipped_spec_tests.rs`, against real output.
+        //
+        // Never assert on `format!("{events:?}")` here. A Debug of a typed payload
+        // resembles nothing a user reads, so such an assertion passes while the CLI
+        // prints something else entirely.
+        let skipped: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::SpecSkipped { error, .. } => Some(error),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(skipped.len(), 1, "got: {events:?}");
         assert_eq!(
-            rendered.matches("creds.yml").count(),
-            1,
-            "the file must be named exactly once, got: {events:?}"
+            skipped[0].package_path(),
+            dirs.package_dir.join("creds.yml")
+        );
+        assert!(
+            matches!(
+                skipped[0].kind(),
+                selfie::package::port::PackageParseKind::Yaml { .. }
+            ),
+            "the reason must survive, not just the fact: got {:?}",
+            skipped[0].kind()
         );
     }
 

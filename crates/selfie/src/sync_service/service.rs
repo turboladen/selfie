@@ -819,7 +819,7 @@ fn validate_changed_packages(
                 // built from the parts rather than rendered and cut back down.
                 let location = e
                     .location()
-                    .map(|(line, column)| format!("line {line} column {column}"));
+                    .map(|at| format!("line {} column {}", at.line(), at.column()));
                 let message = e.reason();
 
                 failures.push(PackageValidationFailure {
