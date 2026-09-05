@@ -7663,3 +7663,122 @@ mod running_under_sudo {
         );
     }
 }
+
+// The three surfaces that answer "is this package usable" now ask one function,
+// so a reader cannot be told the file is fine by one command and refused by the
+// next. Each test here deletes one surface's answer if the consult is removed --
+// which is the only way to know a shared predicate is actually shared, rather
+// than written once and called from one place.
+mod apply_and_drift_agree {
+    use super::*;
+
+    // A top-level key that shadows a real field. Selfie cannot tell it from a
+    // misspelling of `dotfiles:`, and reading it as an anchor empties the list.
+    fn write_shadowed(dir: &std::path::Path, target: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("myapp")).unwrap();
+        std::fs::write(dir.join("myapp/config.toml").as_path(), "SHARED").unwrap();
+        write_package_yaml(
+            dir,
+            "myapp",
+            &format!(
+                "name: myapp\n_dotfiles:\n  - source: \"myapp/config.toml\"\n    target: \"{}\"\nenvironments:\n  test:\n    install: \"true\"\n",
+                target.display()
+            ),
+        );
+    }
+
+    fn drift_refused(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events) {
+            Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                refused_count,
+                ..
+            })) => *refused_count,
+            other => panic!("expected a drift completion, got: {other:?}"),
+        }
+    }
+
+    // The state selfie-9a1h measured on main: apply refuses and names the key,
+    // drift reports zero out of zero with a check mark.
+    #[tokio::test]
+    async fn drift_refuses_the_package_apply_refuses() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        write_shadowed(&dirs.package_dir, &target);
+
+        let applied = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(
+            refused_count(&applied),
+            1,
+            "apply must refuse it: {:?}",
+            warning_messages(&applied)
+        );
+        assert_eq!(
+            drift_refused(&drifted),
+            1,
+            "drift must refuse the same file: {:?}",
+            warning_messages(&drifted)
+        );
+    }
+
+    // Not just that both refuse, but that they say the same thing. Two commands
+    // agreeing on the verdict and disagreeing on the reason is the shape this
+    // predicate exists to stop, and only comparing the rendered text catches it.
+    #[tokio::test]
+    async fn both_commands_give_the_same_reason() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        write_shadowed(&dirs.package_dir, &target);
+
+        let applied = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(dirs.service().check_drift().await).await;
+
+        let from_apply: Vec<String> = warning_messages(&applied)
+            .into_iter()
+            .filter(|m| m.contains("Skipping package"))
+            .collect();
+        let from_drift: Vec<String> = warning_messages(&drifted)
+            .into_iter()
+            .filter(|m| m.contains("Skipping package"))
+            .collect();
+
+        assert_eq!(
+            from_apply.len(),
+            1,
+            "apply must say it once: {from_apply:?}"
+        );
+        assert_eq!(
+            from_apply, from_drift,
+            "the two commands must give one reason, not two"
+        );
+    }
+
+    // The rule-4 control, extended to drift. A tracked dotfile has no
+    // environments by design, and refusing it here would be as wrong as
+    // refusing it on apply -- with nothing else in the suite to notice.
+    #[tokio::test]
+    async fn drift_does_not_refuse_a_tracked_dotfile() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".gemrc");
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("gemrc")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("gemrc/.gemrc").as_path(), "GEM").unwrap();
+        write_package_yaml(
+            &dirs.dotfiles_dir,
+            "gemrc",
+            &format!(
+                "name: gemrc\ndotfiles:\n  - source: \"gemrc/.gemrc\"\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service_with_dotfiles().check_drift().await).await;
+
+        assert_eq!(
+            drift_refused(&events),
+            0,
+            "a tracked dotfile has no environments by design: {:?}",
+            warning_messages(&events)
+        );
+    }
+}

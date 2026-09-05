@@ -1802,6 +1802,7 @@ mod tests {
                 result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                     drift_count: 1,
                     total_count: 3,
+                    refused_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
                 }),
