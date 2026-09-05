@@ -156,6 +156,7 @@ mod tests {
             let repo = crate::package::repository::yaml::YamlPackageRepository::new(
                 crate::fs::real::RealFileSystem,
                 dir.clone(),
+                crate::package::SpecOrigin::PackageDirectory,
             );
             crate::package::port::PackageRepository::list_packages(&repo)
         });

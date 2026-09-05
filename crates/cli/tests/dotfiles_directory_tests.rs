@@ -176,6 +176,20 @@ fn dotfiles_list_includes_standalone_dotfiles() {
         !stdout.to_lowercase().contains(MISSING_DIR_ANY),
         "an existing directory must not be reported as missing, got:\n{stdout}"
     );
+
+    // Which heading it lands under is the only observable proof that the spec
+    // was recorded as coming from the dotfiles directory. The package directory
+    // here is empty, so a spec attributed to it prints the wrong heading and
+    // suppresses the right one -- and every other assertion in this file still
+    // passes, because they only ask whether the name appears somewhere.
+    assert!(
+        stdout.contains("Dotfiles:"),
+        "a standalone spec must be listed under its own heading, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Packages:"),
+        "an empty package directory must not get a heading, got:\n{stdout}"
+    );
 }
 
 // `spec create` is the one namespace check that proceeds to a write when the

@@ -12,7 +12,7 @@ use selfie::{
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
     package::{
-        GetPackage, SpecService,
+        GetPackage, SpecOrigin, SpecService,
         event::PackageEvent,
         git_adapter::GixGitStatusProvider,
         port::PackageRepository,
@@ -46,7 +46,11 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
     config: &CliConfig,
     fs: F,
 ) -> YamlPackageRepository<F> {
-    YamlPackageRepository::new(fs, config.package_directory().clone())
+    YamlPackageRepository::new(
+        fs,
+        config.package_directory().clone(),
+        SpecOrigin::PackageDirectory,
+    )
 }
 
 /// Build the command runner every CLI service uses.
@@ -92,7 +96,11 @@ pub(crate) fn dotfiles_repository(
 ) -> Option<YamlPackageRepository<RealFileSystem>> {
     let dotfiles_dir = config.selfie_config().dotfiles_directory();
     if dotfiles_dir.is_dir() {
-        return Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir));
+        return Some(YamlPackageRepository::new(
+            RealFileSystem,
+            dotfiles_dir,
+            SpecOrigin::DotfilesDirectory,
+        ));
     }
 
     // Once per run, not once per call. `selfie track` reaches this twice on the

@@ -1,4 +1,5 @@
 // crates/selfie/tests/package_validation_tests.rs
+use selfie::package::SpecOrigin;
 use selfie::{
     fs::real::RealFileSystem,
     package::{port::PackageRepository, repository::YamlPackageRepository},
@@ -30,7 +31,7 @@ environments:
 
     let fs = RealFileSystem;
     let repo_path = temp_dir.path().join("packages");
-    let repo = YamlPackageRepository::new(fs, repo_path.clone());
+    let repo = YamlPackageRepository::new(fs, repo_path.clone(), SpecOrigin::PackageDirectory);
 
     let package = repo.get_package("test-package").unwrap();
     let validation = package.package().validate("test-env");
@@ -69,7 +70,7 @@ environments:
 
     let fs = RealFileSystem;
     let repo_path = temp_dir.path().join("packages");
-    let repo = YamlPackageRepository::new(fs, repo_path.clone());
+    let repo = YamlPackageRepository::new(fs, repo_path.clone(), SpecOrigin::PackageDirectory);
 
     let package = repo.get_package("test-package").unwrap();
     let validation = package.package().validate("test-env");
@@ -109,7 +110,7 @@ environments:
 
     let fs = RealFileSystem;
     let repo_path = temp_dir.path().join("packages");
-    let repo = YamlPackageRepository::new(fs, repo_path);
+    let repo = YamlPackageRepository::new(fs, repo_path, SpecOrigin::PackageDirectory);
 
     let package = repo.get_package("test-package").unwrap();
     let env = package.package().environments().get("test-env").unwrap();
@@ -133,7 +134,7 @@ environments:
 
     let fs = RealFileSystem;
     let repo_path = temp_dir.path().join("packages");
-    let repo = YamlPackageRepository::new(fs, repo_path);
+    let repo = YamlPackageRepository::new(fs, repo_path, SpecOrigin::PackageDirectory);
 
     let package = repo.get_package("test-package").unwrap();
     let env = package.package().environments().get("test-env").unwrap();

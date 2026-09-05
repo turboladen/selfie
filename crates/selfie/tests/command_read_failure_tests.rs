@@ -10,6 +10,7 @@
 // `dotfile_service_tests.rs`, where a write actually happens.
 
 use futures::StreamExt;
+use selfie::package::SpecOrigin;
 use tempfile::TempDir;
 use test_common::FakeCommandRunner;
 use tokio_util::sync::CancellationToken;
@@ -45,7 +46,7 @@ fn service(temp: &TempDir, runner: FakeCommandRunner) -> impl PackageService {
         .build();
 
     PackageServiceImpl::new(
-        YamlPackageRepository::new(RealFileSystem, package_dir),
+        YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory),
         runner,
         GixGitStatusProvider,
         config,

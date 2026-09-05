@@ -10,6 +10,7 @@
 //! subscriber. Keeping it alone in the file means the captured output belongs to
 //! this test and nothing else, so a failure is unambiguous.
 
+use selfie::package::SpecOrigin;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -116,7 +117,11 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         .dotfiles_directory(temp.path().join("dotfiles"))
         .state_directory(state_dir)
         .build();
-    let repo = YamlPackageRepository::new(RealFileSystem, package_dir.clone());
+    let repo = YamlPackageRepository::new(
+        RealFileSystem,
+        package_dir.clone(),
+        SpecOrigin::PackageDirectory,
+    );
     let runner = FakeCommandRunner::new()
         .succeeding("op read x", SECRET.as_bytes())
         .succeeding("op read y", SECRET.as_bytes());

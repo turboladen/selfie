@@ -7,7 +7,7 @@ use crate::{
     dotfile_service::service::repository_read_refusal,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
-        GetPackage, Package, TopLevelKeys,
+        GetPackage, Package, SpecOrigin, SpecRefusal,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
             PackageParseKind, PackageRepoError, PackageRepository,
@@ -20,11 +20,21 @@ use crate::{
 pub struct YamlPackageRepository<F: FileSystem> {
     fs: F,
     package_dir: PathBuf,
+    origin: SpecOrigin,
 }
 
 impl<F: FileSystem> YamlPackageRepository<F> {
-    pub fn new(fs: F, package_dir: PathBuf) -> Self {
-        Self { fs, package_dir }
+    /// A repository over `package_dir`, whose specs are of kind `origin`.
+    ///
+    /// The origin is asked for rather than inferred because the same type reads
+    /// both configured directories and cannot tell them apart from the path.
+    /// Every package this repository loads carries it.
+    pub fn new(fs: F, package_dir: PathBuf, origin: SpecOrigin) -> Self {
+        Self {
+            fs,
+            package_dir,
+            origin,
+        }
     }
 
     /// List all YAML files in a directory, in sorted path order.
@@ -144,7 +154,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
         let mut package: Package = crate::yaml::parse(&content)
             .map_err(|source| PackageParseError::new(path, PackageParseKind::Yaml { source }))?;
-        package.set_source(path.to_path_buf(), content);
+        package.set_source(path.to_path_buf(), content, self.origin);
 
         Ok(package)
     }
@@ -353,27 +363,45 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         // The same refusal at the file's top level: `_dotfiles:` as an anchor, or
         // a plain `configs:`, is not modeled either, so rewriting drops it and
-        // every entry under it with no diagnostic.
+        // every entry under it with no diagnostic. A file selfie could not read
+        // back is refused for the same reason -- the key it may hide is one a
+        // rewrite would delete along with whatever it carries (selfie-ebvx).
         //
-        // A file selfie could not read back is refused too. Apply proceeds on one
-        // of those because refusing would stop a deploy over a check that did not
-        // run; a declined write costs a retry instead, and the thing at risk here
-        // is the user's own text (selfie-ebvx).
-        match package.top_level_keys() {
-            TopLevelKeys::Checked(unknown) if !unknown.is_empty() => {
+        // Asked of `top_level_refusal` rather than judged here, so the writer and
+        // apply cannot come to different conclusions about the same two keys.
+        // Reported as field names rather than as the rendered sentence, because
+        // this error names the file and the caller needs the keys to fix it.
+        match package.top_level_refusal() {
+            Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
                 let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
                 return Err(PackageRepoError::UnknownTopLevelFields {
                     path: path.to_path_buf(),
                     fields: fields.join(", "),
                 });
             }
-            TopLevelKeys::Unchecked(error) => {
+            Some(SpecRefusal::UncheckedTopLevel(error)) => {
                 return Err(PackageRepoError::UncheckedTopLevel {
                     path: path.to_path_buf(),
-                    error: error.clone(),
+                    error,
                 });
             }
-            TopLevelKeys::Checked(_) | TopLevelKeys::NoSource => {}
+            // `top_level_refusal` asks about no environment, and the loop below
+            // asks about every one -- which is what a rewrite needs, since it
+            // drops an unknown key wherever it sits, not only in the environment
+            // some other command happens to be applying.
+            //
+            // A missing environment is a deployment rule and not a writing one:
+            // a spec that declares none is still the user's text, and refusing
+            // to save it would strand whatever they were editing. `top_level_refusal`
+            // composes only the two rules above, so this arm is not reached.
+            //
+            // Named rather than left to a catch-all, which buys exactly one
+            // thing: a new `SpecRefusal` variant fails to compile here until
+            // someone decides whether a rewrite refuses over it. Widening
+            // `top_level_refusal` to return a variant already named here is not
+            // caught, so that stays a decision to make there.
+            Some(SpecRefusal::UnknownEnvironmentKeys { .. } | SpecRefusal::NoEnvironments(_))
+            | None => {}
         }
 
         // The same refusal one level down. An environment's unknown key is not
@@ -602,7 +630,8 @@ mod tests {
 
         fs.mock_read_file(package_path, yaml);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let package = repo.get_package("ripgrep").unwrap();
 
         assert_eq!(package.package.name(), "ripgrep");
@@ -624,7 +653,8 @@ mod tests {
             .with(predicate::eq(package_dir.clone()))
             .returning(|_| Ok(vec![PathBuf::from("/test/packages/other.yaml")]));
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("nonexistent");
 
         assert!(matches!(
@@ -645,7 +675,8 @@ mod tests {
             .with(predicate::eq(package_dir.clone()))
             .returning(|_| false);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("ripgrep");
 
         assert!(matches!(
@@ -682,7 +713,8 @@ mod tests {
                 ])
             });
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("ripgrep");
 
         assert!(matches!(
@@ -712,7 +744,8 @@ mod tests {
             .with(predicate::eq(package_dir.clone()))
             .returning(move |_| Ok(vec![yaml_clone.clone(), yml_clone.clone()]));
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
 
         // Should find ripgrep.yaml
         let files = repo.find_package_files("ripgrep").unwrap();
@@ -769,7 +802,8 @@ mod tests {
         fs.mock_read_file(package_dir.join("fzf.yml"), package2);
         fs.mock_read_file(package_dir.join("invalid.yaml"), "not valid yaml: :");
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let package_output = repo.list_packages().unwrap();
 
         // Should find both valid packages
@@ -816,7 +850,8 @@ mod tests {
                 ])
             });
 
-        let repo = YamlPackageRepository::new(fs, PathBuf::from("/dummy"));
+        let repo =
+            YamlPackageRepository::new(fs, PathBuf::from("/dummy"), SpecOrigin::PackageDirectory);
         let yaml_files = repo.list_yaml_files(&dir).unwrap();
 
         assert_eq!(
@@ -849,7 +884,11 @@ mod tests {
                 ])
             });
 
-        let repo = YamlPackageRepository::new(fs, Path::new("/dummy").to_path_buf()); // Path doesn't matter here
+        let repo = YamlPackageRepository::new(
+            fs,
+            Path::new("/dummy").to_path_buf(),
+            SpecOrigin::PackageDirectory,
+        ); // Path doesn't matter here
         let yaml_files = repo.list_yaml_files(&dir).unwrap();
 
         // Should find all yaml/yml files regardless of case
@@ -905,7 +944,8 @@ mod tests {
         fs.mock_read_file(package_dir.join("fzf.yml"), fzf_package);
         fs.mock_read_file(package_dir.join("invalid.yaml"), "not valid yaml: :");
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let available_packages = repo.available_packages().unwrap();
 
         // Should find only valid packages
@@ -941,7 +981,8 @@ mod tests {
         fs.mock_list_directory(package_dir.clone(), std::slice::from_ref(&package_path));
         fs.mock_read_file(package_path.clone(), invalid_yaml);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("invalid");
 
         assert!(result.is_err());
@@ -976,7 +1017,8 @@ mod tests {
             .with(predicate::eq(nonexistent_dir.clone()))
             .returning(|_| false);
 
-        let repo = YamlPackageRepository::new(fs, nonexistent_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, nonexistent_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.list_packages();
 
         assert!(result.is_err());
@@ -1020,7 +1062,8 @@ mod tests {
         fs.mock_read_file(file1, package_yaml);
         fs.mock_read_file(file2, package_yaml);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("duplicate");
 
         assert!(result.is_err());
@@ -1061,7 +1104,8 @@ mod tests {
         nix::unistd::mkfifo(&template, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
         let package_path = package_dir.join("creds.yml");
-        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1117,7 +1161,7 @@ mod tests {
         let ghost = package_dir.join("ghost.yml");
         let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
 
-        let output = YamlPackageRepository::new(fs, package_dir)
+        let output = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .list_packages()
             .expect("listing must succeed despite the fifo");
 
@@ -1153,7 +1197,7 @@ mod tests {
         let ghost = package_dir.join("ghost.yml");
         let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
 
-        let error = YamlPackageRepository::new(fs, package_dir)
+        let error = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .get_package("ghost")
             .expect_err("a fifo spec must be refused");
 
@@ -1174,7 +1218,7 @@ mod tests {
         let sock = package_dir.join("sock.yml");
         let fs = fs_with_one_irregular_spec(&package_dir, &good, &sock, "socket");
 
-        let output = YamlPackageRepository::new(fs, package_dir)
+        let output = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .list_packages()
             .expect("listing must succeed despite the socket");
 
@@ -1212,7 +1256,7 @@ mod tests {
             })
         });
 
-        let output = YamlPackageRepository::new(fs, package_dir)
+        let output = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .list_packages()
             .expect("listing must succeed");
 
@@ -1251,9 +1295,13 @@ mod tests {
         let ghost = package_dir.join("ghost.yml");
         std::fs::write(&ghost, [b'n', b'a', b'm', b'e', b':', b' ', 0xff, 0xfe]).unwrap();
 
-        let output = YamlPackageRepository::new(crate::fs::real::RealFileSystem, package_dir)
-            .list_packages()
-            .expect("listing must succeed despite the unreadable spec");
+        let output = YamlPackageRepository::new(
+            crate::fs::real::RealFileSystem,
+            package_dir,
+            SpecOrigin::PackageDirectory,
+        )
+        .list_packages()
+        .expect("listing must succeed despite the unreadable spec");
 
         let invalid: Vec<_> = output.invalid_packages().collect();
         assert_eq!(invalid.len(), 1, "the spec must be reported as invalid");
@@ -1291,7 +1339,7 @@ mod tests {
             ))))
         });
 
-        let error = YamlPackageRepository::new(fs, package_dir)
+        let error = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .get_package("ghost")
             .expect_err("an unreadable spec must be an error");
 
@@ -1345,7 +1393,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (_temp_dir, package_dir) = package_dir_with_a_fifo_spec();
-        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1376,7 +1425,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (_temp_dir, package_dir) = package_dir_with_a_fifo_spec();
-        let repo = YamlPackageRepository::new(RealFileSystem, package_dir);
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1414,7 +1464,7 @@ environments:
         .unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         let dependents = repo.find_dependent_packages("target-package").unwrap();
         assert!(dependents.is_empty());
@@ -1474,7 +1524,7 @@ environments:
         .unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         let dependents = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
@@ -1523,7 +1573,7 @@ environments:
         .unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         let dependents = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
@@ -1554,7 +1604,7 @@ environments:
         .unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         let dependents = repo.find_dependent_packages("self-package").unwrap();
         assert!(dependents.is_empty());
@@ -1604,7 +1654,7 @@ environments:
         std::fs::write(package_dir.join("app-two.yml"), dependent2_content.trim()).unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         let dependents = repo.find_dependent_packages("shared-lib").unwrap();
         assert_eq!(dependents.len(), 2);
@@ -1637,7 +1687,7 @@ environments:
         std::fs::write(package_dir.join("invalid-package.yml"), invalid_content).unwrap();
 
         let fs = RealFileSystem;
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Should still find the valid dependent, ignoring the parse error
         let dependents = repo.find_dependent_packages("target-package").unwrap();
@@ -1703,7 +1753,7 @@ environments:
         // Mock the write operation
         fs.mock_write_file_no_follow(&package_path);
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Test saving the package
         let result = repo.save_package(&package, &package_path);
@@ -1729,9 +1779,16 @@ environments:
     fn save_package_refuses_a_file_whose_top_level_could_not_be_read() {
         let yaml = "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \"echo i\"\n";
         let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
-        package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
+        package.set_source(
+            PathBuf::from("/test/packages/creds.yml"),
+            yaml.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
         assert!(
-            matches!(package.top_level_keys(), TopLevelKeys::Unchecked(_)),
+            matches!(
+                package.top_level_keys(),
+                crate::package::TopLevelKeys::Unchecked(_)
+            ),
             "fixture must reach the unchecked state, got: {:?}",
             package.top_level_keys()
         );
@@ -1740,7 +1797,8 @@ environments:
         let package_dir = PathBuf::from("/test/packages");
         fs.expect_write_file_no_follow().times(0);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_dir.join("creds.yml"))
             .expect_err("a file selfie could not read back must not be rewritten");
@@ -1777,14 +1835,19 @@ environments:
     fn save_package_refuses_a_top_level_key_carrying_an_anchor_name() {
         let yaml = "name: creds\n_dotfiles:\n  - source: a\n    target: ~/.a\nenvironments:\n  work:\n    install: \"echo i\"\n";
         let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
-        package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
+        package.set_source(
+            PathBuf::from("/test/packages/creds.yml"),
+            yaml.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
 
         let mut fs = MockFileSystem::default();
         let package_dir = PathBuf::from("/test/packages");
 
         fs.expect_write_file_no_follow().times(0);
 
-        let repo = YamlPackageRepository::new(fs, package_dir.clone());
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_dir.join("creds.yml"))
             .expect_err("a package with an unrecognized top-level key must not be rewritten");
@@ -1820,6 +1883,7 @@ environments:
             PathBuf::from("/test/packages/creds.yml"),
             "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n"
                 .to_string(),
+            SpecOrigin::PackageDirectory,
         );
 
         let mut fs = MockFileSystem::default();
@@ -1828,7 +1892,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_path)
             .expect_err("a package with an unrecognized environment key must not be rewritten");
@@ -1864,7 +1928,7 @@ environments:
 
         fs.expect_write_file_no_follow().times(0);
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package_with_typo(), &package_path)
             .expect_err("a package with an unrecognized dotfile key must not be rewritten");
@@ -1898,7 +1962,7 @@ environments:
         )
         .expect("fixture must parse — the collision is a validation error, not a parse error");
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_path)
             .expect_err("a colliding anchor must not be rewritten away");
@@ -1927,7 +1991,7 @@ environments:
         )
         .expect("fixture must parse");
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_path)
             .expect_err("an environment-scoped unrecognized key must not be rewritten");
@@ -1955,7 +2019,7 @@ environments:
         )
         .unwrap();
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         assert!(repo.save_package(&package, &package_path).is_ok());
     }
 
@@ -1986,7 +2050,7 @@ environments:
                 )))
             });
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Test saving the package should fail
         let result = repo.save_package(&package, &package_path);
@@ -2017,7 +2081,7 @@ environments:
         fs.expect_write_file_no_follow()
             .returning(move |_, _| Err(refusal.clone()));
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         repo.save_package(&package, &package_path)
             .unwrap_err()
             .to_string()
@@ -2103,7 +2167,7 @@ environments:
         // Mock the remove_file operation
         fs.mock_remove_file(&package_path);
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Test removing the package
         let result = repo.remove_package(package_name);
@@ -2125,7 +2189,7 @@ environments:
             .with(mockall::predicate::eq(package_dir.clone()))
             .returning(|_| Ok(vec![])); // No packages found
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Test removing non-existent package should fail
         let result = repo.remove_package(package_name);
@@ -2178,7 +2242,7 @@ environments:
                 )))
             });
 
-        let repo = YamlPackageRepository::new(fs, package_dir);
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Test removing package should fail due to filesystem error
         let result = repo.remove_package(package_name);

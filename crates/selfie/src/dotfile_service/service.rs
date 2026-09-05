@@ -29,8 +29,7 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, EnvironmentField, Package, TopLevelKeys,
-        describe_unknown_key_in,
+        ContentSource, DotfileEntry, Package,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -1288,96 +1287,23 @@ where
             continue;
         }
 
-        // Refuse the whole package before asking what dotfiles it has. A
-        // `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
-        // or short, so the `is_empty` check below would skip the package in
-        // silence (selfie-g199, selfie-jt6m). The set is the one `spec validate`
-        // errors on, so the two commands answer alike.
+        // Refuse the whole package before asking what dotfiles it has, through
+        // the one function that answers whether apply refuses a package at all.
+        // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
+        // or short, so the `is_empty` check below would pass over the package in
+        // silence (selfie-g199, selfie-jt6m).
         //
-        // Whole-package rather than per-entry: the problem is in the file's top
-        // level, so there is no entry to attach it to. The keys arrive worded for
-        // that level, so this cannot explain them against another. A file that
-        // could not be read back is decided below instead.
-        if let TopLevelKeys::Checked(keys) = package.top_level_keys()
-            && !keys.is_empty()
-        {
-            let described: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
+        // The reason arrives already worded for the level it came from, so this
+        // adds only the package it belongs to.
+        if let Some(reason) = package.apply_refusal(config.environment()) {
             sender
-                .send_warning(format!(
-                    "Skipping package '{}': {}",
-                    package.name(),
-                    described.join("; ")
-                ))
+                .send_warning(format!("Skipping package '{}': {reason}", package.name()))
                 .await;
             refused_count += 1;
             continue;
         }
 
-        // The same refusal for the environment about to be applied. An unknown
-        // key here is not merely ignored: `_dotfiles:` leaves this environment's
-        // list empty, so `dotfiles_for_environment` falls back to the shared
-        // entry and deploys a file this machine was meant to override.
-        //
-        // Scoped to the active environment, because a typo in an environment
-        // this run does not touch cannot affect what it deploys.
-        if let Some(env) = package.environments().get(config.environment()) {
-            let unknown = env.unknown_keys();
-            if !unknown.is_empty() {
-                let described: Vec<String> = unknown
-                    .iter()
-                    .map(|key| describe_unknown_key_in::<EnvironmentField>(key))
-                    .collect();
-                sender
-                    .send_warning(format!(
-                        "Skipping package '{}': in environment '{}': {}",
-                        package.name(),
-                        config.environment(),
-                        described.join("; ")
-                    ))
-                    .await;
-                refused_count += 1;
-                continue;
-            }
-        }
-
         let dotfiles = package.dotfiles_for_environment(config.environment());
-
-        // Waits for `dotfiles` because what an unread top level costs depends on
-        // what is left to deploy.
-        //
-        // With nothing to deploy, a package that has none by design and one whose
-        // entries are hidden behind an unchecked key are indistinguishable, and
-        // the `continue` below reports both as nothing to do (selfie-c28).
-        //
-        // With entries, what deploys is what selfie's own parse produced -- not
-        // necessarily the right content: a hidden `environments:` key costs the
-        // mapping, so a shared entry can land on its override's target (selfie-flsi).
-        if let TopLevelKeys::Unchecked(error) = package.top_level_keys() {
-            if dotfiles.is_empty() {
-                sender
-                    .send_warning(format!(
-                        "Skipping package '{}': it has no dotfiles to deploy, and its top-level \
-                         keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled \
-                         out. The re-read failed with: {error}",
-                        package.name()
-                    ))
-                    .await;
-                refused_count += 1;
-                continue;
-            }
-
-            // The parse failure ends both messages because it is several lines of
-            // source snippet, and anything after it reads as part of it.
-            sender
-                .send_warning(format!(
-                    "Package '{}': could not re-read the package file to check its top-level \
-                     keys, so an unrecognized one -- a misspelling, or an anchor named after a \
-                     real field -- would not have been caught. Applying it anyway. The re-read \
-                     failed with: {error}",
-                    package.name()
-                ))
-                .await;
-        }
 
         if dotfiles.is_empty() {
             continue;

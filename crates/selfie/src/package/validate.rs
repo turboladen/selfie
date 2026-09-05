@@ -400,7 +400,7 @@ impl Package {
     /// # Errors
     ///
     /// Returns a `ValidationIssue` error if no environments are defined.
-    fn validate_environments_exists(&self) -> Result<(), ValidationIssue> {
+    pub(super) fn validate_environments_exists(&self) -> Result<(), ValidationIssue> {
         if self.environments.value.is_empty() {
             Err(ValidationIssue::error_at(
                 ValidationErrorCategory::RequiredField,
@@ -1883,6 +1883,7 @@ dotfiles:
         package.set_source(
             std::path::PathBuf::from("/packages/myapp.yml"),
             yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
         );
         package
     }

@@ -17,6 +17,7 @@
 //! for command output.
 
 use futures::StreamExt;
+use selfie::package::SpecOrigin;
 use tempfile::TempDir;
 use test_common::FakeCommandRunner;
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,7 @@ fn failing_check_service(temp: &TempDir) -> impl PackageService {
     );
 
     PackageServiceImpl::new(
-        YamlPackageRepository::new(RealFileSystem, package_dir),
+        YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory),
         runner,
         GixGitStatusProvider,
         config,

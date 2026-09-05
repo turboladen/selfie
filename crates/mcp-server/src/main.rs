@@ -8,7 +8,7 @@ use selfie::{
     config::{YamlLoader, loader::ConfigLoader},
     fs::RealFileSystem,
     package::{
-        git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
+        SpecOrigin, git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
     },
 };
@@ -68,7 +68,11 @@ async fn async_main() -> Result<()> {
     let ignored_keys = loaded.ignored_keys().to_vec();
     let config = loaded.into_config();
 
-    let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+    let repo = YamlPackageRepository::new(
+        fs,
+        config.package_directory().clone(),
+        SpecOrigin::PackageDirectory,
+    );
     // Use a login shell so the user's PATH includes tools like ~/.cargo/bin,
     // homebrew, fnm, etc. GUI-launched processes (like MCP servers started by
     // Claude Desktop) don't inherit the terminal's environment.

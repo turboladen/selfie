@@ -4,7 +4,7 @@
 //! all dotfile mappings defined across packages and the standalone dotfiles
 //! directory. This is a fast, file-only operation — no commands are executed.
 
-use selfie::package::{Package, port::PackageRepository};
+use selfie::package::{Package, SpecOrigin, port::PackageRepository};
 use tracing::info;
 
 use crate::{
@@ -12,13 +12,6 @@ use crate::{
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
 };
-
-/// Which directory a package was loaded from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DotfileOrigin {
-    Packages,
-    Dotfiles,
-}
 
 /// Handle the `selfie dotfiles list` command
 ///
@@ -46,7 +39,7 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
     table.set_header(vec!["Package", "Environment", "Source", "Target"]);
 
     let mut total = 0;
-    for (pkg, _origin) in &packages {
+    for pkg in &packages {
         for (scope, entry) in pkg.dotfiles_with_scope() {
             table.add_row(vec![
                 pkg.name().to_string(),
@@ -80,20 +73,18 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
 }
 
 /// Load packages from both repos, keeping only those with dotfile entries.
-/// Each package is tagged with its origin so we know which base directory to display.
+///
+/// Each package carries the directory it came from, which is what decides the
+/// base directories printed above the table.
 fn collect_packages_with_dotfiles(
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<Vec<(Package, DotfileOrigin)>, i32> {
+) -> Result<Vec<Package>, i32> {
     let repo = create_package_repository(config);
-    let (raw, skipped) = load_dotfile_packages(&repo, display, "packages")?;
+    let (mut packages, skipped) = load_dotfile_packages(&repo, display, "packages")?;
     for warning in skipped {
         display.print_warning(warning);
     }
-    let mut packages: Vec<(Package, DotfileOrigin)> = raw
-        .into_iter()
-        .map(|p| (p, DotfileOrigin::Packages))
-        .collect();
 
     // Add standalone dotfiles repository if the directory exists
     if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
@@ -102,11 +93,7 @@ fn collect_packages_with_dotfiles(
                 for warning in dotfile_skipped {
                     display.print_warning(warning);
                 }
-                packages.extend(
-                    dotfile_pkgs
-                        .into_iter()
-                        .map(|p| (p, DotfileOrigin::Dotfiles)),
-                );
+                packages.extend(dotfile_pkgs);
             }
             Err(_) => {
                 // Non-fatal — standalone dotfiles dir is optional
@@ -118,13 +105,13 @@ fn collect_packages_with_dotfiles(
 }
 
 /// Print the base directories above the table so relative source paths have context.
-fn print_base_directories(
-    config: &CliConfig,
-    display: &DisplayManager,
-    packages: &[(Package, DotfileOrigin)],
-) {
-    let has_packages = packages.iter().any(|(_, o)| *o == DotfileOrigin::Packages);
-    let has_dotfiles = packages.iter().any(|(_, o)| *o == DotfileOrigin::Dotfiles);
+fn print_base_directories(config: &CliConfig, display: &DisplayManager, packages: &[Package]) {
+    let has_packages = packages
+        .iter()
+        .any(|p| p.origin() == SpecOrigin::PackageDirectory);
+    let has_dotfiles = packages
+        .iter()
+        .any(|p| p.origin() == SpecOrigin::DotfilesDirectory);
 
     if has_packages {
         display.print_info(format!(
