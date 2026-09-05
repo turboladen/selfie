@@ -243,10 +243,10 @@ so selfie asks the file system about the path as well, and declines rather than 
 there.
 
 The rewriting commands also refuse a file selfie could not read back, even though no key is known to
-be wrong with it. Apply is the other way round: it warns and deploys such a file rather than stop
-over a check that did not run, and skips it only when there is nothing left to deploy. A declined
-write costs a retry, while rewriting would delete whatever the file carries that selfie does not
-model.
+be wrong with it, and so does apply — a rewrite would delete whatever the file carries that selfie
+does not model, and a deploy would write content the unread key may have changed. What differs is
+the cost of the refusal: a declined write costs a retry, while a declined deploy leaves the machine
+without the file until the spec is corrected.
 
 `selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
@@ -1254,29 +1254,24 @@ wrote. It counts as a refusal, so [the run exits non-zero](../README.md#a-refusa
 package file refuse them too — all three agree on the set.
 
 Checking those keys means reading the file a second time, and a file selfie can load as a package
-can still fail that second read — a mapping used as a key is one way. `selfie apply` always says so,
-and what it does next depends on what the package still has to deploy.
-
-If it has dotfiles for this environment, they are deployed and nothing here makes the run fail.
-Nothing is known to be wrong with the file, only unchecked, and what deploys is what selfie read
-from the file either way:
+can still fail that second read — a mapping used as a key is one way. The package is then
+**refused** and [the run exits non-zero](../README.md#a-refusal-is-not-a-success):
 
 ```
-⚠ Package 'myapp': could not re-read the package file to check its top-level keys, so an unrecognized one -- a misspelling, or an anchor named after a real field -- would not have been caught. Applying it anyway. The re-read failed with: …
+⚠ Skipping package 'myapp': its top-level keys could not be checked, so an unrecognized one -- a misspelling, or an anchor named after a real field -- cannot be ruled out. The re-read failed with: …
 ```
 
-If it has nothing to deploy, the package is **refused** and
-[the run exits non-zero](../README.md#a-refusal-is-not-a-success):
+Whether the package appears to have anything to deploy makes no difference, because the key that
+could not be ruled out is what decides whether the entries selfie did read are the right ones. A
+hidden `_dotfiles:` empties the list, so the package deploys nothing while the run reports success.
+A hidden `_environments:` costs the environment mapping, so the shared entry deploys onto the target
+an override was written for — the file looks like it has one dotfile and deploys the wrong content
+to it, and a decoy `environments:` alongside keeps every check that reads that mapping quiet.
 
-```
-⚠ Skipping package 'myapp': it has no dotfiles to deploy, and its top-level keys could not be checked, so a shadowed 'dotfiles:' key cannot be ruled out. The re-read failed with: …
-```
-
-Deploying nothing is exactly what `_dotfiles:` looks like from the outside, and this is the one file
-selfie cannot check for it — so the two cannot be told apart, and reporting the run as a quiet
-success would hide the case this whole section is about. A package that genuinely has no dotfiles is
-unaffected, because its keys were read and found clean. `selfie spec validate` reports the failed
-read either way, as an advisory notice.
+The cost is real and accepted: a package whose YAML is perfectly legal stops deploying because a
+check could not run. Correcting the construct that fails the second read — the mapping used as a
+key, in the example above — restores it. `selfie spec validate` reports the failed read as an
+advisory notice rather than an error: nothing is known to be wrong with the file, only unchecked.
 
 The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
 and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the

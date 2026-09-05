@@ -29,7 +29,7 @@ use crate::{
         },
     },
     package::{
-        ContentSource, DotfileEntry, Package, TopLevelKeys,
+        ContentSource, DotfileEntry, Package,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
@@ -1304,26 +1304,6 @@ where
         }
 
         let dotfiles = package.dotfiles_for_environment(config.environment());
-
-        // Reaching here with a file selfie could not read back means there is
-        // something to deploy, since a package with nothing left is refused above.
-        // What deploys is what selfie's own parse produced -- not necessarily the
-        // right content: a hidden `environments:` key costs the mapping, so a
-        // shared entry can land on its override's target (selfie-flsi).
-        //
-        // The parse failure ends the message because it is several lines of source
-        // snippet, and anything after it reads as part of it.
-        if let TopLevelKeys::Unchecked(error) = package.top_level_keys() {
-            sender
-                .send_warning(format!(
-                    "Package '{}': could not re-read the package file to check its top-level \
-                     keys, so an unrecognized one -- a misspelling, or an anchor named after a \
-                     real field -- would not have been caught. Applying it anyway. The re-read \
-                     failed with: {error}",
-                    package.name()
-                ))
-                .await;
-        }
 
         if dotfiles.is_empty() {
             continue;

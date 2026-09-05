@@ -49,8 +49,9 @@ impl fmt::Display for SpecRefusal {
             // source snippet, and anything after it reads as part of it.
             Self::UncheckedTopLevel(error) => write!(
                 f,
-                "it has no dotfiles to deploy, and its top-level keys could not be checked, so a \
-                 shadowed 'dotfiles:' key cannot be ruled out. The re-read failed with: {error}"
+                "its top-level keys could not be checked, so an unrecognized one -- a \
+                 misspelling, or an anchor named after a real field -- cannot be ruled out. The \
+                 re-read failed with: {error}"
             ),
         }
     }
@@ -100,13 +101,17 @@ impl Package {
             }
         }
 
-        // With nothing to deploy, a package that has none by design and one whose
-        // entries are hidden behind an unchecked key are indistinguishable, and a
-        // caller that reported both as nothing to do would exit zero having done
-        // nothing (selfie-c28).
-        if let TopLevelKeys::Unchecked(error) = self.top_level_keys()
-            && self.dotfiles_for_environment(environment).is_empty()
-        {
+        // A top level nothing looked at can hide either of the two keys above,
+        // and both change what deploys rather than merely adding noise: a
+        // shadowed `dotfiles:` empties the list, so the package deploys nothing
+        // while reporting success (selfie-c28, selfie-g199), and a shadowed
+        // `environments:` costs the mapping, so a shared entry lands on the
+        // target an override was written for (selfie-flsi).
+        //
+        // Neither can be ruled out here, and what the package still appears to
+        // have to deploy does not distinguish them -- the flsi reproducer carries
+        // entries and a decoy `environments:` both.
+        if let TopLevelKeys::Unchecked(error) = self.top_level_keys() {
             return Some(SpecRefusal::UncheckedTopLevel(error.clone()));
         }
 
@@ -240,25 +245,33 @@ environments:
         let yaml = format!(
             "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test:\n    install: \"echo i\"\n"
         );
-        let reason = reason(&yaml, "test")
-            .expect("a file that could not be checked and deploys nothing must be refused");
+        let reason =
+            reason(&yaml, "test").expect("a file whose top level was never read must be refused");
         assert!(reason.contains("cannot be ruled out"), "got: {reason}");
         assert!(reason.contains("The re-read failed with:"), "got: {reason}");
     }
 
+    // Having entries to deploy does not make the unread top level safe: the key
+    // it may hide is what decides whether those entries are the right ones.
     #[test]
-    fn an_unchecked_file_with_dotfiles_is_not_refused() {
+    fn an_unchecked_file_with_dotfiles_is_refused() {
         let yaml = format!(
             "name: myapp\n{UNREADABLE_TOP_LEVEL}dotfiles:\n  - source: myapp/config.toml\n    \
              target: ~/.config/myapp/config.toml\nenvironments:\n  test:\n    install: \"echo i\"\n"
         );
-        assert_eq!(reason(&yaml, "test"), None);
+        let reason = reason(&yaml, "test")
+            .expect("a file with entries and an unread top level must be refused");
+        assert!(reason.contains("cannot be ruled out"), "got: {reason}");
     }
 
     // A package with no file behind it has no key a user could misspell. Left
     // out, the whole answer would depend on a state nothing pins.
     #[test]
     fn a_package_built_in_memory_is_not_refused() {
-        assert!(Package::new_template("myapp").apply_refusal("test").is_none());
+        assert!(
+            Package::new_template("myapp")
+                .apply_refusal("test")
+                .is_none()
+        );
     }
 }

@@ -6285,13 +6285,12 @@ dotfiles:
         );
     }
 
-    // Apply says the check could not run, and deploys the package regardless.
-    //
-    // Both halves matter and neither implies the other: staying quiet reports a
-    // file as clean when nothing looked at it, and refusing stops a package whose
-    // YAML is legal from deploying at all, over a check that did not run.
+    // Having entries to deploy does not make an unread top level safe. The key
+    // it may hide is what decides whether those entries are the right ones: a
+    // shadowed `environments:` costs the mapping, and the shared entry then
+    // lands on the target an override was written for.
     #[tokio::test]
-    async fn apply_warns_and_still_deploys_a_file_it_cannot_re_read() {
+    async fn apply_refuses_a_file_it_cannot_re_read_even_with_dotfiles() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         package_that_cannot_be_re_read(&dirs, &target);
@@ -6300,37 +6299,77 @@ dotfiles:
 
         assert_eq!(
             refused_count(&events),
-            0,
-            "a check that did not run is not a refusal: {:?}",
+            1,
+            "a top level nothing looked at is a refusal: {:?}",
             warning_messages(&events)
         );
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "REPO",
-            "the package must still deploy"
+        assert!(
+            !target.exists(),
+            "a refused package must deploy nothing, but '{}' was written",
+            target.display()
         );
 
         let warnings = warning_messages(&events);
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("myapp") && w.contains("could not re-read")),
-            "apply must say the check could not run: {warnings:?}"
-        );
-        // The two arms are one `match` apart, and this one is not a skip. Saying
-        // so would describe a package that did deploy as skipped.
-        assert!(
-            !warnings.iter().any(|w| w.contains("Skipping")),
-            "nothing was skipped: {warnings:?}"
+            warnings.iter().any(
+                |w| w.contains("Skipping package 'myapp'") && w.contains("cannot be ruled out")
+            ),
+            "the refusal must name the package and what could not be ruled out: {warnings:?}"
         );
     }
 
-    // The same unread file, with nothing left to deploy, is refused.
-    //
-    // Deploying nothing is what a shadowed `dotfiles:` key looks like from the
-    // outside, and this file is one selfie could not check for that key. The two
-    // are indistinguishable here, so the run says so rather than reporting the
-    // package as having had nothing to do.
+    // The harm the refusal exists for, which no count can show: the file carries
+    // a shared entry, an override hidden behind `_environments:`, and a decoy
+    // `environments:` that keeps every check keyed on that mapping quiet. Deployed,
+    // the shared content lands on the override's own target.
+    #[tokio::test]
+    async fn apply_does_not_deploy_shared_content_over_a_hidden_override() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/shared.conf"), "SHARED").unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/work.conf"), "WORK").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+extra:
+  ? [a, b]
+  : v
+dotfiles:
+  - source: "myapp/shared.conf"
+    target: "{0}"
+_environments:
+  test:
+    dotfiles:
+      - source: "myapp/work.conf"
+        target: "{0}"
+environments:
+  test: {{ install: "echo installed" }}
+"#,
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        // The harm first, so a regression reports the content that landed rather
+        // than a count that only implies it.
+        assert!(
+            !target.exists(),
+            "the shared entry must not deploy over the target the override names, but '{}' \
+             contains {:?}",
+            target.display(),
+            std::fs::read_to_string(&target).ok()
+        );
+        assert_eq!(refused_count(&events), 1, "{:?}", warning_messages(&events));
+    }
+
+    // The same unread file with nothing left to deploy. Kept alongside the one
+    // above so the pair pins that what a package appears to have to deploy does
+    // not enter the decision: both are refused, and for the same reason.
     #[tokio::test]
     async fn apply_refuses_an_unchecked_file_that_would_deploy_nothing() {
         let dirs = TestDirs::new();
@@ -6360,23 +6399,20 @@ environments:
 
         let warnings = warning_messages(&events);
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("Skipping package 'myapp'") && w.contains("dotfiles:")),
+            warnings.iter().any(
+                |w| w.contains("Skipping package 'myapp'") && w.contains("cannot be ruled out")
+            ),
             "the refusal must name the package and what could not be ruled out: {warnings:?}"
-        );
-        // The deploying arm says the opposite of this one, and the two are a few
-        // lines apart. A copy-paste either way reads as a lie about what happened.
-        assert!(
-            !warnings.iter().any(|w| w.contains("Applying it anyway")),
-            "nothing was applied: {warnings:?}"
         );
     }
 
-    // The divergence itself: one file, and both surfaces have to speak about it.
+    // One file, and both surfaces speak about it -- neither may go quiet on a
+    // check that never ran.
     //
-    // Validation reported the unread file while apply stayed quiet, so the two
-    // disagreed about the same key check on the same bytes.
+    // They speak at different strengths on purpose. Apply refuses, because it
+    // would otherwise deploy content the unread key may have changed. Validate
+    // reports an advisory notice, because `sync push` refuses a package carrying
+    // any warning and an unrun check must not block one.
     #[tokio::test]
     async fn apply_and_validate_both_report_a_file_that_cannot_be_re_read() {
         let dirs = TestDirs::new();
@@ -6387,7 +6423,7 @@ environments:
         assert!(
             warning_messages(&events)
                 .iter()
-                .any(|w| w.contains("could not re-read")),
+                .any(|w| w.contains("cannot be ruled out")),
             "apply stayed quiet: {:?}",
             warning_messages(&events)
         );
@@ -6538,12 +6574,11 @@ environments:
         assert_eq!(warning_messages(&events), Vec::<String>::new());
     }
 
-    // "Nothing to deploy" is asked of the environment being applied, not of the
-    // shared list. The two tests above both put their entries at the top level,
-    // so a check reading `Package::dotfiles` instead would pass them and refuse
-    // this package, whose only entry is the environment's.
+    // An unread top level is refused wherever the entries live. The two tests
+    // above put theirs at the top level; this one's are the environment's, and
+    // the answer does not depend on which.
     #[tokio::test]
-    async fn an_unchecked_file_deploying_only_environment_entries_is_not_refused() {
+    async fn an_unchecked_file_deploying_only_environment_entries_is_refused() {
         let dirs = TestDirs::new();
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
@@ -6572,21 +6607,13 @@ environments:
 
         assert_eq!(
             refused_count(&events),
-            0,
-            "the environment's entry is something to deploy: {:?}",
+            1,
+            "an unread top level is refused wherever the entries live: {:?}",
             warning_messages(&events)
-        );
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "REPO",
-            "the environment's entry must still deploy"
         );
         assert!(
-            !warning_messages(&events)
-                .iter()
-                .any(|w| w.contains("Skipping")),
-            "nothing was skipped: {:?}",
-            warning_messages(&events)
+            !target.exists(),
+            "the environment's entry must not deploy from a file nothing checked"
         );
     }
 }
