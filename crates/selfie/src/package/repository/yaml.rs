@@ -7,7 +7,7 @@ use crate::{
     dotfile_service::service::repository_read_refusal,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
-        GetPackage, Package, TopLevelKeys,
+        GetPackage, Package, SpecRefusal,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
             PackageParseKind, PackageRepoError, PackageRepository,
@@ -353,27 +353,33 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         // The same refusal at the file's top level: `_dotfiles:` as an anchor, or
         // a plain `configs:`, is not modeled either, so rewriting drops it and
-        // every entry under it with no diagnostic.
+        // every entry under it with no diagnostic. A file selfie could not read
+        // back is refused for the same reason -- the key it may hide is one a
+        // rewrite would delete along with whatever it carries (selfie-ebvx).
         //
-        // A file selfie could not read back is refused too. Apply proceeds on one
-        // of those because refusing would stop a deploy over a check that did not
-        // run; a declined write costs a retry instead, and the thing at risk here
-        // is the user's own text (selfie-ebvx).
-        match package.top_level_keys() {
-            TopLevelKeys::Checked(unknown) if !unknown.is_empty() => {
+        // Asked of `top_level_refusal` rather than judged here, so the writer and
+        // apply cannot come to different conclusions about the same two keys.
+        // Reported as field names rather than as the rendered sentence, because
+        // this error names the file and the caller needs the keys to fix it.
+        match package.top_level_refusal() {
+            Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
                 let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
                 return Err(PackageRepoError::UnknownTopLevelFields {
                     path: path.to_path_buf(),
                     fields: fields.join(", "),
                 });
             }
-            TopLevelKeys::Unchecked(error) => {
+            Some(SpecRefusal::UncheckedTopLevel(error)) => {
                 return Err(PackageRepoError::UncheckedTopLevel {
                     path: path.to_path_buf(),
-                    error: error.clone(),
+                    error,
                 });
             }
-            TopLevelKeys::Checked(_) | TopLevelKeys::NoSource => {}
+            // `top_level_refusal` asks about no environment, and the loop below
+            // asks about every one -- which is what a rewrite needs, since it
+            // drops an unknown key wherever it sits, not only in the environment
+            // some other command happens to be applying.
+            Some(SpecRefusal::UnknownEnvironmentKeys { .. }) | None => {}
         }
 
         // The same refusal one level down. An environment's unknown key is not
@@ -1731,7 +1737,10 @@ environments:
         let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
         package.set_source(PathBuf::from("/test/packages/creds.yml"), yaml.to_string());
         assert!(
-            matches!(package.top_level_keys(), TopLevelKeys::Unchecked(_)),
+            matches!(
+                package.top_level_keys(),
+                crate::package::TopLevelKeys::Unchecked(_)
+            ),
             "fixture must reach the unchecked state, got: {:?}",
             package.top_level_keys()
         );

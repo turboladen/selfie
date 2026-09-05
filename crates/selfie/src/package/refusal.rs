@@ -58,6 +58,16 @@ impl fmt::Display for SpecRefusal {
 }
 
 impl Package {
+    /// Why this file's top level cannot be trusted, when it cannot.
+    ///
+    /// Asks nothing about any environment, so a caller that rewrites the file
+    /// rather than deploying it can share these two rules without inheriting a
+    /// question about deployment.
+    pub(crate) fn top_level_refusal(&self) -> Option<SpecRefusal> {
+        self.unknown_top_level_keys()
+            .or_else(|| self.unchecked_top_level())
+    }
+
     /// Why `selfie apply` refuses this whole package in `environment`, when it
     /// does.
     ///
@@ -74,48 +84,57 @@ impl Package {
         // answer covers the package rather than a dotfile.
         //
         // Ordered as apply reads a file: the top level, the environment about to
-        // be applied, then the top level it could not read back at all.
-        if let TopLevelKeys::Checked(keys) = self.top_level_keys()
-            && !keys.is_empty()
-        {
-            // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read
-            // empty or short, so a caller checking only for entries would pass
-            // over the package in silence (selfie-g199, selfie-jt6m). This is the
-            // set `selfie spec validate` errors on, so the two commands answer
-            // alike.
-            return Some(SpecRefusal::UnknownTopLevelKeys(keys.clone()));
-        }
+        // be applied, then the top level it could not read back at all. Composed
+        // from the rules rather than from `top_level_refusal`, which would put
+        // the unread top level ahead of the environment and change which reason a
+        // file carrying both reports.
+        self.unknown_top_level_keys()
+            .or_else(|| self.unknown_environment_keys(environment))
+            .or_else(|| self.unchecked_top_level())
+    }
 
-        // Scoped to the environment being applied, because a typo in one this run
-        // does not touch cannot affect what it deploys. An unknown key here is
-        // not merely ignored: `_dotfiles:` leaves this environment's list empty,
-        // so `dotfiles_for_environment` falls back to the shared entry and
-        // deploys a file this machine was meant to override.
-        if let Some(env) = self.environments().get(environment) {
-            let unknown = env.unknown_keys();
-            if !unknown.is_empty() {
-                return Some(SpecRefusal::UnknownEnvironmentKeys {
-                    environment: environment.to_string(),
-                    keys: unknown.to_vec(),
-                });
+    // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty or
+    // short, so a caller checking only for entries would pass over the package in
+    // silence (selfie-g199, selfie-jt6m). This is the set `selfie spec validate`
+    // errors on, so the two commands answer alike.
+    fn unknown_top_level_keys(&self) -> Option<SpecRefusal> {
+        match self.top_level_keys() {
+            TopLevelKeys::Checked(keys) if !keys.is_empty() => {
+                Some(SpecRefusal::UnknownTopLevelKeys(keys.clone()))
             }
+            _ => None,
         }
+    }
 
-        // A top level nothing looked at can hide either of the two keys above,
-        // and both change what deploys rather than merely adding noise: a
-        // shadowed `dotfiles:` empties the list, so the package deploys nothing
-        // while reporting success (selfie-c28, selfie-g199), and a shadowed
-        // `environments:` costs the mapping, so a shared entry lands on the
-        // target an override was written for (selfie-flsi).
-        //
-        // Neither can be ruled out here, and what the package still appears to
-        // have to deploy does not distinguish them -- the flsi reproducer carries
-        // entries and a decoy `environments:` both.
-        if let TopLevelKeys::Unchecked(error) = self.top_level_keys() {
-            return Some(SpecRefusal::UncheckedTopLevel(error.clone()));
+    // Scoped to one environment, because a typo in one a run does not touch
+    // cannot affect what it deploys. An unknown key here is not merely ignored:
+    // `_dotfiles:` leaves this environment's list empty, so
+    // `dotfiles_for_environment` falls back to the shared entry and deploys a
+    // file this machine was meant to override.
+    fn unknown_environment_keys(&self, environment: &str) -> Option<SpecRefusal> {
+        let unknown = self.environments().get(environment)?.unknown_keys();
+
+        (!unknown.is_empty()).then(|| SpecRefusal::UnknownEnvironmentKeys {
+            environment: environment.to_string(),
+            keys: unknown.to_vec(),
+        })
+    }
+
+    // A top level nothing looked at can hide either of the keys above, and both
+    // change what deploys rather than merely adding noise: a shadowed `dotfiles:`
+    // empties the list, so the package deploys nothing while reporting success
+    // (selfie-c28, selfie-g199), and a shadowed `environments:` costs the mapping,
+    // so a shared entry lands on the target an override was written for
+    // (selfie-flsi).
+    //
+    // Neither can be ruled out here, and what the package still appears to have to
+    // deploy does not distinguish them -- the flsi reproducer carries entries and
+    // a decoy `environments:` both.
+    fn unchecked_top_level(&self) -> Option<SpecRefusal> {
+        match self.top_level_keys() {
+            TopLevelKeys::Unchecked(error) => Some(SpecRefusal::UncheckedTopLevel(error.clone())),
+            _ => None,
         }
-
-        None
     }
 }
 

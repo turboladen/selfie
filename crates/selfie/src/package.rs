@@ -20,6 +20,7 @@ pub mod git_adapter {
 }
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
+pub(crate) use self::refusal::SpecRefusal;
 pub use self::service::{InstallOptions, PackageService, SpecService};
 
 // Core package entity and related types
