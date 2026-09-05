@@ -878,6 +878,34 @@ fn validate_changed_packages(
             })
             .collect();
 
+        // The same question apply asks, so a push cannot ship a file the machine
+        // receiving it will refuse. Asked here rather than read off a severity:
+        // a level says how bad a file is, and what push needs to know is whether
+        // it will apply. The advisory level on an unread top level was chosen
+        // deliberately so an unrun check would not block a push, and promoting it
+        // would block every push carrying one.
+        //
+        // Appended only when nothing with the same identity is already reported.
+        // Rules that reach push as validation errors arrive twice otherwise --
+        // once in the validator's words and once in apply's -- and a reader
+        // cannot tell that both name one problem.
+        let mut issues = issues;
+        if let Some(refusal) = package.apply_refusal(environment) {
+            let category = "ApplyRefusal".to_string();
+            let already = issues
+                .iter()
+                .any(|i| i.category == category || i.message.contains(&refusal.to_string()));
+            if !already {
+                issues.push(PackageValidationIssue {
+                    level: "ERROR".to_string(),
+                    category,
+                    field: "-".to_string(),
+                    message: format!("'selfie apply' would refuse this package: {refusal}"),
+                    location: None,
+                });
+            }
+        }
+
         if !issues.is_empty() {
             failures.push(PackageValidationFailure {
                 path: path_str,
@@ -2477,9 +2505,76 @@ mod name_collision_tests {
 
     use super::{colliding_specs, group_name_collisions, name_collision_message};
 
-    // The guard is only worth anything if a push actually refuses. Detection
-    // being correct proves nothing about the call site: deleting it leaves
-    // every other test in this module passing.
+    // A push ships specs to a machine that will run `apply` on them. Sending one
+    // apply refuses means the receiving machine finds out, which is the failure
+    // this guard moves earlier.
+    //
+    // The rule worth testing is the one validation does not already cover. A
+    // shadowing key reaches push as a validation error on its own, so a fixture
+    // built on one exercises the validator and reports nothing about this
+    // consult -- which is what the first version of this test did.
+    const UNREADABLE_TOP_LEVEL: &str = "extra:\n  ? [a, b]\n  : v\n";
+
+    fn push_result(spec: &str) -> Result<(), super::SyncError> {
+        use super::{FileChangeKind, validate_changed_packages};
+        use std::path::PathBuf;
+
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("myapp.yml"), spec).unwrap();
+
+        let changes = vec![(
+            PathBuf::from("packages/myapp.yml"),
+            FileChangeKind::Modified,
+        )];
+        validate_changed_packages(root.path(), &packages, &changes, "test-env")
+    }
+
+    // The file parses, so validation passes it, and its top-level keys could not
+    // be read, so nothing else objects. Apply refuses it. Without this consult
+    // the push ships it and the receiving machine is the one that finds out.
+    #[test]
+    fn a_push_carrying_a_spec_apply_would_refuse_is_refused() {
+        let spec = format!(
+            "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test-env:\n    install: \"true\"\n"
+        );
+
+        let Err(error) = push_result(&spec) else {
+            panic!("a push carrying a spec apply would refuse must be refused");
+        };
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("ApplyRefusal"),
+            "the refusal must reach the push report: {rendered}"
+        );
+    }
+
+    // A rule that reaches push as a validation error must not also arrive in
+    // apply's words. Two entries naming one problem read as two problems, and a
+    // reader cannot tell that fixing the key clears both.
+    #[test]
+    fn a_push_reports_a_shadowing_key_once() {
+        let spec =
+            "name: myapp\n_dotfiles: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+
+        let Err(super::SyncError::ValidationFailed { failures }) = push_result(spec) else {
+            panic!("a shadowing key must be refused");
+        };
+        let issues: Vec<_> = failures.iter().flat_map(|f| &f.issues).collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "one problem must be reported once, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_push_carrying_a_clean_spec_is_allowed() {
+        let spec = "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        assert!(push_result(spec).is_ok(), "a spec apply accepts must push");
+    }
+
     #[test]
     fn a_push_touching_a_colliding_directory_is_refused() {
         use super::{FileChangeKind, validate_changed_packages};
