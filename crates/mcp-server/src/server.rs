@@ -18,9 +18,9 @@ use selfie::{
     fs::RealFileSystem,
     git::GixGitAdapter,
     package::{
-        EnvironmentConfig, Package, PackageService, SpecService, event::PackageUpdateFields,
-        git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
-        service::PackageServiceImpl,
+        EnvironmentConfig, Package, PackageService, SpecOrigin, SpecService,
+        event::PackageUpdateFields, git_adapter::GixGitStatusProvider,
+        repository::yaml::YamlPackageRepository, service::PackageServiceImpl,
     },
     privilege::{RealPrivilege, SudoPolicy},
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
@@ -243,8 +243,11 @@ impl SelfieServer {
         config: SelfieConfig,
         ignored_config_keys: Vec<IgnoredKey>,
     ) -> Self {
-        let repo =
-            YamlPackageRepository::new(RealFileSystem, config.package_directory().to_path_buf());
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            config.package_directory().to_path_buf(),
+            SpecOrigin::PackageDirectory,
+        );
         // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
         // and provider commands (`op`, `teller`) live on the user's PATH.
         let runner = ShellCommandRunner::login_shell(config.command_timeout());
@@ -269,7 +272,11 @@ impl SelfieServer {
         // Add standalone dotfiles repository if the directory exists
         let dotfiles_dir = config.dotfiles_directory();
         if dotfiles_dir.is_dir() {
-            let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+            let dotfiles_repo = YamlPackageRepository::new(
+                RealFileSystem,
+                dotfiles_dir,
+                SpecOrigin::DotfilesDirectory,
+            );
             dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
         }
         let sync_service = SyncServiceImpl::new(
@@ -320,11 +327,18 @@ impl SelfieServer {
         }
 
         // Check for namespace conflicts across packages/ and dotfiles/ directories
-        let pkg_repo =
-            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().clone());
+        let pkg_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            self.config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
         let dotfiles_dir = self.config.dotfiles_directory();
         let dotfiles_repo = if dotfiles_dir.is_dir() {
-            Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+            Some(YamlPackageRepository::new(
+                RealFileSystem,
+                dotfiles_dir,
+                SpecOrigin::DotfilesDirectory,
+            ))
         } else {
             None
         };
@@ -678,6 +692,7 @@ A spec that could not be parsed is not reported by this tool at all; use selfie_
         let repo = YamlPackageRepository::new(
             RealFileSystem,
             self.config.package_directory().to_path_buf(),
+            SpecOrigin::PackageDirectory,
         );
         let mut entries: Vec<serde_json::Value> = Vec::new();
 
@@ -690,7 +705,11 @@ A spec that could not be parsed is not reported by this tool at all; use selfie_
 
         let dotfiles_dir = self.config.dotfiles_directory();
         if dotfiles_dir.is_dir() {
-            let dotfiles_repo = YamlPackageRepository::new(RealFileSystem, dotfiles_dir);
+            let dotfiles_repo = YamlPackageRepository::new(
+                RealFileSystem,
+                dotfiles_dir,
+                SpecOrigin::DotfilesDirectory,
+            );
             collect_dotfile_entries(
                 dotfiles_repo.list_packages(),
                 "dotfiles",
@@ -732,11 +751,18 @@ A spec that could not be parsed is not reported by this tool at all; use selfie_
         use selfie::dotfile_service::port::DotfileService;
 
         // Namespace validation — prevent conflicts with existing packages
-        let pkg_repo =
-            YamlPackageRepository::new(RealFileSystem, self.config.package_directory().to_owned());
+        let pkg_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            self.config.package_directory().to_owned(),
+            SpecOrigin::PackageDirectory,
+        );
         let dotfiles_dir = self.config.dotfiles_directory().to_owned();
         let dotfiles_repo = if dotfiles_dir.is_dir() {
-            Some(YamlPackageRepository::new(RealFileSystem, dotfiles_dir))
+            Some(YamlPackageRepository::new(
+                RealFileSystem,
+                dotfiles_dir,
+                SpecOrigin::DotfilesDirectory,
+            ))
         } else {
             None
         };

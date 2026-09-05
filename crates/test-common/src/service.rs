@@ -8,7 +8,7 @@ use selfie::{
     config::SelfieConfig,
     fs::real::RealFileSystem,
     package::{
-        git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+        SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
         service::PackageServiceImpl,
     },
 };
@@ -41,7 +41,11 @@ pub fn create_test_service_with_config(
     GixGitStatusProvider,
 > {
     let fs = RealFileSystem;
-    let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+    let repo = YamlPackageRepository::new(
+        fs,
+        config.package_directory().clone(),
+        SpecOrigin::PackageDirectory,
+    );
     let runner =
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
     PackageServiceImpl::new(
@@ -66,7 +70,11 @@ pub fn create_test_service_with_timeout(
 > {
     let config = test_config_with_dir(temp_dir.path());
     let fs = RealFileSystem;
-    let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+    let repo = YamlPackageRepository::new(
+        fs,
+        config.package_directory().clone(),
+        SpecOrigin::PackageDirectory,
+    );
     let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
     PackageServiceImpl::new(
         repo,
@@ -102,7 +110,11 @@ pub fn create_cli_service(
     ShellCommandRunner,
     GixGitStatusProvider,
 > {
-    let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
+    let repo = YamlPackageRepository::new(
+        RealFileSystem,
+        config.package_directory().clone(),
+        SpecOrigin::PackageDirectory,
+    );
     let command_runner = ShellCommandRunner::new(
         ShellCommandRunner::default_shell(),
         config.command_timeout(),

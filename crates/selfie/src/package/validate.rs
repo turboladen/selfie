@@ -1883,6 +1883,7 @@ dotfiles:
         package.set_source(
             std::path::PathBuf::from("/packages/myapp.yml"),
             yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
         );
         package
     }

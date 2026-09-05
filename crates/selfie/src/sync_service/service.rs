@@ -835,7 +835,13 @@ fn validate_changed_packages(
                 continue;
             }
         };
-        package.set_source(abs_path, content);
+        // Every file reaching here is a direct child of the package directory --
+        // that is what `names_a_spec` above tests -- so these are package specs.
+        package.set_source(
+            abs_path,
+            content,
+            crate::package::SpecOrigin::PackageDirectory,
+        );
 
         let result = package.validate(environment);
         let issues: Vec<PackageValidationIssue> = result

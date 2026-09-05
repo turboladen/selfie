@@ -8,6 +8,7 @@
 // `dotfiles/<name>/`. That is why most tests create source files under
 // `dirs.package_dir`.
 
+use selfie::package::SpecOrigin;
 use std::path::PathBuf;
 
 use futures::StreamExt;
@@ -207,7 +208,11 @@ impl TestDirs {
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
             .build();
-        let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+        let repo = YamlPackageRepository::new(
+            fs,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
         DotfileServiceImpl::new(repo, fs, runner, config, token, self.sudo_policy)
     }
 
@@ -233,7 +238,11 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .stop_on_error(stop_on_error)
             .build();
-        let repo = YamlPackageRepository::new(fs, config.package_directory().clone());
+        let repo = YamlPackageRepository::new(
+            fs,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
         DotfileServiceImpl::new(
             repo,
             fs,
@@ -260,8 +269,16 @@ impl TestDirs {
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
             .build();
-        let package_repo = YamlPackageRepository::new(fs, config.package_directory().clone());
-        let dotfiles_repo = YamlPackageRepository::new(fs, self.dotfiles_dir.clone());
+        let package_repo = YamlPackageRepository::new(
+            fs,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let dotfiles_repo = YamlPackageRepository::new(
+            fs,
+            self.dotfiles_dir.clone(),
+            SpecOrigin::DotfilesDirectory,
+        );
         DotfileServiceImpl::new(
             package_repo,
             fs,
@@ -290,14 +307,22 @@ impl TestDirs {
             .state_directory(self.state_dir.clone())
             .build();
         DotfileServiceImpl::new(
-            YamlPackageRepository::new(fs.clone(), config.package_directory().clone()),
+            YamlPackageRepository::new(
+                fs.clone(),
+                config.package_directory().clone(),
+                SpecOrigin::PackageDirectory,
+            ),
             fs.clone(),
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
             self.sudo_policy,
         )
-        .with_dotfiles_repository(YamlPackageRepository::new(fs, self.dotfiles_dir.clone()))
+        .with_dotfiles_repository(YamlPackageRepository::new(
+            fs,
+            self.dotfiles_dir.clone(),
+            SpecOrigin::DotfilesDirectory,
+        ))
     }
 }
 
@@ -1715,9 +1740,13 @@ async fn a_tracked_target_under_home_is_recorded_relative_to_it() {
 
     // The recorded form has to survive the reader, or track writes a spec that
     // apply cannot use. `~` alone is YAML's null.
-    let reread = YamlPackageRepository::new(RealFileSystem, dirs.dotfiles_dir.clone())
-        .get_package("ghostty")
-        .expect("the tracked spec should load again");
+    let reread = YamlPackageRepository::new(
+        RealFileSystem,
+        dirs.dotfiles_dir.clone(),
+        SpecOrigin::DotfilesDirectory,
+    )
+    .get_package("ghostty")
+    .expect("the tracked spec should load again");
     assert_eq!(
         reread.package().dotfiles()[0].target(),
         "~/.config/ghostty/config"
@@ -4663,7 +4692,11 @@ mod symlinked_targets {
             .dotfiles_directory(dirs.dotfiles_dir.clone())
             .state_directory(dirs.state_dir.clone())
             .build();
-        let repo = YamlPackageRepository::new(RealFileSystem, config.package_directory().clone());
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
         let writes = Arc::new(AtomicUsize::new(0));
         let service = DotfileServiceImpl::new(
             repo,
@@ -6430,7 +6463,11 @@ environments:
 
         use selfie::package::port::PackageRepository;
 
-        let repo = YamlPackageRepository::new(RealFileSystem, dirs.package_dir.clone());
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            dirs.package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        );
         let package = repo.get_package("myapp").expect("fixture must load");
         let result = package.package().validate("test");
         assert!(

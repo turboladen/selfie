@@ -9,7 +9,7 @@ use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
     fs::real::RealFileSystem,
     namespace,
-    package::{port::PackageRepository, repository::yaml::YamlPackageRepository},
+    package::{SpecOrigin, port::PackageRepository, repository::yaml::YamlPackageRepository},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -201,6 +201,7 @@ fn find_existing_tracker(
     let package_repo = YamlPackageRepository::new(
         RealFileSystem,
         config.selfie_config().package_directory().to_path_buf(),
+        SpecOrigin::PackageDirectory,
     );
     let repos: Vec<&YamlPackageRepository<RealFileSystem>> = [Some(&package_repo), dotfiles_repo]
         .into_iter()

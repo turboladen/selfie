@@ -311,7 +311,11 @@ pub enum FileSystemError {
 /// fs.mock_write_file_no_follow(&package_path);
 /// fs.mock_remove_file(&package_path);
 ///
-/// let repo = YamlPackageRepository::new(fs, PathBuf::from("/test/packages"));
+/// let repo = YamlPackageRepository::new(
+///     fs,
+///     PathBuf::from("/test/packages"),
+///     selfie::package::SpecOrigin::PackageDirectory,
+/// );
 /// ```
 #[cfg(feature = "with_mocks")]
 impl MockFileSystem {

@@ -143,6 +143,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::Package;
+    use crate::package::SpecOrigin;
 
     // The construct that fails the re-read while the package itself still
     // parses: `serde_json::Value` has no key for a mapping keyed by a sequence.
@@ -152,7 +153,11 @@ mod tests {
     // at `set_source` and a package built any other way carries no keys to judge.
     fn package_from(yaml: &str) -> Package {
         let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
-        package.set_source(PathBuf::from("/packages/myapp.yml"), yaml.to_string());
+        package.set_source(
+            PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
         package
     }
 
