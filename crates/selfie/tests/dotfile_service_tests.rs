@@ -78,6 +78,17 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .collect()
 }
 
+// Entries an apply was asked to deploy and declined, which is the counter that
+// separates "selfie refused" from "there was nothing to do".
+fn refused_count(events: &[PackageEvent]) -> usize {
+    match get_operation_result(events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { refused_count, .. }) => {
+            *refused_count
+        }
+        other => panic!("expected DotfilesApplied, got {other:?}"),
+    }
+}
+
 // Helper to create a package YAML file with a dotfiles section
 fn create_package_with_dotfiles(
     package_dir: &std::path::Path,
@@ -1512,6 +1523,88 @@ async fn test_apply_specific_name_finds_standalone_dotfile() {
     }
 
     assert!(dot_target.exists(), "Standalone dotfile should be deployed");
+}
+
+// A package spec must declare an environment, and a standalone dotfile spec must
+// not have to. `selfie dotfiles track` writes the second kind with no
+// environments at all, so a rule that asked the same of both would refuse every
+// dotfile anyone has tracked.
+//
+// Every other standalone fixture in this file goes through
+// `create_package_with_dotfiles`, which writes an `environments:` block. So this
+// is the only test that fails when apply stops distinguishing the two, and the
+// pair below is what makes the distinction rather than the absence itself
+// observable: the same bytes, refused from the other directory.
+mod a_spec_declaring_no_environment {
+    use super::*;
+
+    // What `dotfiles track` writes: a source, a target, and nothing else.
+    fn write_spec(dir: &std::path::Path, target: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("gemrc")).unwrap();
+        std::fs::write(dir.join("gemrc/.gemrc").as_path(), "GEM").unwrap();
+        write_package_yaml(
+            dir,
+            "gemrc",
+            &format!(
+                "name: gemrc\ndotfiles:\n  - source: \"gemrc/.gemrc\"\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn deploys_from_the_dotfiles_directory() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".gemrc");
+        write_spec(&dirs.dotfiles_dir, &target);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            refused_count(&events),
+            0,
+            "a tracked dotfile has no environments by design: {:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).ok().as_deref(),
+            Some("GEM"),
+            "the tracked dotfile must deploy: {:?}",
+            warning_messages(&events)
+        );
+    }
+
+    #[tokio::test]
+    async fn is_refused_from_the_package_directory() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".gemrc");
+        write_spec(&dirs.package_dir, &target);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            !target.exists(),
+            "a package spec that cannot be installed anywhere must deploy nothing"
+        );
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("Skipping package 'gemrc'")
+                    && w.contains("environments' section")),
+            "the refusal must name the package and what to add: {:?}",
+            warning_messages(&events)
+        );
+    }
 }
 
 #[tokio::test]
@@ -6091,19 +6184,20 @@ dotfiles:
 // A package file's top-level keys, and what `selfie apply` does about the ones a
 // package does not accept.
 //
-// `_dotfiles:` as an anchor leaves the package no dotfiles, so apply deployed
-// nothing and reported success (selfie-g199); a plain `configs:` did the same
-// while `spec validate` errored (selfie-jt6m). Apply never runs validation.
+// `_dotfiles:` as an anchor leaves the package no dotfiles, and a plain
+// `configs:` does the same. Apply never runs validation, so it has to refuse
+// them itself (selfie-g199, selfie-jt6m).
 //
 // Checking rereads the file, and one that parses can still fail that read. Apply
-// says so either way: with entries it applies them, with nothing to deploy it
-// refuses (selfie-5j5j).
+// refuses that file too, whatever it appears to have left to deploy: the key it
+// may hide is what decides whether those entries are the right ones (selfie-5j5j).
 mod top_level_key_refusals {
     use super::*;
 
     // Parses as a package, and not at all into the map the key check reads: a
     // mapping keyed by a sequence has no `serde_json::Value` to be read into.
-    // The `dotfiles:` entry is what proves the package still deploys.
+    // The `dotfiles:` entry is what makes the refusal cost something visible:
+    // an entry that would otherwise have deployed.
     fn package_that_cannot_be_re_read(dirs: &TestDirs, target: &std::path::Path) {
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
@@ -6126,15 +6220,6 @@ environments:
                 target.display()
             ),
         );
-    }
-
-    fn refused_count(events: &[PackageEvent]) -> usize {
-        match get_operation_result(events).expect("no Completed event") {
-            OperationResult::Success(OperationSuccess::DotfilesApplied {
-                refused_count, ..
-            }) => *refused_count,
-            other => panic!("expected DotfilesApplied, got {other:?}"),
-        }
     }
 
     fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
@@ -6686,15 +6771,6 @@ mod irregular_targets {
                 _ => None,
             })
             .collect()
-    }
-
-    fn refused_count(events: &[PackageEvent]) -> usize {
-        match get_operation_result(events).expect("no Completed event") {
-            OperationResult::Success(OperationSuccess::DotfilesApplied {
-                refused_count, ..
-            }) => *refused_count,
-            other => panic!("expected DotfilesApplied, got {other:?}"),
-        }
     }
 
     // One package, one entry, whose target is `target`.

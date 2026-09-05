@@ -3,7 +3,10 @@
 
 use std::fmt;
 
-use super::{EnvironmentField, Package, TopLevelKeys, UnknownKey, describe_unknown_key_in};
+use super::{
+    EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey, describe_unknown_key_in,
+};
+use crate::validation::ValidationIssue;
 
 /// Why a package cannot be deployed as it stands.
 ///
@@ -22,6 +25,10 @@ pub(crate) enum SpecRefusal {
     },
     /// The top level could not be read back, carrying the parse failure.
     UncheckedTopLevel(String),
+    /// No environment is declared, carrying the issue `spec validate` raises for
+    /// it so a caller reporting structured diagnostics states one category and
+    /// one field rather than inventing its own.
+    NoEnvironments(ValidationIssue),
 }
 
 impl fmt::Display for SpecRefusal {
@@ -53,6 +60,13 @@ impl fmt::Display for SpecRefusal {
                  misspelling, or an anchor named after a real field -- cannot be ruled out. The \
                  re-read failed with: {error}"
             ),
+            // The remedy travels with the message. Every other reason here ends
+            // with what to do about it, and a bare "At least one environment must
+            // be defined" leaves a reader to work out where the section goes.
+            Self::NoEnvironments(issue) => match issue.suggestion() {
+                Some(suggestion) => write!(f, "{}. {suggestion}", issue.message()),
+                None => f.write_str(issue.message()),
+            },
         }
     }
 }
@@ -91,6 +105,26 @@ impl Package {
         self.unknown_top_level_keys()
             .or_else(|| self.unknown_environment_keys(environment))
             .or_else(|| self.unchecked_top_level())
+            .or_else(|| self.no_environments())
+    }
+
+    // Last, so a file that is both missing an environment and carrying a bad key
+    // reports the key -- the reason a reader can act on without first guessing
+    // which of the two selfie objected to.
+    //
+    // Only a package spec must declare one. A standalone dotfile spec has no
+    // environments because `dotfiles track` writes it that way: it deploys from
+    // the shared list and an environment would have nothing to say about it.
+    // Refusing those would refuse every dotfile anyone has tracked, and no test
+    // in this workspace fails when it does -- the rule is keyed on the origin
+    // for that reason and not as a convenience.
+    fn no_environments(&self) -> Option<SpecRefusal> {
+        if self.origin() != SpecOrigin::PackageDirectory {
+            return None;
+        }
+        self.validate_environments_exists()
+            .err()
+            .map(SpecRefusal::NoEnvironments)
     }
 
     // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty or
@@ -157,6 +191,18 @@ mod tests {
             PathBuf::from("/packages/myapp.yml"),
             yaml.to_string(),
             SpecOrigin::PackageDirectory,
+        );
+        package
+    }
+
+    // The same file, loaded as `dotfiles track` writes it: no environments, and
+    // read back from the dotfiles directory rather than the package directory.
+    fn standalone_from(yaml: &str) -> Package {
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
+        package.set_source(
+            PathBuf::from("/dotfiles/gemrc.yml"),
+            yaml.to_string(),
+            SpecOrigin::DotfilesDirectory,
         );
         package
     }
@@ -296,6 +342,113 @@ environments:
             Package::new_template("myapp")
                 .apply_refusal("test")
                 .is_none()
+        );
+    }
+
+    // What `selfie dotfiles track` writes: a target and a source, and nothing
+    // else. It deploys from the shared list, so it declares no environment and
+    // never needed one.
+    const TRACKED_STANDALONE: &str = r#"name: gemrc
+dotfiles:
+  - source: gemrc/.gemrc
+    target: ~/.gemrc
+environments: {}
+"#;
+
+    // The control for the origin rule, and the reason the rule is keyed on the
+    // origin at all. Refusing this refuses every dotfile anyone has tracked --
+    // and when the rule was written without the origin check, the whole
+    // workspace suite still passed while the binary refused a real one.
+    #[test]
+    fn a_tracked_standalone_spec_declaring_no_environment_is_not_refused() {
+        let refusal = standalone_from(TRACKED_STANDALONE).apply_refusal("work");
+        assert!(
+            refusal.is_none(),
+            "a spec from the dotfiles directory has no environments by design, got: {}",
+            refusal.map_or_else(|| "None".to_string(), |r| r.to_string())
+        );
+    }
+
+    // The same bytes from the other directory. A package spec that declares no
+    // environment cannot be installed in one, which is why `spec validate`
+    // already errors on it -- this is apply agreeing with it.
+    #[test]
+    fn a_package_spec_declaring_no_environment_is_refused() {
+        let mut package: Package =
+            crate::yaml::parse(TRACKED_STANDALONE).expect("fixture must parse");
+        package.set_source(
+            PathBuf::from("/packages/gemrc.yml"),
+            TRACKED_STANDALONE.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+
+        let refusal = package
+            .apply_refusal("work")
+            .expect("a package spec must declare an environment");
+        assert!(
+            refusal.to_string().contains("environment"),
+            "the reason must name what is missing, got: {refusal}"
+        );
+    }
+
+    // The remedy travels with the reason, as it does for every other one. A
+    // reader told only that an environment must be defined still has to find out
+    // where the section goes.
+    #[test]
+    fn the_missing_environment_carries_its_remedy() {
+        let mut package: Package =
+            crate::yaml::parse(TRACKED_STANDALONE).expect("fixture must parse");
+        package.set_source(
+            PathBuf::from("/packages/gemrc.yml"),
+            TRACKED_STANDALONE.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+
+        let refusal = package
+            .apply_refusal("work")
+            .expect("a package spec must declare an environment")
+            .to_string();
+        assert!(
+            refusal.contains("Add an 'environments' section"),
+            "the reason must say what to do about it, got: {refusal}"
+        );
+    }
+
+    // An unread top level wins over the missing environment, so a file carrying
+    // both reports the one a reader can act on without first working out which
+    // of the two selfie objected to.
+    #[test]
+    fn an_unread_top_level_is_reported_ahead_of_a_missing_environment() {
+        let yaml = format!("name: myapp\nenvironments: {{}}\n{UNREADABLE_TOP_LEVEL}");
+        let refusal = package_from(&yaml)
+            .apply_refusal("work")
+            .expect("both rules apply");
+        assert!(
+            refusal.to_string().contains("could not be checked"),
+            "the unread top level must be reported first, got: {refusal}"
+        );
+    }
+
+    // The order `apply_refusal` composes by hand, and the only pair that makes
+    // the hand-composition observable: the two top-level rules cannot both hold
+    // of one file, so an unread top level against an environment's own key is
+    // where delegating to `top_level_refusal` would change the answer.
+    //
+    // Without this, that delegation compiles, passes, and quietly reports the
+    // unread top level for a file whose environment names the key to fix.
+    #[test]
+    fn an_environment_key_is_reported_ahead_of_an_unread_top_level() {
+        let yaml = format!(
+            "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test:\n    install: \"echo \
+             i\"\n    _dotfiles:\n      - source: myapp/config.toml\n        target: \
+             ~/.config/myapp/config.toml\n"
+        );
+        let refusal = package_from(&yaml)
+            .apply_refusal("test")
+            .expect("both rules apply");
+        assert!(
+            refusal.to_string().starts_with("in environment 'test':"),
+            "the environment's own key must be reported first, got: {refusal}"
         );
     }
 }

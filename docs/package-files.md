@@ -69,7 +69,9 @@ That makes the capitalization half a portability requirement rather than a style
 ### `environments`
 
 A map of environment names to their installation configurations. At least one environment must be
-defined.
+defined, and both `spec validate` and `apply` refuse a package-directory spec that declares none. A
+standalone dotfile spec in the dotfiles directory declares none by design — see
+[And a package spec has to declare an environment at all](#and-a-package-spec-has-to-declare-an-environment-at-all).
 
 ```yaml
 environments:
@@ -1304,6 +1306,24 @@ after editing an environment to catch the ones apply leaves alone.
 
 `_target: &target …` inside an environment is an ordinary anchor, as at the top level: `target` is
 not a field of an environment either.
+
+### And a package spec has to declare an environment at all
+
+`selfie apply` refuses a spec in the **package directory** whose `environments:` block is absent,
+empty or null, whatever dotfiles it lists:
+
+```
+⚠ Skipping package 'myapp': At least one environment must be defined. Add an 'environments' section with at least one environment.
+```
+
+`selfie spec validate` already errors on that file, so this is apply agreeing with it rather than a
+rule of its own. A package with nowhere to install itself is a spec half-written, and deploying its
+dotfiles while the install half is unusable reports a run as complete that is not.
+
+A spec in the **dotfiles directory** is exempt, because `selfie dotfiles track` writes it with no
+environments on purpose: it deploys from the shared `dotfiles` list on every machine, so an
+environment would have nothing to say about it. If you want a dotfile deployed without an install
+command, that is where it belongs.
 
 ## Common Patterns
 

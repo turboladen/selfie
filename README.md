@@ -217,8 +217,8 @@ Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)
 ```
 
 Whole packages are refused too, when the problem is in the file rather than in one entry: any
-unrecognized key at the top level or in the environment being applied, or a package file selfie
-could not re-read to check for one. See
+unrecognized key at the top level or in the environment being applied, a package file selfie could
+not re-read to check for one, or a package-directory spec that declares no environment. See
 [Package Files](docs/package-files.md#the-same-rule-applies-to-a-packages-top-level-keys).
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:

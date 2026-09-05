@@ -389,7 +389,19 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             // asks about every one -- which is what a rewrite needs, since it
             // drops an unknown key wherever it sits, not only in the environment
             // some other command happens to be applying.
-            Some(SpecRefusal::UnknownEnvironmentKeys { .. }) | None => {}
+            //
+            // A missing environment is a deployment rule and not a writing one:
+            // a spec that declares none is still the user's text, and refusing
+            // to save it would strand whatever they were editing. `top_level_refusal`
+            // composes only the two rules above, so this arm is not reached.
+            //
+            // Named rather than left to a catch-all, which buys exactly one
+            // thing: a new `SpecRefusal` variant fails to compile here until
+            // someone decides whether a rewrite refuses over it. Widening
+            // `top_level_refusal` to return a variant already named here is not
+            // caught, so that stays a decision to make there.
+            Some(SpecRefusal::UnknownEnvironmentKeys { .. } | SpecRefusal::NoEnvironments(_))
+            | None => {}
         }
 
         // The same refusal one level down. An environment's unknown key is not
