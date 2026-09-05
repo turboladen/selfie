@@ -2085,6 +2085,12 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         drifted_targets: Vec<String>,
         total_deployed: usize,
+        /// Packages the drift run could not check at all.
+        ///
+        /// Without it this summary reports a clean run for a package `apply`
+        /// refuses, which is the answer that sends a reader to run the command
+        /// that will not run.
+        refused_count: usize,
     },
 
     /// A commit was created during sync push

@@ -187,7 +187,7 @@ where
             // Step 2: Check dotfile drift (non-fatal — drift is supplementary info,
             // unlike git status which is required for sync to function)
             let drift_stream = dotfile_service.check_drift().await;
-            let (drifted_targets, total_deployed, drift_error) =
+            let (drifted_targets, total_deployed, refused_count, drift_error) =
                 collect_drift_summary(drift_stream).await;
 
             if let Some(error_msg) = drift_error {
@@ -201,6 +201,7 @@ where
                     operation_info: sender.operation_info(),
                     drifted_targets,
                     total_deployed,
+                    refused_count,
                 })
                 .await;
 
@@ -1163,11 +1164,12 @@ fn extract_package_name_from_message(message: &str) -> String {
 ///
 /// Assumes the stream emits exactly one `Completed` event (either success or
 /// failure), matching the `check_drift()` contract.
-async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Option<String>) {
+async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, usize, Option<String>) {
     use futures::StreamExt;
 
     let mut drifted_targets = Vec::new();
     let mut total_deployed = 0;
+    let mut refused_count = 0;
     let mut drift_error = None;
 
     futures::pin_mut!(stream);
@@ -1181,11 +1183,13 @@ async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Opti
                     OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: _,
                         total_count,
+                        refused_count: refused,
                         ..
                     }),
                 ..
             } => {
                 total_deployed = total_count;
+                refused_count = refused;
             }
             PackageEvent::Completed {
                 result: OperationResult::Failure(failure),
@@ -1197,7 +1201,7 @@ async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, Opti
         }
     }
 
-    (drifted_targets, total_deployed, drift_error)
+    (drifted_targets, total_deployed, refused_count, drift_error)
 }
 
 // ─── Pull change categorization ──────────────────────────────────────────────
@@ -1781,11 +1785,45 @@ mod tests {
             )),
         }];
 
-        let (drifted, total, error) = collect_drift_summary(events_to_stream(events)).await;
+        let (drifted, total, _refused, error) =
+            collect_drift_summary(events_to_stream(events)).await;
 
         assert!(drifted.is_empty());
         assert_eq!(total, 0);
         assert_eq!(error.as_deref(), Some("permission denied"));
+    }
+
+    // What `sync status` renders comes from this tuple, so a refusal that stops
+    // here is a refusal the status command cannot report. The count travels
+    // beside the deployed total rather than inside it: the renderer prints that
+    // total as "N deployed", and a refused package was never checked, let alone
+    // deployed.
+    #[tokio::test]
+    async fn collect_drift_summary_carries_the_refusal_count() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_operation_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 4,
+                refused_count: 2,
+                environment: "test".to_string(),
+                steps_completed: crate::package::event::StepCount::new(4, 4),
+            }),
+        }];
+
+        let (drifted, total, refused, error) =
+            collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(
+            refused, 2,
+            "the refusal count must reach the status command"
+        );
+        assert_eq!(
+            total, 4,
+            "the deployed total must not absorb the refusals it did not check"
+        );
+        assert!(drifted.is_empty());
+        assert!(error.is_none());
     }
 
     #[tokio::test]
@@ -1809,7 +1847,8 @@ mod tests {
             },
         ];
 
-        let (drifted, total, error) = collect_drift_summary(events_to_stream(events)).await;
+        let (drifted, total, _refused, error) =
+            collect_drift_summary(events_to_stream(events)).await;
 
         assert_eq!(drifted, vec!["/home/user/.bashrc"]);
         assert_eq!(total, 3);

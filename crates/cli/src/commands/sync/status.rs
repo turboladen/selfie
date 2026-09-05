@@ -104,9 +104,19 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
         PackageEvent::SyncDriftSummary {
             drifted_targets,
             total_deployed,
+            refused_count,
             ..
         } => {
             display.println("");
+            // A package drift could not check is neither drifted nor clean, and
+            // saying "no drift" for one answers a question nobody asked. The
+            // count is reported first because it bounds what the rest of the
+            // line is worth: the deployed total covers only what was examined.
+            if *refused_count > 0 {
+                display.print_warning(format!(
+                    "{refused_count} package(s) could not be checked -- run 'selfie dotfiles drift' for the reason"
+                ));
+            }
             if drifted_targets.is_empty() {
                 display.print_success(format!("No dotfile drift ({total_deployed} deployed)"));
             } else {
@@ -204,6 +214,7 @@ mod tests {
             operation_info: make_operation_info(),
             drifted_targets: vec![],
             total_deployed: 5,
+            refused_count: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -216,6 +227,7 @@ mod tests {
             operation_info: make_operation_info(),
             drifted_targets: vec!["~/.config/starship.toml".to_string()],
             total_deployed: 5,
+            refused_count: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
