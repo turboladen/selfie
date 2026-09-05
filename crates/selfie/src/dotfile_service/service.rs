@@ -1714,8 +1714,25 @@ where
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
+    let mut refused_count: usize = 0;
 
     for package in packages {
+        // The same question apply asks, in the same place, so the two commands
+        // cannot answer differently about one file. Drift reporting a package
+        // clean while apply refuses it is worse than either answer alone: it
+        // sends a reader to run the command that will not run.
+        //
+        // The entries are not examined at all. A package refused whole is
+        // refused before there is an entry to attach a reason to, which is the
+        // same reason apply asks here rather than per entry.
+        if let Some(refusal) = package.apply_refusal(config.environment()) {
+            sender
+                .send_warning(format!("Skipping package '{}': {refusal}", package.name()))
+                .await;
+            refused_count += 1;
+            continue;
+        }
+
         // Source paths resolve relative to the YAML file's parent directory
         let base_dir = package
             .path()
@@ -1875,6 +1892,7 @@ where
     OperationResult::Success(OperationSuccess::DotfileDriftChecked {
         drift_count,
         total_count,
+        refused_count,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total_count, total_count),
     })

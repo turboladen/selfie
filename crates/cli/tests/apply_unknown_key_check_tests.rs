@@ -113,3 +113,44 @@ fn apply_fails_the_run_when_an_unchecked_file_deploys_nothing() {
         "the refusal must name the package and why, got:\n{text}"
     );
 }
+
+// `dotfiles drift` asks the same question apply does, and a refusal has to reach
+// the exit status there too.
+//
+// This is the half no library test can see. `process_events` skips its default
+// handler for any event a custom handler claims, and that default handler is the
+// only thing that writes the exit code -- so drift's own renderer, which claims
+// every successful completion, would print the refusal and exit 0 while the MCP
+// server reported the same run as refused. A `refused_count` assertion in the
+// library passes either way.
+#[test]
+fn drift_fails_the_run_for_an_unchecked_file() {
+    let temp = setup_default_test_config();
+    write_package(&temp);
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "drift"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = format!("{stderr}{stdout}");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a package drift could not check must reach the exit status, got:\n{text}"
+    );
+
+    assert!(
+        text.contains("Skipping package 'myapp'"),
+        "drift must name the package it could not check, got:\n{text}"
+    );
+
+    // The summary is the line a reader believes. Reporting a clean check beside
+    // a non-zero exit is the contradiction this whole change exists to remove.
+    assert!(
+        text.contains("1 refused"),
+        "the summary must count what it skipped, got:\n{text}"
+    );
+}

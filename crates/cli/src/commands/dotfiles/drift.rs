@@ -38,10 +38,18 @@ pub(crate) async fn handle_drift(
             // Render the completion summary with color that matches the outcome:
             //   0 drifted → green ✔ (all clean)
             //   N drifted → yellow ⚠ (attention needed)
+            // A success carrying a refusal is deliberately not claimed here.
+            // `process_events` skips its default handler for any event a custom
+            // handler returns `true` for, and that default handler is the only
+            // thing that writes the exit code. Rendering a refusal prettily here
+            // would print the warning and exit 0, while the MCP server -- which
+            // reads `had_refusals` directly -- would report the same run as
+            // refused. Apply learned this at `commands/apply.rs`; this is the
+            // same half of the same problem.
             PackageEvent::Completed {
                 result: OperationResult::Success(success),
                 ..
-            } => {
+            } if !success.had_refusals() => {
                 let has_drift = matches!(
                     success,
                     OperationSuccess::DotfileDriftChecked {

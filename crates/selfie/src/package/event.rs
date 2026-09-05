@@ -761,6 +761,14 @@ pub enum OperationSuccess {
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
+        /// Packages drift could not check, because apply would refuse them whole.
+        ///
+        /// Its own field rather than part of `total_count`: `sync status`
+        /// renders that total as "N deployed", so a refusal counted there would
+        /// report an entry nobody checked as one that is in place. Apply's total
+        /// does include its refusals, because that one feeds a step count and
+        /// records outcomes rather than entries.
+        refused_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1114,12 +1122,14 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::DotfileDriftChecked {
                 drift_count,
                 total_count,
+                refused_count,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
-                    "Dotfile drift check: {drift_count} drifted out of {total_count} {steps_completed}"
+                    "Dotfile drift check: {drift_count} drifted out of {total_count}, \
+                     {refused_count} refused {steps_completed}"
                 )
             }
             OperationSuccess::DotfileTracked {
@@ -1540,7 +1550,8 @@ impl OperationSuccess {
     #[must_use]
     pub fn refused_count(&self) -> Option<usize> {
         match self {
-            OperationSuccess::DotfilesApplied { refused_count, .. } => Some(*refused_count),
+            OperationSuccess::DotfilesApplied { refused_count, .. }
+            | OperationSuccess::DotfileDriftChecked { refused_count, .. } => Some(*refused_count),
             _ => None,
         }
     }
@@ -2074,6 +2085,12 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         drifted_targets: Vec<String>,
         total_deployed: usize,
+        /// Packages the drift run could not check at all.
+        ///
+        /// Without it this summary reports a clean run for a package `apply`
+        /// refuses, which is the answer that sends a reader to run the command
+        /// that will not run.
+        refused_count: usize,
     },
 
     /// A commit was created during sync push
