@@ -88,17 +88,17 @@ fn collect_packages_with_dotfiles(
 
     // Add standalone dotfiles repository if the directory exists
     if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
-        match load_dotfile_packages(&dotfiles_repo, display, "dotfiles") {
-            Ok((dotfile_pkgs, dotfile_skipped)) => {
-                for warning in dotfile_skipped {
-                    display.print_warning(warning);
-                }
-                packages.extend(dotfile_pkgs);
-            }
-            Err(_) => {
-                // Non-fatal — standalone dotfiles dir is optional
-            }
+        // Whether the user keeps standalone dotfiles is already decided above:
+        // `dotfiles_repository` answers `None` when the directory is absent. So
+        // a listing failure here is selfie unable to read a directory it found,
+        // and carrying on would print a table missing every standalone dotfile
+        // over an exit code saying the listing succeeded.
+        let (dotfile_pkgs, dotfile_skipped) =
+            load_dotfile_packages(&dotfiles_repo, display, "dotfiles")?;
+        for warning in dotfile_skipped {
+            display.print_warning(warning);
         }
+        packages.extend(dotfile_pkgs);
     }
 
     Ok(packages)

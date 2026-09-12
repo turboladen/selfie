@@ -4,7 +4,7 @@ use selfie::{
     package::{
         EnvironmentConfig, SpecService,
         event::{OperationResult, OperationSuccess, PackageEvent},
-        port::PackageRepository,
+        port::{PackageListError, PackageRepository},
     },
 };
 use std::{collections::HashMap, path::PathBuf};
@@ -398,16 +398,51 @@ fn prompt_check_command(
     })
 }
 
+/// The package names offerable as dependencies, sorted, with a warning for every
+/// spec file that could not be read.
+///
+/// A package directory that is not there yet yields no names and no warnings,
+/// so the first spec anyone writes can still be created.
+///
+/// # Errors
+///
+/// A message to display when the package directory is there and cannot be
+/// listed.
+// Split from the prompt below so the skipped files can be asserted. The prompt
+// needs a terminal, so a test driving the binary cannot reach past it, and the
+// dropped-silently case is the whole reason this reports anything at all.
+fn available_dependency_names(
+    repo: &impl PackageRepository,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    match common::package_names_and_skipped(repo) {
+        Ok(loaded) => Ok(loaded),
+        // The first package anyone writes has no directory to list yet, and
+        // having nothing to depend on is the right answer for it. Any other
+        // failure is selfie unable to look, which is a different answer from
+        // "there is nothing there" and must not be offered as one.
+        Err(PackageListError::PackageDirectoryNotFound(_)) => Ok((Vec::new(), Vec::new())),
+        Err(e) => Err(format!("Failed to list packages: {e}")),
+    }
+}
+
 fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<Vec<String>, i32> {
     let repo = common::create_package_repository(config);
-    let mut available_packages = repo.available_packages().unwrap_or_default();
+
+    let (available_packages, skipped) = available_dependency_names(&repo).map_err(|msg| {
+        display.print_error(msg);
+        1
+    })?;
+
+    // A dependency is resolved by name, and selfie does not know the name inside
+    // a spec it could not read, so these cannot be offered. Naming them stops
+    // the picker reading as every package the user has.
+    for warning in skipped {
+        display.print_warning(warning);
+    }
 
     if available_packages.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Sort packages alphabetically for consistent presentation
-    available_packages.sort();
 
     let selected = MultiSelect::with_theme(&SimpleTheme)
         .with_prompt("Dependencies (select with space, confirm with enter)")
@@ -701,6 +736,99 @@ mod tests {
         let file_path = temp_dir.path().join("file-check.yml");
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert!(contents.contains("file-check"));
+    }
+
+    // ── Dependency-picker tests ──────────────────────────────────────────────
+
+    fn dependency_repo(
+        results: Vec<Result<selfie::package::Package, selfie::package::port::PackageParseError>>,
+    ) -> selfie::package::port::MockPackageRepository {
+        let mut repo = selfie::package::port::MockPackageRepository::new();
+        repo.expect_list_packages().returning(move || {
+            Ok(selfie::package::port::ListPackagesOutput::from_results(
+                results.clone(),
+            ))
+        });
+        repo
+    }
+
+    fn named(name: &str) -> selfie::package::Package {
+        selfie::package::PackageBuilder::default()
+            .name(name)
+            .build()
+    }
+
+    #[test]
+    fn available_dependency_names_are_sorted_and_report_nothing_skipped() {
+        let repo = dependency_repo(vec![Ok(named("zsh")), Ok(named("alacritty"))]);
+
+        let (names, skipped) = available_dependency_names(&repo).unwrap();
+
+        assert_eq!(names, vec!["alacritty", "zsh"]);
+        assert!(skipped.is_empty());
+    }
+
+    // The picker resolves a dependency by the name inside the spec, which selfie
+    // does not have for a file it could not read, so the caller is handed
+    // something to say about it.
+    #[test]
+    fn available_dependency_names_names_the_spec_it_could_not_read() {
+        let repo = dependency_repo(vec![
+            Ok(named("alacritty")),
+            Err(selfie::package::port::PackageParseError::new(
+                "/test/packages/ghost.yml",
+                selfie::package::port::PackageParseKind::IrregularFile {
+                    kind: "named pipe (fifo)",
+                },
+            )),
+        ]);
+
+        let (names, skipped) = available_dependency_names(&repo).unwrap();
+
+        assert_eq!(names, vec!["alacritty"]);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("ghost.yml"), "got: {}", skipped[0]);
+        assert!(
+            skipped[0].contains("named pipe (fifo)"),
+            "got: {}",
+            skipped[0]
+        );
+    }
+
+    // Creating the first package of all must still work, so the one listing
+    // failure that means "nothing to depend on yet" is not an error.
+    #[test]
+    fn available_dependency_names_treats_a_missing_directory_as_no_candidates() {
+        let mut repo = selfie::package::port::MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::PackageDirectoryNotFound(PathBuf::from(
+                "/nowhere",
+            )))
+        });
+
+        let (names, skipped) = available_dependency_names(&repo).unwrap();
+
+        assert!(names.is_empty());
+        assert!(skipped.is_empty());
+    }
+
+    // Every other listing failure means selfie could not look, which must not be
+    // offered to the user as an empty list of candidates.
+    #[test]
+    fn available_dependency_names_reports_a_listing_it_could_not_perform() {
+        let mut repo = selfie::package::port::MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            )))
+        });
+
+        let message = available_dependency_names(&repo).unwrap_err();
+
+        assert!(
+            message.contains("Failed to list packages"),
+            "got: {message}"
+        );
     }
 
     // ── UI-concern tests (name validation uses repo directly for interactive flow) ──
