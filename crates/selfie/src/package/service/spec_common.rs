@@ -23,8 +23,6 @@ pub(super) struct SpecQueryOptions<'a, F> {
     pub emit_step_label: &'a str,
     /// Predicate that decides which valid packages to include in results
     pub filter: F,
-    /// Whether to include invalid packages in the summary event
-    pub include_invalid: bool,
     /// Value for `show_all` in the emitted `SpecListData`
     pub show_all: bool,
 }
@@ -114,12 +112,11 @@ where
         spec_items.push(item);
     }
 
+    // The filter never reaches these. A spec selfie could not read has no
+    // contents to match a pattern against, so dropping it here would let a query
+    // answer "nothing found" over a directory holding a file it never opened.
     let invalid_package_items: Vec<crate::package::port::PackageParseError> =
-        if opts.include_invalid {
-            invalid_packages.iter().map(|ip| (*ip).clone()).collect()
-        } else {
-            Vec::new()
-        };
+        invalid_packages.iter().map(|ip| (*ip).clone()).collect();
 
     let valid_count = spec_items.len();
     let invalid_count = invalid_package_items.len();
@@ -186,7 +183,6 @@ mod tests {
             load_step_label: "Loading",
             emit_step_label: "Emitting",
             filter,
-            include_invalid: true,
             show_all: false,
         }
     }
@@ -264,68 +260,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_include_invalid_false_omits_invalid_packages() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let config = SelfieConfigBuilder::default()
-            .environment("macos")
-            .package_directory(temp_dir.path())
-            .build();
-
-        let valid_pkg = PackageBuilder::default()
-            .name("ripgrep")
-            .environment("macos", |b| b.install("brew install ripgrep"))
-            .path(temp_dir.path().join("ripgrep.yml"))
-            .build();
-
-        let invalid_path = temp_dir.path().join("broken.yml");
-        let mut mock_repo = MockPackageRepository::new();
-        mock_repo.expect_list_packages().returning(move || {
-            Ok(crate::package::port::ListPackagesOutput(vec![
-                Ok(valid_pkg.clone()),
-                Err(make_invalid_package(invalid_path.clone())),
-            ]))
-        });
-
-        let (sender, mut rx) = test_sender();
-        let mut progress = ProgressTracker::new(2);
-        let mock_git = mock_git_not_in_repo();
-
-        let result = load_filter_emit(
-            &mock_repo,
-            &config,
-            &mock_git,
-            &sender,
-            &mut progress,
-            SpecQueryOptions {
-                load_step_label: "Loading",
-                emit_step_label: "Emitting",
-                filter: |_: &Package| true,
-                include_invalid: false,
-                show_all: false,
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            OperationResult::Success(OperationSuccess::SpecListGenerated {
-                invalid_count: 0,
-                ..
-            })
-        ));
-
-        drop(sender);
-        while let Some(event) = rx.recv().await {
-            if let PackageEvent::SpecListLoaded { spec_list, .. } = event {
-                assert!(spec_list.invalid_packages.is_empty());
-                return;
-            }
-        }
-        panic!("Expected SpecListLoaded event");
-    }
-
-    #[tokio::test]
-    async fn test_include_invalid_true_includes_invalid_packages() {
+    async fn test_the_summary_reports_the_specs_it_could_not_read() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("macos")
@@ -490,7 +425,6 @@ mod tests {
                 load_step_label: "Loading",
                 emit_step_label: "Emitting",
                 filter: |_: &Package| true,
-                include_invalid: true,
                 show_all: true,
             },
         )

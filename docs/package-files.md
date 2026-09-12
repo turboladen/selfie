@@ -794,6 +794,7 @@ pipe (fifo), a socket, or a device node in the same way:
 Commands that enumerate specs continue with the rest and name the file they skipped:
 
 - `selfie spec list`
+- `selfie spec search`
 - `selfie package list`
 - `selfie spec validate --all`
 - `selfie package audit --all`

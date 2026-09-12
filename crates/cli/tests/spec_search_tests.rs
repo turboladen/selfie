@@ -126,3 +126,28 @@ fn test_spec_search_matches_across_environments() {
         .success()
         .stdout(predicate::str::contains("apt-tool"));
 }
+
+// The library carrying an unreadable spec in its summary is not the same as the
+// user seeing it, so this drives the binary. The pattern deliberately matches
+// nothing: that is the run whose answer is otherwise just "no specs found".
+#[test]
+fn test_spec_search_reports_the_specs_it_could_not_read() {
+    let temp_dir = setup_default_test_config();
+
+    let package = PackageBuilder::default()
+        .name("ripgrep")
+        .description("Fast search tool")
+        .environment(SELFIE_ENV, |b| b.install("brew install ripgrep"))
+        .build();
+    add_package(&temp_dir, &package);
+
+    let broken = temp_dir.path().join("packages").join("brokenpkg.yaml");
+    std::fs::write(&broken, "{{{\n").unwrap();
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["spec", "search", "nothingmatchesthis"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("brokenpkg"));
+}

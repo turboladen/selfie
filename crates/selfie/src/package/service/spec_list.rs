@@ -39,7 +39,6 @@ where
             filter: move |pkg: &crate::package::Package| {
                 show_all || pkg.environments().contains_key(&environment)
             },
-            include_invalid: true,
             show_all,
         },
     )

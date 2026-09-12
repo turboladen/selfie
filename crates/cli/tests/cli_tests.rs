@@ -186,6 +186,25 @@ fn test_cli_spec_remove_not_found() {
         .stderr(predicate::str::contains("not found"));
 }
 
+// The twin of the control above, differing in one way: the file is there. A
+// user looking at it is told what selfie could not do with it, and where the
+// two cases share a message they cannot act on either.
+#[test]
+fn test_cli_spec_remove_does_not_call_an_unreadable_file_missing() {
+    let temp_dir = setup_default_test_config();
+    let path = temp_dir.path().join("packages").join("brokenpkg.yaml");
+    std::fs::write(&path, "{{{\n").unwrap();
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["spec", "remove", "brokenpkg"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not found").not())
+        .stderr(predicate::str::contains("could not load that spec"));
+
+    assert!(path.exists(), "a spec selfie refused to read must survive");
+}
+
 #[test]
 fn test_cli_spec_validate() {
     let temp_dir = setup_default_test_config();

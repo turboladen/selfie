@@ -43,7 +43,6 @@ where
                     .is_some_and(|d: &str| d.to_lowercase().contains(&pattern_lower));
                 name_match || desc_match
             },
-            include_invalid: false,
             show_all: true, // search results span all environments
         },
     )
@@ -116,6 +115,31 @@ mod tests {
             Ok(crate::package::port::ListPackagesOutput(
                 packages.iter().cloned().map(Ok).collect(),
             ))
+        });
+        mock
+    }
+
+    fn unreadable_spec(path: std::path::PathBuf) -> crate::package::port::PackageParseError {
+        crate::package::port::PackageParseError::new(
+            path,
+            crate::package::port::PackageParseKind::Io {
+                source: std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file not found",
+                )),
+            },
+        )
+    }
+
+    fn mock_repo_with_unreadable(
+        packages: Vec<crate::package::Package>,
+        unreadable: std::path::PathBuf,
+    ) -> MockPackageRepository {
+        let mut mock = MockPackageRepository::new();
+        mock.expect_list_packages().returning(move || {
+            let mut entries: Vec<_> = packages.iter().cloned().map(Ok).collect();
+            entries.push(Err(unreadable_spec(unreadable.clone())));
+            Ok(crate::package::port::ListPackagesOutput(entries))
         });
         mock
     }
@@ -280,15 +304,18 @@ mod tests {
         assert_eq!(items[0].name, "fd-find");
     }
 
+    // Matching is a question about a file's contents, and an unreadable file has
+    // no contents to ask about. The summary carries it so the user decides.
     #[tokio::test]
-    async fn test_search_emits_summary_without_invalid_packages() {
+    async fn test_search_reports_the_specs_it_could_not_read() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory(temp_dir.path())
             .build();
 
-        let mock_repo = mock_repo(test_packages(temp_dir.path()));
+        let broken = temp_dir.path().join("broken.yml");
+        let mock_repo = mock_repo_with_unreadable(test_packages(temp_dir.path()), broken.clone());
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
         let mock_git = mock_git_not_in_repo();
@@ -311,11 +338,58 @@ mod tests {
                 assert_eq!(spec_list.specs.len(), 1);
                 assert_eq!(spec_list.specs[0].name, "node");
                 assert!(spec_list.show_all);
-                assert!(spec_list.invalid_packages.is_empty());
+                assert_eq!(spec_list.invalid_packages.len(), 1);
+                assert_eq!(
+                    spec_list.invalid_packages[0].package_path(),
+                    broken.as_path()
+                );
                 // env_stats should reflect all packages, not just matches
                 assert_eq!(spec_list.environment_stats.len(), 2);
                 assert_eq!(spec_list.environment_stats["macos"], 2);
                 assert_eq!(spec_list.environment_stats["ubuntu"], 1);
+                found_summary = true;
+            }
+        }
+        assert!(found_summary, "Expected SpecListLoaded event");
+    }
+
+    // The loudest case: with nothing matched, the summary is the whole answer,
+    // and an unreported unreadable file makes that answer "nothing matched".
+    #[tokio::test]
+    async fn test_search_with_no_matches_still_reports_unreadable_specs() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("macos")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let broken = temp_dir.path().join("broken.yml");
+        let mock_repo = mock_repo_with_unreadable(test_packages(temp_dir.path()), broken.clone());
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let mock_git = mock_git_not_in_repo();
+
+        let result = handle_spec_search(
+            &mock_repo,
+            &config,
+            &mock_git,
+            &sender,
+            &mut progress,
+            "nonexistent",
+        )
+        .await;
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found_summary = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::SpecListLoaded { spec_list, .. } = event {
+                assert!(spec_list.specs.is_empty());
+                assert_eq!(spec_list.invalid_packages.len(), 1);
+                assert_eq!(
+                    spec_list.invalid_packages[0].package_path(),
+                    broken.as_path()
+                );
                 found_summary = true;
             }
         }
