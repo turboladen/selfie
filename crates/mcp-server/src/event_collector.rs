@@ -203,6 +203,20 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "invalid_packages": invalid,
             }))
         }
+        PackageEvent::PackageListLoaded { package_list, .. } => {
+            let invalid: Vec<Value> = package_list
+                .invalid_packages
+                .iter()
+                .map(parse_failure_json)
+                .collect();
+            Some(serde_json::json!({
+                "type": "package_list_summary",
+                "environment": &package_list.current_environment,
+                "package_directory": &package_list.package_directory,
+                "total_packages": package_list.valid_packages.len(),
+                "invalid_packages": invalid,
+            }))
+        }
         PackageEvent::RecommendStarted { recommend_name, .. } => Some(serde_json::json!({
             "type": "recommend_started",
             "package": recommend_name,
@@ -339,17 +353,13 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         // `Completed` is read by `collect_events` for the operation's result
         // rather than emitted as a data event, and the lifecycle and log variants
         // carry nothing a tool caller acts on.
-        //
-        // `PackageListLoaded` is a gap, not a decision: `selfie_package_list`
-        // drops its invalid packages because nothing here reads them.
         PackageEvent::Started { .. }
         | PackageEvent::Progress { .. }
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
         | PackageEvent::Debug { .. }
-        | PackageEvent::Error { .. }
-        | PackageEvent::PackageListLoaded { .. } => None,
+        | PackageEvent::Error { .. } => None,
     }
 }
 
@@ -650,6 +660,43 @@ mod tests {
         let result = collect_events(stream).await;
 
         let row = &result.data["data"][0]["invalid_packages"][0];
+        assert_eq!(row["path"], "/packages/creds.yml");
+        assert_eq!(row["kind"], "yaml");
+        assert_eq!(row["reason"], "unclosed bracket '{'");
+        assert_eq!(row["line"], 2);
+        assert_eq!(row["column"], 15);
+    }
+
+    // The package listing answers the same question about the same directory, so
+    // a caller that has to switch tools to find out what selfie could not read
+    // has been told the directory holds less than it does.
+    #[tokio::test]
+    async fn a_package_list_summary_reports_the_spec_it_could_not_read() {
+        let source =
+            selfie::yaml::parse::<selfie::package::Package>("name: x\nenvironments: {oops\n")
+                .expect_err("the fixture must not parse");
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/creds.yml",
+            selfie::package::port::PackageParseKind::Yaml { source },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageListLoaded {
+            operation_info: test_op_info(),
+            package_list: selfie::package::event::PackageListData {
+                valid_packages: vec![],
+                invalid_packages: vec![error],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let summary = &result.data["data"][0];
+        assert_eq!(summary["type"], "package_list_summary");
+        assert_eq!(summary["package_directory"], "/packages");
+
+        let row = &summary["invalid_packages"][0];
         assert_eq!(row["path"], "/packages/creds.yml");
         assert_eq!(row["kind"], "yaml");
         assert_eq!(row["reason"], "unclosed bracket '{'");
