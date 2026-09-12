@@ -69,21 +69,6 @@ pub trait PackageRepository: Send + Sync {
     /// listed.
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError>;
 
-    /// The names of the packages that parse, for callers that do not need the
-    /// definitions themselves.
-    ///
-    /// # Errors
-    ///
-    /// [`PackageListError`] if the underlying listing fails.
-    fn available_packages(&self) -> Result<Vec<String>, PackageListError> {
-        let list_packages_output = self.list_packages()?;
-
-        Ok(list_packages_output
-            .valid_packages()
-            .map(|package| package.name().to_string())
-            .collect())
-    }
-
     /// Every package file matching `name`. More than one is how an ambiguous
     /// package name is detected.
     ///

@@ -859,26 +859,4 @@ mod tests {
         let package = create_basic_package("new-package", &config);
         assert_eq!(package.name(), "new-package");
     }
-
-    #[test]
-    fn test_create_with_dependency_selection_mock_repo() {
-        let mut mock_repo = MockPackageRepository::new();
-
-        mock_repo
-            .expect_available_packages()
-            .times(1)
-            .returning(|| {
-                Ok(vec![
-                    "database".to_string(),
-                    "web-server".to_string(),
-                    "cache".to_string(),
-                ])
-            });
-
-        let available = mock_repo.available_packages().unwrap();
-        assert_eq!(available.len(), 3);
-        assert!(available.contains(&"database".to_string()));
-        assert!(available.contains(&"web-server".to_string()));
-        assert!(available.contains(&"cache".to_string()));
-    }
 }

@@ -307,28 +307,6 @@ environments:
     }
 
     #[test]
-    fn test_package_discovery_with_mock_repo() {
-        use selfie::package::port::PackageRepository;
-
-        let mut mock_repo = MockPackageRepository::new();
-
-        mock_repo
-            .expect_available_packages()
-            .times(1)
-            .returning(|| {
-                Ok(vec![
-                    "app-server".to_string(),
-                    "database".to_string(),
-                    "web-client".to_string(),
-                ])
-            });
-
-        let package_names = mock_repo.available_packages().unwrap();
-        assert_eq!(package_names.len(), 3);
-        assert!(package_names.contains(&"app-server".to_string()));
-    }
-
-    #[test]
     fn test_remove_package_not_found_with_mock_repo() {
         use selfie::package::port::{MockPackageRepository, PackageError, PackageRepository};
 
