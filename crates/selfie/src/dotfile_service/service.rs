@@ -61,8 +61,27 @@ const APPLY_CANCELLED: &str = "Apply cancelled";
 enum ApplyWarning {
     /// A package file that could not be parsed.
     SkippedSpec(crate::package::port::PackageParseError),
+    /// A repository selfie found and could not list.
+    ///
+    /// Typed apart from [`Other`](Self::Other) because the callers disagree
+    /// about what it costs them, and prose gives them nothing to disagree on:
+    /// deploying can carry on without the standalone dotfiles, but a listing
+    /// that carries on prints a table missing every one of them.
+    UnreadableRepository(crate::package::port::PackageListError),
     /// Anything else worth saying, already worded.
     Other(String),
+}
+
+/// What a package name appearing in both directories means to the caller.
+// A parameter rather than two collectors: the reading of both repositories, the
+// unparsable-spec reporting and the unlistable-directory handling are identical,
+// and only this one question differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameCollision {
+    /// The `packages/` copy wins and the other is dropped with a warning.
+    PackagesWin,
+    /// Both are kept, because both files are there.
+    KeepBoth,
 }
 
 impl ApplyWarning {
@@ -74,6 +93,11 @@ impl ApplyWarning {
     async fn send(self, sender: &crate::package::event::EventSender) {
         match self {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error).await,
+            Self::UnreadableRepository(e) => {
+                sender
+                    .send_warning(format!("Failed to load standalone dotfiles: {e}"))
+                    .await;
+            }
             Self::Other(message) => sender.send_warning(message).await,
         }
     }
@@ -178,6 +202,19 @@ where
         package_repo: &R,
         dotfiles_repo: Option<&R>,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
+        Self::collect_packages(package_repo, dotfiles_repo, NameCollision::PackagesWin)
+    }
+
+    /// Collect from both repositories, deciding what a name in both means.
+    ///
+    /// Deploying has to choose one, because two packages cannot both own a name.
+    /// Listing must not: both files exist, and a caller asking what is on disk is
+    /// asking about the files rather than about what would win.
+    fn collect_packages(
+        package_repo: &R,
+        dotfiles_repo: Option<&R>,
+        collision: NameCollision,
+    ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
         // A package file that does not parse is dropped by `valid_packages`, and
@@ -208,16 +245,14 @@ where
                     packages.extend(output.valid_packages().cloned());
                 }
                 Err(e) => {
-                    warnings.push(ApplyWarning::Other(format!(
-                        "Failed to load standalone dotfiles: {e}"
-                    )));
+                    warnings.push(ApplyWarning::UnreadableRepository(e));
                 }
             }
         }
 
         // Detect duplicate names across packages/ and dotfiles/ directories.
         // Packages from packages/ take precedence (they appear first in the vec).
-        if packages.len() > packages_count {
+        if collision == NameCollision::PackagesWin && packages.len() > packages_count {
             let mut seen = std::collections::HashSet::new();
             for pkg in &packages[..packages_count] {
                 seen.insert(pkg.name().to_string());
@@ -497,6 +532,104 @@ where
                         warning.send(&sender).await;
                     }
                     handle_check_drift(&packages, &fs, &config, &sender).await
+                }
+                Err(e) => OperationResult::Failure(
+                    crate::package::event::OperationFailure::PackageList(e),
+                ),
+            };
+
+            sender.send_completed(result).await;
+        })
+    }
+
+    async fn list(&self) -> EventStream {
+        // `KeepBoth`: a name in both directories is two files on disk, and a
+        // listing that showed one of them would be answering the deploy question
+        // instead of the one the user asked.
+        let collected = Self::collect_packages(
+            &self.package_repository,
+            self.dotfiles_repository.as_ref(),
+            NameCollision::KeepBoth,
+        );
+        let config = self.config.clone();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileList,
+                String::new(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+
+            sender.send_started().await;
+
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    // A directory selfie found and could not list is fatal HERE
+                    // and not on the deploy paths, and the difference is what
+                    // the answer is for. Deploying can carry on without the
+                    // standalone dotfiles; a listing that carries on prints a
+                    // table missing every one of them over an exit code saying
+                    // the listing succeeded.
+                    let unreadable = warnings
+                        .iter()
+                        .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)));
+
+                    // Drained before the listing is sent, so a consumer reading
+                    // events in order has the caveats in hand before the answer
+                    // they qualify.
+                    for warning in warnings {
+                        warning.send(&sender).await;
+                    }
+
+                    if unreadable {
+                        return sender
+                            .send_completed(OperationResult::Failure(
+                                crate::package::event::OperationFailure::Generic(
+                                    "Could not list every dotfile directory, so this listing \
+                                     would be missing entries"
+                                        .to_string(),
+                                ),
+                            ))
+                            .await;
+                    }
+
+                    // `listing_refusal` rather than `spec_refusal`: this
+                    // listing spans every environment, so a reason keyed to one
+                    // named environment would refuse a package for a question
+                    // the table never asks -- while a shadowing key in ANY
+                    // environment empties a list this table would otherwise show
+                    // as simply absent.
+                    let mut refused = Vec::new();
+                    let mut listable = Vec::new();
+                    for package in packages {
+                        if let Some(reason) = package.listing_refusal() {
+                            refused.push(crate::package::event::RefusedSpec {
+                                package_name: package.name().to_string(),
+                                path: package.path().display().to_string(),
+                                reason: reason.to_string(),
+                            });
+                        } else if !package.dotfiles_with_scope().is_empty() {
+                            listable.push(package);
+                        }
+                    }
+
+                    let packages = listable;
+                    let count = packages.len();
+
+                    sender
+                        .send_dotfile_list(crate::package::event::DotfileListData {
+                            packages,
+                            refused,
+                            package_directory: config.package_directory().display().to_string(),
+                            dotfiles_directory: config.dotfiles_directory().display().to_string(),
+                        })
+                        .await;
+
+                    OperationResult::Success(OperationSuccess::Generic(format!(
+                        "Listed dotfiles across {count} package(s)"
+                    )))
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),

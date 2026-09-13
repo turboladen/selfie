@@ -417,6 +417,7 @@ impl EventProcessor {
             | PackageEvent::RemovalDependencyInfo { .. }
             | PackageEvent::SpecListItemCompleted { .. }
             | PackageEvent::SpecListLoaded { .. }
+            | PackageEvent::DotfileListLoaded { .. }
             | PackageEvent::SyncRepoStatus { .. }
             | PackageEvent::SyncDriftSummary { .. }
             | PackageEvent::SyncCommitCreated { .. } => {

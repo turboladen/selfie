@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, CheckResult, EventStream, OperationResult, PackageEvent,
 };
@@ -61,6 +62,73 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
         success,
         data: serde_json::json!({ "result": result_data, "data": data_events }),
     }
+}
+
+/// The `origin` value a dotfile row carries, derived from the package rather
+/// than chosen by the caller.
+///
+/// The two strings are the ones this tool has always emitted; what changes is
+/// where they come from. A call site pairing the dotfiles repository with
+/// "packages" used to mislabel every row it produced, with nothing to catch it.
+// No catch-all: an origin added later has to state which label it carries here
+// rather than inherit one that was written before it existed.
+pub(crate) fn origin_label(origin: SpecOrigin) -> &'static str {
+    match origin {
+        SpecOrigin::PackageDirectory => "packages",
+        SpecOrigin::DotfilesDirectory => "dotfiles",
+        SpecOrigin::Memory => "memory",
+    }
+}
+
+/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+///
+/// Reports where content comes from without producing any of it: var names and
+/// the command string come from the package file and are references, not values.
+/// Nothing here runs a command or renders a template, so enumeration cannot leak
+/// a secret or trigger an authentication prompt.
+pub(crate) fn dotfile_entry_json(
+    package: &str,
+    scope: Option<&str>,
+    entry: &selfie::package::DotfileEntry,
+    origin: &str,
+) -> serde_json::Value {
+    use selfie::package::ContentSource;
+
+    let mut value = serde_json::json!({
+        "package": package,
+        "environment": scope,
+        "target": entry.target(),
+        "origin": origin,
+    });
+    let map = value.as_object_mut().expect("constructed as an object");
+
+    match entry.content_source() {
+        Ok(ContentSource::RepoFile(source)) => {
+            map.insert("kind".into(), "file".into());
+            map.insert("source".into(), source.into());
+        }
+        Ok(ContentSource::Template { source, vars }) => {
+            map.insert("kind".into(), "template".into());
+            map.insert("source".into(), source.into());
+            map.insert(
+                "vars".into(),
+                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
+            );
+        }
+        Ok(ContentSource::Provider(command)) => {
+            map.insert("kind".into(), "command".into());
+            map.insert("command".into(), command.into());
+        }
+        // The reason, not a generic string: an assistant reading this is the
+        // caller least able to guess which of the possible defects applies, and
+        // naming the key or the var is what lets it propose the actual fix.
+        Err(invalid) => {
+            map.insert("kind".into(), "invalid".into());
+            map.insert("error".into(), invalid.to_string().into());
+        }
+    }
+
+    value
 }
 
 /// One parse failure as fields, shared by every surface that reports one.
@@ -201,6 +269,47 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &spec_list.package_directory,
                 "total_specs": spec_list.specs.len(),
                 "invalid_packages": invalid,
+            }))
+        }
+        PackageEvent::DotfileListLoaded { dotfile_list, .. } => {
+            // One row per ENTRY, not per package: a caller asking what is
+            // deployed where is asking about entries, and a package carrying
+            // three of them is three answers.
+            let entries: Vec<Value> = dotfile_list
+                .packages
+                .iter()
+                .flat_map(|pkg| {
+                    let origin = origin_label(pkg.origin());
+                    pkg.dotfiles_with_scope()
+                        .into_iter()
+                        .map(move |(scope, entry)| {
+                            dotfile_entry_json(pkg.name(), scope, entry, origin)
+                        })
+                })
+                .collect();
+
+            // A refused package is not a package with no dotfiles, and an
+            // assistant reading `total` cannot tell those apart unless the
+            // refusals are their own field.
+            let refused: Vec<Value> = dotfile_list
+                .refused
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "package": &r.package_name,
+                        "path": &r.path,
+                        "reason": &r.reason,
+                    })
+                })
+                .collect();
+
+            Some(serde_json::json!({
+                "type": "dotfile_list",
+                "package_directory": &dotfile_list.package_directory,
+                "dotfiles_directory": &dotfile_list.dotfiles_directory,
+                "total": entries.len(),
+                "entries": entries,
+                "refused": refused,
             }))
         }
         PackageEvent::PackageListLoaded { package_list, .. } => {
@@ -631,6 +740,66 @@ mod tests {
         for event in &events {
             test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
         }
+    }
+
+    // The only test of this arm. Without it a regression could drop `refused`, or
+    // go back to labelling every row from the loop it stands in rather than from
+    // the package, and the rest of the suite would stay green -- the CLI renders
+    // this event through entirely different code.
+    #[tokio::test]
+    async fn a_dotfile_listing_carries_both_origins_and_its_refusals() {
+        use selfie::package::{DotfileEntry, PackageBuilder, SpecOrigin};
+
+        let from_packages = PackageBuilder::default()
+            .name("bat")
+            .origin(SpecOrigin::PackageDirectory)
+            .dotfiles(vec![DotfileEntry::new("bat.conf", "~/.config/bat/config")])
+            .build();
+        let from_dotfiles = PackageBuilder::default()
+            .name("fish")
+            .origin(SpecOrigin::DotfilesDirectory)
+            .dotfiles(vec![DotfileEntry::new("config.fish", "~/.config/fish/c")])
+            .build();
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::DotfileListLoaded {
+            operation_info: test_op_info(),
+            dotfile_list: selfie::package::event::DotfileListData {
+                packages: vec![from_packages, from_dotfiles],
+                refused: vec![selfie::package::event::RefusedSpec {
+                    package_name: "shadowed".to_string(),
+                    path: "/packages/shadowed.yml".to_string(),
+                    reason: "unrecognized top-level key `_dotfiles`".to_string(),
+                }],
+                package_directory: "/packages".to_string(),
+                dotfiles_directory: "/dotfiles".to_string(),
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["type"], "dotfile_list");
+        assert_eq!(row["total"], 2);
+
+        // Each row's origin comes from its own package, not from a literal.
+        let origins: Vec<&str> = row["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .iter()
+            .map(|e| e["origin"].as_str().expect("origin is a string"))
+            .collect();
+        assert_eq!(origins, vec!["packages", "dotfiles"]);
+
+        let refused = &row["refused"][0];
+        assert_eq!(refused["package"], "shadowed");
+        assert_eq!(refused["path"], "/packages/shadowed.yml");
+        assert!(
+            refused["reason"]
+                .as_str()
+                .expect("reason is a string")
+                .contains("_dotfiles"),
+            "the reason must survive to the caller, got: {}",
+            refused["reason"]
+        );
     }
 
     // The listing rows carry the same shape as a skipped spec, so a caller learns

@@ -7782,3 +7782,361 @@ mod apply_and_drift_agree {
         );
     }
 }
+
+// ── DotfileService::list ────────────────────────────────────────────────────
+//
+// The listing exists so both adapters stop reading the repositories themselves.
+// What matters at this level is what reaches the stream, because that is all an
+// adapter has: the entries, and every spec selfie could not read.
+
+#[tokio::test]
+async fn list_returns_entries_from_both_directories() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    write_package_yaml(
+        &dirs.dotfiles_dir,
+        "fish",
+        "name: fish\ndotfiles:\n  - source: config.fish\n    target: ~/.config/fish/config.fish\n",
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+
+    let mut names: Vec<&str> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::name)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["bat", "fish"]);
+
+    // Each package carries where it was read from, so an adapter labels a row
+    // from the package rather than from whichever loop it is standing in.
+    let origins: Vec<_> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::origin)
+        .collect();
+    assert!(origins.contains(&SpecOrigin::PackageDirectory));
+    assert!(origins.contains(&SpecOrigin::DotfilesDirectory));
+
+    assert!(matches!(
+        get_operation_result(&events),
+        Some(OperationResult::Success(_))
+    ));
+}
+
+// A spec that did not parse leaves as a typed event, and the rest of the
+// listing still arrives. Reporting it must not cost the caller the packages it
+// could read.
+#[tokio::test]
+async fn list_reports_a_spec_it_could_not_read() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    write_package_yaml(&dirs.package_dir, "brokenpkg", "{{{\n");
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let skipped: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::SpecSkipped { error, .. } => Some(error),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
+    assert!(
+        skipped[0].package_path().ends_with("brokenpkg.yml"),
+        "got: {}",
+        skipped[0].package_path().display()
+    );
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must still arrive");
+    assert_eq!(listed.packages.len(), 1);
+    assert_eq!(listed.packages[0].name(), "bat");
+}
+
+// The control for the two above: a package declaring no dotfiles is not a row,
+// and a clean directory reports nothing skipped. Without this, a listing that
+// returned everything or reported everything would satisfy both.
+#[tokio::test]
+async fn list_omits_packages_with_no_dotfiles_and_reports_nothing_skipped() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "ripgrep",
+        "name: ripgrep\nenvironments:\n  test:\n    install: \"true\"\n",
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::SpecSkipped { .. })),
+        "a readable directory has nothing to skip"
+    );
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted even when empty");
+    assert!(listed.packages.is_empty());
+}
+
+// A listing that fails outright is a failure, not an empty answer. Reporting it
+// as success with no entries is indistinguishable, to a caller with no stderr,
+// from a directory that genuinely holds no dotfiles.
+#[tokio::test]
+async fn list_reports_a_listing_it_could_not_perform() {
+    let dirs = TestDirs::new();
+    // The directory the service was pointed at is gone by the time it looks.
+    std::fs::remove_dir_all(&dirs.package_dir).unwrap();
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Failure(failure)) => {
+            let rendered = failure.to_string();
+            assert!(
+                rendered.contains("packages"),
+                "the failure must name the directory, got: {rendered}"
+            );
+        }
+        other => panic!("a failed listing must not report success, got: {other:?}"),
+    }
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::DotfileListLoaded { .. })),
+        "no listing should be emitted when the listing failed"
+    );
+}
+
+// The asymmetry with apply and drift, pinned so it cannot be flattened by
+// accident. A dotfiles directory that exists and cannot be listed is fatal to a
+// LISTING, because the table would be missing every standalone entry while the
+// exit code said the listing succeeded. Deploying is different: it can carry on
+// with the package dotfiles, which is why `collect_all_packages` treats this as
+// a warning for its other callers.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores the mode bits, so confirm the precondition holds rather than
+    // inferring it from the user id.
+    if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        eprintln!("SKIP list_fails_when_a_dotfiles_directory_cannot_be_listed: still readable");
+        return;
+    }
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Failure(_))
+        ),
+        "an unlistable directory must not come back as a successful listing"
+    );
+}
+
+// A key that shadows `dotfiles:` leaves selfie reading an EMPTY list from a file
+// that declares entries. Counting that as "this package has no dotfiles" is what
+// sends a user looking for a dotfile the listing says does not exist, so the
+// package is reported as refused rather than listed as bare.
+#[tokio::test]
+async fn list_reports_a_package_whose_dotfiles_key_is_shadowed() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    // `_dotfiles` is an anchor whose name collides with the real field, so the
+    // list selfie reads is empty while the file declares an entry. A raw string
+    // because YAML is indentation-sensitive and a continuation would eat it.
+    write_package_yaml(
+        &dirs.package_dir,
+        "shadowed",
+        r#"name: shadowed
+_dotfiles: &d
+  - source: a
+    target: ~/.a
+environments:
+  test:
+    install: "true"
+"#,
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+
+    assert_eq!(
+        listed.refused.len(),
+        1,
+        "the shadowed package must be refused"
+    );
+    assert_eq!(listed.refused[0].package_name, "shadowed");
+    assert!(
+        listed.refused[0].reason.contains("_dotfiles"),
+        "the reason must name the key, got: {}",
+        listed.refused[0].reason
+    );
+
+    // The control: the readable package is still listed. Refusing one must not
+    // cost the caller the rest.
+    assert_eq!(listed.packages.len(), 1);
+    assert_eq!(listed.packages[0].name(), "bat");
+}
+
+// A name in both directories is two files, and a listing is asked what is on
+// disk rather than which one would deploy. `collect_all_packages` drops the
+// dotfiles/ copy for exactly that deploy question, so the listing must not reuse
+// that answer.
+#[tokio::test]
+async fn list_keeps_both_copies_of_a_name_in_both_directories() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "shared",
+        r#"name: shared
+environments:
+  test:
+    install: "true"
+dotfiles:
+  - source: from-packages
+    target: ~/.from-packages
+"#,
+    );
+    write_package_yaml(
+        &dirs.dotfiles_dir,
+        "shared",
+        r#"name: shared
+dotfiles:
+  - source: from-dotfiles
+    target: ~/.from-dotfiles
+"#,
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+
+    assert_eq!(
+        listed.packages.len(),
+        2,
+        "both files exist, so both are listed; got {:?}",
+        listed
+            .packages
+            .iter()
+            .map(selfie::package::Package::name)
+            .collect::<Vec<_>>()
+    );
+
+    let origins: Vec<_> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::origin)
+        .collect();
+    assert!(origins.contains(&SpecOrigin::PackageDirectory));
+    assert!(origins.contains(&SpecOrigin::DotfilesDirectory));
+}
+
+// One level down from the shadowed top level, and the same harm: a key inside an
+// environment mapping empties that environment's list, so the listing would show
+// the package as simply having no dotfiles there. `spec validate` already errors
+// on this, so a listing that stayed silent disagreed with it.
+#[tokio::test]
+async fn list_reports_a_package_whose_environment_key_is_shadowed() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "envshadow",
+        r#"name: envshadow
+environments:
+  test:
+    install: "true"
+    _dotfiles: &d
+      - source: hidden
+        target: ~/.hidden
+"#,
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+
+    assert_eq!(
+        listed.refused.len(),
+        1,
+        "the shadowed environment must be refused"
+    );
+    assert_eq!(listed.refused[0].package_name, "envshadow");
+    assert!(
+        listed.refused[0].reason.contains("_dotfiles"),
+        "the reason must name the key, got: {}",
+        listed.refused[0].reason
+    );
+}

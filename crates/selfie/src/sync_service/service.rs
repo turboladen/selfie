@@ -2096,6 +2096,10 @@ mod credential_egress_tests {
     pub(super) struct UnusedDotfileService;
 
     impl DotfileService for UnusedDotfileService {
+        async fn list(&self) -> EventStream {
+            unreachable!("the push paths do not list dotfiles")
+        }
+
         async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
             unreachable!("the push paths do not deploy dotfiles")
         }

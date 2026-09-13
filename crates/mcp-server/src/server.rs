@@ -684,49 +684,14 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. A spec this tool could not parse is reported as prose in `skipped`, not as fields: this tool reads the package directory directly rather than through the event stream every other tool uses, so the location is in the message text. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
-        use selfie::package::port::PackageRepository;
+        use selfie::dotfile_service::port::DotfileService;
 
-        let repo = YamlPackageRepository::new(
-            RealFileSystem,
-            self.config.package_directory().to_path_buf(),
-            SpecOrigin::PackageDirectory,
-        );
-        let mut entries: Vec<serde_json::Value> = Vec::new();
-
-        // Anything omitted from `dotfiles` is reported here rather than dropped.
-        // Reported so an assistant can tell a complete map from a partial one,
-        // for an unreadable spec file and for a failed listing alike.
-        let mut skipped: Vec<String> = Vec::new();
-
-        collect_dotfile_entries(repo.list_packages(), "packages", &mut entries, &mut skipped);
-
-        let dotfiles_dir = self.config.dotfiles_directory();
-        if dotfiles_dir.is_dir() {
-            let dotfiles_repo = YamlPackageRepository::new(
-                RealFileSystem,
-                dotfiles_dir,
-                SpecOrigin::DotfilesDirectory,
-            );
-            collect_dotfile_entries(
-                dotfiles_repo.list_packages(),
-                "dotfiles",
-                &mut entries,
-                &mut skipped,
-            );
-        }
-
-        let data = serde_json::json!({
-            "status": "success",
-            "total": entries.len(),
-            "dotfiles": entries,
-            "skipped": skipped,
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        )]))
+        let stream = self.dotfile_service.list().await;
+        let result = event_collector::collect_events(stream).await;
+        Ok(tool_result(result))
     }
 
     #[tool(
@@ -910,95 +875,6 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
     }
 }
 
-/// Append one repository's dotfile entries, and a note for anything it could not
-/// read — a single unreadable spec file, or the whole listing failing.
-///
-/// Takes the `Result` rather than an unwrapped output so both failure paths are
-/// reachable from a test.
-// This consumer has no stderr, so anything omitted here is invisible: the
-// assistant reads `total` and presents a partial map as the whole picture.
-fn collect_dotfile_entries(
-    listing: Result<
-        selfie::package::port::ListPackagesOutput,
-        selfie::package::port::PackageListError,
-    >,
-    origin: &str,
-    entries: &mut Vec<serde_json::Value>,
-    skipped: &mut Vec<String>,
-) {
-    let output = match listing {
-        Ok(output) => output,
-        Err(e) => {
-            skipped.push(format!("Could not list the {origin} directory: {e}"));
-            return;
-        }
-    };
-
-    for invalid in output.invalid_packages() {
-        skipped.push(selfie::package::service::skipped_spec_warning(invalid));
-    }
-
-    for pkg in output
-        .valid_packages()
-        .filter(|p| !p.dotfiles_with_scope().is_empty())
-    {
-        for (scope, entry) in pkg.dotfiles_with_scope() {
-            entries.push(dotfile_entry_json(pkg.name(), scope, entry, origin));
-        }
-    }
-}
-
-/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
-///
-/// Reports where content comes from without producing any of it: var names and
-/// the command string come from the package file and are references, not values.
-/// Nothing here runs a command or renders a template, so enumeration cannot leak
-/// a secret or trigger an authentication prompt.
-fn dotfile_entry_json(
-    package: &str,
-    scope: Option<&str>,
-    entry: &selfie::package::DotfileEntry,
-    origin: &str,
-) -> serde_json::Value {
-    use selfie::package::ContentSource;
-
-    let mut value = serde_json::json!({
-        "package": package,
-        "environment": scope,
-        "target": entry.target(),
-        "origin": origin,
-    });
-    let map = value.as_object_mut().expect("constructed as an object");
-
-    match entry.content_source() {
-        Ok(ContentSource::RepoFile(source)) => {
-            map.insert("kind".into(), "file".into());
-            map.insert("source".into(), source.into());
-        }
-        Ok(ContentSource::Template { source, vars }) => {
-            map.insert("kind".into(), "template".into());
-            map.insert("source".into(), source.into());
-            map.insert(
-                "vars".into(),
-                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
-            );
-        }
-        Ok(ContentSource::Provider(command)) => {
-            map.insert("kind".into(), "command".into());
-            map.insert("command".into(), command.into());
-        }
-        // The reason, not a generic string: an assistant reading this is the
-        // caller least able to guess which of the possible defects applies, and
-        // naming the key or the var is what lets it propose the actual fix.
-        Err(invalid) => {
-            map.insert("kind".into(), "invalid".into());
-            map.insert("error".into(), invalid.to_string().into());
-        }
-    }
-
-    value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,7 +923,8 @@ mod tests {
                 "exactly one of",
             ),
         ] {
-            let json = dotfile_entry_json("creds", None, &entry(yaml), "packages");
+            let json =
+                crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml), "packages");
 
             assert_eq!(json["kind"], "invalid", "for {yaml}");
             assert_eq!(json["target"], "~/.creds", "for {yaml}");
@@ -1063,7 +940,7 @@ mod tests {
     fn a_deployable_entry_is_still_described_by_its_source() {
         // The control: without it the test above could pass on a change that
         // reported every entry as invalid.
-        let json = dotfile_entry_json(
+        let json = crate::event_collector::dotfile_entry_json(
             "creds",
             Some("macos"),
             &entry("source: creds.tpl\ntarget: ~/.creds\nvars:\n  api_key: op read x\n"),
@@ -1074,92 +951,5 @@ mod tests {
         assert_eq!(json["source"], "creds.tpl");
         assert_eq!(json["vars"][0], "api_key");
         assert!(json.get("error").is_none());
-    }
-
-    fn package_with_a_dotfile(name: &str) -> selfie::package::Package {
-        selfie::package::PackageBuilder::default()
-            .name(name)
-            .dotfiles(vec![selfie::package::DotfileEntry::new(
-                format!("{name}.conf"),
-                format!("~/.config/{name}.conf"),
-            )])
-            .build()
-    }
-
-    // This consumer cannot see stderr, so anything omitted here is invisible to
-    // the assistant reading the result, which then reports a partial map as the
-    // whole picture. `valid_packages()` drops a file that could not be read, so
-    // the failures have to be asked for explicitly.
-    #[test]
-    fn a_spec_file_that_could_not_be_read_is_reported_as_skipped() {
-        use selfie::package::port::{ListPackagesOutput, PackageParseError};
-
-        let output = ListPackagesOutput::from_results(vec![
-            Ok(package_with_a_dotfile("starship")),
-            Err(PackageParseError::new(
-                "/test/packages/ghost.yml",
-                selfie::package::port::PackageParseKind::IrregularFile {
-                    kind: "named pipe (fifo)",
-                },
-            )),
-        ]);
-
-        let mut entries = Vec::new();
-        let mut skipped = Vec::new();
-        collect_dotfile_entries(Ok(output), "packages", &mut entries, &mut skipped);
-
-        // The readable package's entries still come through: reporting the
-        // skipped file must not cost the caller the rest of the listing.
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["package"], "starship");
-
-        assert_eq!(skipped.len(), 1, "the unreadable file must be reported");
-        assert!(skipped[0].contains("ghost.yml"), "got: {}", skipped[0]);
-        assert!(
-            skipped[0].contains("named pipe (fifo)"),
-            "got: {}",
-            skipped[0]
-        );
-    }
-
-    // The control. Without it, a `skipped` that is never empty -- or one built
-    // from every package rather than the failed ones -- satisfies the test above.
-    #[test]
-    fn a_clean_listing_reports_nothing_skipped() {
-        use selfie::package::port::ListPackagesOutput;
-
-        let output = ListPackagesOutput::from_packages(vec![package_with_a_dotfile("starship")]);
-
-        let mut entries = Vec::new();
-        let mut skipped = Vec::new();
-        collect_dotfile_entries(Ok(output), "packages", &mut entries, &mut skipped);
-
-        assert_eq!(entries.len(), 1);
-        assert!(skipped.is_empty(), "got: {skipped:?}");
-    }
-
-    // A listing that fails outright must be reported. An `if let Ok(output)`
-    // with no `else` would answer an unreadable package directory with
-    // `{"status": "success", "total": 0}`, which the assistant cannot tell from
-    // a directory that genuinely holds no dotfiles.
-    #[test]
-    fn a_failed_listing_is_reported_rather_than_swallowed() {
-        use selfie::package::port::PackageListError;
-
-        let mut entries = Vec::new();
-        let mut skipped = Vec::new();
-        collect_dotfile_entries(
-            Err(PackageListError::PackageDirectoryNotFound(
-                "/missing".into(),
-            )),
-            "packages",
-            &mut entries,
-            &mut skipped,
-        );
-
-        assert!(entries.is_empty());
-        assert_eq!(skipped.len(), 1, "a failed listing must be reported");
-        assert!(skipped[0].contains("/missing"), "got: {}", skipped[0]);
-        assert!(skipped[0].contains("packages"), "got: {}", skipped[0]);
     }
 }

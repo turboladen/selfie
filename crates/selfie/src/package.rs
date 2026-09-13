@@ -862,12 +862,12 @@ pub struct Package {
 
     /// Which directory this spec was loaded from.
     ///
-    /// Set by [`set_source`](Self::set_source) alongside the path, so a loader
-    /// cannot record where a file came from without saying which kind of spec it
+    /// A loader sets it through [`set_source`](Self::set_source) alongside the
+    /// path, so recording where a file came from also says which kind of spec it
     /// is. Deserialization skips it, leaving
     /// [`Memory`](SpecOrigin::Memory) — the variant no rule keyed on origin
-    /// applies to, so a package built through the builder is never refused for
-    /// where it did not come from.
+    /// applies to, so a package that names no origin of its own is never refused
+    /// for where it did not come from.
     #[serde(skip)]
     origin: SpecOrigin,
 }
@@ -1160,6 +1160,14 @@ impl Package {
         self.top_level_keys = top_level_keys(&raw_yaml);
         self.path = path;
         self.raw_yaml = Some(raw_yaml);
+        self.origin = origin;
+    }
+
+    // The builder calls this, for a package that was never loaded. A loader sets
+    // the origin through `set_source`, which also carries the path and the raw
+    // YAML the origin-keyed rules are read from -- so this cannot stand in for
+    // it.
+    pub(crate) fn set_origin(&mut self, origin: SpecOrigin) {
         self.origin = origin;
     }
 

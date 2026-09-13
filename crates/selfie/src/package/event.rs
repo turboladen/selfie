@@ -435,6 +435,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send the dotfile listing.
+    pub(crate) async fn send_dotfile_list(&self, dotfile_list: DotfileListData) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::DotfileListLoaded {
+            operation_info,
+            dotfile_list,
+        })
+        .await;
+    }
+
     /// Send spec list summary data
     pub(crate) async fn send_spec_list(&self, spec_list: SpecListData) {
         let operation_info = self.touch_operation_info();
@@ -1982,6 +1992,12 @@ pub enum PackageEvent {
         packages: Vec<PackageListItem>,
     },
 
+    /// Every dotfile entry selfie could read across both directories.
+    DotfileListLoaded {
+        operation_info: OperationInfo,
+        dotfile_list: DotfileListData,
+    },
+
     /// Package list loaded
     PackageListLoaded {
         operation_info: OperationInfo,
@@ -2238,6 +2254,49 @@ pub struct SpecListData {
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
     pub show_all: bool,
+}
+
+/// Every dotfile entry selfie could read, and where it read them from.
+///
+/// Carries the packages rather than flattened rows: an adapter renders a
+/// dotfile entry from [`content_source`](crate::package::DotfileEntry::content_source),
+/// and the terminal wants one sentence where a structured consumer wants the
+/// kind and its parts as fields. Flattening here would pick one of those.
+///
+/// Specs that did not parse are not in this list and are not counted as absent:
+/// they leave as [`SpecSkipped`](PackageEvent::SpecSkipped) while the listing
+/// runs.
+#[derive(Debug, Clone)]
+pub struct DotfileListData {
+    /// Packages declaring at least one dotfile entry.
+    pub packages: Vec<crate::package::Package>,
+    /// Packages whose file selfie will not read at the top level.
+    ///
+    /// Separate from [`packages`](Self::packages) because their entry list is
+    /// not short, it is untrustworthy: the key that shadows `dotfiles:` leaves
+    /// selfie reading an empty list from a file that declares several. Showing
+    /// them as ordinary packages with nothing in them is what sends a user
+    /// looking for a dotfile the listing says does not exist.
+    pub refused: Vec<RefusedSpec>,
+    /// Where the package specs were read from.
+    pub package_directory: String,
+    /// Where the standalone dotfile specs were read from.
+    pub dotfiles_directory: String,
+}
+
+/// A package the listing could not trust, and why.
+///
+/// The reason is rendered rather than typed, matching
+/// [`OperationFailure::UnreadableSpec`]. A consumer that needs to branch on the
+/// kind of refusal is the trigger to make `SpecRefusal` public; none does yet.
+#[derive(Debug, Clone)]
+pub struct RefusedSpec {
+    /// The package's declared name.
+    pub package_name: String,
+    /// The file it was read from.
+    pub path: String,
+    /// What selfie objected to.
+    pub reason: String,
 }
 
 /// Structured data for check results
