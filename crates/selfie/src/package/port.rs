@@ -95,7 +95,15 @@ pub trait PackageRepository: Send + Sync {
     fn remove_package(&self, name: &str) -> Result<(), PackageRepoError>;
 
     /// Every package listing `target_package` as a dependency in any of its
-    /// environments, so a caller can say what a removal would break.
+    /// environments, so a caller can say what a removal would break, paired with
+    /// the spec files that could not be read while looking.
+    ///
+    /// A caller that ignores the second list is claiming nothing depends on the
+    /// target when the honest answer is that it does not know: an unreadable
+    /// spec declares dependencies selfie never saw.
+    ///
+    /// The failures are returned rather than rendered, so an adapter reporting
+    /// structure has the kind and location as values.
     ///
     /// # Errors
     ///
@@ -103,7 +111,7 @@ pub trait PackageRepository: Send + Sync {
     fn find_dependent_packages(
         &self,
         target_package: &str,
-    ) -> Result<Vec<Package>, PackageRepoError>;
+    ) -> Result<(Vec<Package>, Vec<PackageParseError>), PackageRepoError>;
 }
 
 /// Errors that can occur during package repository operations
@@ -691,26 +699,29 @@ mod tests {
                     ),
                 );
 
-                Ok(vec![
-                    Package::new(
-                        "dependent1".to_string(),
-                        None,
-                        None,
-                        Vec::new(),
-                        None,
-                        env1,
-                        PathBuf::from("/test/dependent1.yml"),
-                    ),
-                    Package::new(
-                        "dependent2".to_string(),
-                        None,
-                        None,
-                        Vec::new(),
-                        None,
-                        env2,
-                        PathBuf::from("/test/dependent2.yml"),
-                    ),
-                ])
+                Ok((
+                    vec![
+                        Package::new(
+                            "dependent1".to_string(),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            env1,
+                            PathBuf::from("/test/dependent1.yml"),
+                        ),
+                        Package::new(
+                            "dependent2".to_string(),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            env2,
+                            PathBuf::from("/test/dependent2.yml"),
+                        ),
+                    ],
+                    Vec::new(),
+                ))
             });
 
         // Call the mocked method
@@ -718,8 +729,9 @@ mod tests {
 
         // Verify the result
         assert!(result.is_ok());
-        let dependents = result.unwrap();
+        let (dependents, unreadable) = result.unwrap();
         assert_eq!(dependents.len(), 2);
+        assert!(unreadable.is_empty());
 
         let names: Vec<String> = dependents.iter().map(|p| p.name().to_string()).collect();
         assert!(names.contains(&"dependent1".to_string()));
@@ -735,13 +747,14 @@ mod tests {
             .expect_find_dependent_packages()
             .with(eq("standalone-package"))
             .times(1)
-            .returning(|_| Ok(vec![]));
+            .returning(|_| Ok((vec![], Vec::new())));
 
         let result = mock_repo.find_dependent_packages("standalone-package");
 
         assert!(result.is_ok());
-        let dependents = result.unwrap();
+        let (dependents, unreadable) = result.unwrap();
         assert!(dependents.is_empty());
+        assert!(unreadable.is_empty());
     }
 
     #[test]

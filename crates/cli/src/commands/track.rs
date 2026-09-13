@@ -5,6 +5,8 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
+use std::collections::HashSet;
+
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
     fs::real::RealFileSystem,
@@ -58,16 +60,19 @@ pub(crate) async fn handle_track(
     let dotfiles_repo = dotfiles_repository(config, display);
 
     // Check if this file is already tracked anywhere
-    if let Some((pkg_name, tracked_target)) =
-        find_existing_tracker(file, config, dotfiles_repo.as_ref())
-    {
+    let (existing_tracker, unchecked) = find_existing_tracker(file, config, dotfiles_repo.as_ref());
+
+    if let Some((pkg_name, tracked_target)) = existing_tracker {
         display.print_info(format!(
             "Already tracking '{tracked_target}' in spec '{pkg_name}'"
         ));
         return 0;
     }
 
-    // Collect available package names for the prompt
+    // Collect available package names for the prompt. Done before anything from
+    // the scan above is printed: this reads the package directory too, and its
+    // failure ends the run, so a warning that the same directory could not be
+    // checked would only be a quieter version of the error that follows it.
     let (package_names, skipped) = match load_package_names(&repo) {
         Ok(loaded) => loaded,
         Err(msg) => {
@@ -76,11 +81,19 @@ pub(crate) async fn handle_track(
         }
     };
 
-    // A spec selfie cannot read is no place to put this dotfile, so the choices
-    // below leave it out. Naming it is what stops that list reading as the whole
-    // package directory.
-    for warning in skipped {
-        display.print_warning(warning);
+    // Reaching here means no spec selfie could read tracks this file, and that
+    // the package directory itself was readable. Where something else could not
+    // be read -- an individual spec, or the dotfiles directory -- "nothing
+    // tracks it" is not what selfie established, and the run is about to offer
+    // to write a second entry for it.
+    //
+    // Both scans read the package directory, so an unreadable spec there
+    // composes the same sentence twice; the second printing is noise.
+    let mut reported: HashSet<String> = HashSet::new();
+    for warning in unchecked.into_iter().chain(skipped) {
+        if reported.insert(warning.clone()) {
+            display.print_warning(warning);
+        }
     }
 
     let choice = prompt_track_choice(&package_names, file);
@@ -189,7 +202,12 @@ fn suggest_name(file_path: &str) -> String {
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
 /// entry whose target matches the given file path. Returns the name of the
-/// package that tracks it and the entry's own target, or `None`.
+/// package that tracks it and the entry's own target, or `None`, paired with a
+/// warning for every spec and every directory it could not read.
+///
+/// A caller that ignores the second list is treating "nothing selfie could read
+/// tracks this file" as "nothing tracks it", and a spec it could not read may
+/// already carry the entry.
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
@@ -197,9 +215,10 @@ fn find_existing_tracker(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: Option<&YamlPackageRepository<RealFileSystem>>,
-) -> Option<(String, String)> {
+) -> (Option<(String, String)>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
+    let mut skipped = Vec::new();
 
     // Takes the dotfiles repository rather than building its own, so that a
     // missing directory is reported by the caller once. Dropping it silently
@@ -210,24 +229,48 @@ fn find_existing_tracker(
         config.selfie_config().package_directory().to_path_buf(),
         SpecOrigin::PackageDirectory,
     );
-    let repos: Vec<&YamlPackageRepository<RealFileSystem>> = [Some(&package_repo), dotfiles_repo]
-        .into_iter()
-        .flatten()
-        .collect();
+    // Each repository is carried with the name of the directory it reads, so a
+    // run told one of them could not be listed knows which one to go and look
+    // at. The path is left to the error, which already carries it.
+    let repos: Vec<(&YamlPackageRepository<RealFileSystem>, &str)> = [
+        Some((&package_repo, "package directory")),
+        dotfiles_repo.map(|repo| (repo, "dotfiles directory")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    for repo in repos {
-        if let Ok(output) = repo.list_packages() {
-            for pkg in output.valid_packages() {
-                for (_scope, entry) in pkg.dotfiles_with_scope() {
-                    let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
-                    if entry_expanded == expanded {
-                        return Some((pkg.name().to_string(), entry.target().to_string()));
-                    }
+    for (repo, directory) in repos {
+        // A spec selfie could not read may already track this file, and so may
+        // every spec in a directory it could not list. Both used to leave by the
+        // same door as "nothing tracks it", and the caller then wrote a second
+        // entry for a target some package already covers -- the duplicate the
+        // comment above records, arriving by a different route.
+        let output = match repo.list_packages() {
+            Ok(output) => output,
+            Err(e) => {
+                skipped.push(format!("Could not check the {directory}: {e}"));
+                continue;
+            }
+        };
+
+        for invalid in output.invalid_packages() {
+            skipped.push(selfie::package::service::skipped_spec_warning(invalid));
+        }
+
+        for pkg in output.valid_packages() {
+            for (_scope, entry) in pkg.dotfiles_with_scope() {
+                let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
+                if entry_expanded == expanded {
+                    return (
+                        Some((pkg.name().to_string(), entry.target().to_string())),
+                        skipped,
+                    );
                 }
             }
         }
     }
-    None
+    (None, skipped)
 }
 
 /// Load sorted package names from the repository, along with a warning for every
@@ -264,6 +307,61 @@ mod tests {
     #[test]
     fn suggest_name_handles_deeply_nested_path() {
         assert_eq!(suggest_name("~/.config/fish/conf.d/fnm.fish"), "fnm");
+    }
+
+    // A spec selfie could not read may already track the file being offered, so
+    // "nothing tracks it" and "nothing selfie could read tracks it" have to be
+    // distinguishable to the caller. Asserted on the returned list because the
+    // prompt that follows needs a terminal, which a test cannot give it.
+    #[test]
+    fn find_existing_tracker_reports_a_spec_it_could_not_read() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("brokenpkg.yaml"), "{{{\n").unwrap();
+
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages)
+                .build(),
+        );
+
+        let (found, skipped) = find_existing_tracker("~/.config/fish/config.fish", &config, None);
+
+        assert!(found.is_none(), "nothing readable tracks that file");
+        assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
+        assert!(skipped[0].contains("brokenpkg.yaml"), "got: {}", skipped[0]);
+    }
+
+    // The control: with every spec readable, a run that finds no tracker has
+    // nothing to report, so a `skipped` that is never empty would fail here.
+    #[test]
+    fn find_existing_tracker_reports_nothing_for_a_clean_directory() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(
+            packages.join("bat.yaml"),
+            "name: bat\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages)
+                .build(),
+        );
+
+        let (found, skipped) = find_existing_tracker("~/.config/fish/config.fish", &config, None);
+
+        assert!(found.is_none());
+        assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
     #[test]
