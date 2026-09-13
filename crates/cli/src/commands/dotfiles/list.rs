@@ -4,49 +4,87 @@
 //! all dotfile mappings defined across packages and the standalone dotfiles
 //! directory. This is a fast, file-only operation — no commands are executed.
 
-use selfie::package::{Package, SpecOrigin, port::PackageRepository};
+use selfie::dotfile_service::port::DotfileService;
+use selfie::package::{
+    Package, SpecOrigin,
+    event::{DotfileListData, OperationResult, PackageEvent},
+};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::common::{create_formatted_table, create_package_repository, dotfiles_repository},
+    commands::common::{create_dotfile_service, create_formatted_table},
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
+    event_processor::EventProcessor,
 };
 
 /// Handle the `selfie dotfiles list` command
 ///
-/// Reads all package YAML files from both the packages directory and the
-/// standalone dotfiles directory, then displays every dotfile mapping in
-/// a table. This bypasses the service layer for fast file reads (same
-/// pattern as `spec list` and the MCP bulk tools).
-pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
+/// Drives `DotfileService::list`, which reads both directories and reports every
+/// spec it could not read. This command runs nothing: it renders var names and
+/// command strings, never a resolved value, so it cannot leak a secret or raise
+/// an authentication prompt.
+pub(crate) async fn handle_list(
+    config: &CliConfig,
+    display: &DisplayManager,
+    cancellation_token: CancellationToken,
+) -> i32 {
     info!("Listing dotfiles");
 
-    let packages = match collect_packages_with_dotfiles(config, display) {
-        Ok(pkgs) => pkgs,
-        Err(code) => return code,
-    };
+    let service = create_dotfile_service(config, display, cancellation_token);
+    let event_stream = service.list().await;
 
-    if packages.is_empty() {
+    let config_for_handler = config.clone();
+    let display_for_handler = display.clone();
+    let processor = EventProcessor::new(display.clone());
+    let result = processor
+        .process_events(event_stream, |event| match event {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => {
+                render_listing(dotfile_list, &config_for_handler, &display_for_handler);
+                true
+            }
+            // The envelope every service-driven command prints is noise on a
+            // listing: the header repeats the environment the table is about,
+            // and the completion line repeats the count the table just gave.
+            // `spec search` suppresses its own for the same reason.
+            //
+            // Only a SUCCESSFUL completion. `process_events` skips its default
+            // handler for anything a custom handler claims, and that default
+            // handler is the only thing that writes the exit code -- so claiming
+            // a failure here would print nothing and exit 0, which is the bug
+            // PR #155 fixed for this very command.
+            PackageEvent::Started { .. }
+            | PackageEvent::Completed {
+                result: OperationResult::Success(_),
+                ..
+            } => true,
+            _ => false,
+        })
+        .await;
+
+    result.exit_code
+}
+
+/// Render the table, or say there is nothing to put in one.
+fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayManager) {
+    if data.packages.is_empty() {
         display.print_info("No dotfiles found in any packages.");
-        return 0;
+        return;
     }
 
-    // Print the base directories so relative source paths have context
-    print_base_directories(config, display, &packages);
+    print_base_directories(config, display, &data.packages);
 
     let mut table = create_formatted_table();
     table.set_header(vec!["Package", "Environment", "Source", "Target"]);
 
     let mut total = 0;
-    for pkg in &packages {
+    for pkg in &data.packages {
         for (scope, entry) in pkg.dotfiles_with_scope() {
             table.add_row(vec![
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
-                // Renders var names and command strings, never a resolved value:
-                // listing runs nothing, so it cannot leak a secret or raise an
-                // authentication prompt.
+                // Renders var names and command strings, never a resolved value.
                 //
                 // A refused entry is shown as the reason it was refused rather
                 // than omitted: it is in the package file, `selfie apply` will
@@ -65,43 +103,9 @@ pub(crate) fn handle_list(config: &CliConfig, display: &DisplayManager) -> i32 {
     display.print_info(format!(
         "{total} {} across {} {}",
         selfie::pluralize(total, "dotfile", "dotfiles"),
-        packages.len(),
-        selfie::pluralize(packages.len(), "package", "packages"),
+        data.packages.len(),
+        selfie::pluralize(data.packages.len(), "package", "packages"),
     ));
-
-    0
-}
-
-/// Load packages from both repos, keeping only those with dotfile entries.
-///
-/// Each package carries the directory it came from, which is what decides the
-/// base directories printed above the table.
-fn collect_packages_with_dotfiles(
-    config: &CliConfig,
-    display: &DisplayManager,
-) -> Result<Vec<Package>, i32> {
-    let repo = create_package_repository(config);
-    let (mut packages, skipped) = load_dotfile_packages(&repo, display, "packages")?;
-    for warning in skipped {
-        display.print_warning(warning);
-    }
-
-    // Add standalone dotfiles repository if the directory exists
-    if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
-        // Whether the user keeps standalone dotfiles is already decided above:
-        // `dotfiles_repository` answers `None` when the directory is absent. So
-        // a listing failure here is selfie unable to read a directory it found,
-        // and carrying on would print a table missing every standalone dotfile
-        // over an exit code saying the listing succeeded.
-        let (dotfile_pkgs, dotfile_skipped) =
-            load_dotfile_packages(&dotfiles_repo, display, "dotfiles")?;
-        for warning in dotfile_skipped {
-            display.print_warning(warning);
-        }
-        packages.extend(dotfile_pkgs);
-    }
-
-    Ok(packages)
 }
 
 /// Print the base directories above the table so relative source paths have context.
@@ -130,168 +134,5 @@ fn print_base_directories(config: &CliConfig, display: &DisplayManager, packages
                     .to_string()
             ),
         ));
-    }
-}
-
-/// Load packages from a single repository, filtering to those with dotfiles,
-/// along with a warning for every spec file that could not be loaded.
-// The warnings are returned rather than printed so they can be asserted:
-// `print_warning` goes to stderr, which a unit test cannot observe, and the
-// dropped-silently case is the whole reason this reports anything at all.
-fn load_dotfile_packages(
-    repo: &impl PackageRepository,
-    display: &DisplayManager,
-    label: &str,
-) -> Result<(Vec<Package>, Vec<String>), i32> {
-    match repo.list_packages() {
-        Ok(output) => {
-            let skipped = output
-                .invalid_packages()
-                .map(selfie::package::service::skipped_spec_warning)
-                .collect();
-
-            let packages = output
-                .valid_packages()
-                .filter(|p| !p.dotfiles_with_scope().is_empty())
-                .cloned()
-                .collect();
-
-            Ok((packages, skipped))
-        }
-        Err(e) => {
-            display.print_error(format!("Failed to load {label}: {e}"));
-            Err(1)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use selfie::package::{
-        DotfileEntry, PackageBuilder,
-        port::{ListPackagesOutput, MockPackageRepository, PackageListError},
-    };
-
-    fn make_package_with_dotfiles(name: &str) -> Package {
-        PackageBuilder::default()
-            .name(name)
-            .dotfiles(vec![DotfileEntry::new(
-                format!("{name}.conf"),
-                format!("~/.config/{name}.conf"),
-            )])
-            .build()
-    }
-
-    fn make_package_without_dotfiles(name: &str) -> Package {
-        PackageBuilder::default().name(name).build()
-    }
-
-    #[test]
-    fn test_load_filters_to_packages_with_dotfiles() {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages().returning(|| {
-            Ok(ListPackagesOutput::from_packages(vec![
-                make_package_with_dotfiles("starship"),
-                make_package_without_dotfiles("ripgrep"),
-                make_package_with_dotfiles("alacritty"),
-            ]))
-        });
-
-        let display = DisplayManager::new(false);
-        let (packages, skipped) = load_dotfile_packages(&repo, &display, "test").unwrap();
-
-        assert_eq!(packages.len(), 2);
-        assert_eq!(packages[0].name(), "starship");
-        assert_eq!(packages[1].name(), "alacritty");
-        assert!(skipped.is_empty(), "got: {skipped:?}");
-    }
-
-    #[test]
-    fn test_load_returns_empty_when_no_dotfiles() {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages().returning(|| {
-            Ok(ListPackagesOutput::from_packages(vec![
-                make_package_without_dotfiles("ripgrep"),
-                make_package_without_dotfiles("fd"),
-            ]))
-        });
-
-        let display = DisplayManager::new(false);
-        let (packages, skipped) = load_dotfile_packages(&repo, &display, "test").unwrap();
-
-        assert!(packages.is_empty());
-        assert!(skipped.is_empty(), "got: {skipped:?}");
-    }
-
-    // `valid_packages` drops a spec file that could not be loaded, so without the
-    // shared warning this command would list the dotfiles it could read and say
-    // nothing about the file it could not, which the user cannot tell from a
-    // package that genuinely declares no dotfiles.
-    #[test]
-    fn test_load_names_a_package_file_it_could_not_read() {
-        use selfie::package::port::PackageParseError;
-
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages().returning(|| {
-            Ok(ListPackagesOutput::from_results(vec![
-                Ok(make_package_with_dotfiles("starship")),
-                Err(PackageParseError::new(
-                    "/test/packages/ghost.yml",
-                    selfie::package::port::PackageParseKind::IrregularFile {
-                        kind: "named pipe (fifo)",
-                    },
-                )),
-            ]))
-        });
-
-        let display = DisplayManager::new(false);
-        let (packages, skipped) = load_dotfile_packages(&repo, &display, "packages").unwrap();
-
-        // The readable package still comes back: reporting the skipped file must
-        // not cost the caller the rest of the listing.
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].name(), "starship");
-
-        assert_eq!(skipped.len(), 1, "the unreadable file must be reported");
-        assert!(skipped[0].contains("ghost.yml"), "got: {}", skipped[0]);
-        assert!(
-            skipped[0].contains("named pipe (fifo)"),
-            "got: {}",
-            skipped[0]
-        );
-    }
-
-    // The control for the test above: an ordinary listing reports nothing
-    // skipped, so a `skipped` that is never empty would fail here.
-    #[test]
-    fn test_load_reports_nothing_skipped_for_a_clean_listing() {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages().returning(|| {
-            Ok(ListPackagesOutput::from_packages(vec![
-                make_package_with_dotfiles("starship"),
-            ]))
-        });
-
-        let display = DisplayManager::new(false);
-        let (packages, skipped) = load_dotfile_packages(&repo, &display, "packages").unwrap();
-
-        assert_eq!(packages.len(), 1);
-        assert!(skipped.is_empty(), "got: {skipped:?}");
-    }
-
-    #[test]
-    fn test_load_returns_error_on_repo_failure() {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages().returning(|| {
-            Err(PackageListError::PackageDirectoryNotFound(
-                "/missing".into(),
-            ))
-        });
-
-        let display = DisplayManager::new(false);
-        let result = load_dotfile_packages(&repo, &display, "packages");
-
-        assert_eq!(result.unwrap_err(), 1);
     }
 }

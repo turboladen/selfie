@@ -129,8 +129,15 @@ fn an_unreadable_dotfiles_directory_fails_the_listing() {
         !output.status.success(),
         "listing reported success; stderr was: {stderr}"
     );
+    // Both halves. The cause on its own leaves the user to work out what it
+    // cost them, and the consequence on its own does not say which directory to
+    // go and fix.
     assert!(
-        stderr.contains("Failed to load dotfiles"),
-        "stderr was: {stderr}"
+        stderr.contains("Failed to load standalone dotfiles"),
+        "must name what it could not read; stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("would be missing entries"),
+        "must say the listing is incomplete; stderr was: {stderr}"
     );
 }

@@ -61,6 +61,13 @@ const APPLY_CANCELLED: &str = "Apply cancelled";
 enum ApplyWarning {
     /// A package file that could not be parsed.
     SkippedSpec(crate::package::port::PackageParseError),
+    /// A repository selfie found and could not list.
+    ///
+    /// Typed apart from [`Other`](Self::Other) because the callers disagree
+    /// about what it costs them, and prose gives them nothing to disagree on:
+    /// deploying can carry on without the standalone dotfiles, but a listing
+    /// that carries on prints a table missing every one of them.
+    UnreadableRepository(crate::package::port::PackageListError),
     /// Anything else worth saying, already worded.
     Other(String),
 }
@@ -86,6 +93,11 @@ impl ApplyWarning {
     async fn send(self, sender: &crate::package::event::EventSender) {
         match self {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error).await,
+            Self::UnreadableRepository(e) => {
+                sender
+                    .send_warning(format!("Failed to load standalone dotfiles: {e}"))
+                    .await;
+            }
             Self::Other(message) => sender.send_warning(message).await,
         }
     }
@@ -233,9 +245,7 @@ where
                     packages.extend(output.valid_packages().cloned());
                 }
                 Err(e) => {
-                    warnings.push(ApplyWarning::Other(format!(
-                        "Failed to load standalone dotfiles: {e}"
-                    )));
+                    warnings.push(ApplyWarning::UnreadableRepository(e));
                 }
             }
         }
@@ -556,11 +566,33 @@ where
 
             let result = match collected {
                 Ok((packages, warnings)) => {
+                    // A directory selfie found and could not list is fatal HERE
+                    // and not on the deploy paths, and the difference is what
+                    // the answer is for. Deploying can carry on without the
+                    // standalone dotfiles; a listing that carries on prints a
+                    // table missing every one of them over an exit code saying
+                    // the listing succeeded.
+                    let unreadable = warnings
+                        .iter()
+                        .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)));
+
                     // Drained before the listing is sent, so a consumer reading
                     // events in order has the caveats in hand before the answer
                     // they qualify.
                     for warning in warnings {
                         warning.send(&sender).await;
+                    }
+
+                    if unreadable {
+                        return sender
+                            .send_completed(OperationResult::Failure(
+                                crate::package::event::OperationFailure::Generic(
+                                    "Could not list every dotfile directory, so this listing \
+                                     would be missing entries"
+                                        .to_string(),
+                                ),
+                            ))
+                            .await;
                     }
 
                     let packages: Vec<_> = packages

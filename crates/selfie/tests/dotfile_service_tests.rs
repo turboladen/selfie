@@ -7940,3 +7940,44 @@ async fn list_reports_a_listing_it_could_not_perform() {
         "no listing should be emitted when the listing failed"
     );
 }
+
+// The asymmetry with apply and drift, pinned so it cannot be flattened by
+// accident. A dotfiles directory that exists and cannot be listed is fatal to a
+// LISTING, because the table would be missing every standalone entry while the
+// exit code said the listing succeeded. Deploying is different: it can carry on
+// with the package dotfiles, which is why `collect_all_packages` treats this as
+// a warning for its other callers.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores the mode bits, so confirm the precondition holds rather than
+    // inferring it from the user id.
+    if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        eprintln!("SKIP list_fails_when_a_dotfiles_directory_cannot_be_listed: still readable");
+        return;
+    }
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Failure(_))
+        ),
+        "an unlistable directory must not come back as a successful listing"
+    );
+}

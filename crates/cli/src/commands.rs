@@ -203,7 +203,9 @@ async fn dispatch_dotfiles_command(
         DotfilesSubcommands::Drift => {
             dotfiles::drift::handle_drift(config, display, cancellation_token).await
         }
-        DotfilesSubcommands::List => dotfiles::list::handle_list(config, display),
+        DotfilesSubcommands::List => {
+            dotfiles::list::handle_list(config, display, cancellation_token).await
+        }
         DotfilesSubcommands::Track { name, file } => {
             dotfiles::track::handle_track(name, file, config, display, cancellation_token).await
         }
