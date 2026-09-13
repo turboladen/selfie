@@ -55,21 +55,41 @@ pub(crate) async fn handle_remove(
     display.print_info(format!("Package '{package_name}' found at:"));
     display.print_info(format!("  {}", package_blob.file_path().display()));
 
-    // The unreadable specs are deliberately dropped here and consumed in the
-    // commit that follows; this one only opens the channel.
-    let (dependent_packages, _unreadable) = match repo.find_dependent_packages(package_name) {
-        Ok(found) => found,
+    // `checked` is what separates "nothing depends on this" from "selfie does not
+    // know". Both used to arrive here as an empty list, and the line below then
+    // reported the first while meaning the second -- directly under the warning
+    // saying the check had failed.
+    let (dependent_packages, unreadable, checked) = match repo.find_dependent_packages(package_name)
+    {
+        Ok((deps, unreadable)) => (deps, unreadable, true),
         Err(e) => {
             display.print_warning(format!("Could not check for dependent packages: {e}"));
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), false)
         }
     };
 
-    let (prompt, default_answer) = if dependent_packages.is_empty() {
+    let mut already_reported: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for invalid in &unreadable {
+        already_reported.insert(invalid.package_path().to_path_buf());
+        display.print_warning(selfie::package::service::skipped_spec_warning(invalid));
+    }
+
+    // A spec selfie could not read may name this package, so neither an
+    // unreadable spec nor a failed listing can support a clearance.
+    let complete = checked && unreadable.is_empty();
+
+    let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
         display.print_success(format!(
             "Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
+    } else if dependent_packages.is_empty() {
+        display.print_warning(format!(
+            "Nothing selfie could read depends on '{package_name}', but it could not read \
+             everything, so this is not a clearance."
+        ));
+        (format!("Remove package '{package_name}' anyway?"), false)
     } else {
         display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"
@@ -111,6 +131,15 @@ pub(crate) async fn handle_remove(
             PackageEvent::RemovalDependencyInfo { .. } => {
                 // Already displayed dependency info above before confirmation
                 true
+            }
+            // The service repeats the dependency check, so a file named above
+            // the prompt arrives here a second time and is dropped. Matched by
+            // path rather than suppressed wholesale: the pre-flight can report
+            // nothing at all -- its own listing failed -- and the repeat can
+            // then be the only pass that sees the file. Swallowing every event
+            // would make that the one case where nothing is said.
+            PackageEvent::SpecSkipped { error, .. } => {
+                already_reported.contains(error.package_path())
             }
             PackageEvent::Progress { .. } => true,
             PackageEvent::Completed { result, .. } => {

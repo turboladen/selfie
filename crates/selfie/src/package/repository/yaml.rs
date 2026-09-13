@@ -1673,8 +1673,10 @@ environments:
     }
 
     #[test]
-    fn test_find_dependent_packages_handles_parse_errors() {
-        // Test that the method gracefully handles packages with parse errors
+    // The unreadable file is reported, not ignored. It may well name the target,
+    // so counting it as "does not depend on this" is what let `spec remove`
+    // print a clearance it had no basis for.
+    fn test_find_dependent_packages_reports_the_spec_it_could_not_read() {
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("packages");
         std::fs::create_dir_all(&package_dir).unwrap();
@@ -1698,10 +1700,21 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        // Should still find the valid dependent, ignoring the parse error
-        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, unreadable) = repo.find_dependent_packages("target-package").unwrap();
+
+        // The readable dependent still comes back: reporting the unreadable file
+        // must not cost the caller the rest of the answer.
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "valid-package");
+
+        assert_eq!(unreadable.len(), 1, "the unreadable file must be reported");
+        assert!(
+            unreadable[0]
+                .package_path()
+                .ends_with("invalid-package.yml"),
+            "got: {}",
+            unreadable[0].package_path().display()
+        );
     }
 
     #[test]

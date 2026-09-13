@@ -36,9 +36,7 @@ where
         .next(sender, "Checking for dependent packages")
         .await;
 
-    // The unreadable specs are deliberately dropped here and consumed in the
-    // commit that follows; this one only opens the channel.
-    let (dependent_packages, _unreadable) = match repo.find_dependent_packages(package_name) {
+    let (dependent_packages, unreadable) = match repo.find_dependent_packages(package_name) {
         Ok(found) => found,
         Err(err) => {
             sender
@@ -47,6 +45,17 @@ where
             (vec![], vec![])
         }
     };
+
+    // A spec selfie could not read may name this package, so an empty dependent
+    // list under one of these is silence rather than a clearance. The caller is
+    // told, and decides.
+    //
+    // `SpecSkipped` rather than a rendered warning: a terminal wants one line
+    // and a structured consumer wants the kind and the location as fields, and
+    // a sentence composed here gives the second one nothing to branch on.
+    for invalid in unreadable {
+        sender.send_spec_skipped(invalid).await;
+    }
 
     let dependent_names: Vec<String> = dependent_packages
         .iter()
@@ -167,6 +176,67 @@ mod tests {
         let result = handle_remove("test-pkg", &mock_repo, &config, &sender, &mut progress).await;
 
         assert!(matches!(result, OperationResult::Success(_)));
+    }
+
+    // The library's own report of what it could not read. The CLI cannot cover
+    // this: it names those files before the prompt and suppresses the service's
+    // repeat, so deleting the emission below left every CLI assertion passing.
+    //
+    // A typed event rather than a rendered warning, because the consumer that
+    // needs this most is the one with no terminal to read prose on.
+    #[tokio::test]
+    async fn an_unreadable_spec_is_reported_and_the_removal_still_completes() {
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+
+        let package = PackageBuilder::default()
+            .name("target-pkg")
+            .environment("test-env", |b| b.install("brew install target"))
+            .path("/test/packages/target-pkg.yml")
+            .build();
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/target-pkg.yml"));
+
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+
+        mock_repo.expect_find_dependent_packages().return_once(|_| {
+            Ok((
+                vec![],
+                vec![crate::package::port::PackageParseError::new(
+                    "/test/packages/ghost.yml",
+                    crate::package::port::PackageParseKind::IrregularFile {
+                        kind: "named pipe (fifo)",
+                    },
+                )],
+            ))
+        });
+
+        mock_repo.expect_remove_package().return_once(|_| Ok(()));
+
+        let result = handle_remove("target-pkg", &mock_repo, &config, &sender, &mut progress).await;
+
+        // Soft, not fatal: an unreadable spec is a gap in what selfie can say
+        // about the removal, not a reason to refuse the removal itself.
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut skipped = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let crate::package::event::PackageEvent::SpecSkipped { error, .. } = event {
+                skipped.push(error);
+            }
+        }
+
+        assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
+        assert!(
+            skipped[0].package_path().ends_with("ghost.yml"),
+            "got: {}",
+            skipped[0].package_path().display()
+        );
     }
 
     #[tokio::test]
