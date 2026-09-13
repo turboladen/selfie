@@ -1,7 +1,7 @@
 //! Dependency graph resolution for package installation.
 //!
 //! Resolves package dependencies into a topological install order and detects
-//! circular dependencies using DFS with three-state visit tracking.
+//! circular dependencies using DFS with four-state visit tracking.
 
 use crate::package::{
     event::{EventSender, OperationFailure},
@@ -16,14 +16,21 @@ pub(crate) struct DependencyGraph {
 }
 
 /// Visit state for cycle detection during DFS traversal.
+// Two walks share one map, and they finish a package for different reasons:
+// `dfs` places it in `install_order`, `check_recommend_cycles` only reads its
+// edges. They need separate marks, because a package the recommend walk has
+// merely looked at is one `dfs` still has to install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisitState {
     /// Not yet visited.
     Unvisited,
     /// Currently on the DFS stack — encountering this again means a cycle.
     Visiting,
-    /// Fully explored — all descendants processed.
+    /// Fully explored by `dfs` and placed in `install_order`.
     Visited,
+    /// Walked by `check_recommend_cycles` and found free of cycles. Says
+    /// nothing about installing it: `dfs` must still decide that.
+    CycleChecked,
 }
 
 /// Resolve the dependency graph for `root_package`, returning a topological
@@ -107,7 +114,10 @@ where
                     cycle,
                 )));
             }
-            VisitState::Unvisited => {}
+            // `CycleChecked` means the recommend walk read this package's edges
+            // and nothing more. Where it belongs in `install_order` is still
+            // this walk's to decide, so both fall through.
+            VisitState::Unvisited | VisitState::CycleChecked => {}
         }
 
         visit_state.insert(package_name.to_string(), VisitState::Visiting);
@@ -222,9 +232,10 @@ where
 
 /// Walk a recommend's dependency graph for cycle detection only.
 ///
-/// Unlike `dfs`, this does NOT add packages to `install_order`. It only checks
-/// for cycles by examining `Visiting` state. Packages already `Visited` by
-/// the main DFS are safely skipped.
+/// Unlike `dfs`, this adds nothing to `install_order`, and it marks a package it
+/// clears as `CycleChecked` rather than `Visited`, which leaves `dfs` free to
+/// install that package later as some other package's hard dependency. A package
+/// either walk has already finished is skipped.
 ///
 /// Traverses both hard `dependencies` AND `recommends` of the recommended package
 /// to catch cycles formed entirely through recommend edges (e.g., A recommends B,
@@ -249,8 +260,10 @@ where
             .unwrap_or(VisitState::Unvisited);
 
         match state {
-            // Already fully processed — no cycle through this node
-            VisitState::Visited => return Ok(()),
+            // Either mark means this package's edges have already been read, by
+            // whichever walk got here first, so there is no cycle to find below
+            // it a second time.
+            VisitState::Visited | VisitState::CycleChecked => return Ok(()),
             // Currently on the DFS stack — cycle detected
             VisitState::Visiting => {
                 let cycle_start = path
@@ -324,7 +337,11 @@ where
             path.pop();
         }
 
-        visit_state.insert(package_name.to_string(), VisitState::Visited);
+        // `CycleChecked`, never `Visited`: this walk puts nothing in
+        // `install_order`, and marking it the way `dfs` marks a package it has
+        // installed would make `dfs` skip it. A package reached here first can
+        // still be some other package's hard dependency.
+        visit_state.insert(package_name.to_string(), VisitState::CycleChecked);
         Ok(())
     })
 }
@@ -704,6 +721,49 @@ mod tests {
             }
             _ => panic!("Expected CircularDependency"),
         }
+    }
+
+    // A package can be reached by the recommend walk before anything depends on
+    // it hard. pkg-a depends on [pkg-b, pkg-c]; pkg-b recommends pkg-r; pkg-c
+    // depends on pkg-r. Walking pkg-b's recommends reaches pkg-r first, and if
+    // that walk marked it the way `dfs` marks an installed package, `dfs(pkg-c)`
+    // would skip it and `install pkg-a` would report success having never
+    // installed pkg-r.
+    //
+    // The order matters as much as the membership: pkg-r has to be installed
+    // before the package that needs it.
+    #[tokio::test]
+    async fn a_recommend_reached_first_is_still_installed_as_a_hard_dependency() {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|name| match name {
+            "pkg-a" => Ok(mock_package("pkg-a", &["pkg-b", "pkg-c"])),
+            "pkg-b" => Ok(mock_package_with_recommends("pkg-b", &[], &["pkg-r"])),
+            "pkg-c" => Ok(mock_package("pkg-c", &["pkg-r"])),
+            "pkg-r" => Ok(mock_package("pkg-r", &[])),
+            other => panic!("unexpected package {other}"),
+        });
+
+        let sender = make_sender();
+        let graph = resolve_dependencies("pkg-a", &repo, "test", &sender)
+            .await
+            .expect("resolution must succeed");
+
+        let order = &graph.install_order;
+        let pos = |name: &str| {
+            order
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("{name} missing from {order:?}"))
+        };
+
+        assert!(
+            pos("pkg-r") < pos("pkg-c"),
+            "pkg-r is a hard dependency of pkg-c and must precede it, got {order:?}"
+        );
+        assert!(
+            pos("pkg-c") < pos("pkg-a"),
+            "pkg-c must precede the package that asked for it, got {order:?}"
+        );
     }
 
     #[tokio::test]
