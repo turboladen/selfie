@@ -595,15 +595,33 @@ where
                             .await;
                     }
 
-                    let packages: Vec<_> = packages
-                        .into_iter()
-                        .filter(|p| !p.dotfiles_with_scope().is_empty())
-                        .collect();
+                    // `listing_refusal` rather than `spec_refusal`: this
+                    // listing spans every environment, so a reason keyed to one
+                    // named environment would refuse a package for a question
+                    // the table never asks -- while a shadowing key in ANY
+                    // environment empties a list this table would otherwise show
+                    // as simply absent.
+                    let mut refused = Vec::new();
+                    let mut listable = Vec::new();
+                    for package in packages {
+                        if let Some(reason) = package.listing_refusal() {
+                            refused.push(crate::package::event::RefusedSpec {
+                                package_name: package.name().to_string(),
+                                path: package.path().display().to_string(),
+                                reason: reason.to_string(),
+                            });
+                        } else if !package.dotfiles_with_scope().is_empty() {
+                            listable.push(package);
+                        }
+                    }
+
+                    let packages = listable;
                     let count = packages.len();
 
                     sender
                         .send_dotfile_list(crate::package::event::DotfileListData {
                             packages,
+                            refused,
                             package_directory: config.package_directory().display().to_string(),
                             dotfiles_directory: config.dotfiles_directory().display().to_string(),
                         })

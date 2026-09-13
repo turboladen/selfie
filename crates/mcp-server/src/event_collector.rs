@@ -288,12 +288,28 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 })
                 .collect();
 
+            // A refused package is not a package with no dotfiles, and an
+            // assistant reading `total` cannot tell those apart unless the
+            // refusals are their own field.
+            let refused: Vec<Value> = dotfile_list
+                .refused
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "package": &r.package_name,
+                        "path": &r.path,
+                        "reason": &r.reason,
+                    })
+                })
+                .collect();
+
             Some(serde_json::json!({
                 "type": "dotfile_list",
                 "package_directory": &dotfile_list.package_directory,
                 "dotfiles_directory": &dotfile_list.dotfiles_directory,
                 "total": entries.len(),
                 "entries": entries,
+                "refused": refused,
             }))
         }
         PackageEvent::PackageListLoaded { package_list, .. } => {
@@ -724,6 +740,66 @@ mod tests {
         for event in &events {
             test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
         }
+    }
+
+    // The only test of this arm. Without it a regression could drop `refused`, or
+    // go back to labelling every row from the loop it stands in rather than from
+    // the package, and the rest of the suite would stay green -- the CLI renders
+    // this event through entirely different code.
+    #[tokio::test]
+    async fn a_dotfile_listing_carries_both_origins_and_its_refusals() {
+        use selfie::package::{DotfileEntry, PackageBuilder, SpecOrigin};
+
+        let from_packages = PackageBuilder::default()
+            .name("bat")
+            .origin(SpecOrigin::PackageDirectory)
+            .dotfiles(vec![DotfileEntry::new("bat.conf", "~/.config/bat/config")])
+            .build();
+        let from_dotfiles = PackageBuilder::default()
+            .name("fish")
+            .origin(SpecOrigin::DotfilesDirectory)
+            .dotfiles(vec![DotfileEntry::new("config.fish", "~/.config/fish/c")])
+            .build();
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::DotfileListLoaded {
+            operation_info: test_op_info(),
+            dotfile_list: selfie::package::event::DotfileListData {
+                packages: vec![from_packages, from_dotfiles],
+                refused: vec![selfie::package::event::RefusedSpec {
+                    package_name: "shadowed".to_string(),
+                    path: "/packages/shadowed.yml".to_string(),
+                    reason: "unrecognized top-level key `_dotfiles`".to_string(),
+                }],
+                package_directory: "/packages".to_string(),
+                dotfiles_directory: "/dotfiles".to_string(),
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["type"], "dotfile_list");
+        assert_eq!(row["total"], 2);
+
+        // Each row's origin comes from its own package, not from a literal.
+        let origins: Vec<&str> = row["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .iter()
+            .map(|e| e["origin"].as_str().expect("origin is a string"))
+            .collect();
+        assert_eq!(origins, vec!["packages", "dotfiles"]);
+
+        let refused = &row["refused"][0];
+        assert_eq!(refused["package"], "shadowed");
+        assert_eq!(refused["path"], "/packages/shadowed.yml");
+        assert!(
+            refused["reason"]
+                .as_str()
+                .expect("reason is a string")
+                .contains("_dotfiles"),
+            "the reason must survive to the caller, got: {}",
+            refused["reason"]
+        );
     }
 
     // The listing rows carry the same shape as a skipped spec, so a caller learns

@@ -2270,10 +2270,33 @@ pub struct SpecListData {
 pub struct DotfileListData {
     /// Packages declaring at least one dotfile entry.
     pub packages: Vec<crate::package::Package>,
+    /// Packages whose file selfie will not read at the top level.
+    ///
+    /// Separate from [`packages`](Self::packages) because their entry list is
+    /// not short, it is untrustworthy: the key that shadows `dotfiles:` leaves
+    /// selfie reading an empty list from a file that declares several. Showing
+    /// them as ordinary packages with nothing in them is what sends a user
+    /// looking for a dotfile the listing says does not exist.
+    pub refused: Vec<RefusedSpec>,
     /// Where the package specs were read from.
     pub package_directory: String,
     /// Where the standalone dotfile specs were read from.
     pub dotfiles_directory: String,
+}
+
+/// A package the listing could not trust, and why.
+///
+/// The reason is rendered rather than typed, matching
+/// [`OperationFailure::UnreadableSpec`]. A consumer that needs to branch on the
+/// kind of refusal is the trigger to make `SpecRefusal` public; none does yet.
+#[derive(Debug, Clone)]
+pub struct RefusedSpec {
+    /// The package's declared name.
+    pub package_name: String,
+    /// The file it was read from.
+    pub path: String,
+    /// What selfie objected to.
+    pub reason: String,
 }
 
 /// Structured data for check results

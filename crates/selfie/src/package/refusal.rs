@@ -81,6 +81,41 @@ impl Package {
             .or_else(|| self.unchecked_top_level())
     }
 
+    /// Why a caller that reads EVERY environment cannot trust this file.
+    ///
+    /// The top level, plus the unknown keys in any environment rather than one
+    /// named environment. A listing enumerates every scope, so a `_dotfiles:`
+    /// inside one of them empties a list the listing would otherwise show as
+    /// simply absent -- the same harm the top-level rule covers, one level down.
+    ///
+    /// Does not ask whether an environment is declared at all, which is a
+    /// question about deploying: a spec with no environments lists whatever its
+    /// shared entries hold.
+    pub(crate) fn listing_refusal(&self) -> Option<SpecRefusal> {
+        // Composed from the rules in the order `spec_refusal` uses, and for the
+        // reason its own comment gives: delegating to `top_level_refusal` would
+        // put the unread top level ahead of an environment's own key, so a file
+        // carrying both reports the reason a reader cannot act on.
+        self.unknown_top_level_keys()
+            .or_else(|| self.any_unknown_environment_keys())
+            .or_else(|| self.unchecked_top_level())
+    }
+
+    // In name order. `environments` is a `HashMap` and its iteration order is
+    // randomized per process, so taking whichever came first names a different
+    // environment between runs of the same file.
+    fn any_unknown_environment_keys(&self) -> Option<SpecRefusal> {
+        self.environments_sorted()
+            .into_iter()
+            .find_map(|(name, env)| {
+                let unknown = env.unknown_keys();
+                (!unknown.is_empty()).then(|| SpecRefusal::UnknownEnvironmentKeys {
+                    environment: name.to_string(),
+                    keys: unknown.to_vec(),
+                })
+            })
+    }
+
     /// Why selfie refuses this whole package in `environment`, when it does.
     ///
     /// `Some` carries the reason to report, and what it costs is the caller's to
@@ -449,6 +484,53 @@ environments: {}
         assert!(
             refusal.to_string().starts_with("in environment 'test':"),
             "the environment's own key must be reported first, got: {refusal}"
+        );
+    }
+
+    // The listing asks every environment, and the same ordering holds there: a
+    // file whose environment names the key to fix must report that key rather
+    // than the top level nothing could read. Delegating to `top_level_refusal`
+    // compiles and passes everything else while reporting the other one.
+    #[test]
+    fn a_listing_reports_an_environment_key_ahead_of_an_unread_top_level() {
+        let yaml = format!(
+            "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test:\n    install: \"echo \
+             i\"\n    _dotfiles:\n      - source: myapp/config.toml\n        target: \
+             ~/.config/myapp/config.toml\n"
+        );
+        let refusal = package_from(&yaml)
+            .listing_refusal()
+            .expect("both rules apply");
+        assert!(
+            refusal.to_string().starts_with("in environment 'test':"),
+            "the environment's own key must be reported first, got: {refusal}"
+        );
+    }
+
+    // `environments` is a `HashMap` whose iteration order is randomized per
+    // process, so a listing that took whichever environment came first would
+    // name a different one between runs of the same file.
+    #[test]
+    fn a_listing_names_the_offending_environment_in_name_order() {
+        let yaml = r#"name: myapp
+environments:
+  alpha:
+    install: "echo i"
+    _dotfiles:
+      - source: myapp/a.toml
+        target: ~/.config/myapp/a.toml
+  zulu:
+    install: "echo i"
+    _dotfiles:
+      - source: myapp/z.toml
+        target: ~/.config/myapp/z.toml
+"#;
+        let refusal = package_from(yaml)
+            .listing_refusal()
+            .expect("both environments carry a shadowing key");
+        assert!(
+            refusal.to_string().starts_with("in environment 'alpha':"),
+            "got: {refusal}"
         );
     }
 }

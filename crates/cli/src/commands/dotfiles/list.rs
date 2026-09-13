@@ -68,8 +68,20 @@ pub(crate) async fn handle_list(
 
 /// Render the table, or say there is nothing to put in one.
 fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayManager) {
+    // Before the table, and before the empty-listing line: a refused package may
+    // be the only reason the table is short, and saying "no dotfiles found" over
+    // one is the answer this reporting exists to stop.
+    for refused in &data.refused {
+        display.print_warning(format!(
+            "Cannot read the dotfiles in '{}' ({}): {}",
+            refused.package_name, refused.path, refused.reason
+        ));
+    }
+
     if data.packages.is_empty() {
-        display.print_info("No dotfiles found in any packages.");
+        if data.refused.is_empty() {
+            display.print_info("No dotfiles found in any packages.");
+        }
         return;
     }
 
