@@ -114,12 +114,28 @@ where
 
         // Load the package to discover its dependencies
         let package_blob = repo.get_package(package_name).map_err(|repo_err| {
-            // For transitive deps, report as missing dependency with the parent name.
-            // For the root package (path has only itself), propagate the repo error
-            // so the caller gets a proper PackageNotFound.
-            if path.len() >= 2 {
-                let parent = path[path.len() - 2].clone();
+            // The root package was named by the user, so the repository's own
+            // error already says everything there is to say about it.
+            if path.len() < 2 {
+                return OperationFailure::from(repo_err);
+            }
+
+            let parent = path[path.len() - 2].clone();
+
+            // Three answers, not two. A dependency selfie found and could not
+            // read is not one that is absent -- calling it missing sends the
+            // user looking for a file already in the package directory. But a
+            // failure that is not about that package's file either, such as a
+            // directory selfie could not list, is not its spec's fault, and
+            // saying the spec will not be read blames the wrong thing.
+            if repo_err.means_no_such_package() {
                 OperationFailure::missing_dependency(parent, package_name.to_string())
+            } else if repo_err.names_an_unusable_spec() {
+                OperationFailure::unreadable_spec(
+                    package_name.to_string(),
+                    Some(parent),
+                    repo_err.to_string(),
+                )
             } else {
                 OperationFailure::from(repo_err)
             }
@@ -254,9 +270,16 @@ where
         // Mark visiting for cycle detection
         visit_state.insert(package_name.to_string(), VisitState::Visiting);
 
-        // Try loading the package — if it doesn't exist, silently skip.
-        // Clean up the temporary visit_state entry so we don't mask a later
-        // hard dependency on the same package.
+        // Every load failure is skipped here, absent file and unreadable file
+        // alike, because a recommend is soft and refusing one must not fail the
+        // install its parent asked for. Clearing the temporary entry keeps a
+        // later hard dependency on the same package from being masked.
+        //
+        // The silence costs the user nothing: `install_recommends` loads the
+        // package again and `install_recommend_in_bulk` turns that failure into
+        // a `RecommendFailed` event naming it. Both callers of
+        // `resolve_dependencies` are in `install.rs`, so nothing walks these
+        // edges without then trying the install.
         let Ok(package_blob) = repo.get_package(package_name) else {
             visit_state.remove(package_name);
             return Ok(());
@@ -571,6 +594,90 @@ mod tests {
             }
             _ => panic!("Expected MissingDependency"),
         }
+    }
+
+    // The twin of the test above, differing in one way: the dependency's file is
+    // there. A user handed "brokendep is missing" goes looking for a file that is
+    // already in the package directory, and is never told what is wrong with it.
+    #[tokio::test]
+    async fn an_unreadable_dependency_is_not_reported_as_a_missing_one() {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-a")
+            .returning(|_| Ok(mock_package("pkg-a", &["brokendep"])));
+        repo.expect_get_package()
+            .withf(|name| name == "brokendep")
+            .returning(|_| {
+                Err(crate::package::port::PackageError::UnreadableFile {
+                    name: "brokendep".to_string(),
+                    packages_path: std::path::PathBuf::from("/tmp"),
+                    failed_file: std::path::PathBuf::from("/tmp/brokendep.yml"),
+                    source: crate::package::port::PackageParseError::new(
+                        "/tmp/brokendep.yml",
+                        crate::package::port::PackageParseKind::IrregularFile {
+                            kind: "named pipe (fifo)",
+                        },
+                    ),
+                }
+                .into())
+            });
+
+        let sender = make_sender();
+        let result = resolve_dependencies("pkg-a", &repo, "test", &sender).await;
+
+        let err = result.unwrap_err();
+        assert!(err.is_dependency_error());
+        match err.dependency_failure().unwrap() {
+            crate::package::event::DependencyFailure::UnreadableSpec {
+                package_name,
+                required_by,
+                reason,
+            } => {
+                assert_eq!(package_name, "brokendep");
+                assert_eq!(required_by.as_deref(), Some("pkg-a"));
+                assert!(
+                    reason.contains("named pipe (fifo)"),
+                    "the reason must say what selfie could not do with the file, got: {reason}"
+                );
+            }
+            _ => panic!("Expected UnreadableSpec"),
+        }
+    }
+
+    // The third answer. A directory selfie could not list is not a verdict on
+    // this dependency's spec -- there may not be one -- so reporting it as a
+    // spec selfie will not read blames a file that was never opened, and hides
+    // the permission problem the user actually has to fix.
+    #[tokio::test]
+    async fn a_listing_failure_is_not_reported_as_an_unreadable_dependency() {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-a")
+            .returning(|_| Ok(mock_package("pkg-a", &["pkg-b"])));
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-b")
+            .returning(|_| {
+                Err(crate::package::port::PackageRepoError::PackageListError(
+                    crate::package::port::PackageListError::IoError(std::sync::Arc::new(
+                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+                    )),
+                ))
+            });
+
+        let sender = make_sender();
+        let err = resolve_dependencies("pkg-a", &repo, "test", &sender)
+            .await
+            .expect_err("a listing failure must not resolve");
+
+        assert!(
+            err.dependency_failure().is_none(),
+            "a listing failure is not a verdict about pkg-b's spec, got: {err}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("denied"),
+            "the listing failure must survive to the user, got: {rendered}"
+        );
     }
 
     #[tokio::test]

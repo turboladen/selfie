@@ -69,21 +69,6 @@ pub trait PackageRepository: Send + Sync {
     /// listed.
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError>;
 
-    /// The names of the packages that parse, for callers that do not need the
-    /// definitions themselves.
-    ///
-    /// # Errors
-    ///
-    /// [`PackageListError`] if the underlying listing fails.
-    fn available_packages(&self) -> Result<Vec<String>, PackageListError> {
-        let list_packages_output = self.list_packages()?;
-
-        Ok(list_packages_output
-            .valid_packages()
-            .map(|package| package.name().to_string())
-            .collect())
-    }
-
     /// Every package file matching `name`. More than one is how an ambiguous
     /// package name is detected.
     ///
@@ -273,6 +258,36 @@ impl PackageRepoError {
             _ => false,
         }
     }
+
+    /// Whether this error is about the file or files sitting at that name.
+    ///
+    /// `true` when selfie found something there and will not use it: a file that
+    /// will not parse, one it could not read, or two files claiming the name.
+    /// `false` when the failure is not about that package's own file at all,
+    /// such as a directory selfie could not list.
+    ///
+    /// A caller that reports every failure as the package's own spec names the
+    /// wrong thing for the second group. [`means_no_such_package`] answers a
+    /// different question and the two are not opposites: a name with nothing
+    /// behind it is neither.
+    ///
+    /// [`means_no_such_package`]: Self::means_no_such_package
+    // The catch-all answers `false`, so an error variant added later is
+    // propagated as itself rather than relabelled as this package's spec. That
+    // is the safe direction: a caller losing the parent's name is recoverable,
+    // a caller blaming the wrong file is not.
+    #[must_use]
+    pub fn names_an_unusable_spec(&self) -> bool {
+        match self {
+            Self::PackageError(e) => matches!(
+                **e,
+                PackageError::ParseError { .. }
+                    | PackageError::UnreadableFile { .. }
+                    | PackageError::MultiplePackagesFound { .. }
+            ),
+            _ => false,
+        }
+    }
 }
 
 impl From<PackageError> for PackageRepoError {
@@ -347,7 +362,11 @@ pub enum PackageError {
     },
 
     /// Package definition file exists but could not be parsed
-    #[error("Parse error in package `{name}` from {}: {source}", packages_path.display())]
+    // The failing FILE, not the directory holding it. Every consumer of this
+    // message tells the reader to go open it, and a directory is not something
+    // you can open -- the two `spec` commands that say so were both naming a
+    // path the user still had to search.
+    #[error("Parse error in package `{name}` from {}: {source}", failed_file.display())]
     ParseError {
         name: String,
         packages_path: PathBuf,
@@ -363,7 +382,7 @@ pub enum PackageError {
     /// selfie either declined to open the file or the read itself failed. Saying
     /// "parse error" for a fifo sends the reader to inspect YAML syntax in a file
     /// that has none.
-    #[error("Cannot read package `{name}` from {}: {source}", packages_path.display())]
+    #[error("Cannot read package `{name}` from {}: {source}", failed_file.display())]
     UnreadableFile {
         name: String,
         packages_path: PathBuf,

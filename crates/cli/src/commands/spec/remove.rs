@@ -29,9 +29,27 @@ pub(crate) async fn handle_remove(
     // info before prompting the user. A dry-run API could eliminate this but adds complexity.
     let repo = common::create_package_repository(config);
 
-    let Ok(package_blob) = repo.get_package(package_name) else {
-        display.print_error(format!("Package '{package_name}' not found."));
-        return 1;
+    // Calling an unreadable file "not found" points the user at the wrong
+    // problem: they can see the file, so selfie looks broken and the real
+    // fault -- what is wrong inside it -- goes unnamed.
+    let package_blob = match repo.get_package(package_name) {
+        Ok(pkg) => pkg,
+        Err(e) if e.means_no_such_package() => {
+            display.print_error(format!("Package '{package_name}' not found."));
+            return 1;
+        }
+        // Everything else the repository can answer here: a file that will not
+        // parse, one selfie declined to open, several files claiming the name,
+        // a directory it could not list. The sentence must fit all of them, so
+        // it says what selfie could not do and leaves the cause to `e`, which
+        // already names the files and says what to do about them.
+        Err(e) => {
+            display.print_error(format!(
+                "Cannot remove '{package_name}': selfie could not load that spec, so it cannot \
+                 tell what depends on it. Resolve what is reported below, then try again. {e}"
+            ));
+            return 1;
+        }
     };
 
     display.print_info(format!("Package '{package_name}' found at:"));
@@ -286,28 +304,6 @@ environments:
 
         let remove_result = mock_repo.remove_package("workflow-test");
         assert!(remove_result.is_ok());
-    }
-
-    #[test]
-    fn test_package_discovery_with_mock_repo() {
-        use selfie::package::port::PackageRepository;
-
-        let mut mock_repo = MockPackageRepository::new();
-
-        mock_repo
-            .expect_available_packages()
-            .times(1)
-            .returning(|| {
-                Ok(vec![
-                    "app-server".to_string(),
-                    "database".to_string(),
-                    "web-client".to_string(),
-                ])
-            });
-
-        let package_names = mock_repo.available_packages().unwrap();
-        assert_eq!(package_names.len(), 3);
-        assert!(package_names.contains(&"app-server".to_string()));
     }
 
     #[test]

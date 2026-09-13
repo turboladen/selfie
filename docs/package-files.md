@@ -794,11 +794,14 @@ pipe (fifo), a socket, or a device node in the same way:
 Commands that enumerate specs continue with the rest and name the file they skipped:
 
 - `selfie spec list`
+- `selfie spec search`
 - `selfie package list`
 - `selfie spec validate --all`
 - `selfie package audit --all`
 - `selfie dotfiles list`
 - `selfie apply`
+- `selfie track`
+- `selfie spec create --interactive`, when it offers the dependency picker
 
 A command that names that one spec fails instead, because the file it was asked about is the file it
 cannot read — `selfie spec info ghost`, `selfie package check ghost`, `selfie package status ghost`.

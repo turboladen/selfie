@@ -68,13 +68,20 @@ pub(crate) async fn handle_track(
     }
 
     // Collect available package names for the prompt
-    let package_names = match load_package_names(&repo) {
-        Ok(names) => names,
+    let (package_names, skipped) = match load_package_names(&repo) {
+        Ok(loaded) => loaded,
         Err(msg) => {
             display.print_error(msg);
             return 1;
         }
     };
+
+    // A spec selfie cannot read is no place to put this dotfile, so the choices
+    // below leave it out. Naming it is what stops that list reading as the whole
+    // package directory.
+    for warning in skipped {
+        display.print_warning(warning);
+    }
 
     let choice = prompt_track_choice(&package_names, file);
 
@@ -223,13 +230,15 @@ fn find_existing_tracker(
     None
 }
 
-/// Load sorted package names from the repository.
-fn load_package_names(repo: &impl PackageRepository) -> Result<Vec<String>, String> {
-    let mut names = repo
-        .available_packages()
-        .map_err(|e| format!("Failed to list packages: {e}"))?;
-    names.sort();
-    Ok(names)
+/// Load sorted package names from the repository, along with a warning for every
+/// spec file that could not be loaded.
+///
+/// # Errors
+///
+/// A message to display when the package directory cannot be listed. There is
+/// nowhere to put the file if selfie cannot see the directory it would go in.
+fn load_package_names(repo: &impl PackageRepository) -> Result<(Vec<String>, Vec<String>), String> {
+    common::package_names_and_skipped(repo).map_err(|e| format!("Failed to list packages: {e}"))
 }
 
 #[cfg(test)]
@@ -259,19 +268,53 @@ mod tests {
 
     #[test]
     fn load_package_names_returns_sorted() {
-        use selfie::package::port::MockPackageRepository;
+        use selfie::package::PackageBuilder;
+        use selfie::package::port::{ListPackagesOutput, MockPackageRepository};
 
         let mut repo = MockPackageRepository::new();
-        repo.expect_available_packages().returning(|| {
-            Ok(vec![
-                "zsh".to_string(),
-                "alacritty".to_string(),
-                "fnm".to_string(),
-            ])
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_packages(
+                ["zsh", "alacritty", "fnm"]
+                    .into_iter()
+                    .map(|name| PackageBuilder::default().name(name).build())
+                    .collect(),
+            ))
         });
 
-        let names = load_package_names(&repo).unwrap();
+        let (names, skipped) = load_package_names(&repo).unwrap();
         assert_eq!(names, vec!["alacritty", "fnm", "zsh"]);
+        assert!(skipped.is_empty());
+    }
+
+    // The picker cannot offer a spec selfie could not read, so the caller has to
+    // be handed something to say about it.
+    #[test]
+    fn load_package_names_names_the_spec_it_could_not_read() {
+        use selfie::package::PackageBuilder;
+        use selfie::package::port::{ListPackagesOutput, MockPackageRepository};
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_results(vec![
+                Ok(PackageBuilder::default().name("fnm").build()),
+                Err(selfie::package::port::PackageParseError::new(
+                    "/test/packages/broken.yml",
+                    selfie::package::port::PackageParseKind::IrregularFile {
+                        kind: "named pipe (fifo)",
+                    },
+                )),
+            ]))
+        });
+
+        let (names, skipped) = load_package_names(&repo).unwrap();
+        assert_eq!(names, vec!["fnm"]);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("broken.yml"), "got: {}", skipped[0]);
+        assert!(
+            skipped[0].contains("named pipe (fifo)"),
+            "got: {}",
+            skipped[0]
+        );
     }
 
     #[test]

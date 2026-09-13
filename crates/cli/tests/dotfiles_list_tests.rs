@@ -89,3 +89,48 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
 // `crates/selfie/tests/dotfile_service_tests.rs`, which asserts `call_count() == 0`
 // against an injected runner and has a positive control proving that runner
 // records calls on the same path.
+
+// Whether the user keeps standalone dotfiles is settled before the listing runs:
+// the repository is built only when the directory is there. Once it is, a
+// listing selfie could not perform must not come back as a successful listing
+// that happens to be missing everything in that directory.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_dotfiles_directory_fails_the_listing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = setup_default_test_config();
+    write_packages(&temp);
+
+    // The sibling of `packages`, which is where an unset `dotfiles_directory`
+    // resolves to.
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores the mode bits, so check the precondition actually holds
+    // rather than inferring it from the user id.
+    if std::fs::read_dir(&dotfiles).is_ok() {
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("SKIP an_unreadable_dotfiles_directory_fails_the_listing: still readable");
+        return;
+    }
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "list"])
+        .output()
+        .unwrap();
+
+    // Before any assertion, so a failure cannot leave the temp dir unremovable.
+    std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "listing reported success; stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("Failed to load dotfiles"),
+        "stderr was: {stderr}"
+    );
+}

@@ -904,8 +904,11 @@ mod tests {
         assert!(!yaml_files.contains(&dir.join("file3.txt")));
     }
 
+    // Both halves of one listing: the files that parsed, and the file that did
+    // not. A listing that reported only the first half could not tell a caller
+    // that anything was missing from it.
     #[test]
-    fn test_available_packages() {
+    fn test_list_packages_reports_both_the_parsed_and_the_unparsable() {
         let mut fs = MockFileSystem::default();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
@@ -946,14 +949,16 @@ mod tests {
 
         let repo =
             YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
-        let available_packages = repo.available_packages().unwrap();
+        let output = repo.list_packages().unwrap();
 
-        // Should find only valid packages
-        assert_eq!(available_packages.len(), 2);
+        let names: Vec<&str> = output.valid_packages().map(Package::name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"ripgrep"));
+        assert!(names.contains(&"fzf"));
 
-        // Check package details
-        assert!(available_packages.iter().any(|p| *p == "ripgrep"));
-        assert!(available_packages.iter().any(|p| *p == "fzf"));
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(invalid.len(), 1, "the unparsable file must be reported");
+        assert_eq!(invalid[0].package_path(), package_dir.join("invalid.yaml"));
     }
 
     #[test]

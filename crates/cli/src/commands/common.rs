@@ -15,7 +15,7 @@ use selfie::{
         GetPackage, SpecOrigin, SpecService,
         event::PackageEvent,
         git_adapter::GixGitStatusProvider,
-        port::PackageRepository,
+        port::{PackageListError, PackageRepository},
         repository::yaml::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
@@ -51,6 +51,37 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
         config.package_directory().clone(),
         SpecOrigin::PackageDirectory,
     )
+}
+
+/// The names of the packages that loaded, sorted, along with a warning for every
+/// spec file that did not.
+///
+/// # Errors
+///
+/// [`PackageListError`] if the package directory itself cannot be listed. The
+/// caller decides what that means: one command aborts on it, another treats a
+/// directory that is not there yet as holding no candidates.
+// Shared by the two interactive pickers -- `spec create`'s dependency list and
+// `track`'s destination list -- so neither can quietly stop naming the files it
+// left out. The warnings are returned rather than printed so they can be
+// asserted: `print_warning` goes to stderr, which a unit test cannot observe.
+pub(crate) fn package_names_and_skipped(
+    repo: &impl PackageRepository,
+) -> Result<(Vec<String>, Vec<String>), PackageListError> {
+    let output = repo.list_packages()?;
+
+    let skipped = output
+        .invalid_packages()
+        .map(selfie::package::service::skipped_spec_warning)
+        .collect();
+
+    let mut names: Vec<String> = output
+        .valid_packages()
+        .map(|package| package.name().to_string())
+        .collect();
+    names.sort();
+
+    Ok((names, skipped))
 }
 
 /// Build the command runner every CLI service uses.
