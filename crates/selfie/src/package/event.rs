@@ -435,6 +435,16 @@ impl EventSender {
         .await;
     }
 
+    /// Send the dotfile listing.
+    pub(crate) async fn send_dotfile_list(&self, dotfile_list: DotfileListData) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::DotfileListLoaded {
+            operation_info,
+            dotfile_list,
+        })
+        .await;
+    }
+
     /// Send spec list summary data
     pub(crate) async fn send_spec_list(&self, spec_list: SpecListData) {
         let operation_info = self.touch_operation_info();
@@ -1982,6 +1992,12 @@ pub enum PackageEvent {
         packages: Vec<PackageListItem>,
     },
 
+    /// Every dotfile entry selfie could read across both directories.
+    DotfileListLoaded {
+        operation_info: OperationInfo,
+        dotfile_list: DotfileListData,
+    },
+
     /// Package list loaded
     PackageListLoaded {
         operation_info: OperationInfo,
@@ -2238,6 +2254,26 @@ pub struct SpecListData {
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
     pub show_all: bool,
+}
+
+/// Every dotfile entry selfie could read, and where it read them from.
+///
+/// Carries the packages rather than flattened rows: an adapter renders a
+/// dotfile entry from [`content_source`](crate::package::DotfileEntry::content_source),
+/// and the terminal wants one sentence where a structured consumer wants the
+/// kind and its parts as fields. Flattening here would pick one of those.
+///
+/// Specs that did not parse are not in this list and are not counted as absent:
+/// they leave as [`SpecSkipped`](PackageEvent::SpecSkipped) while the listing
+/// runs.
+#[derive(Debug, Clone)]
+pub struct DotfileListData {
+    /// Packages declaring at least one dotfile entry.
+    pub packages: Vec<crate::package::Package>,
+    /// Where the package specs were read from.
+    pub package_directory: String,
+    /// Where the standalone dotfile specs were read from.
+    pub dotfiles_directory: String,
 }
 
 /// Structured data for check results

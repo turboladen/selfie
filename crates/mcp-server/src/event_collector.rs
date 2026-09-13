@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, CheckResult, EventStream, OperationResult, PackageEvent,
 };
@@ -68,6 +69,73 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
 /// `kind` is what a caller branches on; `reason` is prose to display. `line` and
 /// `column` are null for the kinds that carry no location — absent because there
 /// is none, not because nothing was wired.
+/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+///
+/// Reports where content comes from without producing any of it: var names and
+/// the command string come from the package file and are references, not values.
+/// Nothing here runs a command or renders a template, so enumeration cannot leak
+/// a secret or trigger an authentication prompt.
+/// The `origin` value a dotfile row carries, derived from the package rather
+/// than chosen by the caller.
+///
+/// The two strings are the ones this tool has always emitted; what changes is
+/// where they come from. A call site pairing the dotfiles repository with
+/// "packages" used to mislabel every row it produced, with nothing to catch it.
+// No catch-all: an origin added later has to state which label it carries here
+// rather than inherit one that was written before it existed.
+pub(crate) fn origin_label(origin: SpecOrigin) -> &'static str {
+    match origin {
+        SpecOrigin::PackageDirectory => "packages",
+        SpecOrigin::DotfilesDirectory => "dotfiles",
+        SpecOrigin::Memory => "memory",
+    }
+}
+
+pub(crate) fn dotfile_entry_json(
+    package: &str,
+    scope: Option<&str>,
+    entry: &selfie::package::DotfileEntry,
+    origin: &str,
+) -> serde_json::Value {
+    use selfie::package::ContentSource;
+
+    let mut value = serde_json::json!({
+        "package": package,
+        "environment": scope,
+        "target": entry.target(),
+        "origin": origin,
+    });
+    let map = value.as_object_mut().expect("constructed as an object");
+
+    match entry.content_source() {
+        Ok(ContentSource::RepoFile(source)) => {
+            map.insert("kind".into(), "file".into());
+            map.insert("source".into(), source.into());
+        }
+        Ok(ContentSource::Template { source, vars }) => {
+            map.insert("kind".into(), "template".into());
+            map.insert("source".into(), source.into());
+            map.insert(
+                "vars".into(),
+                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
+            );
+        }
+        Ok(ContentSource::Provider(command)) => {
+            map.insert("kind".into(), "command".into());
+            map.insert("command".into(), command.into());
+        }
+        // The reason, not a generic string: an assistant reading this is the
+        // caller least able to guess which of the possible defects applies, and
+        // naming the key or the var is what lets it propose the actual fix.
+        Err(invalid) => {
+            map.insert("kind".into(), "invalid".into());
+            map.insert("error".into(), invalid.to_string().into());
+        }
+    }
+
+    value
+}
+
 fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
     use selfie::package::port::PackageParseKind;
 
@@ -201,6 +269,31 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &spec_list.package_directory,
                 "total_specs": spec_list.specs.len(),
                 "invalid_packages": invalid,
+            }))
+        }
+        PackageEvent::DotfileListLoaded { dotfile_list, .. } => {
+            // One row per ENTRY, not per package: a caller asking what is
+            // deployed where is asking about entries, and a package carrying
+            // three of them is three answers.
+            let entries: Vec<Value> = dotfile_list
+                .packages
+                .iter()
+                .flat_map(|pkg| {
+                    let origin = origin_label(pkg.origin());
+                    pkg.dotfiles_with_scope()
+                        .into_iter()
+                        .map(move |(scope, entry)| {
+                            dotfile_entry_json(pkg.name(), scope, entry, origin)
+                        })
+                })
+                .collect();
+
+            Some(serde_json::json!({
+                "type": "dotfile_list",
+                "package_directory": &dotfile_list.package_directory,
+                "dotfiles_directory": &dotfile_list.dotfiles_directory,
+                "total": entries.len(),
+                "entries": entries,
             }))
         }
         PackageEvent::PackageListLoaded { package_list, .. } => {

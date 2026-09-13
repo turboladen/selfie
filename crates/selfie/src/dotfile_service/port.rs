@@ -96,6 +96,7 @@ impl std::fmt::Debug for ApplyOptions {
 /// Operations:
 /// - `apply_all` / `apply` — Deploy dotfiles to target locations
 /// - `check_drift` — Detect changes since last deploy
+/// - `list` — Every dotfile entry declared, without running anything
 /// - `track_standalone` — Start tracking a file as a standalone dotfile
 /// - `track_for_package` — Add a file to an existing package's dotfiles
 #[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
@@ -108,6 +109,15 @@ pub trait DotfileService: Send + Sync {
 
     /// Check for drift between deployed files and repo sources
     fn check_drift(&self) -> impl Future<Output = EventStream> + Send;
+
+    /// Every dotfile entry declared across both directories.
+    ///
+    /// Reads files and runs nothing, so it cannot leak a provider's secret or
+    /// raise an authentication prompt. A spec that did not parse is reported as
+    /// [`SpecSkipped`](crate::package::event::PackageEvent::SpecSkipped) rather
+    /// than dropped, because a listing missing a package silently is one the
+    /// caller reads as the whole picture.
+    fn list(&self) -> impl Future<Output = EventStream> + Send;
 
     /// Track a file as a standalone dotfile.
     ///

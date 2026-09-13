@@ -7782,3 +7782,131 @@ mod apply_and_drift_agree {
         );
     }
 }
+
+// ── DotfileService::list ────────────────────────────────────────────────────
+//
+// The listing exists so both adapters stop reading the repositories themselves.
+// What matters at this level is what reaches the stream, because that is all an
+// adapter has: the entries, and every spec selfie could not read.
+
+#[tokio::test]
+async fn list_returns_entries_from_both_directories() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    write_package_yaml(
+        &dirs.dotfiles_dir,
+        "fish",
+        "name: fish\ndotfiles:\n  - source: config.fish\n    target: ~/.config/fish/config.fish\n",
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+
+    let mut names: Vec<&str> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::name)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["bat", "fish"]);
+
+    // Each package carries where it was read from, so an adapter labels a row
+    // from the package rather than from whichever loop it is standing in.
+    let origins: Vec<_> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::origin)
+        .collect();
+    assert!(origins.contains(&SpecOrigin::PackageDirectory));
+    assert!(origins.contains(&SpecOrigin::DotfilesDirectory));
+
+    assert!(matches!(
+        get_operation_result(&events),
+        Some(OperationResult::Success(_))
+    ));
+}
+
+// A spec that did not parse leaves as a typed event, and the rest of the
+// listing still arrives. Reporting it must not cost the caller the packages it
+// could read.
+#[tokio::test]
+async fn list_reports_a_spec_it_could_not_read() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "bat",
+        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+         bat.conf\n    target: ~/.config/bat/config\n",
+    );
+    write_package_yaml(&dirs.package_dir, "brokenpkg", "{{{\n");
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let skipped: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::SpecSkipped { error, .. } => Some(error),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
+    assert!(
+        skipped[0].package_path().ends_with("brokenpkg.yml"),
+        "got: {}",
+        skipped[0].package_path().display()
+    );
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must still arrive");
+    assert_eq!(listed.packages.len(), 1);
+    assert_eq!(listed.packages[0].name(), "bat");
+}
+
+// The control for the two above: a package declaring no dotfiles is not a row,
+// and a clean directory reports nothing skipped. Without this, a listing that
+// returned everything or reported everything would satisfy both.
+#[tokio::test]
+async fn list_omits_packages_with_no_dotfiles_and_reports_nothing_skipped() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "ripgrep",
+        "name: ripgrep\nenvironments:\n  test:\n    install: \"true\"\n",
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::SpecSkipped { .. })),
+        "a readable directory has nothing to skip"
+    );
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted even when empty");
+    assert!(listed.packages.is_empty());
+}

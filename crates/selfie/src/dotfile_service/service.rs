@@ -65,6 +65,18 @@ enum ApplyWarning {
     Other(String),
 }
 
+/// What a package name appearing in both directories means to the caller.
+// A parameter rather than two collectors: the reading of both repositories, the
+// unparsable-spec reporting and the unlistable-directory handling are identical,
+// and only this one question differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameCollision {
+    /// The `packages/` copy wins and the other is dropped with a warning.
+    PackagesWin,
+    /// Both are kept, because both files are there.
+    KeepBoth,
+}
+
 impl ApplyWarning {
     /// Emit this warning on the event stream it belongs to.
     ///
@@ -178,6 +190,19 @@ where
         package_repo: &R,
         dotfiles_repo: Option<&R>,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
+        Self::collect_packages(package_repo, dotfiles_repo, NameCollision::PackagesWin)
+    }
+
+    /// Collect from both repositories, deciding what a name in both means.
+    ///
+    /// Deploying has to choose one, because two packages cannot both own a name.
+    /// Listing must not: both files exist, and a caller asking what is on disk is
+    /// asking about the files rather than about what would win.
+    fn collect_packages(
+        package_repo: &R,
+        dotfiles_repo: Option<&R>,
+        collision: NameCollision,
+    ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
         // A package file that does not parse is dropped by `valid_packages`, and
@@ -217,7 +242,7 @@ where
 
         // Detect duplicate names across packages/ and dotfiles/ directories.
         // Packages from packages/ take precedence (they appear first in the vec).
-        if packages.len() > packages_count {
+        if collision == NameCollision::PackagesWin && packages.len() > packages_count {
             let mut seen = std::collections::HashSet::new();
             for pkg in &packages[..packages_count] {
                 seen.insert(pkg.name().to_string());
@@ -497,6 +522,64 @@ where
                         warning.send(&sender).await;
                     }
                     handle_check_drift(&packages, &fs, &config, &sender).await
+                }
+                Err(e) => OperationResult::Failure(
+                    crate::package::event::OperationFailure::PackageList(e),
+                ),
+            };
+
+            sender.send_completed(result).await;
+        })
+    }
+
+    async fn list(&self) -> EventStream {
+        // `KeepBoth`: a name in both directories is two files on disk, and a
+        // listing that showed one of them would be answering the deploy question
+        // instead of the one the user asked.
+        let collected = Self::collect_packages(
+            &self.package_repository,
+            self.dotfiles_repository.as_ref(),
+            NameCollision::KeepBoth,
+        );
+        let config = self.config.clone();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileList,
+                String::new(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+
+            sender.send_started().await;
+
+            let result = match collected {
+                Ok((packages, warnings)) => {
+                    // Drained before the listing is sent, so a consumer reading
+                    // events in order has the caveats in hand before the answer
+                    // they qualify.
+                    for warning in warnings {
+                        warning.send(&sender).await;
+                    }
+
+                    let packages: Vec<_> = packages
+                        .into_iter()
+                        .filter(|p| !p.dotfiles_with_scope().is_empty())
+                        .collect();
+                    let count = packages.len();
+
+                    sender
+                        .send_dotfile_list(crate::package::event::DotfileListData {
+                            packages,
+                            package_directory: config.package_directory().display().to_string(),
+                            dotfiles_directory: config.dotfiles_directory().display().to_string(),
+                        })
+                        .await;
+
+                    OperationResult::Success(OperationSuccess::Generic(format!(
+                        "Listed dotfiles across {count} package(s)"
+                    )))
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),

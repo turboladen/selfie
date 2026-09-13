@@ -943,60 +943,14 @@ fn collect_dotfile_entries(
         .filter(|p| !p.dotfiles_with_scope().is_empty())
     {
         for (scope, entry) in pkg.dotfiles_with_scope() {
-            entries.push(dotfile_entry_json(pkg.name(), scope, entry, origin));
+            entries.push(event_collector::dotfile_entry_json(
+                pkg.name(),
+                scope,
+                entry,
+                origin,
+            ));
         }
     }
-}
-
-/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
-///
-/// Reports where content comes from without producing any of it: var names and
-/// the command string come from the package file and are references, not values.
-/// Nothing here runs a command or renders a template, so enumeration cannot leak
-/// a secret or trigger an authentication prompt.
-fn dotfile_entry_json(
-    package: &str,
-    scope: Option<&str>,
-    entry: &selfie::package::DotfileEntry,
-    origin: &str,
-) -> serde_json::Value {
-    use selfie::package::ContentSource;
-
-    let mut value = serde_json::json!({
-        "package": package,
-        "environment": scope,
-        "target": entry.target(),
-        "origin": origin,
-    });
-    let map = value.as_object_mut().expect("constructed as an object");
-
-    match entry.content_source() {
-        Ok(ContentSource::RepoFile(source)) => {
-            map.insert("kind".into(), "file".into());
-            map.insert("source".into(), source.into());
-        }
-        Ok(ContentSource::Template { source, vars }) => {
-            map.insert("kind".into(), "template".into());
-            map.insert("source".into(), source.into());
-            map.insert(
-                "vars".into(),
-                vars.keys().map(String::as_str).collect::<Vec<_>>().into(),
-            );
-        }
-        Ok(ContentSource::Provider(command)) => {
-            map.insert("kind".into(), "command".into());
-            map.insert("command".into(), command.into());
-        }
-        // The reason, not a generic string: an assistant reading this is the
-        // caller least able to guess which of the possible defects applies, and
-        // naming the key or the var is what lets it propose the actual fix.
-        Err(invalid) => {
-            map.insert("kind".into(), "invalid".into());
-            map.insert("error".into(), invalid.to_string().into());
-        }
-    }
-
-    value
 }
 
 #[cfg(test)]
@@ -1047,7 +1001,8 @@ mod tests {
                 "exactly one of",
             ),
         ] {
-            let json = dotfile_entry_json("creds", None, &entry(yaml), "packages");
+            let json =
+                crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml), "packages");
 
             assert_eq!(json["kind"], "invalid", "for {yaml}");
             assert_eq!(json["target"], "~/.creds", "for {yaml}");
@@ -1063,7 +1018,7 @@ mod tests {
     fn a_deployable_entry_is_still_described_by_its_source() {
         // The control: without it the test above could pass on a change that
         // reported every entry as invalid.
-        let json = dotfile_entry_json(
+        let json = crate::event_collector::dotfile_entry_json(
             "creds",
             Some("macos"),
             &entry("source: creds.tpl\ntarget: ~/.creds\nvars:\n  api_key: op read x\n"),
