@@ -484,11 +484,15 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     fn find_dependent_packages(
         &self,
         target_package: &str,
-    ) -> Result<Vec<Package>, PackageRepoError> {
+    ) -> Result<(Vec<Package>, Vec<PackageParseError>), PackageRepoError> {
         let mut dependents = Vec::new();
 
         // Get all packages and check their dependencies
         let package_list = self.list_packages()?;
+
+        // A spec that did not load may well name the target. Carrying the
+        // failures out lets the caller say so rather than count them as absent.
+        let unreadable: Vec<PackageParseError> = package_list.invalid_packages().cloned().collect();
 
         for package in package_list.valid_packages() {
             // Skip the target package itself
@@ -508,7 +512,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             }
         }
 
-        Ok(dependents)
+        Ok((dependents, unreadable))
     }
 }
 
@@ -1471,7 +1475,7 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        let dependents = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert!(dependents.is_empty());
     }
 
@@ -1531,7 +1535,7 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        let dependents = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "dependent-package");
     }
@@ -1580,7 +1584,7 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        let dependents = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "multi-env-package");
     }
@@ -1611,7 +1615,7 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        let dependents = repo.find_dependent_packages("self-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("self-package").unwrap();
         assert!(dependents.is_empty());
     }
 
@@ -1661,7 +1665,7 @@ environments:
         let fs = RealFileSystem;
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
-        let dependents = repo.find_dependent_packages("shared-lib").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("shared-lib").unwrap();
         assert_eq!(dependents.len(), 2);
         let names: Vec<String> = dependents.iter().map(|p| p.name().to_string()).collect();
         assert!(names.contains(&"app-one".to_string()));
@@ -1695,7 +1699,7 @@ environments:
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
 
         // Should still find the valid dependent, ignoring the parse error
-        let dependents = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "valid-package");
     }

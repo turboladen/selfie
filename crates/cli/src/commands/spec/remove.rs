@@ -55,11 +55,13 @@ pub(crate) async fn handle_remove(
     display.print_info(format!("Package '{package_name}' found at:"));
     display.print_info(format!("  {}", package_blob.file_path().display()));
 
-    let dependent_packages = match repo.find_dependent_packages(package_name) {
-        Ok(deps) => deps,
+    // The unreadable specs are deliberately dropped here and consumed in the
+    // commit that follows; this one only opens the channel.
+    let (dependent_packages, _unreadable) = match repo.find_dependent_packages(package_name) {
+        Ok(found) => found,
         Err(e) => {
             display.print_warning(format!("Could not check for dependent packages: {e}"));
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -274,7 +276,7 @@ environments:
         let repo = common::create_package_repository_with_fs(&config, mock_fs);
 
         use selfie::package::port::PackageRepository;
-        let dependents = repo.find_dependent_packages("target-package").unwrap();
+        let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "dependent-package");
     }

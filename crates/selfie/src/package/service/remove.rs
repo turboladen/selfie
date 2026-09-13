@@ -36,13 +36,15 @@ where
         .next(sender, "Checking for dependent packages")
         .await;
 
-    let dependent_packages = match repo.find_dependent_packages(package_name) {
-        Ok(deps) => deps,
+    // The unreadable specs are deliberately dropped here and consumed in the
+    // commit that follows; this one only opens the channel.
+    let (dependent_packages, _unreadable) = match repo.find_dependent_packages(package_name) {
+        Ok(found) => found,
         Err(err) => {
             sender
                 .send_warning(format!("Failed to check for dependent packages: {err}"))
                 .await;
-            vec![]
+            (vec![], vec![])
         }
     };
 
@@ -158,7 +160,7 @@ mod tests {
 
         mock_repo
             .expect_find_dependent_packages()
-            .return_once(|_| Ok(vec![]));
+            .return_once(|_| Ok((vec![], Vec::new())));
 
         mock_repo.expect_remove_package().return_once(|_| Ok(()));
 
@@ -198,7 +200,7 @@ mod tests {
 
         mock_repo
             .expect_find_dependent_packages()
-            .return_once(move |_| Ok(vec![dependent]));
+            .return_once(move |_| Ok((vec![dependent], Vec::new())));
 
         mock_repo.expect_remove_package().return_once(|_| Ok(()));
 
@@ -273,7 +275,7 @@ mod tests {
 
         mock_repo
             .expect_find_dependent_packages()
-            .return_once(|_| Ok(vec![]));
+            .return_once(|_| Ok((vec![], Vec::new())));
 
         mock_repo.expect_remove_package().return_once(|_| Ok(()));
 
@@ -330,7 +332,7 @@ mod tests {
             .return_once(move |_| Ok(get_package));
         mock_repo
             .expect_find_dependent_packages()
-            .return_once(|_| Ok(vec![]));
+            .return_once(|_| Ok((vec![], Vec::new())));
         mock_repo.expect_remove_package().return_once(|_| Ok(()));
 
         let _ = handle_remove("cfg-pkg", &mock_repo, &config, &sender, &mut progress).await;
