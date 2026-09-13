@@ -42,6 +42,21 @@ git diff <old-tip> HEAD   # must be empty
 That check is what makes reordering safe. A conflict resolved wrongly shows up as a tree difference,
 so an empty diff means the only thing that changed is how the work is grouped.
 
+Compare against the right baseline. After folding review fixes in, the tree you started from is the
+one **with the fixup commits applied**, not the tip you had before them — those differ by exactly
+the fixes, and reporting the second comparison as "the tree did not move" is a claim nobody can
+check.
+
+**An empty diff says nothing about the intermediate commits.** It proves the final tree survived; it
+is silent on whether each commit still builds, which is the property a bisect needs and the one a
+rewrite is most likely to break. So re-run the per-commit check after **any** rewrite, before
+pushing — the rewrite's existence is the trigger, not a judgment about its size. That judgment is
+what failed on #157: the same check ran after #155's fold and was skipped after #157's because the
+fold felt smaller, and two commits reached `main` uncertified.
+
+A green tip cannot stand in for it. A commit that fails to build is invisible at the tip whenever a
+later commit fixes it, which is the ordinary shape of a fold.
+
 ## Messages
 
 Conventional-commit subjects, as the log already uses: `fix(scope):`, `docs:`, `refactor:`, `test:`,
