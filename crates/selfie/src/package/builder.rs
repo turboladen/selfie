@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use super::{DotfileEntry, EnvironmentConfig, Package};
+use super::{DotfileEntry, EnvironmentConfig, Package, SpecOrigin};
 
 #[derive(Default)]
 pub struct PackageBuilder {
@@ -11,6 +11,7 @@ pub struct PackageBuilder {
     post_install_note: Option<String>,
     environments: HashMap<String, EnvironmentConfig>,
     path: PathBuf,
+    origin: SpecOrigin,
 }
 
 impl PackageBuilder {
@@ -71,13 +72,24 @@ impl PackageBuilder {
         self
     }
 
+    /// Which directory this spec is to be treated as coming from.
+    ///
+    /// Defaults to [`SpecOrigin::Memory`], which is what a package built here
+    /// and never loaded from disk actually is. Set it where a test needs the
+    /// distinction the loader would have made.
+    #[must_use]
+    pub fn origin(mut self, origin: SpecOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
     /// Build the final Package instance
     ///
     /// Constructs a `Package` with all the configured values. Uses sensible
     /// defaults for any fields that weren't explicitly set.
     #[must_use]
     pub fn build(self) -> Package {
-        Package::new(
+        let mut package = Package::new(
             self.name,
             self.homepage,
             self.description,
@@ -85,7 +97,9 @@ impl PackageBuilder {
             self.post_install_note,
             self.environments,
             self.path,
-        )
+        );
+        package.set_origin(self.origin);
+        package
     }
 }
 

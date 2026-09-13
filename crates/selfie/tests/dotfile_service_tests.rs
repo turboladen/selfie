@@ -7910,3 +7910,33 @@ async fn list_omits_packages_with_no_dotfiles_and_reports_nothing_skipped() {
         .expect("the listing must be emitted even when empty");
     assert!(listed.packages.is_empty());
 }
+
+// A listing that fails outright is a failure, not an empty answer. Reporting it
+// as success with no entries is indistinguishable, to a caller with no stderr,
+// from a directory that genuinely holds no dotfiles.
+#[tokio::test]
+async fn list_reports_a_listing_it_could_not_perform() {
+    let dirs = TestDirs::new();
+    // The directory the service was pointed at is gone by the time it looks.
+    std::fs::remove_dir_all(&dirs.package_dir).unwrap();
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Failure(failure)) => {
+            let rendered = failure.to_string();
+            assert!(
+                rendered.contains("packages"),
+                "the failure must name the directory, got: {rendered}"
+            );
+        }
+        other => panic!("a failed listing must not report success, got: {other:?}"),
+    }
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::DotfileListLoaded { .. })),
+        "no listing should be emitted when the listing failed"
+    );
+}

@@ -64,17 +64,6 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
 }
 
-/// One parse failure as fields, shared by every surface that reports one.
-///
-/// `kind` is what a caller branches on; `reason` is prose to display. `line` and
-/// `column` are null for the kinds that carry no location — absent because there
-/// is none, not because nothing was wired.
-/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
-///
-/// Reports where content comes from without producing any of it: var names and
-/// the command string come from the package file and are references, not values.
-/// Nothing here runs a command or renders a template, so enumeration cannot leak
-/// a secret or trigger an authentication prompt.
 /// The `origin` value a dotfile row carries, derived from the package rather
 /// than chosen by the caller.
 ///
@@ -91,6 +80,12 @@ pub(crate) fn origin_label(origin: SpecOrigin) -> &'static str {
     }
 }
 
+/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+///
+/// Reports where content comes from without producing any of it: var names and
+/// the command string come from the package file and are references, not values.
+/// Nothing here runs a command or renders a template, so enumeration cannot leak
+/// a secret or trigger an authentication prompt.
 pub(crate) fn dotfile_entry_json(
     package: &str,
     scope: Option<&str>,
@@ -136,6 +131,11 @@ pub(crate) fn dotfile_entry_json(
     value
 }
 
+/// One parse failure as fields, shared by every surface that reports one.
+///
+/// `kind` is what a caller branches on; `reason` is prose to display. `line` and
+/// `column` are null for the kinds that carry no location — absent because there
+/// is none, not because nothing was wired.
 fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
     use selfie::package::port::PackageParseKind;
 
