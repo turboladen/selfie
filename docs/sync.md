@@ -42,10 +42,14 @@ When changes exist:
   → Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details
 ```
 
-This summary reports counts and target paths only. When a target keeps reappearing here and
-`selfie apply` never clears it, run `selfie dotfiles drift` — it explains why, and a
-[symlinked target](package-files.md#symlinked-targets) is the usual cause. `sync status` does not
-carry that reason itself.
+The summary reports counts and target paths. Above it, in the order the drift check reported them,
+`sync status` prints everything that check warned about, such as a package it would refuse, and
+every spec it skipped because it could not be parsed. A spec that could not be loaded is counted and
+named, and the summary line stops claiming no drift when any were.
+
+It does not print why an individual target drifted. When a target keeps reappearing here and
+`selfie apply` never clears it, run `selfie dotfiles drift`, which shows the reason beside the
+entry; a [symlinked target](package-files.md#symlinked-targets) is the usual cause.
 
 ### `selfie sync push`
 

@@ -769,7 +769,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_sync_status",
-        description = "Get git repository status and dotfile drift summary. Returns uncommitted changes, remote tracking state, and drifted dotfiles."
+        description = "Get git repository status and dotfile drift summary. Returns uncommitted changes, remote tracking state, and drifted dotfiles. Everything the drift check warned about (`warning` rows) and every spec it skipped as unparsable (`spec_skipped` rows) is included ahead of the summary, in the order drift reported them; those rows limit what the summary covers. Why an individual target drifted is not included; selfie_dotfiles_drift reports that beside each entry. The `sync_drift_summary` row carries `unloaded_specs`, the count of specs the drift check could not load; a non-zero value means the summary covers less than the repository."
     )]
     async fn selfie_sync_status(&self) -> Result<CallToolResult, McpError> {
         let stream = self.sync_service.status().await;
