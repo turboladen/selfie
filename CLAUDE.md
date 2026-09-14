@@ -19,7 +19,7 @@ dprint fmt                                     # Format Markdown/YAML (CI checks
 dprint check                                   # Verify Markdown/YAML formatting
 ```
 
-Two gate commands come with a catch:
+Three gate commands come with a catch:
 
 - `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
   rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form when
@@ -30,6 +30,15 @@ Two gate commands come with a catch:
   with an error naming a crate you did not touch. `.claude/rules/architecture.md` explains the
   mechanism. The command compiles today. It did not before PR #67, which is why older instructions
   prescribe a `--features with_mocks` flag that is now unnecessary.
+- **Any cargo command in this repo waits on `target/`'s lock.** A `cargo-watch` the maintainer is
+  running, or another agent's build, holds it — and `just check` then stalls silently rather than
+  failing, so a ten-minute wait is indistinguishable from a slow compile. Point `CARGO_TARGET_DIR`
+  at a path outside the repo to take a lock of your own.
+
+  That trades one hazard for another, and the second one lies. A target directory reused across runs
+  makes `cargo doc` exit 101 complaining that it could not remove `doc/selfie` because the directory
+  is not empty — that is the previous run's output, not a broken doc comment. Delete
+  `$CARGO_TARGET_DIR/doc` before the docs gate rather than reporting a failure it did not find.
 
 ### Running the binary by hand
 
