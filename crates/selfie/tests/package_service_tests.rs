@@ -746,3 +746,164 @@ mod a_spec_selfie_cannot_read {
         assert_successful_operation(&events);
     }
 }
+
+// A root package that stops loading once its install has succeeded. Its
+// recommends must still install: a failure at that point has no install left to
+// fail, so it could only skip them under a successful result.
+mod recommends_after_the_root_stops_loading {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    use selfie::{
+        fs::{FileSystemError, RealFileSystem},
+        package::{
+            GetPackage, Package, SpecOrigin,
+            git_adapter::GixGitStatusProvider,
+            port::{
+                ListPackagesOutput, PackageListError, PackageParseError, PackageRepoError,
+                PackageRepository,
+            },
+            repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    // The root fails to load from the moment its check command has run. Every
+    // check in this fixture reports installed, so that is where the root's
+    // install ends. Keyed to that step rather than to a read count, so the test
+    // does not depend on how many times install reads the root first.
+    #[derive(Debug, Clone)]
+    struct RootStopsLoading {
+        inner: YamlPackageRepository<RealFileSystem>,
+        runner: FakeCommandRunner,
+    }
+
+    impl PackageRepository for RootStopsLoading {
+        fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
+            if name == "root"
+                && self
+                    .runner
+                    .calls()
+                    .iter()
+                    .any(|(command, _)| command == "check-root")
+            {
+                return Err(PackageRepoError::IoError(Arc::new(std::io::Error::other(
+                    "the root package stopped loading",
+                ))));
+            }
+            self.inner.get_package(name)
+        }
+
+        fn path_is_occupied(&self, path: &Path) -> bool {
+            self.inner.path_is_occupied(path)
+        }
+
+        fn read_referenced_file(
+            &self,
+            package_path: &Path,
+            relative_path: &str,
+        ) -> Result<String, FileSystemError> {
+            self.inner.read_referenced_file(package_path, relative_path)
+        }
+
+        fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError> {
+            self.inner.list_packages()
+        }
+
+        fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError> {
+            self.inner.find_package_files(name)
+        }
+
+        fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
+            self.inner.save_package(package, path)
+        }
+
+        fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
+            self.inner.remove_package(name)
+        }
+
+        fn find_dependent_packages(
+            &self,
+            target_package: &str,
+        ) -> Result<(Vec<Package>, Vec<PackageParseError>), PackageRepoError> {
+            self.inner.find_dependent_packages(target_package)
+        }
+    }
+
+    #[tokio::test]
+    async fn its_recommends_are_still_installed() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().to_path_buf();
+        // The root has a hard dependency, and the dependency has a recommend of
+        // its own. Only the root's recommend may install: recommends are one
+        // level deep, and the dependency's list must neither replace the root's
+        // nor join it.
+        std::fs::write(
+            package_dir.join("root.yml"),
+            "name: root\nenvironments:\n  test:\n    check: \"check-root\"\n    install: \
+             \"install-root\"\n    dependencies:\n      - dep\n    recommends:\n      - rec\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("dep.yml"),
+            "name: dep\nenvironments:\n  test:\n    check: \"check-dep\"\n    install: \
+             \"install-dep\"\n    recommends:\n      - deprec\n",
+        )
+        .unwrap();
+        for name in ["rec", "deprec"] {
+            std::fs::write(
+                package_dir.join(format!("{name}.yml")),
+                format!(
+                    "name: {name}\nenvironments:\n  test:\n    check: \"check-{name}\"\n    \
+                     install: \"install-{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        // Every check reports installed, so no install command runs.
+        let runner = FakeCommandRunner::new()
+            .succeeding("check-root", b"")
+            .succeeding("check-dep", b"")
+            .succeeding("check-rec", b"");
+        let repo = RootStopsLoading {
+            inner: YamlPackageRepository::new(
+                RealFileSystem,
+                package_dir.clone(),
+                SpecOrigin::PackageDirectory,
+            ),
+            runner: runner.clone(),
+        };
+        let service = PackageServiceImpl::new(
+            repo,
+            runner,
+            GixGitStatusProvider,
+            service_test_config_with_dir(&package_dir),
+            CancellationToken::new(),
+        );
+
+        let events = collect_events(service.install("root", InstallOptions::default()).await).await;
+
+        assert_successful_operation(&events);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::RecommendSucceeded { recommend_name, .. } if recommend_name == "rec"
+            )),
+            "the recommend was not installed; events: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::RecommendStarted { recommend_name, .. } if recommend_name == "deprec"
+            )),
+            "a dependency's recommend was installed; events: {events:?}"
+        );
+    }
+}

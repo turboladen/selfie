@@ -13,6 +13,9 @@ use crate::package::{
 pub(crate) struct DependencyGraph {
     /// Packages in topological install order (dependencies first, target last).
     pub install_order: Vec<String>,
+    /// The root package's recommends for the environment, from the same read
+    /// that produced its dependencies.
+    pub root_recommends: Vec<String>,
 }
 
 /// Visit state for cycle detection during DFS traversal.
@@ -55,7 +58,10 @@ where
         ))
         .await;
 
-    dfs(
+    // Kept from the read that resolved the root, so install never loads the root
+    // after installing it. A load failing at that point has no install left to
+    // fail, and could only skip every recommend under a successful result.
+    let root_recommends = dfs(
         root_package,
         repo,
         config_environment,
@@ -73,10 +79,21 @@ where
         ))
         .await;
 
-    Ok(DependencyGraph { install_order })
+    Ok(DependencyGraph {
+        install_order,
+        root_recommends,
+    })
 }
 
+/// What [`dfs`] resolves to: the package's recommends, or the failure.
+type DfsFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<String>, Box<OperationFailure>>> + Send + 'a>,
+>;
+
 /// Recursive DFS that builds `install_order` bottom-up and detects cycles.
+///
+/// Returns the package's recommends for the environment, or an empty list for a
+/// package already visited.
 fn dfs<'a, PR>(
     package_name: &'a str,
     repo: &'a PR,
@@ -85,9 +102,7 @@ fn dfs<'a, PR>(
     visit_state: &'a mut std::collections::HashMap<String, VisitState>,
     install_order: &'a mut Vec<String>,
     path: &'a mut Vec<String>,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<(), Box<OperationFailure>>> + Send + 'a>,
->
+) -> DfsFuture<'a>
 where
     PR: PackageRepository + Sync,
 {
@@ -98,7 +113,7 @@ where
             .unwrap_or(VisitState::Unvisited);
 
         match state {
-            VisitState::Visited => return Ok(()),
+            VisitState::Visited => return Ok(Vec::new()),
             VisitState::Visiting => {
                 // Build the cycle path from where the cycle starts.
                 // The path already ends with package_name (pushed by the caller),
@@ -226,7 +241,7 @@ where
         visit_state.insert(package_name.to_string(), VisitState::Visited);
         install_order.push(package_name.to_string());
 
-        Ok(())
+        Ok(recommends)
     })
 }
 
@@ -288,11 +303,11 @@ where
         // install its parent asked for. Clearing the temporary entry keeps a
         // later hard dependency on the same package from being masked.
         //
-        // The silence costs the user nothing: `install_recommends` loads the
-        // package again and `install_recommend_in_bulk` turns that failure into
-        // a `RecommendFailed` event naming it. Both callers of
-        // `resolve_dependencies` are in `install.rs`, so nothing walks these
-        // edges without then trying the install.
+        // The silence costs nothing because whatever installs a package skipped
+        // here reads it again: `dfs`, when it is also a hard dependency, or
+        // `install_single_recommend`, when it is one of the root's recommends or
+        // a dependency of one, which reports the failure as `RecommendFailed`. A
+        // package neither reaches is never installed.
         let Ok(package_blob) = repo.get_package(package_name) else {
             visit_state.remove(package_name);
             return Ok(());
@@ -784,6 +799,7 @@ mod tests {
 
         // Only hard deps + root in install_order; recommend pkg-b excluded
         assert_eq!(graph.install_order, vec!["pkg-a"]);
+        assert_eq!(graph.root_recommends, vec!["pkg-b"]);
     }
 
     #[tokio::test]

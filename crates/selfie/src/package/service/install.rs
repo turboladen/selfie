@@ -81,7 +81,16 @@ where
 
     // After the main install succeeds, handle recommends (soft dependencies)
     if !options.skip_recommends {
-        install_recommends(package_name, repo, config, command_runner, sender, token).await;
+        install_recommends(
+            package_name,
+            &dep_graph.root_recommends,
+            repo,
+            config,
+            command_runner,
+            sender,
+            token,
+        )
+        .await;
     }
 
     last_result.unwrap_or_else(|| {
@@ -497,8 +506,12 @@ async fn verify_installation<CR>(
 /// Recommends are one-level deep only — we do NOT follow recommends of recommends.
 /// Each recommend's hard dependencies ARE resolved and installed.
 /// Failures are emitted as `RecommendFailed` events but never propagate to the parent result.
+///
+/// `recommends` must be the root package's list for `config.environment()`, as
+/// `DependencyGraph::root_recommends` holds it.
 async fn install_recommends<PR, CR>(
     package_name: &str,
+    recommends: &[String],
     repo: &PR,
     config: &SelfieConfig,
     command_runner: &CR,
@@ -508,26 +521,6 @@ async fn install_recommends<PR, CR>(
     PR: PackageRepository + Sync,
     CR: CommandRunner,
 {
-    // Load the root package to read its recommends for the current environment
-    let package_blob = match repo.get_package(package_name) {
-        Ok(pkg) => pkg,
-        Err(err) => {
-            sender
-                .send_debug(format!(
-                    "Skipping recommends for '{package_name}': failed to reload package: {err}"
-                ))
-                .await;
-            return;
-        }
-    };
-
-    let recommends: Vec<String> = package_blob
-        .package
-        .environments()
-        .get(config.environment())
-        .map(|env| env.recommends().to_vec())
-        .unwrap_or_default();
-
     if recommends.is_empty() {
         return;
     }
