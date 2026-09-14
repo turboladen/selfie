@@ -407,6 +407,64 @@ fn is_safe_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
+impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
+where
+    R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
+    F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+    CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    P: Privilege + Send + Sync,
+{
+    /// Apply every package, or only the one named by `filter`.
+    fn apply_matching(&self, filter: Option<String>, options: ApplyOptions) -> EventStream {
+        // Refused before collecting, so a run that will write nothing does not
+        // read and parse every spec in both repositories first.
+        let prepared = match self.sudo_refusal() {
+            Some(refusal) => Err(OperationFailure::Privilege(refusal)),
+            None => Self::collect_all_packages(
+                &self.package_repository,
+                self.dotfiles_repository.as_ref(),
+            )
+            .map_err(OperationFailure::PackageList),
+        };
+        let fs = self.filesystem.clone();
+        let runner = self.runner.clone();
+        let config = self.config.clone();
+        let token = self.cancellation_token.clone();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileApply,
+                filter.clone().unwrap_or_default(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+
+            sender.send_started().await;
+
+            let result = match prepared {
+                Ok((packages, warnings)) => {
+                    for warning in warnings {
+                        warning.send(&sender).await;
+                    }
+                    let ctx = ApplyContext {
+                        filesystem: &fs,
+                        runner: &runner,
+                        config: &config,
+                        sender: &sender,
+                        options: &options,
+                        token: &token,
+                    };
+                    handle_apply(&packages, &ctx, filter.as_deref()).await
+                }
+                Err(failure) => OperationResult::Failure(failure),
+            };
+
+            sender.send_completed(result).await;
+        })
+    }
+}
+
 impl<R, F, CR, P> DotfileService for DotfileServiceImpl<R, F, CR, P>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -415,98 +473,11 @@ where
     P: Privilege + Send + Sync,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
-        let refusal = self.sudo_refusal();
-        let collected =
-            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
-        let fs = self.filesystem.clone();
-        let runner = self.runner.clone();
-        let config = self.config.clone();
-        let token = self.cancellation_token.clone();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                OperationType::DotfileApply,
-                String::new(),
-                config.environment().to_string(),
-                OperationContext::default(),
-            );
-
-            sender.send_started().await;
-
-            let result = match (refusal, collected) {
-                (Some(refusal), _) => {
-                    OperationResult::Failure(OperationFailure::Privilege(refusal))
-                }
-                (None, Ok((packages, warnings))) => {
-                    for warning in warnings {
-                        warning.send(&sender).await;
-                    }
-                    let ctx = ApplyContext {
-                        filesystem: &fs,
-                        runner: &runner,
-                        config: &config,
-                        sender: &sender,
-                        options: &options,
-                        token: &token,
-                    };
-                    handle_apply(&packages, &ctx, None).await
-                }
-                (None, Err(e)) => OperationResult::Failure(
-                    crate::package::event::OperationFailure::PackageList(e),
-                ),
-            };
-
-            sender.send_completed(result).await;
-        })
+        self.apply_matching(None, options)
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
-        let refusal = self.sudo_refusal();
-        let collected =
-            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
-        let fs = self.filesystem.clone();
-        let runner = self.runner.clone();
-        let config = self.config.clone();
-        let token = self.cancellation_token.clone();
-        let name = name.to_string();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                OperationType::DotfileApply,
-                name.clone(),
-                config.environment().to_string(),
-                OperationContext::default(),
-            );
-
-            sender.send_started().await;
-
-            let result = match (refusal, collected) {
-                (Some(refusal), _) => {
-                    OperationResult::Failure(OperationFailure::Privilege(refusal))
-                }
-                (None, Ok((packages, warnings))) => {
-                    for warning in warnings {
-                        warning.send(&sender).await;
-                    }
-                    let ctx = ApplyContext {
-                        filesystem: &fs,
-                        runner: &runner,
-                        config: &config,
-                        sender: &sender,
-                        options: &options,
-                        token: &token,
-                    };
-                    handle_apply(&packages, &ctx, Some(&name)).await
-                }
-                (None, Err(e)) => OperationResult::Failure(
-                    crate::package::event::OperationFailure::PackageList(e),
-                ),
-            };
-
-            sender.send_completed(result).await;
-        })
+        self.apply_matching(Some(name.to_string()), options)
     }
 
     async fn check_drift(&self) -> EventStream {
