@@ -106,14 +106,14 @@ impl ApplyWarning {
     }
 }
 
-/// Whether `package` is the one `requested` names.
+/// Whether `package` is the one `folded_name`, already lowercased, names.
 ///
 /// A package is named by its spec file, with case folded, as package lookup
 /// resolves a name. The YAML `name:` field does not decide it.
-fn is_named(package: &Package, requested: &str) -> bool {
+fn is_named(package: &Package, folded_name: &str) -> bool {
     package
         .spec_name()
-        .is_some_and(|spec_name| spec_name == requested.to_lowercase())
+        .is_some_and(|spec_name| spec_name == folded_name)
 }
 
 /// The failure for a named apply that no collected package answers.
@@ -126,11 +126,7 @@ fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> OperationFailure {
     let requested = name.to_lowercase();
     let unloadable = warnings.iter().any(|warning| {
         matches!(warning, ApplyWarning::SkippedSpec(error)
-            if error
-                .package_path()
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .and_then(crate::package::spec_name_from_file_name)
+            if crate::package::spec_name_of(error.package_path())
                 .is_some_and(|spec_name| spec_name == requested))
     });
 
@@ -278,6 +274,10 @@ where
         // the three fixes for a missing package directory applies.
         let output = package_repo.list_packages()?;
         note_unparsable(&output, &mut warnings);
+        let unloadable_package_names: std::collections::HashSet<String> = output
+            .invalid_packages()
+            .filter_map(|error| crate::package::spec_name_of(error.package_path()))
+            .collect();
         let mut packages = output.valid_packages().cloned().collect::<Vec<_>>();
 
         let packages_count = packages.len();
@@ -304,24 +304,42 @@ where
             }
         }
 
-        // Detect duplicate names across packages/ and dotfiles/ directories.
-        // Packages from packages/ take precedence (they appear first in the vec).
+        // A packages/ spec claims its name over a dotfiles/ spec of the same
+        // name. Names are spec file names with case folded, as package lookup
+        // resolves them, so `bat.yml` and `Bat.yml` are one name. A packages/
+        // spec that failed to parse still claims its name: deploying the
+        // dotfiles/ copy in its place would apply a file the user did not mean.
         if collision == NameCollision::PackagesWin && packages.len() > packages_count {
-            let mut seen = std::collections::HashSet::new();
-            for pkg in &packages[..packages_count] {
-                seen.insert(pkg.name().to_string());
-            }
+            let claimed_by_packages: std::collections::HashSet<String> = packages[..packages_count]
+                .iter()
+                .filter_map(Package::spec_name)
+                .collect();
+            let mut seen_in_dotfiles = std::collections::HashSet::new();
 
+            // A loaded packages/ spec is asked about first, so the warning names
+            // the copy that is used. A dotfiles/ name repeated within dotfiles/
+            // is its own case and does not blame packages/.
             let mut deduped_dotfiles = Vec::new();
             for pkg in packages.drain(packages_count..) {
-                if seen.contains(pkg.name()) {
+                let Some(name) = pkg.spec_name() else {
+                    deduped_dotfiles.push(pkg);
+                    continue;
+                };
+                if claimed_by_packages.contains(&name) {
                     warnings.push(ApplyWarning::Other(format!(
-                        "Duplicate name '{}' found in both packages/ and dotfiles/ — \
-                         using the packages/ version",
-                        pkg.name()
+                        "Duplicate name '{name}' found in both packages/ and dotfiles/ — using \
+                         the packages/ version"
+                    )));
+                } else if unloadable_package_names.contains(&name) {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Not using '{name}' from dotfiles/: packages/ has a spec by that name \
+                         that could not be loaded"
+                    )));
+                } else if !seen_in_dotfiles.insert(name.clone()) {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Duplicate name '{name}' found twice in dotfiles/ — using the first"
                     )));
                 } else {
-                    seen.insert(pkg.name().to_string());
                     deduped_dotfiles.push(pkg);
                 }
             }
@@ -505,10 +523,13 @@ where
                     let refused_repository =
                         filter.is_none() && ApplyWarning::any_unreadable_repository(&warnings);
                     let selected: Vec<Package> = match filter.as_deref() {
-                        Some(name) => packages
-                            .into_iter()
-                            .filter(|package| is_named(package, name))
-                            .collect(),
+                        Some(name) => {
+                            let folded_name = name.to_lowercase();
+                            packages
+                                .into_iter()
+                                .filter(|package| is_named(package, &folded_name))
+                                .collect()
+                        }
                         None => packages,
                     };
                     // A name matching nothing has nothing to deploy. Completing

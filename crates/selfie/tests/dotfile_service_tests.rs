@@ -1235,6 +1235,103 @@ async fn apply_by_name_ignores_case() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
 
+// A spec's name is its file name with case folded, so `dotfiles/Bat.yml` is the
+// same package as `packages/bat.yml`, and only the packages/ copy deploys.
+#[tokio::test]
+async fn a_name_in_both_directories_differing_in_case_deploys_only_the_packages_copy() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "from packages").unwrap();
+    let packages_target = dirs.target_dir.join("packages-bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", packages_target.to_str().unwrap())],
+    );
+    std::fs::write(dirs.dotfiles_dir.join("bat.conf"), "from dotfiles").unwrap();
+    let dotfiles_target = dirs.target_dir.join("dotfiles-bat.conf");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "Bat",
+        &[("bat.conf", dotfiles_target.to_str().unwrap())],
+    );
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(&packages_target).unwrap(),
+        "from packages"
+    );
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. } if message.contains("Duplicate name 'bat'")
+        )),
+        "the collision must be reported; events: {events:?}"
+    );
+}
+
+// A packages/ spec that failed to parse still claims its name. Deploying the
+// dotfiles/ spec of that name in its place would apply a file the user did not
+// mean, and applying the name says the packages/ spec could not be loaded.
+#[tokio::test]
+async fn an_unparsable_packages_spec_keeps_its_dotfiles_namesake_from_deploying() {
+    let dirs = TestDirs::new();
+    write_package_yaml(&dirs.package_dir, "bat", "name: bat\nenvironments: [\n");
+    std::fs::write(dirs.dotfiles_dir.join("bat.conf"), "from dotfiles").unwrap();
+    let dotfiles_target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "bat",
+        &[("bat.conf", dotfiles_target.to_str().unwrap())],
+    );
+
+    let all = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {all:?}"
+    );
+    assert!(
+        all.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Not using 'bat' from dotfiles/")
+        )),
+        "the skipped namesake must be reported; events: {all:?}"
+    );
+
+    let named = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("bat", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {named:?}"
+    );
+    assert_no_such_package(
+        &named,
+        "bat",
+        selfie::package::event::NoSuchPackageReason::NotLoaded,
+    );
+}
+
 #[tokio::test]
 async fn test_deploy_state_persists_across_service_instances() {
     let dirs = TestDirs::new();

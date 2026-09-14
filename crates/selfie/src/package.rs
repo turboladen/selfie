@@ -236,6 +236,13 @@ pub(crate) fn spec_name_from_file_name(file_name: &str) -> Option<String> {
         .then(|| stem.to_lowercase())
 }
 
+/// The package name a spec file's path claims, or `None` if it names no spec.
+pub(crate) fn spec_name_of(path: &std::path::Path) -> Option<String> {
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .and_then(spec_name_from_file_name)
+}
+
 /// [`shadows_field`] against a dotfile entry's own fields.
 ///
 /// Applied only inside a dotfile entry. A package's top-level `_target: &target
@@ -1338,10 +1345,7 @@ impl Package {
     /// memory with no file behind it.
     #[must_use]
     pub(crate) fn spec_name(&self) -> Option<String> {
-        self.path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .and_then(spec_name_from_file_name)
+        spec_name_of(&self.path)
     }
 }
 
