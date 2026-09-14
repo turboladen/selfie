@@ -172,6 +172,11 @@ standalone dotfiles — they are simply absent from `apply`, `dotfiles drift` an
 a new spec's name is not checked against them. If you do **not** set it and the default sibling does
 not exist, selfie says nothing: that is the ordinary state of a setup with no standalone dotfiles.
 
+A directory that exists but cannot be listed is different, because selfie knows standalone dotfiles
+may be in it. `dotfiles list` fails. `apply` with no package name, and `dotfiles drift`, carry on
+with the package dotfiles and count one refusal, so they exit non-zero. See
+[A refusal is not a success](../README.md#a-refusal-is-not-a-success).
+
 `dotfiles track` is the exception. It copies the file _into_ that directory, so it refuses rather
 than warning.
 

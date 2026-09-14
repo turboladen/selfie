@@ -1,13 +1,29 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, CheckResult, EventStream, OperationResult, PackageEvent,
+    AuditResult, CheckResult, EventStream, NoSuchPackageReason, OperationFailure, OperationResult,
+    PackageEvent,
 };
 use serde_json::Value;
 
 pub struct EventCollectorResult {
     pub success: bool,
     pub data: Value,
+}
+
+/// The result payload for a failed operation.
+fn failure_json(failure: &OperationFailure) -> Value {
+    let mut payload = serde_json::json!({ "status": "failure", "error": format!("{failure}") });
+    // A field, so an assistant can tell a typo from a spec that failed to load
+    // without matching the sentence in `error`.
+    if let OperationFailure::NoSuchPackage { reason, .. } = failure {
+        payload["reason"] = Value::from(match reason {
+            NoSuchPackageReason::NotFound => "not_found",
+            NoSuchPackageReason::MaybeInUnlistableDirectory => "maybe_in_unlistable_directory",
+            NoSuchPackageReason::NotLoaded => "not_loaded",
+        });
+    }
+    payload
 }
 
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
@@ -48,10 +64,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
             true,
             serde_json::json!({ "status": "success", "message": format!("{s}") }),
         ),
-        Some(OperationResult::Failure(f)) => (
-            false,
-            serde_json::json!({ "status": "failure", "error": format!("{f}") }),
-        ),
+        Some(OperationResult::Failure(f)) => (false, failure_json(&f)),
         None => (
             false,
             serde_json::json!({ "status": "unknown", "error": "No completion event received" }),
@@ -625,6 +638,25 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.data["result"]["status"], "success");
+    }
+
+    // The reason is a field, so telling a typo from a spec that failed to load
+    // does not require reading `error`.
+    #[tokio::test]
+    async fn a_named_package_that_could_not_be_found_carries_its_reason() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Failure(OperationFailure::NoSuchPackage {
+                name: "bat".to_string(),
+                reason: NoSuchPackageReason::NotLoaded,
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "failure");
+        assert_eq!(result.data["result"]["reason"], "not_loaded");
     }
 
     // A failed command's output must not reach the JSON an assistant reads.

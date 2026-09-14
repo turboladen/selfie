@@ -37,6 +37,35 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         }
     }
 
+    /// The error for a package directory that could not be found:
+    /// `PackageDirectoryNotFound` when it does not exist, `IoError` when it
+    /// exists and cannot be reached.
+    fn absent_directory_error(&self) -> PackageListError {
+        // `path_exists` answers false for any failed stat, including a
+        // directory behind a parent that denies access. Calling that "not found"
+        // tells the user to create a directory that is there, and lets a caller
+        // skip a repository that may be hiding specs, so the listing is asked
+        // why. A listing that fails with `NotFound` means absent, and so does
+        // `NotADirectory`: a path running through a file cannot exist.
+        match self.fs.list_directory(&self.package_dir) {
+            // The error from the listing names no path, and the user has two
+            // configured directories to choose between, so it is rebuilt with
+            // this one's path and the same kind.
+            Err(FileSystemError::IoError(error))
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                PackageListError::IoError(Arc::new(std::io::Error::new(
+                    error.kind(),
+                    format!("{}: {error}", self.package_dir.display()),
+                )))
+            }
+            _ => PackageListError::PackageDirectoryNotFound(self.package_dir.clone()),
+        }
+    }
+
     /// List all YAML files in a directory, in sorted path order.
     ///
     /// The sort is load-bearing, not cosmetic. `read_dir` yields entries in
@@ -242,7 +271,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // Check if package directory exists first
         if !self.fs.path_exists(&self.package_dir) {
             return Err(PackageRepoError::PackageListError(
-                PackageListError::PackageDirectoryNotFound(self.package_dir.clone()),
+                self.absent_directory_error(),
             ));
         }
 
@@ -307,9 +336,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError> {
         if !self.fs.path_exists(&self.package_dir) {
-            return Err(PackageListError::PackageDirectoryNotFound(
-                self.package_dir.clone(),
-            ));
+            return Err(self.absent_directory_error());
         }
 
         // Get all YAML files in the directory
@@ -327,9 +354,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError> {
         if !self.fs.path_exists(&self.package_dir) {
-            return Err(PackageListError::PackageDirectoryNotFound(
-                self.package_dir.clone(),
-            ));
+            return Err(self.absent_directory_error());
         }
 
         let entries = self
@@ -678,6 +703,13 @@ mod tests {
         fs.expect_path_exists()
             .with(predicate::eq(package_dir.clone()))
             .returning(|_| false);
+        fs.expect_list_directory()
+            .with(predicate::eq(package_dir.clone()))
+            .returning(|_| {
+                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
 
         let repo =
             YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
@@ -1025,6 +1057,13 @@ mod tests {
         fs.expect_path_exists()
             .with(predicate::eq(nonexistent_dir.clone()))
             .returning(|_| false);
+        fs.expect_list_directory()
+            .with(predicate::eq(nonexistent_dir.clone()))
+            .returning(|_| {
+                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
 
         let repo =
             YamlPackageRepository::new(fs, nonexistent_dir.clone(), SpecOrigin::PackageDirectory);
@@ -1036,6 +1075,35 @@ mod tests {
                 assert_eq!(path, nonexistent_dir);
             }
             PackageListError::IoError(_) => panic!("Expected PackageDirectoryNotFound error"),
+        }
+    }
+
+    // A failed stat is not proof of absence. A directory behind a parent that
+    // denies access fails `path_exists` too, and calling it "not found" would
+    // tell the user to create a directory that is already there.
+    #[test]
+    fn a_directory_that_cannot_be_reached_is_an_io_error_not_absent() {
+        let mut fs = MockFileSystem::default();
+        let unreachable_dir = PathBuf::from("/locked/packages");
+
+        fs.expect_path_exists()
+            .with(predicate::eq(unreachable_dir.clone()))
+            .returning(|_| false);
+        fs.expect_list_directory()
+            .with(predicate::eq(unreachable_dir.clone()))
+            .returning(|_| {
+                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                )))
+            });
+
+        let repo = YamlPackageRepository::new(fs, unreachable_dir, SpecOrigin::PackageDirectory);
+
+        match repo.list_packages() {
+            Err(PackageListError::IoError(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("an unreachable directory must be an IO error, got: {other:?}"),
         }
     }
 

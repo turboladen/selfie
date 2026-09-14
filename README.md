@@ -204,6 +204,10 @@ argument — is rejected by the argument parser before any of this applies, and 
 | `1`   | The command failed, **or refused part of its work**. See below.               |
 | `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
 
+`selfie apply <name>` matches the name against package file names, ignoring case, the same way
+`selfie package install` does. A name that matches no package, or names a package file that could
+not be loaded, is a failure and exits `1` with nothing deployed.
+
 ### A refusal is not a success
 
 `selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run
@@ -225,6 +229,10 @@ re-read to check for one, or a package-directory spec that declares no environme
 running a command the file's author did not write — a key hiding `environments:` costs them the very
 mapping they take that command from. Each was given one package name, so a refusal leaves them
 nothing to do.
+
+A dotfiles directory that exists but cannot be listed counts as one refusal for `selfie apply` with
+no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it was part of the run
+and none could be read, while the package dotfiles still deploy or are still checked.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 

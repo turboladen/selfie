@@ -755,7 +755,8 @@ pub enum OperationSuccess {
         /// Usually an entry, but **not always one**: a package refused whole for
         /// a top-level key that hides a real field contributes 1 here and no
         /// entries at all, because its `dotfiles` list was swallowed by the very
-        /// key being refused. So this counts *outcomes*, matching
+        /// key being refused. A dotfiles directory that exists and could not be
+        /// listed also contributes 1 and no entries. So this counts *outcomes*, matching
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
@@ -771,7 +772,8 @@ pub enum OperationSuccess {
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
-        /// Packages drift could not check, because apply would refuse them whole.
+        /// What drift could not check: a package apply would refuse whole, or a
+        /// dotfiles directory that exists and could not be listed.
         ///
         /// Its own field rather than part of `total_count`: `sync status`
         /// renders that total as "N deployed", so a refusal counted there would
@@ -844,8 +846,27 @@ pub enum OperationFailure {
         package_name: String,
         reason: String,
     },
+    /// A command named a package it could not find.
+    // Typed rather than folded into `Generic` so an adapter can tell a typo from
+    // a spec that failed to load without parsing the sentence.
+    NoSuchPackage {
+        name: String,
+        reason: NoSuchPackageReason,
+    },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// Why a named package could not be found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoSuchPackageReason {
+    /// No spec file has the name.
+    NotFound,
+    /// No spec file that could be listed has the name, and a dotfiles directory
+    /// could not be listed, so the package may be in it.
+    MaybeInUnlistableDirectory,
+    /// A spec file has the name and could not be loaded.
+    NotLoaded,
 }
 
 /// Command execution failure details
@@ -925,6 +946,18 @@ impl std::fmt::Display for OperationFailure {
                 package_name,
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
+            OperationFailure::NoSuchPackage { name, reason } => match reason {
+                NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
+                NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
+                    f,
+                    "No package named '{name}' was found. A dotfiles directory could not be \
+                     listed, so it may be there."
+                ),
+                NoSuchPackageReason::NotLoaded => write!(
+                    f,
+                    "Package '{name}' could not be loaded, so nothing was applied"
+                ),
+            },
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -2162,7 +2195,8 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         drifted_targets: Vec<String>,
         total_deployed: usize,
-        /// Packages the drift run could not check at all.
+        /// What the drift run could not check at all: packages, or a dotfiles
+        /// directory that exists and could not be listed.
         ///
         /// Without it this summary reports a clean run for a package `apply`
         /// refuses, which is the answer that sends a reader to run the command

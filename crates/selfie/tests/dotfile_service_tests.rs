@@ -1105,6 +1105,21 @@ async fn test_apply_source_only_change_redeploys() {
     assert_eq!(content, "key = \"updated\"");
 }
 
+// The apply failed for a name no package answers, for this reason.
+fn assert_no_such_package(
+    events: &[PackageEvent],
+    expected_name: &str,
+    expected_reason: selfie::package::event::NoSuchPackageReason,
+) {
+    match get_operation_result(events) {
+        Some(OperationResult::Failure(OperationFailure::NoSuchPackage { name, reason })) => {
+            assert_eq!(name, expected_name);
+            assert_eq!(*reason, expected_reason);
+        }
+        other => panic!("expected NoSuchPackage, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_apply_nonexistent_package_name() {
     let dirs = TestDirs::new();
@@ -1125,24 +1140,195 @@ async fn test_apply_nonexistent_package_name() {
     let stream = service.apply("no-such-pkg", ApplyOptions::default()).await;
     let events = collect_events(stream).await;
 
-    let result = get_operation_result(&events).expect("Should have a Completed event");
-    match result {
-        OperationResult::Success(OperationSuccess::DotfilesApplied {
-            deployed_count,
-            skipped_count,
-            conflict_count,
-            ..
-        }) => {
-            assert_eq!(*deployed_count, 0);
-            assert_eq!(*skipped_count, 0);
-            assert_eq!(*conflict_count, 0);
-        }
-        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
-    }
+    // A success with every count at zero would read as "already up to date".
+    assert_no_such_package(
+        &events,
+        "no-such-pkg",
+        selfie::package::event::NoSuchPackageReason::NotFound,
+    );
 
     assert!(
         !target_file.exists(),
         "Target file should NOT be deployed for non-matching package"
+    );
+}
+
+// The package asked for may be a standalone dotfile in the directory selfie
+// could not list, so "not found" alone would send the user looking for a typo.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_by_name_says_an_unlistable_directory_may_hold_the_package() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_by_name_says_an_unlistable_directory_may_hold_the_package");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("standalone", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_no_such_package(
+        &events,
+        "standalone",
+        selfie::package::event::NoSuchPackageReason::MaybeInUnlistableDirectory,
+    );
+}
+
+// A spec that failed to parse is dropped before the name is looked for, so "no
+// package named" would send the user looking for a file that is there.
+#[tokio::test]
+async fn apply_by_name_says_an_unparsable_spec_could_not_be_loaded() {
+    let dirs = TestDirs::new();
+    write_package_yaml(&dirs.package_dir, "bat", "name: bat\nenvironments: [\n");
+
+    let events = collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+    assert_no_such_package(
+        &events,
+        "bat",
+        selfie::package::event::NoSuchPackageReason::NotLoaded,
+    );
+}
+
+// A package is named by its file, as package lookup resolves it, so a `name:`
+// field that differs from the file name does not hide the package from apply.
+#[tokio::test]
+async fn apply_by_name_matches_the_file_name_not_the_name_field() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("init.lua"), "-- nvim").unwrap();
+    let target = dirs.target_dir.join("init.lua");
+    write_package_yaml(
+        &dirs.package_dir,
+        "nvim",
+        &format!(
+            "name: neovim\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - \
+             source: init.lua\n    target: {}\n",
+            target.display()
+        ),
+    );
+
+    let events = collect_events(dirs.service().apply("nvim", ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "-- nvim");
+}
+
+// Package files are matched ignoring case, so apply accepts a name the other
+// package commands accept.
+#[tokio::test]
+async fn apply_by_name_ignores_case() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+
+    let events = collect_events(dirs.service().apply("BAT", ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A spec's name is its file name with case folded, so `dotfiles/Bat.yml` is the
+// same package as `packages/bat.yml`, and only the packages/ copy deploys.
+#[tokio::test]
+async fn a_name_in_both_directories_differing_in_case_deploys_only_the_packages_copy() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "from packages").unwrap();
+    let packages_target = dirs.target_dir.join("packages-bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", packages_target.to_str().unwrap())],
+    );
+    std::fs::write(dirs.dotfiles_dir.join("bat.conf"), "from dotfiles").unwrap();
+    let dotfiles_target = dirs.target_dir.join("dotfiles-bat.conf");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "Bat",
+        &[("bat.conf", dotfiles_target.to_str().unwrap())],
+    );
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(&packages_target).unwrap(),
+        "from packages"
+    );
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. } if message.contains("Duplicate name 'bat'")
+        )),
+        "the collision must be reported; events: {events:?}"
+    );
+}
+
+// A packages/ spec that failed to parse still claims its name. Deploying the
+// dotfiles/ spec of that name in its place would apply a file the user did not
+// mean, and applying the name says the packages/ spec could not be loaded.
+#[tokio::test]
+async fn an_unparsable_packages_spec_keeps_its_dotfiles_namesake_from_deploying() {
+    let dirs = TestDirs::new();
+    write_package_yaml(&dirs.package_dir, "bat", "name: bat\nenvironments: [\n");
+    std::fs::write(dirs.dotfiles_dir.join("bat.conf"), "from dotfiles").unwrap();
+    let dotfiles_target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.dotfiles_dir,
+        "bat",
+        &[("bat.conf", dotfiles_target.to_str().unwrap())],
+    );
+
+    let all = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {all:?}"
+    );
+    assert!(
+        all.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Not using 'bat' from dotfiles/")
+        )),
+        "the skipped namesake must be reported; events: {all:?}"
+    );
+
+    let named = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("bat", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        !dotfiles_target.exists(),
+        "the dotfiles/ copy must not deploy; events: {named:?}"
+    );
+    assert_no_such_package(
+        &named,
+        "bat",
+        selfie::package::event::NoSuchPackageReason::NotLoaded,
     );
 }
 
@@ -7941,37 +8127,170 @@ async fn list_reports_a_listing_it_could_not_perform() {
     );
 }
 
-// The asymmetry with apply and drift, pinned so it cannot be flattened by
-// accident. A dotfiles directory that exists and cannot be listed is fatal to a
-// LISTING, because the table would be missing every standalone entry while the
-// exit code said the listing succeeded. Deploying is different: it can carry on
-// with the package dotfiles, which is why `collect_all_packages` treats this as
-// a warning for its other callers.
+// Test directories whose dotfiles directory is mode 0o000 until this is
+// dropped. Restoring in `Drop` runs before the `TestDirs` field is dropped, so
+// the temp directory can still be removed when an assertion panics first.
 #[cfg(unix)]
-#[tokio::test]
-async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+struct UnlistableDotfilesDirectory(TestDirs);
+
+#[cfg(unix)]
+impl std::ops::Deref for UnlistableDotfilesDirectory {
+    type Target = TestDirs;
+
+    fn deref(&self) -> &TestDirs {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnlistableDotfilesDirectory {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Ignored on failure: panicking in `Drop` during an unwind aborts the
+        // test binary, which would hide the assertion that started the unwind.
+        let _ =
+            std::fs::set_permissions(&self.0.dotfiles_dir, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+// A package with one deployable dotfile, and a dotfiles directory that exists
+// and cannot be listed. `None` when running as root, which ignores the mode bits.
+#[cfg(unix)]
+fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDirectory, PathBuf)> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dirs = TestDirs::new();
-    write_package_yaml(
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "bat",
-        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
-         bat.conf\n    target: ~/.config/bat/config\n",
+        &[("bat.conf", target.to_str().unwrap())],
     );
     std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let dirs = UnlistableDotfilesDirectory(dirs);
 
-    // Root ignores the mode bits, so confirm the precondition holds rather than
-    // inferring it from the user id.
     if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
-        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        return None;
+    }
+    Some((dirs, target))
+}
+
+// Every standalone dotfile in an unlistable directory was asked for and none can
+// deploy, so the run carries a refusal. The package dotfile still deploys, which
+// is what keeps this a refusal rather than a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
+    let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(refused_count(&events), 1, "events: {events:?}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "theme = dark",
+        "the package dotfile must still deploy"
+    );
+}
+
+// A named apply that matches a package outside the directory lost nothing to it,
+// so the run is not refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
+    let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("bat", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A dotfiles directory removed after the service was built is absent, the state
+// a directory missing at startup is reported in. It is not one hiding dotfiles,
+// so the run is not refused, though the directory is still reported.
+#[tokio::test]
+async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Failed to load standalone dotfiles")
+        )),
+        "the missing directory must still be reported; events: {events:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn drift_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP drift_counts_an_unlistable_dotfiles_directory_as_a_refusal");
+        return;
+    };
+
+    let events = collect_events(dirs.service_with_dotfiles().check_drift().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            refused_count,
+            total_count,
+            ..
+        })) => {
+            assert_eq!(*refused_count, 1, "events: {events:?}");
+            assert_eq!(
+                *total_count, 1,
+                "the package dotfile must still be checked; events: {events:?}"
+            );
+        }
+        other => panic!("expected a drift check, got: {other:?}"),
+    }
+}
+
+// A dotfiles directory that exists and cannot be listed is fatal to a LISTING,
+// because the table would be missing every standalone entry. Apply and drift
+// have the package dotfiles to act on, so they count it as a refusal instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
         eprintln!("SKIP list_fails_when_a_dotfiles_directory_cannot_be_listed: still readable");
         return;
-    }
+    };
 
     let events = collect_events(dirs.service_with_dotfiles().list().await).await;
-    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(
         matches!(
@@ -7979,6 +8298,34 @@ async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
             Some(OperationResult::Failure(_))
         ),
         "an unlistable directory must not come back as a successful listing"
+    );
+}
+
+// A dotfiles directory removed after the service was built is absent, which a
+// listing reports and carries on past, the same as a directory missing at
+// startup. Only one that exists and cannot be listed fails the listing.
+#[tokio::test]
+async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
+    let dirs = TestDirs::new();
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.list().await).await;
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Failed to load standalone dotfiles")
+        )),
+        "the missing directory must still be reported; events: {events:?}"
     );
 }
 

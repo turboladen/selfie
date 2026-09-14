@@ -106,3 +106,58 @@ environments:
         if matches!(**box_error, PackageError::MultiplePackagesFound { .. })
     ));
 }
+
+// A package directory behind a parent that denies access exists, so listing it
+// is an IO error rather than a directory the user should create.
+#[cfg(unix)]
+#[test]
+fn a_package_directory_behind_an_unreadable_parent_is_not_reported_missing() {
+    use selfie::package::port::PackageListError;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Restores the parent's mode when dropped, so a panic before the end of the
+    // test cannot leave a directory the temp dir is unable to remove.
+    struct Locked<'a>(&'a std::path::Path);
+    impl Drop for Locked<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let temp_dir = tempdir().unwrap();
+    let parent = temp_dir.path().join("locked");
+    let package_dir = parent.join("packages");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+    let _locked = Locked(&parent);
+
+    // Root ignores the mode bits, so confirm the precondition rather than infer
+    // it from the user id.
+    if fs::read_dir(&parent).is_ok() {
+        eprintln!(
+            "SKIP a_package_directory_behind_an_unreadable_parent_is_not_reported_missing: \
+             still readable"
+        );
+        return;
+    }
+
+    let repo = YamlPackageRepository::new(
+        RealFileSystem,
+        package_dir.clone(),
+        SpecOrigin::PackageDirectory,
+    );
+
+    match repo.list_packages() {
+        // The listing's own error names no path, and there are two configured
+        // directories it could be about.
+        Err(error @ PackageListError::IoError(_)) => {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(&package_dir.display().to_string()),
+                "the error must name the directory, got: {rendered}"
+            );
+        }
+        Err(other) => panic!("an unreachable directory must be an IO error, got: {other}"),
+        Ok(_) => panic!("an unreachable directory must not list"),
+    }
+}

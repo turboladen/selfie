@@ -61,12 +61,8 @@ const APPLY_CANCELLED: &str = "Apply cancelled";
 enum ApplyWarning {
     /// A package file that could not be parsed.
     SkippedSpec(crate::package::port::PackageParseError),
-    /// A repository selfie found and could not list.
-    ///
-    /// Typed apart from [`Other`](Self::Other) because the callers disagree
-    /// about what it costs them, and prose gives them nothing to disagree on:
-    /// deploying can carry on without the standalone dotfiles, but a listing
-    /// that carries on prints a table missing every one of them.
+    /// A repository that exists and could not be listed, so the collection is
+    /// missing whatever it holds.
     UnreadableRepository(crate::package::port::PackageListError),
     /// Anything else worth saying, already worded.
     Other(String),
@@ -85,6 +81,13 @@ enum NameCollision {
 }
 
 impl ApplyWarning {
+    /// Whether any of `warnings` is an [`UnreadableRepository`](Self::UnreadableRepository).
+    fn any_unreadable_repository(warnings: &[Self]) -> bool {
+        warnings
+            .iter()
+            .any(|warning| matches!(warning, Self::UnreadableRepository(_)))
+    }
+
     /// Emit this warning on the event stream it belongs to.
     ///
     /// The two kinds leave differently on purpose: a skipped spec travels typed so
@@ -100,6 +103,43 @@ impl ApplyWarning {
             }
             Self::Other(message) => sender.send_warning(message).await,
         }
+    }
+}
+
+/// Whether `package` is the one `folded_name`, already lowercased, names.
+///
+/// A package is named by its spec file, with case folded, as package lookup
+/// resolves a name. The YAML `name:` field does not decide it.
+fn is_named(package: &Package, folded_name: &str) -> bool {
+    package
+        .spec_name()
+        .is_some_and(|spec_name| spec_name == folded_name)
+}
+
+/// The failure for a named apply that no collected package answers.
+fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> OperationFailure {
+    use crate::package::event::NoSuchPackageReason;
+
+    // The unloadable check runs before either not-found answer. A spec that
+    // failed to parse is not among the collected packages, and "no package
+    // named" would send the user looking for a file they may be looking at.
+    let requested = name.to_lowercase();
+    let unloadable = warnings.iter().any(|warning| {
+        matches!(warning, ApplyWarning::SkippedSpec(error)
+            if crate::package::spec_name_of(error.package_path())
+                .is_some_and(|spec_name| spec_name == requested))
+    });
+
+    let reason = if unloadable {
+        NoSuchPackageReason::NotLoaded
+    } else if ApplyWarning::any_unreadable_repository(warnings) {
+        NoSuchPackageReason::MaybeInUnlistableDirectory
+    } else {
+        NoSuchPackageReason::NotFound
+    };
+    OperationFailure::NoSuchPackage {
+        name: name.to_string(),
+        reason,
     }
 }
 
@@ -234,6 +274,10 @@ where
         // the three fixes for a missing package directory applies.
         let output = package_repo.list_packages()?;
         note_unparsable(&output, &mut warnings);
+        let unloadable_package_names: std::collections::HashSet<String> = output
+            .invalid_packages()
+            .filter_map(|error| crate::package::spec_name_of(error.package_path()))
+            .collect();
         let mut packages = output.valid_packages().cloned().collect::<Vec<_>>();
 
         let packages_count = packages.len();
@@ -244,30 +288,58 @@ where
                     note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
                 }
+                // This directory existed when the repository was built and is
+                // gone now. A directory missing at startup is reported and
+                // otherwise ignored, and one that disappears later is in the
+                // same state, so this is not a refusal. Only a directory that
+                // exists and cannot be listed may be hiding dotfiles.
+                Err(e @ crate::package::port::PackageListError::PackageDirectoryNotFound(_)) => {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Failed to load standalone dotfiles: {e}"
+                    )));
+                }
                 Err(e) => {
                     warnings.push(ApplyWarning::UnreadableRepository(e));
                 }
             }
         }
 
-        // Detect duplicate names across packages/ and dotfiles/ directories.
-        // Packages from packages/ take precedence (they appear first in the vec).
+        // A packages/ spec claims its name over a dotfiles/ spec of the same
+        // name. Names are spec file names with case folded, as package lookup
+        // resolves them, so `bat.yml` and `Bat.yml` are one name. A packages/
+        // spec that failed to parse still claims its name: deploying the
+        // dotfiles/ copy in its place would apply a file the user did not mean.
         if collision == NameCollision::PackagesWin && packages.len() > packages_count {
-            let mut seen = std::collections::HashSet::new();
-            for pkg in &packages[..packages_count] {
-                seen.insert(pkg.name().to_string());
-            }
+            let claimed_by_packages: std::collections::HashSet<String> = packages[..packages_count]
+                .iter()
+                .filter_map(Package::spec_name)
+                .collect();
+            let mut seen_in_dotfiles = std::collections::HashSet::new();
 
+            // A loaded packages/ spec is asked about first, so the warning names
+            // the copy that is used. A dotfiles/ name repeated within dotfiles/
+            // is its own case and does not blame packages/.
             let mut deduped_dotfiles = Vec::new();
             for pkg in packages.drain(packages_count..) {
-                if seen.contains(pkg.name()) {
+                let Some(name) = pkg.spec_name() else {
+                    deduped_dotfiles.push(pkg);
+                    continue;
+                };
+                if claimed_by_packages.contains(&name) {
                     warnings.push(ApplyWarning::Other(format!(
-                        "Duplicate name '{}' found in both packages/ and dotfiles/ — \
-                         using the packages/ version",
-                        pkg.name()
+                        "Duplicate name '{name}' found in both packages/ and dotfiles/ — using \
+                         the packages/ version"
+                    )));
+                } else if unloadable_package_names.contains(&name) {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Not using '{name}' from dotfiles/: packages/ has a spec by that name \
+                         that could not be loaded"
+                    )));
+                } else if !seen_in_dotfiles.insert(name.clone()) {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Duplicate name '{name}' found twice in dotfiles/ — using the first"
                     )));
                 } else {
-                    seen.insert(pkg.name().to_string());
                     deduped_dotfiles.push(pkg);
                 }
             }
@@ -407,6 +479,94 @@ fn is_safe_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
+impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
+where
+    R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
+    F: FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+    CR: CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    P: Privilege + Send + Sync,
+{
+    /// Apply every package, or only the one named by `filter`.
+    fn apply_matching(&self, filter: Option<String>, options: ApplyOptions) -> EventStream {
+        // Refused before collecting, so a run that will write nothing does not
+        // read and parse every spec in both repositories first.
+        let prepared = match self.sudo_refusal() {
+            Some(refusal) => Err(OperationFailure::Privilege(refusal)),
+            None => Self::collect_all_packages(
+                &self.package_repository,
+                self.dotfiles_repository.as_ref(),
+            )
+            .map_err(OperationFailure::PackageList),
+        };
+        let fs = self.filesystem.clone();
+        let runner = self.runner.clone();
+        let config = self.config.clone();
+        let token = self.cancellation_token.clone();
+
+        Self::create_event_stream(move |tx| async move {
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::DotfileApply,
+                filter.clone().unwrap_or_default(),
+                config.environment().to_string(),
+                OperationContext::default(),
+            );
+
+            sender.send_started().await;
+
+            let result = match prepared {
+                Ok((packages, warnings)) => {
+                    // Applying everything carries on with the package dotfiles
+                    // and counts an unlistable dotfiles directory as a refusal.
+                    // A named apply that finds its package lost nothing to the
+                    // directory, so it counts none.
+                    let refused_repository =
+                        filter.is_none() && ApplyWarning::any_unreadable_repository(&warnings);
+                    let selected: Vec<Package> = match filter.as_deref() {
+                        Some(name) => {
+                            let folded_name = name.to_lowercase();
+                            packages
+                                .into_iter()
+                                .filter(|package| is_named(package, &folded_name))
+                                .collect()
+                        }
+                        None => packages,
+                    };
+                    // A name matching nothing has nothing to deploy. Completing
+                    // as a success with every count at zero would read as
+                    // "already up to date" to a user who mistyped the name.
+                    let unmatched = filter
+                        .as_deref()
+                        .filter(|_| selected.is_empty())
+                        .map(|name| no_such_package(name, &warnings));
+                    // Drained first, so a skipped spec's own reason precedes the
+                    // failure it explains.
+                    for warning in warnings {
+                        warning.send(&sender).await;
+                    }
+                    if let Some(failure) = unmatched {
+                        return sender
+                            .send_completed(OperationResult::Failure(failure))
+                            .await;
+                    }
+                    let ctx = ApplyContext {
+                        filesystem: &fs,
+                        runner: &runner,
+                        config: &config,
+                        sender: &sender,
+                        options: &options,
+                        token: &token,
+                    };
+                    handle_apply(&selected, &ctx, refused_repository).await
+                }
+                Err(failure) => OperationResult::Failure(failure),
+            };
+
+            sender.send_completed(result).await;
+        })
+    }
+}
+
 impl<R, F, CR, P> DotfileService for DotfileServiceImpl<R, F, CR, P>
 where
     R: PackageRepository + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -415,98 +575,11 @@ where
     P: Privilege + Send + Sync,
 {
     async fn apply_all(&self, options: ApplyOptions) -> EventStream {
-        let refusal = self.sudo_refusal();
-        let collected =
-            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
-        let fs = self.filesystem.clone();
-        let runner = self.runner.clone();
-        let config = self.config.clone();
-        let token = self.cancellation_token.clone();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                OperationType::DotfileApply,
-                String::new(),
-                config.environment().to_string(),
-                OperationContext::default(),
-            );
-
-            sender.send_started().await;
-
-            let result = match (refusal, collected) {
-                (Some(refusal), _) => {
-                    OperationResult::Failure(OperationFailure::Privilege(refusal))
-                }
-                (None, Ok((packages, warnings))) => {
-                    for warning in warnings {
-                        warning.send(&sender).await;
-                    }
-                    let ctx = ApplyContext {
-                        filesystem: &fs,
-                        runner: &runner,
-                        config: &config,
-                        sender: &sender,
-                        options: &options,
-                        token: &token,
-                    };
-                    handle_apply(&packages, &ctx, None).await
-                }
-                (None, Err(e)) => OperationResult::Failure(
-                    crate::package::event::OperationFailure::PackageList(e),
-                ),
-            };
-
-            sender.send_completed(result).await;
-        })
+        self.apply_matching(None, options)
     }
 
     async fn apply(&self, name: &str, options: ApplyOptions) -> EventStream {
-        let refusal = self.sudo_refusal();
-        let collected =
-            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
-        let fs = self.filesystem.clone();
-        let runner = self.runner.clone();
-        let config = self.config.clone();
-        let token = self.cancellation_token.clone();
-        let name = name.to_string();
-
-        Self::create_event_stream(move |tx| async move {
-            let sender = EventSender::new_with_context(
-                tx,
-                OperationType::DotfileApply,
-                name.clone(),
-                config.environment().to_string(),
-                OperationContext::default(),
-            );
-
-            sender.send_started().await;
-
-            let result = match (refusal, collected) {
-                (Some(refusal), _) => {
-                    OperationResult::Failure(OperationFailure::Privilege(refusal))
-                }
-                (None, Ok((packages, warnings))) => {
-                    for warning in warnings {
-                        warning.send(&sender).await;
-                    }
-                    let ctx = ApplyContext {
-                        filesystem: &fs,
-                        runner: &runner,
-                        config: &config,
-                        sender: &sender,
-                        options: &options,
-                        token: &token,
-                    };
-                    handle_apply(&packages, &ctx, Some(&name)).await
-                }
-                (None, Err(e)) => OperationResult::Failure(
-                    crate::package::event::OperationFailure::PackageList(e),
-                ),
-            };
-
-            sender.send_completed(result).await;
-        })
+        self.apply_matching(Some(name.to_string()), options)
     }
 
     async fn check_drift(&self) -> EventStream {
@@ -528,10 +601,15 @@ where
 
             let result = match collected {
                 Ok((packages, warnings)) => {
+                    // Carries on with the package dotfiles, and
+                    // `handle_check_drift` counts the unlistable directory as a
+                    // refusal.
+                    let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
-                    handle_check_drift(&packages, &fs, &config, &sender).await
+                    handle_check_drift(&packages, &fs, &config, &sender, unreadable_repository)
+                        .await
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -566,15 +644,12 @@ where
 
             let result = match collected {
                 Ok((packages, warnings)) => {
-                    // A directory selfie found and could not list is fatal HERE
-                    // and not on the deploy paths, and the difference is what
-                    // the answer is for. Deploying can carry on without the
-                    // standalone dotfiles; a listing that carries on prints a
-                    // table missing every one of them over an exit code saying
-                    // the listing succeeded.
-                    let unreadable = warnings
-                        .iter()
-                        .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)));
+                    // A directory selfie found and could not list is fatal HERE.
+                    // Apply and drift still have the package dotfiles to act on,
+                    // so they count it as a refusal and carry on. A listing has
+                    // nothing to carry on to except a table missing every
+                    // standalone dotfile.
+                    let unreadable = ApplyWarning::any_unreadable_repository(&warnings);
 
                     // Drained before the listing is sent, so a consumer reading
                     // events in order has the caveats in hand before the answer
@@ -1367,10 +1442,14 @@ struct ApplyContext<'a, F, CR> {
 }
 
 /// Core logic for applying config files
+///
+/// Applies every package in `packages`. `refused_repository` counts one refusal
+/// for a dotfiles repository whose dotfiles were asked for and could not be
+/// listed.
 async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
-    filter_name: Option<&str>,
+    refused_repository: bool,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -1402,7 +1481,7 @@ where
     // `SecretOutcome::Failed` and `SecretOutcome::Skipped` — see
     // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
     // never reached the repository-file path until now.
-    let mut refused_count: usize = 0;
+    let mut refused_count = usize::from(refused_repository);
 
     // Set when `stop_on_error` aborts the run. Held rather than returned so the
     // deploy state below is still saved.
@@ -1413,13 +1492,6 @@ where
     let mut stopped: Option<String> = None;
 
     'packages: for package in packages {
-        // If filtering by name, skip non-matching packages
-        if let Some(name) = filter_name
-            && package.name() != name
-        {
-            continue;
-        }
-
         // Refuse the whole package before asking what dotfiles it has, through
         // the one function that answers whether apply refuses a package at all.
         // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
@@ -1831,11 +1903,15 @@ where
 }
 
 /// Core logic for checking drift
+///
+/// `unreadable_repository` says a dotfiles repository could not be listed, so
+/// `packages` is missing whatever it holds.
 async fn handle_check_drift<F>(
     packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
+    unreadable_repository: bool,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -1847,7 +1923,9 @@ where
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
-    let mut refused_count: usize = 0;
+    // One for an unlistable dotfiles directory, as apply counts it. A drift
+    // report missing every standalone dotfile must not read as all clear.
+    let mut refused_count = usize::from(unreadable_repository);
 
     for package in packages {
         // The same question apply asks, in the same place, so the two commands

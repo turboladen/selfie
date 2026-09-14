@@ -605,7 +605,8 @@ environments:
 # Deploy all dotfiles from all packages
 selfie apply
 
-# Deploy dotfiles for a specific package only
+# Deploy dotfiles for a specific package only. The name is matched against package
+# file names, ignoring case; a name matching no package is an error.
 selfie apply starship
 
 # Preview what would change without writing files
