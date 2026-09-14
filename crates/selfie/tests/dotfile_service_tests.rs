@@ -7941,37 +7941,170 @@ async fn list_reports_a_listing_it_could_not_perform() {
     );
 }
 
-// The asymmetry with apply and drift, pinned so it cannot be flattened by
-// accident. A dotfiles directory that exists and cannot be listed is fatal to a
-// LISTING, because the table would be missing every standalone entry while the
-// exit code said the listing succeeded. Deploying is different: it can carry on
-// with the package dotfiles, which is why `collect_all_packages` treats this as
-// a warning for its other callers.
+// Test directories whose dotfiles directory is mode 0o000 until this is
+// dropped. Restoring in `Drop` runs before the `TestDirs` field is dropped, so
+// the temp directory can still be removed when an assertion panics first.
 #[cfg(unix)]
-#[tokio::test]
-async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+struct UnlistableDotfilesDirectory(TestDirs);
+
+#[cfg(unix)]
+impl std::ops::Deref for UnlistableDotfilesDirectory {
+    type Target = TestDirs;
+
+    fn deref(&self) -> &TestDirs {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnlistableDotfilesDirectory {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Ignored on failure: panicking in `Drop` during an unwind aborts the
+        // test binary, which would hide the assertion that started the unwind.
+        let _ =
+            std::fs::set_permissions(&self.0.dotfiles_dir, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+// A package with one deployable dotfile, and a dotfiles directory that exists
+// and cannot be listed. `None` when running as root, which ignores the mode bits.
+#[cfg(unix)]
+fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDirectory, PathBuf)> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dirs = TestDirs::new();
-    write_package_yaml(
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
         &dirs.package_dir,
         "bat",
-        "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
-         bat.conf\n    target: ~/.config/bat/config\n",
+        &[("bat.conf", target.to_str().unwrap())],
     );
     std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let dirs = UnlistableDotfilesDirectory(dirs);
 
-    // Root ignores the mode bits, so confirm the precondition holds rather than
-    // inferring it from the user id.
     if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
-        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        return None;
+    }
+    Some((dirs, target))
+}
+
+// Every standalone dotfile in an unlistable directory was asked for and none can
+// deploy, so the run carries a refusal. The package dotfile still deploys, which
+// is what keeps this a refusal rather than a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
+    let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(refused_count(&events), 1, "events: {events:?}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "theme = dark",
+        "the package dotfile must still deploy"
+    );
+}
+
+// A named apply that matches a package outside the directory lost nothing to it,
+// so the run is not refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
+    let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("bat", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A dotfiles directory removed after the service was built is absent, the state
+// a directory missing at startup is reported in. It is not one hiding dotfiles,
+// so the run is not refused, though the directory is still reported.
+#[tokio::test]
+async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Failed to load standalone dotfiles")
+        )),
+        "the missing directory must still be reported; events: {events:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn drift_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP drift_counts_an_unlistable_dotfiles_directory_as_a_refusal");
+        return;
+    };
+
+    let events = collect_events(dirs.service_with_dotfiles().check_drift().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            refused_count,
+            total_count,
+            ..
+        })) => {
+            assert_eq!(*refused_count, 1, "events: {events:?}");
+            assert_eq!(
+                *total_count, 1,
+                "the package dotfile must still be checked; events: {events:?}"
+            );
+        }
+        other => panic!("expected a drift check, got: {other:?}"),
+    }
+}
+
+// A dotfiles directory that exists and cannot be listed is fatal to a LISTING,
+// because the table would be missing every standalone entry. Apply and drift
+// have the package dotfiles to act on, so they count it as a refusal instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
         eprintln!("SKIP list_fails_when_a_dotfiles_directory_cannot_be_listed: still readable");
         return;
-    }
+    };
 
     let events = collect_events(dirs.service_with_dotfiles().list().await).await;
-    std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(
         matches!(
@@ -7979,6 +8112,34 @@ async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
             Some(OperationResult::Failure(_))
         ),
         "an unlistable directory must not come back as a successful listing"
+    );
+}
+
+// A dotfiles directory removed after the service was built is absent, which a
+// listing reports and carries on past, the same as a directory missing at
+// startup. Only one that exists and cannot be listed fails the listing.
+#[tokio::test]
+async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
+    let dirs = TestDirs::new();
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.list().await).await;
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. }
+                if message.contains("Failed to load standalone dotfiles")
+        )),
+        "the missing directory must still be reported; events: {events:?}"
     );
 }
 

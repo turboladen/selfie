@@ -226,6 +226,10 @@ running a command the file's author did not write — a key hiding `environments
 mapping they take that command from. Each was given one package name, so a refusal leaves them
 nothing to do.
 
+A dotfiles directory that exists but cannot be listed counts as one refusal for `selfie apply` with
+no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it was part of the run
+and none could be read, while the package dotfiles still deploy or are still checked.
+
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 
 - **A skip.** The entry was already in sync, so there was nothing to do.

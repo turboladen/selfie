@@ -755,7 +755,8 @@ pub enum OperationSuccess {
         /// Usually an entry, but **not always one**: a package refused whole for
         /// a top-level key that hides a real field contributes 1 here and no
         /// entries at all, because its `dotfiles` list was swallowed by the very
-        /// key being refused. So this counts *outcomes*, matching
+        /// key being refused. A dotfiles directory that exists and could not be
+        /// listed also contributes 1 and no entries. So this counts *outcomes*, matching
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
@@ -771,7 +772,8 @@ pub enum OperationSuccess {
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
-        /// Packages drift could not check, because apply would refuse them whole.
+        /// What drift could not check: a package apply would refuse whole, or a
+        /// dotfiles directory that exists and could not be listed.
         ///
         /// Its own field rather than part of `total_count`: `sync status`
         /// renders that total as "N deployed", so a refusal counted there would
@@ -2162,7 +2164,8 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         drifted_targets: Vec<String>,
         total_deployed: usize,
-        /// Packages the drift run could not check at all.
+        /// What the drift run could not check at all: packages, or a dotfiles
+        /// directory that exists and could not be listed.
         ///
         /// Without it this summary reports a clean run for a package `apply`
         /// refuses, which is the answer that sends a reader to run the command

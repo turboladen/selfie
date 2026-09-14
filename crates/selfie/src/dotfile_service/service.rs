@@ -61,12 +61,8 @@ const APPLY_CANCELLED: &str = "Apply cancelled";
 enum ApplyWarning {
     /// A package file that could not be parsed.
     SkippedSpec(crate::package::port::PackageParseError),
-    /// A repository selfie found and could not list.
-    ///
-    /// Typed apart from [`Other`](Self::Other) because the callers disagree
-    /// about what it costs them, and prose gives them nothing to disagree on:
-    /// deploying can carry on without the standalone dotfiles, but a listing
-    /// that carries on prints a table missing every one of them.
+    /// A repository that exists and could not be listed, so the collection is
+    /// missing whatever it holds.
     UnreadableRepository(crate::package::port::PackageListError),
     /// Anything else worth saying, already worded.
     Other(String),
@@ -85,6 +81,13 @@ enum NameCollision {
 }
 
 impl ApplyWarning {
+    /// Whether any of `warnings` is an [`UnreadableRepository`](Self::UnreadableRepository).
+    fn any_unreadable_repository(warnings: &[Self]) -> bool {
+        warnings
+            .iter()
+            .any(|warning| matches!(warning, Self::UnreadableRepository(_)))
+    }
+
     /// Emit this warning on the event stream it belongs to.
     ///
     /// The two kinds leave differently on purpose: a skipped spec travels typed so
@@ -243,6 +246,16 @@ where
                 Ok(output) => {
                     note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
+                }
+                // This directory existed when the repository was built and is
+                // gone now. A directory missing at startup is reported and
+                // otherwise ignored, and one that disappears later is in the
+                // same state, so this is not a refusal. Only a directory that
+                // exists and cannot be listed may be hiding dotfiles.
+                Err(e @ crate::package::port::PackageListError::PackageDirectoryNotFound(_)) => {
+                    warnings.push(ApplyWarning::Other(format!(
+                        "Failed to load standalone dotfiles: {e}"
+                    )));
                 }
                 Err(e) => {
                     warnings.push(ApplyWarning::UnreadableRepository(e));
@@ -444,6 +457,9 @@ where
 
             let result = match prepared {
                 Ok((packages, warnings)) => {
+                    // Carries on with the package dotfiles, and `handle_apply`
+                    // counts the unlistable directory as a refusal.
+                    let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
@@ -455,7 +471,7 @@ where
                         options: &options,
                         token: &token,
                     };
-                    handle_apply(&packages, &ctx, filter.as_deref()).await
+                    handle_apply(&packages, &ctx, filter.as_deref(), unreadable_repository).await
                 }
                 Err(failure) => OperationResult::Failure(failure),
             };
@@ -499,10 +515,15 @@ where
 
             let result = match collected {
                 Ok((packages, warnings)) => {
+                    // Carries on with the package dotfiles, and
+                    // `handle_check_drift` counts the unlistable directory as a
+                    // refusal.
+                    let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
-                    handle_check_drift(&packages, &fs, &config, &sender).await
+                    handle_check_drift(&packages, &fs, &config, &sender, unreadable_repository)
+                        .await
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -537,15 +558,12 @@ where
 
             let result = match collected {
                 Ok((packages, warnings)) => {
-                    // A directory selfie found and could not list is fatal HERE
-                    // and not on the deploy paths, and the difference is what
-                    // the answer is for. Deploying can carry on without the
-                    // standalone dotfiles; a listing that carries on prints a
-                    // table missing every one of them over an exit code saying
-                    // the listing succeeded.
-                    let unreadable = warnings
-                        .iter()
-                        .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)));
+                    // A directory selfie found and could not list is fatal HERE.
+                    // Apply and drift still have the package dotfiles to act on,
+                    // so they count it as a refusal and carry on. A listing has
+                    // nothing to carry on to except a table missing every
+                    // standalone dotfile.
+                    let unreadable = ApplyWarning::any_unreadable_repository(&warnings);
 
                     // Drained before the listing is sent, so a consumer reading
                     // events in order has the caveats in hand before the answer
@@ -1338,10 +1356,14 @@ struct ApplyContext<'a, F, CR> {
 }
 
 /// Core logic for applying config files
+///
+/// `unreadable_repository` says a dotfiles repository could not be listed, so
+/// `packages` is missing whatever it holds.
 async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
     filter_name: Option<&str>,
+    unreadable_repository: bool,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -1374,6 +1396,14 @@ where
     // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
     // never reached the repository-file path until now.
     let mut refused_count: usize = 0;
+
+    // An unlistable dotfiles directory is one refusal when applying everything:
+    // its standalone dotfiles were asked for and none can deploy, while the
+    // package dotfiles still do. A named apply that matches a package lost
+    // nothing to it.
+    if unreadable_repository && filter_name.is_none() {
+        refused_count += 1;
+    }
 
     // Set when `stop_on_error` aborts the run. Held rather than returned so the
     // deploy state below is still saved.
@@ -1802,11 +1832,15 @@ where
 }
 
 /// Core logic for checking drift
+///
+/// `unreadable_repository` says a dotfiles repository could not be listed, so
+/// `packages` is missing whatever it holds.
 async fn handle_check_drift<F>(
     packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
+    unreadable_repository: bool,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -1818,7 +1852,9 @@ where
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
-    let mut refused_count: usize = 0;
+    // One for an unlistable dotfiles directory, as apply counts it. A drift
+    // report missing every standalone dotfile must not read as all clear.
+    let mut refused_count = usize::from(unreadable_repository);
 
     for package in packages {
         // The same question apply asks, in the same place, so the two commands
