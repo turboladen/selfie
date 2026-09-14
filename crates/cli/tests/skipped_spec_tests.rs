@@ -122,3 +122,47 @@ fn the_readable_spec_is_still_processed() {
         skipped[0]
     );
 }
+
+// The exit status and the terminal text are what the library tests cannot see.
+// A handler that claimed the failure event would print it and exit 0.
+fn apply_output(temp_dir: &tempfile::TempDir, name: &str) -> (Option<i32>, String) {
+    let output = sandboxed_command(temp_dir)
+        .args(["apply", name])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    (output.status.code(), text)
+}
+
+// Naming the unparsable spec must not read as "no such package": the file is
+// there, and the skip line above the failure says why it could not be used.
+#[test]
+fn apply_naming_an_unparsable_spec_fails_and_says_it_could_not_be_loaded() {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+
+    let (code, text) = apply_output(&temp_dir, "creds");
+
+    assert_eq!(code, Some(1), "output was: {text}");
+    assert!(
+        text.contains("Package 'creds' could not be loaded"),
+        "output was: {text}"
+    );
+    assert!(!text.contains("No package named"), "output was: {text}");
+}
+
+#[test]
+fn apply_naming_no_package_fails() {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+
+    let (code, text) = apply_output(&temp_dir, "nope");
+
+    assert_eq!(code, Some(1), "output was: {text}");
+    assert!(
+        text.contains("No package named 'nope' was found"),
+        "output was: {text}"
+    );
+}

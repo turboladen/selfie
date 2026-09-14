@@ -204,6 +204,10 @@ argument — is rejected by the argument parser before any of this applies, and 
 | `1`   | The command failed, **or refused part of its work**. See below.               |
 | `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
 
+`selfie apply <name>` matches the name against package file names, ignoring case, the same way
+`selfie package install` does. A name that matches no package, or names a package file that could
+not be loaded, is a failure and exits `1` with nothing deployed.
+
 ### A refusal is not a success
 
 `selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run

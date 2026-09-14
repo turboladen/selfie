@@ -846,8 +846,27 @@ pub enum OperationFailure {
         package_name: String,
         reason: String,
     },
+    /// A command named a package it could not find.
+    // Typed rather than folded into `Generic` so an adapter can tell a typo from
+    // a spec that failed to load without parsing the sentence.
+    NoSuchPackage {
+        name: String,
+        reason: NoSuchPackageReason,
+    },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// Why a named package could not be found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoSuchPackageReason {
+    /// No spec file has the name.
+    NotFound,
+    /// No spec file that could be listed has the name, and a dotfiles directory
+    /// could not be listed, so the package may be in it.
+    MaybeInUnlistableDirectory,
+    /// A spec file has the name and could not be loaded.
+    NotLoaded,
 }
 
 /// Command execution failure details
@@ -927,6 +946,18 @@ impl std::fmt::Display for OperationFailure {
                 package_name,
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
+            OperationFailure::NoSuchPackage { name, reason } => match reason {
+                NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
+                NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
+                    f,
+                    "No package named '{name}' was found. A dotfiles directory could not be \
+                     listed, so it may be there."
+                ),
+                NoSuchPackageReason::NotLoaded => write!(
+                    f,
+                    "Package '{name}' could not be loaded, so nothing was applied"
+                ),
+            },
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }

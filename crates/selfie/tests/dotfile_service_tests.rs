@@ -1105,6 +1105,21 @@ async fn test_apply_source_only_change_redeploys() {
     assert_eq!(content, "key = \"updated\"");
 }
 
+// The apply failed for a name no package answers, for this reason.
+fn assert_no_such_package(
+    events: &[PackageEvent],
+    expected_name: &str,
+    expected_reason: selfie::package::event::NoSuchPackageReason,
+) {
+    match get_operation_result(events) {
+        Some(OperationResult::Failure(OperationFailure::NoSuchPackage { name, reason })) => {
+            assert_eq!(name, expected_name);
+            assert_eq!(*reason, expected_reason);
+        }
+        other => panic!("expected NoSuchPackage, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_apply_nonexistent_package_name() {
     let dirs = TestDirs::new();
@@ -1125,25 +1140,99 @@ async fn test_apply_nonexistent_package_name() {
     let stream = service.apply("no-such-pkg", ApplyOptions::default()).await;
     let events = collect_events(stream).await;
 
-    let result = get_operation_result(&events).expect("Should have a Completed event");
-    match result {
-        OperationResult::Success(OperationSuccess::DotfilesApplied {
-            deployed_count,
-            skipped_count,
-            conflict_count,
-            ..
-        }) => {
-            assert_eq!(*deployed_count, 0);
-            assert_eq!(*skipped_count, 0);
-            assert_eq!(*conflict_count, 0);
-        }
-        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
-    }
+    // A success with every count at zero would read as "already up to date".
+    assert_no_such_package(
+        &events,
+        "no-such-pkg",
+        selfie::package::event::NoSuchPackageReason::NotFound,
+    );
 
     assert!(
         !target_file.exists(),
         "Target file should NOT be deployed for non-matching package"
     );
+}
+
+// The package asked for may be a standalone dotfile in the directory selfie
+// could not list, so "not found" alone would send the user looking for a typo.
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_by_name_says_an_unlistable_directory_may_hold_the_package() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!("SKIP apply_by_name_says_an_unlistable_directory_may_hold_the_package");
+        return;
+    };
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("standalone", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_no_such_package(
+        &events,
+        "standalone",
+        selfie::package::event::NoSuchPackageReason::MaybeInUnlistableDirectory,
+    );
+}
+
+// A spec that failed to parse is dropped before the name is looked for, so "no
+// package named" would send the user looking for a file that is there.
+#[tokio::test]
+async fn apply_by_name_says_an_unparsable_spec_could_not_be_loaded() {
+    let dirs = TestDirs::new();
+    write_package_yaml(&dirs.package_dir, "bat", "name: bat\nenvironments: [\n");
+
+    let events = collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+    assert_no_such_package(
+        &events,
+        "bat",
+        selfie::package::event::NoSuchPackageReason::NotLoaded,
+    );
+}
+
+// A package is named by its file, as package lookup resolves it, so a `name:`
+// field that differs from the file name does not hide the package from apply.
+#[tokio::test]
+async fn apply_by_name_matches_the_file_name_not_the_name_field() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("init.lua"), "-- nvim").unwrap();
+    let target = dirs.target_dir.join("init.lua");
+    write_package_yaml(
+        &dirs.package_dir,
+        "nvim",
+        &format!(
+            "name: neovim\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - \
+             source: init.lua\n    target: {}\n",
+            target.display()
+        ),
+    );
+
+    let events = collect_events(dirs.service().apply("nvim", ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "-- nvim");
+}
+
+// Package files are matched ignoring case, so apply accepts a name the other
+// package commands accept.
+#[tokio::test]
+async fn apply_by_name_ignores_case() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+
+    let events = collect_events(dirs.service().apply("BAT", ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
 
 #[tokio::test]

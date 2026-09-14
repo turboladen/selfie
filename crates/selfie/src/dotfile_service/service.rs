@@ -106,6 +106,47 @@ impl ApplyWarning {
     }
 }
 
+/// Whether `package` is the one `requested` names.
+///
+/// A package is named by its spec file, with case folded, as package lookup
+/// resolves a name. The YAML `name:` field does not decide it.
+fn is_named(package: &Package, requested: &str) -> bool {
+    package
+        .spec_name()
+        .is_some_and(|spec_name| spec_name == requested.to_lowercase())
+}
+
+/// The failure for a named apply that no collected package answers.
+fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> OperationFailure {
+    use crate::package::event::NoSuchPackageReason;
+
+    // The unloadable check runs before either not-found answer. A spec that
+    // failed to parse is not among the collected packages, and "no package
+    // named" would send the user looking for a file they may be looking at.
+    let requested = name.to_lowercase();
+    let unloadable = warnings.iter().any(|warning| {
+        matches!(warning, ApplyWarning::SkippedSpec(error)
+            if error
+                .package_path()
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .and_then(crate::package::spec_name_from_file_name)
+                .is_some_and(|spec_name| spec_name == requested))
+    });
+
+    let reason = if unloadable {
+        NoSuchPackageReason::NotLoaded
+    } else if ApplyWarning::any_unreadable_repository(warnings) {
+        NoSuchPackageReason::MaybeInUnlistableDirectory
+    } else {
+        NoSuchPackageReason::NotFound
+    };
+    OperationFailure::NoSuchPackage {
+        name: name.to_string(),
+        reason,
+    }
+}
+
 /// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
@@ -457,11 +498,35 @@ where
 
             let result = match prepared {
                 Ok((packages, warnings)) => {
-                    // Carries on with the package dotfiles, and `handle_apply`
-                    // counts the unlistable directory as a refusal.
-                    let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
+                    // Applying everything carries on with the package dotfiles
+                    // and counts an unlistable dotfiles directory as a refusal.
+                    // A named apply that finds its package lost nothing to the
+                    // directory, so it counts none.
+                    let refused_repository =
+                        filter.is_none() && ApplyWarning::any_unreadable_repository(&warnings);
+                    let selected: Vec<Package> = match filter.as_deref() {
+                        Some(name) => packages
+                            .into_iter()
+                            .filter(|package| is_named(package, name))
+                            .collect(),
+                        None => packages,
+                    };
+                    // A name matching nothing has nothing to deploy. Completing
+                    // as a success with every count at zero would read as
+                    // "already up to date" to a user who mistyped the name.
+                    let unmatched = filter
+                        .as_deref()
+                        .filter(|_| selected.is_empty())
+                        .map(|name| no_such_package(name, &warnings));
+                    // Drained first, so a skipped spec's own reason precedes the
+                    // failure it explains.
                     for warning in warnings {
                         warning.send(&sender).await;
+                    }
+                    if let Some(failure) = unmatched {
+                        return sender
+                            .send_completed(OperationResult::Failure(failure))
+                            .await;
                     }
                     let ctx = ApplyContext {
                         filesystem: &fs,
@@ -471,7 +536,7 @@ where
                         options: &options,
                         token: &token,
                     };
-                    handle_apply(&packages, &ctx, filter.as_deref(), unreadable_repository).await
+                    handle_apply(&selected, &ctx, refused_repository).await
                 }
                 Err(failure) => OperationResult::Failure(failure),
             };
@@ -1357,13 +1422,13 @@ struct ApplyContext<'a, F, CR> {
 
 /// Core logic for applying config files
 ///
-/// `unreadable_repository` says a dotfiles repository could not be listed, so
-/// `packages` is missing whatever it holds.
+/// Applies every package in `packages`. `refused_repository` counts one refusal
+/// for a dotfiles repository whose dotfiles were asked for and could not be
+/// listed.
 async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
-    filter_name: Option<&str>,
-    unreadable_repository: bool,
+    refused_repository: bool,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -1395,15 +1460,7 @@ where
     // `SecretOutcome::Failed` and `SecretOutcome::Skipped` — see
     // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
     // never reached the repository-file path until now.
-    let mut refused_count: usize = 0;
-
-    // An unlistable dotfiles directory is one refusal when applying everything:
-    // its standalone dotfiles were asked for and none can deploy, while the
-    // package dotfiles still do. A named apply that matches a package lost
-    // nothing to it.
-    if unreadable_repository && filter_name.is_none() {
-        refused_count += 1;
-    }
+    let mut refused_count = usize::from(refused_repository);
 
     // Set when `stop_on_error` aborts the run. Held rather than returned so the
     // deploy state below is still saved.
@@ -1414,13 +1471,6 @@ where
     let mut stopped: Option<String> = None;
 
     'packages: for package in packages {
-        // If filtering by name, skip non-matching packages
-        if let Some(name) = filter_name
-            && package.name() != name
-        {
-            continue;
-        }
-
         // Refuse the whole package before asking what dotfiles it has, through
         // the one function that answers whether apply refuses a package at all.
         // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty

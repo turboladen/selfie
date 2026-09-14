@@ -1331,6 +1331,18 @@ impl Package {
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
+
+    /// The name this package's file claims, the one package lookup resolves.
+    ///
+    /// `None` when the file name is not a spec's, as for a package built in
+    /// memory with no file behind it.
+    #[must_use]
+    pub(crate) fn spec_name(&self) -> Option<String> {
+        self.path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .and_then(spec_name_from_file_name)
+    }
 }
 
 #[cfg(test)]
