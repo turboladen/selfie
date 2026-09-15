@@ -1901,6 +1901,40 @@ async fn test_track_standalone_fails_when_target_missing() {
     );
 }
 
+// Tracking copies the file into the dotfiles directory, and the writer creates
+// missing parent directories. A directory removed after the service was built
+// has to stop the track, or a mistyped path quietly becomes a new directory
+// holding one spec.
+#[tokio::test]
+async fn track_standalone_refuses_a_missing_dotfiles_directory_and_does_not_create_it() {
+    let dirs = TestDirs::new();
+    let target_file = dirs.target_dir.join("starship.toml");
+    std::fs::write(&target_file, "format = \"$all\"").unwrap();
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(
+        service
+            .track_standalone("starship", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let message = failure_message(&events);
+    assert!(
+        message.contains("Cannot track a standalone dotfile"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains(&dirs.dotfiles_dir.display().to_string()),
+        "the refusal must name the dotfiles directory, got: {message}"
+    );
+    assert!(
+        !dirs.dotfiles_dir.exists(),
+        "the missing dotfiles directory must not be created"
+    );
+}
+
 #[tokio::test]
 async fn test_track_for_package_adds_dotfile_to_existing_package() {
     let dirs = TestDirs::new();

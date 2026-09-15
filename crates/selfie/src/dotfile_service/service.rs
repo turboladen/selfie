@@ -2138,6 +2138,16 @@ where
 
     let dotfiles_dir = config.dotfiles_directory();
 
+    // This check precedes every target check and every write.
+    // `write_file_no_follow` creates missing parent directories, so tracking
+    // into a directory that is not there would create it, and a mistyped
+    // `dotfiles_directory` would become a new directory holding one spec.
+    if !filesystem.path_exists(&dotfiles_dir) {
+        return OperationResult::Failure(OperationFailure::Generic(
+            super::directory::track_refusal(&dotfiles_dir),
+        ));
+    }
+
     // Expand the target, or refuse it if selfie could never deploy to it.
     //
     // First of the three refusals, and ahead of `symlink_refusal` for a reason of
