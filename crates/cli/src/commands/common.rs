@@ -25,11 +25,7 @@ use selfie::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{config::CliConfig, event_processor::EventProcessor};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{path::Path, process::Command};
 
 use crate::display_manager::{DisplayManager, INDENT};
 
@@ -94,111 +90,27 @@ fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
     ShellCommandRunner::login_shell(config.command_timeout())
 }
 
-// `selfie track` can reach both the warning and the refusal in one run, so they
-// say different things. The suggestion is shared, so neither can name a
-// different directory than the other.
-fn missing_dotfiles_dir_warning(dotfiles_dir: &Path) -> String {
-    format!(
-        "Dotfiles directory does not exist: {} — standalone dotfiles will not be read.",
-        dotfiles_dir.display()
+/// The standalone dotfiles repository for the configured `dotfiles_directory`.
+///
+/// Built whether or not the directory exists. The dotfile service decides what
+/// a missing or unreadable directory means for each operation.
+pub(crate) fn create_dotfiles_repository(
+    config: &CliConfig,
+) -> YamlPackageRepository<RealFileSystem> {
+    YamlPackageRepository::new(
+        RealFileSystem,
+        config.selfie_config().dotfiles_directory(),
+        SpecOrigin::DotfilesDirectory,
     )
 }
 
-fn missing_dotfiles_dir_refusal(dotfiles_dir: &Path) -> String {
-    format!(
-        "Cannot track a standalone dotfile: the dotfiles directory does not exist: {}",
-        dotfiles_dir.display()
-    )
-}
-
-fn missing_dotfiles_dir_suggestion(dotfiles_dir: &Path) -> String {
-    format!("Create it with: mkdir -p {}", dotfiles_dir.display())
-}
-
-/// The standalone dotfiles repository, or `None`.
+/// Create a `DotfileServiceImpl` over the package repository and the standalone
+/// dotfiles repository.
 ///
-/// Every command that reads standalone dotfiles goes through here. Reports the
-/// missing directory only when the user configured that path; an unset
-/// `dotfiles_directory` defaults to a sibling of `package_directory`, which a
-/// user with no standalone dotfiles never creates.
-pub(crate) fn dotfiles_repository(
-    config: &CliConfig,
-    display: &DisplayManager,
-) -> Option<YamlPackageRepository<RealFileSystem>> {
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if dotfiles_dir.is_dir() {
-        return Some(YamlPackageRepository::new(
-            RealFileSystem,
-            dotfiles_dir,
-            SpecOrigin::DotfilesDirectory,
-        ));
-    }
-
-    // Once per run, not once per call. `selfie track` reaches this twice on the
-    // way to an existing package — once looking for a tracker, once building the
-    // service — and the directory cannot change in between, so the second report
-    // is a repeat rather than news. Ordering the calls differently would move
-    // which one speaks, not how many do.
-    let already_reported = MISSING_DOTFILES_DIR_REPORTED.swap(true, Ordering::Relaxed);
-    if missing_dir_is_worth_reporting(
-        config.selfie_config().configured_dotfiles_directory(),
-        already_reported,
-    ) {
-        // One call, so the whole diagnostic lands on stderr. `print_suggestion`
-        // writes to stdout, which would put it in a redirected `dotfiles list`.
-        display.print_warning(format!(
-            "{} {}",
-            missing_dotfiles_dir_warning(&dotfiles_dir),
-            missing_dotfiles_dir_suggestion(&dotfiles_dir)
-        ));
-    }
-
-    None
-}
-
-// Split out of `dotfiles_repository` so it can be tested without a filesystem
-// or a terminal.
-fn missing_dir_is_worth_reporting(configured: Option<&PathBuf>, already_reported: bool) -> bool {
-    configured.is_some() && !already_reported
-}
-
-static MISSING_DOTFILES_DIR_REPORTED: AtomicBool = AtomicBool::new(false);
-
-/// Refuse, reporting why, unless the dotfiles directory is there.
-///
-/// For the commands that **write into** it, where there is nothing to continue
-/// with. Reading commands use [`dotfiles_repository`] and carry on.
-///
-/// # Errors
-///
-/// The exit code the handler should return, when the directory is not there.
-pub(crate) fn require_dotfiles_dir(
-    config: &CliConfig,
-    display: &DisplayManager,
-) -> Result<(), i32> {
-    let dotfiles_dir = config.selfie_config().dotfiles_directory();
-    if dotfiles_dir.is_dir() {
-        return Ok(());
-    }
-
-    // One call, for the same reason as the warning above.
-    display.print_error(format!(
-        "{} {}",
-        missing_dotfiles_dir_refusal(&dotfiles_dir),
-        missing_dotfiles_dir_suggestion(&dotfiles_dir)
-    ));
-    Err(1)
-}
-
-/// Create a `DotfileServiceImpl` with the packages repo and, if the configured
-/// `dotfiles_directory` exists on disk, an additional dotfiles repo.
-///
-/// This is the standard setup for any command that needs `DotfileService`.
-/// A missing dotfiles directory is reported through `display` rather than
-/// dropped — see [`dotfiles_repository`] for when it is worth reporting.
+/// This is the standard setup for any command that needs `DotfileService`. The
+/// service reports a configured dotfiles directory that does not exist.
 pub(crate) fn create_dotfile_service(
     config: &CliConfig,
-    display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> DotfileServiceImpl<
     YamlPackageRepository<RealFileSystem>,
@@ -206,23 +118,15 @@ pub(crate) fn create_dotfile_service(
     ShellCommandRunner,
     RealPrivilege,
 > {
-    let repo = create_package_repository(config);
-    let fs = RealFileSystem;
-    let runner = create_command_runner(config);
-    let mut service = DotfileServiceImpl::new(
-        repo,
-        fs,
-        runner,
+    DotfileServiceImpl::new(
+        create_package_repository(config),
+        RealFileSystem,
+        create_command_runner(config),
         config.selfie_config().clone(),
         cancellation_token,
         sudo_policy(config),
-    );
-
-    if let Some(dotfiles_repo) = dotfiles_repository(config, display) {
-        service = service.with_dotfiles_repository(dotfiles_repo);
-    }
-
-    service
+    )
+    .with_dotfiles_repository(create_dotfiles_repository(config))
 }
 
 /// Create a `SyncServiceImpl` with `GixGitAdapter` and `DotfileService`.
@@ -230,11 +134,10 @@ pub(crate) fn create_dotfile_service(
 /// This is the standard setup for any command that needs `SyncService`.
 pub(crate) fn create_sync_service(
     config: &CliConfig,
-    display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> impl SyncService {
     let git = GixGitAdapter;
-    let dotfile_service = create_dotfile_service(config, display, cancellation_token);
+    let dotfile_service = create_dotfile_service(config, cancellation_token);
     // Its own policy rather than one read back out of `dotfile_service`: sync
     // commits and pushes as root even though it deploys nothing, and root-owned
     // git objects in a user-owned repository do not self-heal.
@@ -269,12 +172,10 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// to throw away. Both read the same [`sudo_policy`], so they cannot disagree
 /// about whether to refuse — only about how far the run got first.
 ///
-/// It exists because two handlers had something to do before the service was
-/// built, and both did the wrong thing under sudo: `handle_track_standalone`
-/// checked for the dotfiles directory, which on a machine where sudo resets
-/// `$HOME` resolves under `/root`, and suggested `mkdir -p /root/…` — creating
-/// the root-owned directory the refusal exists to prevent. `selfie track` ran the
-/// whole interactive prompt and discarded the answers.
+/// `handle_track_standalone` calls this before building the dotfile service,
+/// which skips the "Started" message the service would otherwise print ahead
+/// of its own refusal. `selfie track` calls this before its interactive
+/// prompts, whose answers a refusal afterward would discard.
 pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<i32> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
     display.print_error(refusal.message());
@@ -292,21 +193,13 @@ pub(crate) async fn handle_track_standalone(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    // Ahead of the directory check, not after it. Under sudo on a machine whose
-    // sudoers policy resets `$HOME`, `dotfiles_directory` resolves under `/root`,
-    // the check fails, and the suggestion below tells the user to `mkdir -p` it —
-    // creating the root-owned directory the refusal exists to prevent.
+    // Ahead of building the service, so a run under sudo prints only the
+    // refusal, not the "Started" message the service would emit first.
     if let Some(code) = refuse_under_sudo(config, display) {
         return code;
     }
 
-    // Refuses rather than warning, unlike every reading command: this one copies
-    // the file *into* that directory, so there is nothing to continue with.
-    if let Err(code) = require_dotfiles_dir(config, display) {
-        return code;
-    }
-
-    let service = create_dotfile_service(config, display, cancellation_token);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.track_standalone(name, file).await;
 
     let processor = EventProcessor::new(display.clone());
@@ -329,7 +222,7 @@ pub(crate) async fn handle_track_for_package(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_dotfile_service(config, display, cancellation_token);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.track_for_package(package_name, file).await;
 
     let processor = EventProcessor::new(display.clone());
@@ -888,45 +781,5 @@ mod tests {
         assert!(result.is_ok());
 
         // This demonstrates testing complete CLI workflows without repository implementation
-    }
-
-    // `selfie track` reaches both in one run: it warns while looking for an
-    // existing tracker, then refuses when the user asks to create a standalone
-    // dotfile. That is escalation, not duplication — but only if the two say
-    // different things. The interactive path needs a TTY and cannot be driven
-    // from a test, so the property is asserted here instead.
-    #[test]
-    fn the_warning_and_the_refusal_do_not_say_the_same_thing() {
-        let dir = Path::new("/nonexistent/dotfiles");
-
-        let warning = missing_dotfiles_dir_warning(dir);
-        let refusal = missing_dotfiles_dir_refusal(dir);
-
-        assert_ne!(warning, refusal);
-        // Each says what *it* is about: one that nothing standalone will be
-        // read, the other that nothing can be written.
-        assert!(warning.contains("will not be read"), "{warning}");
-        assert!(refusal.contains("Cannot track"), "{refusal}");
-        // Both name the same directory, and send the user to the same fix.
-        assert!(warning.contains("/nonexistent/dotfiles"), "{warning}");
-        assert!(refusal.contains("/nonexistent/dotfiles"), "{refusal}");
-        assert_eq!(
-            missing_dotfiles_dir_suggestion(dir),
-            "Create it with: mkdir -p /nonexistent/dotfiles"
-        );
-    }
-
-    // Both halves of the decision, without a filesystem or a terminal. The
-    // once-per-run half exists because `selfie track` asks twice on its way to
-    // an existing package; the configured-only half because an absent *default*
-    // is the ordinary state of anyone who keeps no standalone dotfiles.
-    #[test]
-    fn a_missing_dotfiles_dir_is_reported_only_when_configured_and_only_once() {
-        let configured = PathBuf::from("/nonexistent/dotfiles");
-
-        assert!(missing_dir_is_worth_reporting(Some(&configured), false));
-        assert!(!missing_dir_is_worth_reporting(Some(&configured), true));
-        assert!(!missing_dir_is_worth_reporting(None, false));
-        assert!(!missing_dir_is_worth_reporting(None, true));
     }
 }

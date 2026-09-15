@@ -78,6 +78,17 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .collect()
 }
 
+// The warnings that mention the dotfiles directory, ignoring case.
+fn dotfiles_directory_warnings(events: &[PackageEvent]) -> Vec<String> {
+    warning_messages(events)
+        .into_iter()
+        .filter(|message| {
+            let lower = message.to_lowercase();
+            lower.contains("dotfiles directory") || lower.contains("standalone dotfiles")
+        })
+        .collect()
+}
+
 // Entries an apply was asked to deploy and declined, which is the counter that
 // separates "selfie refused" from "there was nothing to do".
 fn refused_count(events: &[PackageEvent]) -> usize {
@@ -280,6 +291,48 @@ impl TestDirs {
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
             .build();
+        let package_repo = YamlPackageRepository::new(
+            fs,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let dotfiles_repo = YamlPackageRepository::new(
+            fs,
+            self.dotfiles_dir.clone(),
+            SpecOrigin::DotfilesDirectory,
+        );
+        DotfileServiceImpl::new(
+            package_repo,
+            fs,
+            FakeCommandRunner::new(),
+            config,
+            CancellationToken::new(),
+            self.sudo_policy,
+        )
+        .with_dotfiles_repository(dotfiles_repo)
+    }
+
+    // Both directories, with `dotfiles_directory` left unset. `dotfiles_dir` is
+    // the sibling of `package_dir`, which is where the default resolves.
+    fn service_with_default_dotfiles(
+        &self,
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        RealFileSystem,
+        FakeCommandRunner,
+        RunningAs,
+    > {
+        let fs = RealFileSystem;
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .state_directory(self.state_dir.clone())
+            .build();
+        assert_eq!(
+            config.dotfiles_directory(),
+            self.dotfiles_dir,
+            "the fixture's dotfiles directory must be the unset default"
+        );
         let package_repo = YamlPackageRepository::new(
             fs,
             config.package_directory().clone(),
@@ -8257,9 +8310,8 @@ async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
 
-// A dotfiles directory removed after the service was built is absent, the state
-// a directory missing at startup is reported in. It is not one hiding dotfiles,
-// so the run is not refused, though the directory is still reported.
+// A configured dotfiles directory that is not there is reported and carries on:
+// it holds nothing, so there is nothing to refuse.
 #[tokio::test]
 async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
     let dirs = TestDirs::new();
@@ -8276,13 +8328,14 @@ async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
     let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
     assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            PackageEvent::Warning { message, .. }
-                if message.contains("Failed to load standalone dotfiles")
-        )),
-        "the missing directory must still be reported; events: {events:?}"
+        warnings[0].starts_with("Dotfiles directory does not exist: ")
+            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+            && warnings[0].contains("standalone dotfiles will not be read"),
+        "got: {}",
+        warnings[0]
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
@@ -8335,9 +8388,8 @@ async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
     );
 }
 
-// A dotfiles directory removed after the service was built is absent, which a
-// listing reports and carries on past, the same as a directory missing at
-// startup. Only one that exists and cannot be listed fails the listing.
+// A configured dotfiles directory that is not there is reported, and the listing
+// carries on past it. Only one that exists and cannot be listed fails a listing.
 #[tokio::test]
 async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
     let dirs = TestDirs::new();
@@ -8353,13 +8405,108 @@ async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
         ),
         "events: {events:?}"
     );
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            PackageEvent::Warning { message, .. }
-                if message.contains("Failed to load standalone dotfiles")
-        )),
-        "the missing directory must still be reported; events: {events:?}"
+        warnings[0].starts_with("Dotfiles directory does not exist: ")
+            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+            && warnings[0].contains("standalone dotfiles will not be read"),
+        "got: {}",
+        warnings[0]
+    );
+}
+
+#[tokio::test]
+async fn drift_reports_a_configured_dotfiles_directory_that_is_gone_without_refusing() {
+    let dirs = TestDirs::new();
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.check_drift().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            refused_count,
+            ..
+        })) => assert_eq!(*refused_count, 0, "events: {events:?}"),
+        other => panic!("expected a drift check, got: {other:?}"),
+    }
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
+    assert!(
+        warnings[0].starts_with("Dotfiles directory does not exist: "),
+        "got: {}",
+        warnings[0]
+    );
+}
+
+// An unset default that is not there is the ordinary state of a setup with no
+// standalone dotfiles. Saying so on every run would be noise people learn to
+// ignore.
+#[tokio::test]
+async fn apply_all_says_nothing_about_an_unset_default_that_is_not_there() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(
+        dirs.service_with_default_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    assert!(
+        dotfiles_directory_warnings(&events).is_empty(),
+        "events: {events:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+#[tokio::test]
+async fn drift_says_nothing_about_an_unset_default_that_is_not_there() {
+    let dirs = TestDirs::new();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(dirs.service_with_default_dotfiles().check_drift().await).await;
+
+    match get_operation_result(&events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            refused_count,
+            ..
+        })) => assert_eq!(*refused_count, 0, "events: {events:?}"),
+        other => panic!("expected a drift check, got: {other:?}"),
+    }
+    assert!(
+        dotfiles_directory_warnings(&events).is_empty(),
+        "events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_says_nothing_about_an_unset_default_that_is_not_there() {
+    let dirs = TestDirs::new();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(dirs.service_with_default_dotfiles().list().await).await;
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "events: {events:?}"
+    );
+    assert!(
+        dotfiles_directory_warnings(&events).is_empty(),
+        "events: {events:?}"
     );
 }
 

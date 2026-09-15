@@ -248,6 +248,10 @@ impl SelfieServer {
             config.package_directory().to_path_buf(),
             SpecOrigin::PackageDirectory,
         );
+        // Attached whether or not the directory exists. The dotfile service
+        // reports a configured one that is missing on every call that reads it,
+        // and a directory created after startup is read on the next call.
+        let dotfiles_repo = dotfiles_repository(&config);
         // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
         // and provider commands (`op`, `teller`) live on the user's PATH.
         let runner = ShellCommandRunner::login_shell(config.command_timeout());
@@ -260,25 +264,15 @@ impl SelfieServer {
         // No `allowing_sudo` call, and no tool parameter that could reach one: an
         // AI assistant has no reason to be driving selfie under sudo, so the
         // refusal here is unconditional.
-        let mut dotfile_service = DotfileServiceImpl::new(
+        let dotfile_service = DotfileServiceImpl::new(
             repo,
             RealFileSystem,
             runner,
             config.clone(),
             CancellationToken::new(),
             SudoPolicy::new(RealPrivilege),
-        );
-
-        // Add standalone dotfiles repository if the directory exists
-        let dotfiles_dir = config.dotfiles_directory();
-        if dotfiles_dir.is_dir() {
-            let dotfiles_repo = YamlPackageRepository::new(
-                RealFileSystem,
-                dotfiles_dir,
-                SpecOrigin::DotfilesDirectory,
-            );
-            dotfile_service = dotfile_service.with_dotfiles_repository(dotfiles_repo);
-        }
+        )
+        .with_dotfiles_repository(dotfiles_repo);
         let sync_service = SyncServiceImpl::new(
             GixGitAdapter,
             dotfile_service.clone(),
@@ -332,20 +326,13 @@ impl SelfieServer {
             self.config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
-        let dotfiles_dir = self.config.dotfiles_directory();
-        let dotfiles_repo = if dotfiles_dir.is_dir() {
-            Some(YamlPackageRepository::new(
-                RealFileSystem,
-                dotfiles_dir,
-                SpecOrigin::DotfilesDirectory,
-            ))
-        } else {
-            None
-        };
+        // A dotfiles directory that is not there holds no names, so the check
+        // below is complete without it.
+        let dotfiles_repo = dotfiles_repository(&self.config);
         if let Err(e) = selfie::namespace::validate_unique_name(
             &params.package,
             &pkg_repo,
-            dotfiles_repo.as_ref(),
+            Some(&dotfiles_repo),
         ) {
             return Err(McpError::invalid_params(
                 format!("Namespace conflict: {e}"),
@@ -659,7 +646,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\" or \"not_loaded\"; branch on `reason`, not on `error`. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to, a source it cannot read — or, when deploying all, cannot list a dotfiles directory that exists, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\" or \"not_loaded\"; branch on `reason`, not on `error`. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to, a source it cannot read — or, when deploying all, cannot list a dotfiles directory that exists, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -684,7 +671,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List all dotfile mappings with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -696,7 +683,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_drift",
-        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift cannot check something — a package apply would refuse whole, or a dotfiles directory that exists and cannot be listed — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift cannot check something — a package apply would refuse whole, or a dotfiles directory that exists and cannot be listed — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -721,18 +708,9 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
             self.config.package_directory().to_owned(),
             SpecOrigin::PackageDirectory,
         );
-        let dotfiles_dir = self.config.dotfiles_directory().to_owned();
-        let dotfiles_repo = if dotfiles_dir.is_dir() {
-            Some(YamlPackageRepository::new(
-                RealFileSystem,
-                dotfiles_dir,
-                SpecOrigin::DotfilesDirectory,
-            ))
-        } else {
-            None
-        };
+        let dotfiles_repo = dotfiles_repository(&self.config);
         if let Err(e) =
-            selfie::namespace::validate_unique_name(&params.name, &pkg_repo, dotfiles_repo.as_ref())
+            selfie::namespace::validate_unique_name(&params.name, &pkg_repo, Some(&dotfiles_repo))
         {
             return Err(McpError::invalid_params(
                 format!("Namespace conflict: {e}"),
@@ -866,6 +844,16 @@ impl ServerHandler for SelfieServer {
     }
 }
 
+/// Returns the standalone dotfiles repository for `config`'s
+/// `dotfiles_directory`. It is built whether or not the directory exists.
+fn dotfiles_repository(config: &SelfieConfig) -> YamlPackageRepository<RealFileSystem> {
+    YamlPackageRepository::new(
+        RealFileSystem,
+        config.dotfiles_directory(),
+        SpecOrigin::DotfilesDirectory,
+    )
+}
+
 fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult {
     let json = serde_json::to_string_pretty(&result.data).unwrap_or_default();
     if result.success {
@@ -951,5 +939,102 @@ mod tests {
         assert_eq!(json["source"], "creds.tpl");
         assert_eq!(json["vars"][0], "api_key");
         assert!(json.get("error").is_none());
+    }
+
+    // A server over `packages` and the given `dotfiles_directory`, or the
+    // sibling default when `None`. Listing runs no command, so the login-shell
+    // runner is never used.
+    fn server_over(packages: &std::path::Path, dotfiles: Option<&std::path::Path>) -> SelfieServer {
+        let mut builder = selfie::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(packages);
+        if let Some(dotfiles) = dotfiles {
+            builder = builder.dotfiles_directory(dotfiles.to_path_buf());
+        }
+        let config = builder.build();
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            config.package_directory().to_path_buf(),
+            SpecOrigin::PackageDirectory,
+        );
+        let service = PackageServiceImpl::new(
+            repo,
+            ShellCommandRunner::login_shell(config.command_timeout()),
+            GixGitStatusProvider,
+            config.clone(),
+            CancellationToken::new(),
+        );
+        SelfieServer::new(service, config, Vec::new())
+    }
+
+    // The JSON a tool returned.
+    fn tool_json(result: &CallToolResult) -> serde_json::Value {
+        let text = &result.content[0]
+            .as_text()
+            .expect("tool results are text")
+            .text;
+        serde_json::from_str(text).unwrap()
+    }
+
+    // An assistant reading the list result has no stderr to look at, so the
+    // missing directory has to be a row in the result itself.
+    #[tokio::test]
+    async fn the_list_tool_reports_a_configured_dotfiles_directory_that_is_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let dotfiles = temp.path().join("missing-dotfiles");
+
+        let server = server_over(&packages, Some(&dotfiles));
+        let json = tool_json(&server.selfie_dotfiles_list().await.unwrap());
+
+        let warnings: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "warning")
+            .filter_map(|row| row["message"].as_str())
+            .collect();
+        assert_eq!(warnings.len(), 1, "got: {json}");
+        assert!(
+            warnings[0].starts_with("Dotfiles directory does not exist: ")
+                && warnings[0].contains(&dotfiles.display().to_string()),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    // The server reads the dotfiles directory on each call, not once at startup.
+    #[tokio::test]
+    async fn the_list_tool_reads_a_dotfiles_directory_created_after_startup() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_over(&packages, None);
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(
+            dotfiles.join("vim.yml"),
+            "name: vim\ndotfiles:\n  - source: vim/vimrc\n    target: ~/.vimrc\n",
+        )
+        .unwrap();
+
+        let json = tool_json(&server.selfie_dotfiles_list().await.unwrap());
+
+        let list = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["type"] == "dotfile_list")
+            .unwrap_or_else(|| panic!("no dotfile_list row in {json}"));
+        assert!(
+            list["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["package"] == "vim"),
+            "got: {list}"
+        );
     }
 }

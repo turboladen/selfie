@@ -1,12 +1,13 @@
 //! What selfie says when the standalone dotfiles directory is not there.
 //!
-//! Every call site shares one helper, which reports the missing directory only
-//! when the user configured that path.
+//! The dotfile service reports a missing directory only when the user
+//! configured `dotfiles_directory` explicitly, observed here through the CLI
+//! across `dotfiles list`, `spec create` and `dotfiles track`.
 //!
-//! The silent case has its own test and is the load-bearing one: a helper that
-//! warned whenever the directory was absent would fire on every invocation for
-//! everyone who keeps no standalone dotfiles, which is how a diagnostic becomes
-//! noise people filter out.
+//! The silent case has its own test and is the load-bearing one: a service
+//! that warned whenever the directory was absent would fire on every
+//! invocation for everyone who keeps no standalone dotfiles, which is how a
+//! diagnostic becomes noise people filter out.
 
 pub mod common;
 
@@ -111,11 +112,10 @@ fn an_explicitly_configured_missing_dotfiles_directory_is_reported() {
     );
 }
 
-// The control, and the one that fails if the helper is ever "simplified" back to
-// a bare `is_dir()` check. `dotfiles_directory` defaults to a sibling of
-// `package_directory`, so this is the ordinary state of anyone who keeps no
-// standalone dotfiles — a run that complained here would complain on every
-// invocation forever.
+// The control: `dotfiles_directory` defaults to a sibling of
+// `package_directory`, so an absent default is the ordinary state of anyone
+// who keeps no standalone dotfiles. A service that reported it here would
+// complain on every invocation forever.
 #[test]
 fn an_absent_default_dotfiles_directory_is_silent() {
     let temp = config_without_dotfiles_dir();
@@ -140,9 +140,10 @@ fn an_absent_default_dotfiles_directory_is_silent() {
     );
 }
 
-// The other control: when the directory is there, the repository is really
-// built and really read. Without this, returning `None` unconditionally would
-// satisfy every other test in this file.
+// The other control: when the directory is there, its packages are really
+// read. A service that treated the directory as missing unconditionally
+// would still satisfy every other test in this file, since they only check
+// the missing case.
 #[test]
 fn dotfiles_list_includes_standalone_dotfiles() {
     let temp = tempfile::tempdir().unwrap();
@@ -193,9 +194,9 @@ fn dotfiles_list_includes_standalone_dotfiles() {
 }
 
 // `spec create` is the one namespace check that proceeds to a write when the
-// dotfiles repository is absent — it writes into the *package* directory and has
-// no refusal of its own. So it is where the check being skipped would let a
-// colliding name through.
+// dotfiles directory does not exist — it writes into the *package* directory
+// and has no refusal of its own. So it is where a skipped uniqueness check
+// would let a colliding name through.
 #[test]
 fn spec_create_refuses_a_name_that_collides_with_a_standalone_dotfile() {
     let temp = tempfile::tempdir().unwrap();
@@ -268,10 +269,10 @@ fn spec_create_succeeds_quietly_when_there_is_no_dotfiles_directory() {
     );
 }
 
-// `dotfiles track` copies the file *into* the dotfiles directory, so a missing
-// one stops the run. Asserting the count rather than mere presence is what
-// catches the other failure: the reading helper warning a line before the
-// refusal says the same thing.
+// `dotfiles track` copies the file *into* the dotfiles directory, so a
+// missing one stops the run before any copy is attempted. Asserting the
+// exact count is what would catch the refusal being reported twice, not
+// only whether it is reported at all.
 #[test]
 fn dotfiles_track_refuses_once_when_the_dotfiles_directory_is_missing() {
     let temp = config_with_explicit_dotfiles_dir("/nonexistent/selfie-dotfiles");

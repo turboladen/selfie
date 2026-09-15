@@ -64,6 +64,8 @@ enum ApplyWarning {
     /// A repository that exists and could not be listed, so the collection is
     /// missing whatever it holds.
     UnreadableRepository(crate::package::port::PackageListError),
+    /// A dotfiles directory the user configured that does not exist.
+    MissingDotfilesDirectory(PathBuf),
     /// Anything else worth saying, already worded.
     Other(String),
 }
@@ -99,6 +101,11 @@ impl ApplyWarning {
             Self::UnreadableRepository(e) => {
                 sender
                     .send_warning(format!("Failed to load standalone dotfiles: {e}"))
+                    .await;
+            }
+            Self::MissingDotfilesDirectory(path) => {
+                sender
+                    .send_warning(super::directory::missing_warning(&path))
                     .await;
             }
             Self::Other(message) => sender.send_warning(message).await,
@@ -207,8 +214,10 @@ where
 
     /// Add a standalone dotfiles repository for the `dotfiles/` directory.
     ///
-    /// When set, `apply` and `check_drift` operations will scan both the main
-    /// package repository and this dotfiles repository.
+    /// `list`, `apply`, `apply_all`, `check_drift` and `track_standalone` all
+    /// read it alongside the main package repository. Attach it whether or
+    /// not its directory exists: each of those operations decides for itself
+    /// what a missing or unlistable directory means.
     #[must_use]
     pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
         self.dotfiles_repository = Some(repo);
@@ -241,8 +250,14 @@ where
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
+        dotfiles_directory_configured: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
-        Self::collect_packages(package_repo, dotfiles_repo, NameCollision::PackagesWin)
+        Self::collect_packages(
+            package_repo,
+            dotfiles_repo,
+            NameCollision::PackagesWin,
+            dotfiles_directory_configured,
+        )
     }
 
     /// Collect from both repositories, deciding what a name in both means.
@@ -250,10 +265,15 @@ where
     /// Deploying has to choose one, because two packages cannot both own a name.
     /// Listing must not: both files exist, and a caller asking what is on disk is
     /// asking about the files rather than about what would win.
+    ///
+    /// `dotfiles_directory_configured` says whether the user set
+    /// `dotfiles_directory`, which decides whether a dotfiles directory that is
+    /// not there is worth a warning.
     fn collect_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
         collision: NameCollision,
+        dotfiles_directory_configured: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
@@ -288,19 +308,21 @@ where
                     note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
                 }
-                // This directory existed when the repository was built and is
-                // gone now. A directory missing at startup is reported and
-                // otherwise ignored, and one that disappears later is in the
-                // same state, so this is not a refusal. Only a directory that
-                // exists and cannot be listed may be hiding dotfiles.
-                Err(e @ crate::package::port::PackageListError::PackageDirectoryNotFound(_)) => {
-                    warnings.push(ApplyWarning::Other(format!(
-                        "Failed to load standalone dotfiles: {e}"
-                    )));
-                }
-                Err(e) => {
-                    warnings.push(ApplyWarning::UnreadableRepository(e));
-                }
+                Err(error) => match super::directory::UnlistedDotfilesDirectory::from_list_error(
+                    error,
+                    dotfiles_directory_configured,
+                ) {
+                    super::directory::UnlistedDotfilesDirectory::UnsetAndMissing => {}
+                    super::directory::UnlistedDotfilesDirectory::ConfiguredAndMissing(path) => {
+                        warnings.push(ApplyWarning::MissingDotfilesDirectory(path));
+                    }
+                    // Only a directory that exists and cannot be listed may be
+                    // hiding dotfiles, so only this one refuses the run or fails
+                    // the listing.
+                    super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
+                        warnings.push(ApplyWarning::UnreadableRepository(error));
+                    }
+                },
             }
         }
 
@@ -495,6 +517,7 @@ where
             None => Self::collect_all_packages(
                 &self.package_repository,
                 self.dotfiles_repository.as_ref(),
+                self.config.configured_dotfiles_directory().is_some(),
             )
             .map_err(OperationFailure::PackageList),
         };
@@ -583,8 +606,11 @@ where
     }
 
     async fn check_drift(&self) -> EventStream {
-        let collected =
-            Self::collect_all_packages(&self.package_repository, self.dotfiles_repository.as_ref());
+        let collected = Self::collect_all_packages(
+            &self.package_repository,
+            self.dotfiles_repository.as_ref(),
+            self.config.configured_dotfiles_directory().is_some(),
+        );
         let fs = self.filesystem.clone();
         let config = self.config.clone();
 
@@ -628,6 +654,7 @@ where
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
             NameCollision::KeepBoth,
+            self.config.configured_dotfiles_directory().is_some(),
         );
         let config = self.config.clone();
 

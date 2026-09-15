@@ -2858,6 +2858,7 @@ dependencies = [
  "selfie",
  "serde",
  "serde_json",
+ "tempfile",
  "test-common",
  "tokio",
  "tokio-util",

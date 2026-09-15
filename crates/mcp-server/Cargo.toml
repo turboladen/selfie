@@ -25,4 +25,5 @@ libc = "0.2"
 
 [dev-dependencies]
 test-common = { path = "../test-common/" }
+tempfile.workspace = true
 uuid.workspace = true
