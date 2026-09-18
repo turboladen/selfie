@@ -214,6 +214,7 @@ where
                     total_deployed: summary.total_deployed,
                     refused_count: summary.refused_count,
                     unloaded_specs: summary.unloaded_specs,
+                    warned: summary.warned,
                 })
                 .await;
 
@@ -1212,6 +1213,8 @@ struct DriftSummary {
     refused_count: usize,
     /// How many specs the drift check skipped rather than loaded.
     unloaded_specs: usize,
+    /// How many relayed warnings named work the check could not complete.
+    warned: usize,
     /// The failure message, when the check failed.
     error: Option<String>,
     /// Warnings and skipped specs, in the order drift reported them.
@@ -1234,6 +1237,7 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary.drifted_targets.push(target);
             }
             PackageEvent::Warning { message, .. } => {
+                summary.warned += 1;
                 summary.relayed.push(RelayedDriftEvent::Warning(message));
             }
             PackageEvent::SpecSkipped { error, .. } => {
@@ -2247,6 +2251,196 @@ mod tests {
         });
 
         assert_eq!(unloaded_specs, Some(2), "{events:?}");
+    }
+
+    // A DotfileService whose `check_drift` emits one warning and completes
+    // cleanly, with no skipped spec at all.
+    #[derive(Clone)]
+    struct DriftEmittingOneWarning;
+
+    impl DotfileService for DriftEmittingOneWarning {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let operation_info = test_operation_info();
+            let events = vec![
+                PackageEvent::Warning {
+                    operation_info: operation_info.clone(),
+                    message: "a relayed warning".to_string(),
+                },
+                PackageEvent::Completed {
+                    operation_info,
+                    result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                        drift_count: 0,
+                        total_count: 0,
+                        refused_count: 0,
+                        environment: "test".to_string(),
+                        steps_completed: StepCount::new(0, 0),
+                    }),
+                },
+            ];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    // A relayed warning must raise `warned` alone. An implementation that
+    // folded warnings into `unloaded_specs`, or that dropped `warned`
+    // entirely, would leave one of these two counts wrong on an event that
+    // carries no skipped spec at all.
+    #[tokio::test]
+    async fn status_reports_a_relayed_warning_as_warned_and_not_as_an_unloaded_spec() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftEmittingOneWarning,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let counts = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary {
+                warned,
+                unloaded_specs,
+                ..
+            } => Some((*warned, *unloaded_specs)),
+            _ => None,
+        });
+
+        assert_eq!(counts, Some((1, 0)), "{events:?}");
+    }
+
+    // A DotfileService whose `check_drift` emits one warning and two skipped
+    // specs, so a test reading both `warned` and `unloaded_specs` proves the
+    // two counts land in the field each names rather than one leaking into
+    // the other.
+    #[derive(Clone)]
+    struct DriftEmittingOneWarningAndTwoSkippedSpecs;
+
+    impl DotfileService for DriftEmittingOneWarningAndTwoSkippedSpecs {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let operation_info = test_operation_info();
+            let skipped = |name: &str| PackageEvent::SpecSkipped {
+                operation_info: operation_info.clone(),
+                error: crate::package::port::PackageParseError::new(
+                    PathBuf::from(format!("/packages/{name}.yml")),
+                    crate::package::port::PackageParseKind::Unreadable {
+                        reason: "not valid YAML".to_string(),
+                    },
+                ),
+            };
+            let events = vec![
+                PackageEvent::Warning {
+                    operation_info: operation_info.clone(),
+                    message: "a relayed warning".to_string(),
+                },
+                skipped("bat"),
+                skipped("cat"),
+                PackageEvent::Completed {
+                    operation_info,
+                    result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                        drift_count: 0,
+                        total_count: 0,
+                        refused_count: 0,
+                        environment: "test".to_string(),
+                        steps_completed: StepCount::new(0, 0),
+                    }),
+                },
+            ];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    // Pins the two counts `collect_drift_summary` keeps as independent: a
+    // warning raises only `warned`, and a skipped spec raises only
+    // `unloaded_specs`. Neither of the two tests above can catch a count
+    // leaking into the other, because each drives a stream carrying only one
+    // kind of event.
+    #[tokio::test]
+    async fn status_counts_a_warning_and_skipped_specs_separately() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftEmittingOneWarningAndTwoSkippedSpecs,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let counts = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary {
+                warned,
+                unloaded_specs,
+                ..
+            } => Some((*warned, *unloaded_specs)),
+            _ => None,
+        });
+
+        assert_eq!(counts, Some((1, 2)), "{events:?}");
     }
 }
 
