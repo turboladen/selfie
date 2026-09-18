@@ -437,12 +437,14 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             drifted_targets,
             total_deployed,
             refused_count,
+            unloaded_specs,
             ..
         } => Some(serde_json::json!({
             "type": "sync_drift_summary",
             "drifted_targets": drifted_targets,
             "total_deployed": total_deployed,
             "refused_count": refused_count,
+            "unloaded_specs": unloaded_specs,
         })),
         PackageEvent::SyncCommitCreated {
             package_name,
@@ -638,6 +640,30 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.data["result"]["status"], "success");
+    }
+
+    // An assistant reading `sync_drift_summary` needs the same count the CLI
+    // warns about, so it can tell a run that skipped specs from one that
+    // checked everything.
+    #[tokio::test]
+    async fn sync_drift_summary_carries_the_unloaded_spec_count() {
+        let events = vec![
+            PackageEvent::SyncDriftSummary {
+                operation_info: test_op_info(),
+                drifted_targets: vec![],
+                total_deployed: 3,
+                refused_count: 0,
+                unloaded_specs: 2,
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(result.data["data"][0]["unloaded_specs"], 2);
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load

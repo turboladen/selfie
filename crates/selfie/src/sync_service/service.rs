@@ -187,10 +187,21 @@ where
             // Step 2: Check dotfile drift (non-fatal — drift is supplementary info,
             // unlike git status which is required for sync to function)
             let drift_stream = dotfile_service.check_drift().await;
-            let (drifted_targets, total_deployed, refused_count, drift_error) =
-                collect_drift_summary(drift_stream).await;
+            let summary = collect_drift_summary(drift_stream).await;
 
-            if let Some(error_msg) = drift_error {
+            // What drift warned about and the specs it skipped limit what its
+            // summary covers, so they are sent ahead of it, in the order drift
+            // reported them: a skipped spec comes before the warning it explains.
+            for relayed in summary.relayed {
+                match relayed {
+                    RelayedDriftEvent::Warning(message) => sender.send_warning(message).await,
+                    RelayedDriftEvent::SkippedSpec(error) => {
+                        sender.send_spec_skipped(error).await;
+                    }
+                }
+            }
+
+            if let Some(error_msg) = summary.error {
                 sender
                     .send_warning(format!("Drift check failed: {error_msg}"))
                     .await;
@@ -199,9 +210,10 @@ where
             sender
                 .send(PackageEvent::SyncDriftSummary {
                     operation_info: sender.operation_info(),
-                    drifted_targets,
-                    total_deployed,
-                    refused_count,
+                    drifted_targets: summary.drifted_targets,
+                    total_deployed: summary.total_deployed,
+                    refused_count: summary.refused_count,
+                    unloaded_specs: summary.unloaded_specs,
                 })
                 .await;
 
@@ -1185,51 +1197,73 @@ fn extract_package_name_from_message(message: &str) -> String {
 
 // ─── Drift summary collection ────────────────────────────────────────────────
 
+/// A drift event `sync status` passes on to its own caller.
+#[derive(Debug)]
+enum RelayedDriftEvent {
+    Warning(String),
+    SkippedSpec(crate::package::port::PackageParseError),
+}
+
+/// What `sync status` takes from a drift check.
+#[derive(Debug, Default)]
+struct DriftSummary {
+    drifted_targets: Vec<String>,
+    total_deployed: usize,
+    refused_count: usize,
+    /// How many specs the drift check skipped rather than loaded.
+    unloaded_specs: usize,
+    /// The failure message, when the check failed.
+    error: Option<String>,
+    /// Warnings and skipped specs, in the order drift reported them.
+    relayed: Vec<RelayedDriftEvent>,
+}
+
 /// Collect drift information from a DotfileService event stream.
-///
-/// Consumes the event stream and extracts drifted target paths, total
-/// deployed count, and any failure message from drift events.
 ///
 /// Assumes the stream emits exactly one `Completed` event (either success or
 /// failure), matching the `check_drift()` contract.
-async fn collect_drift_summary(stream: EventStream) -> (Vec<String>, usize, usize, Option<String>) {
+async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
     use futures::StreamExt;
 
-    let mut drifted_targets = Vec::new();
-    let mut total_deployed = 0;
-    let mut refused_count = 0;
-    let mut drift_error = None;
+    let mut summary = DriftSummary::default();
 
     futures::pin_mut!(stream);
     while let Some(event) = stream.next().await {
         match event {
             PackageEvent::DotfileDriftDetected { target, .. } => {
-                drifted_targets.push(target);
+                summary.drifted_targets.push(target);
+            }
+            PackageEvent::Warning { message, .. } => {
+                summary.relayed.push(RelayedDriftEvent::Warning(message));
+            }
+            PackageEvent::SpecSkipped { error, .. } => {
+                summary.unloaded_specs += 1;
+                summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
             }
             PackageEvent::Completed {
                 result:
                     OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: _,
                         total_count,
-                        refused_count: refused,
+                        refused_count,
                         ..
                     }),
                 ..
             } => {
-                total_deployed = total_count;
-                refused_count = refused;
+                summary.total_deployed = total_count;
+                summary.refused_count = refused_count;
             }
             PackageEvent::Completed {
                 result: OperationResult::Failure(failure),
                 ..
             } => {
-                drift_error = Some(failure.to_string());
+                summary.error = Some(failure.to_string());
             }
             _ => {}
         }
     }
 
-    (drifted_targets, total_deployed, refused_count, drift_error)
+    summary
 }
 
 // ─── Pull change categorization ──────────────────────────────────────────────
@@ -1813,15 +1847,78 @@ mod tests {
             )),
         }];
 
-        let (drifted, total, _refused, error) =
-            collect_drift_summary(events_to_stream(events)).await;
+        let summary = collect_drift_summary(events_to_stream(events)).await;
 
-        assert!(drifted.is_empty());
-        assert_eq!(total, 0);
-        assert_eq!(error.as_deref(), Some("permission denied"));
+        assert!(summary.drifted_targets.is_empty());
+        assert_eq!(summary.total_deployed, 0);
+        assert_eq!(summary.error.as_deref(), Some("permission denied"));
     }
 
-    // What `sync status` renders comes from this tuple, so a refusal that stops
+    // What drift warned about and the specs it skipped limit its summary, and
+    // both travel in the order drift reported them rather than grouped by
+    // kind: an implementation that relayed every skipped spec ahead of every
+    // warning would still pass a test that sent only one of each.
+    #[tokio::test]
+    async fn collect_drift_summary_keeps_warnings_and_skipped_specs_in_order() {
+        let skipped = crate::package::port::PackageParseError::new(
+            PathBuf::from("/packages/bat.yml"),
+            crate::package::port::PackageParseKind::Unreadable {
+                reason: "not valid YAML".to_string(),
+            },
+        );
+        let events = vec![
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "first warning".to_string(),
+            },
+            PackageEvent::SpecSkipped {
+                operation_info: test_operation_info(),
+                error: skipped,
+            },
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "second warning".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_operation_info(),
+                result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                    drift_count: 0,
+                    total_count: 0,
+                    refused_count: 0,
+                    environment: "test".to_string(),
+                    steps_completed: crate::package::event::StepCount::new(0, 0),
+                }),
+            },
+        ];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(summary.relayed.len(), 3, "{summary:?}");
+        assert!(
+            matches!(
+                &summary.relayed[0],
+                RelayedDriftEvent::Warning(message) if message == "first warning"
+            ),
+            "{summary:?}"
+        );
+        assert!(
+            matches!(
+                &summary.relayed[1],
+                RelayedDriftEvent::SkippedSpec(error)
+                    if error.package_path() == std::path::Path::new("/packages/bat.yml")
+            ),
+            "{summary:?}"
+        );
+        assert!(
+            matches!(
+                &summary.relayed[2],
+                RelayedDriftEvent::Warning(message) if message == "second warning"
+            ),
+            "{summary:?}"
+        );
+    }
+
+    // What `sync status` renders comes from this summary, so a refusal that stops
     // here is a refusal the status command cannot report. The count travels
     // beside the deployed total rather than inside it: the renderer prints that
     // total as "N deployed", and a refused package was never checked, let alone
@@ -1839,19 +1936,18 @@ mod tests {
             }),
         }];
 
-        let (drifted, total, refused, error) =
-            collect_drift_summary(events_to_stream(events)).await;
+        let summary = collect_drift_summary(events_to_stream(events)).await;
 
         assert_eq!(
-            refused, 2,
+            summary.refused_count, 2,
             "the refusal count must reach the status command"
         );
         assert_eq!(
-            total, 4,
+            summary.total_deployed, 4,
             "the deployed total must not absorb the refusals it did not check"
         );
-        assert!(drifted.is_empty());
-        assert!(error.is_none());
+        assert!(summary.drifted_targets.is_empty());
+        assert!(summary.error.is_none());
     }
 
     #[tokio::test]
@@ -1875,12 +1971,282 @@ mod tests {
             },
         ];
 
-        let (drifted, total, _refused, error) =
-            collect_drift_summary(events_to_stream(events)).await;
+        let summary = collect_drift_summary(events_to_stream(events)).await;
 
-        assert_eq!(drifted, vec!["/home/user/.bashrc"]);
-        assert_eq!(total, 3);
-        assert!(error.is_none());
+        assert_eq!(summary.drifted_targets, vec!["/home/user/.bashrc"]);
+        assert_eq!(summary.total_deployed, 3);
+        assert!(summary.error.is_none());
+    }
+
+    // ─── status() tests ──────────────────────────────────────────────────────
+
+    // A GitSyncProvider whose `discover_repo` and `repo_status` succeed, so
+    // `status()` reaches the drift step. Nothing else about push or pull runs
+    // through it.
+    #[derive(Clone)]
+    struct GitReachingDrift;
+
+    impl GitSyncProvider for GitReachingDrift {
+        fn discover_repo(&self, path: &Path) -> Result<crate::git::RepoInfo, GitSyncError> {
+            Ok(crate::git::RepoInfo {
+                root: path.to_path_buf(),
+                branch: Some("main".to_string()),
+                remote_name: Some("origin".to_string()),
+            })
+        }
+
+        fn repo_status(&self, _: &Path) -> Result<crate::git::RepoStatus, GitSyncError> {
+            Ok(crate::git::RepoStatus::default())
+        }
+
+        fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+            unreachable!("status() does not stage files")
+        }
+
+        fn commit(&self, _: &Path, _: &str) -> Result<crate::git::CommitId, GitSyncError> {
+            unreachable!("status() does not commit")
+        }
+
+        fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("status() does not push")
+        }
+
+        fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+            unreachable!("status() does not fetch")
+        }
+
+        fn fast_forward(&self, _: &Path) -> Result<crate::git::FastForwardResult, GitSyncError> {
+            unreachable!("status() does not fast-forward")
+        }
+
+        fn diff_commits(
+            &self,
+            _: &Path,
+            _: &crate::git::CommitId,
+            _: &crate::git::CommitId,
+        ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+            unreachable!("status() does not diff commits")
+        }
+    }
+
+    // A DotfileService whose `check_drift` emits a warning, a skipped spec,
+    // and a second warning ahead of its completion, so `status()`'s relay
+    // order can be pinned end to end rather than only inside
+    // `collect_drift_summary`.
+    #[derive(Clone)]
+    struct DriftEmittingWarningsAndSkip;
+
+    impl DotfileService for DriftEmittingWarningsAndSkip {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let operation_info = test_operation_info();
+            let skipped = crate::package::port::PackageParseError::new(
+                PathBuf::from("/packages/bat.yml"),
+                crate::package::port::PackageParseKind::Unreadable {
+                    reason: "not valid YAML".to_string(),
+                },
+            );
+            let events = vec![
+                PackageEvent::Warning {
+                    operation_info: operation_info.clone(),
+                    message: "first warning".to_string(),
+                },
+                PackageEvent::SpecSkipped {
+                    operation_info: operation_info.clone(),
+                    error: skipped,
+                },
+                PackageEvent::Warning {
+                    operation_info: operation_info.clone(),
+                    message: "second warning".to_string(),
+                },
+                PackageEvent::Completed {
+                    operation_info,
+                    result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                        drift_count: 0,
+                        total_count: 0,
+                        refused_count: 0,
+                        environment: "test".to_string(),
+                        steps_completed: StepCount::new(0, 0),
+                    }),
+                },
+            ];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    // `status()` relays drift's warnings and skipped specs in the order the
+    // drift check reported them, all ahead of `SyncDriftSummary`. The loop
+    // that does this in `status()` could be deleted with
+    // `collect_drift_summary`'s own order test still green, because that
+    // test calls `collect_drift_summary` directly rather than `status()`.
+    #[tokio::test]
+    async fn status_relays_drift_warnings_and_skipped_specs_in_order_ahead_of_the_summary() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftEmittingWarningsAndSkip,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::SyncDriftSummary { .. })),
+            "status() must emit SyncDriftSummary: {events:?}"
+        );
+
+        let relayed_before_summary: Vec<&PackageEvent> = events
+            .iter()
+            .take_while(|e| !matches!(e, PackageEvent::SyncDriftSummary { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    PackageEvent::Warning { .. } | PackageEvent::SpecSkipped { .. }
+                )
+            })
+            .collect();
+
+        assert_eq!(relayed_before_summary.len(), 3, "{events:?}");
+        assert!(
+            matches!(
+                relayed_before_summary[0],
+                PackageEvent::Warning { message, .. } if message == "first warning"
+            ),
+            "{events:?}"
+        );
+        assert!(
+            matches!(relayed_before_summary[1], PackageEvent::SpecSkipped { .. }),
+            "{events:?}"
+        );
+        assert!(
+            matches!(
+                relayed_before_summary[2],
+                PackageEvent::Warning { message, .. } if message == "second warning"
+            ),
+            "{events:?}"
+        );
+    }
+
+    // A DotfileService whose `check_drift` skips two specs, so a test reading
+    // `unloaded_specs` proves the field counts them rather than recording that
+    // any were skipped at all.
+    #[derive(Clone)]
+    struct DriftEmittingTwoSkippedSpecs;
+
+    impl DotfileService for DriftEmittingTwoSkippedSpecs {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let operation_info = test_operation_info();
+            let skipped = |name: &str| PackageEvent::SpecSkipped {
+                operation_info: operation_info.clone(),
+                error: crate::package::port::PackageParseError::new(
+                    PathBuf::from(format!("/packages/{name}.yml")),
+                    crate::package::port::PackageParseKind::Unreadable {
+                        reason: "not valid YAML".to_string(),
+                    },
+                ),
+            };
+            let events = vec![
+                skipped("bat"),
+                skipped("cat"),
+                PackageEvent::Completed {
+                    operation_info,
+                    result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                        drift_count: 0,
+                        total_count: 0,
+                        refused_count: 0,
+                        environment: "test".to_string(),
+                        steps_completed: StepCount::new(0, 0),
+                    }),
+                },
+            ];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_unloaded_spec_count_in_the_summary() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftEmittingTwoSkippedSpecs,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let unloaded_specs = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { unloaded_specs, .. } => Some(*unloaded_specs),
+            _ => None,
+        });
+
+        assert_eq!(unloaded_specs, Some(2), "{events:?}");
     }
 }
 

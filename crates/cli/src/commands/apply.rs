@@ -202,11 +202,10 @@ fn summary_to_render(
 
 /// Handle the apply command
 ///
-/// Creates a `DotfileServiceImpl` and delegates to `apply_all` or `apply`
-/// based on whether a package name was given. When the configured
-/// `dotfiles_directory` exists, it's added as a second source so
-/// standalone dotfiles are included in the apply. Events are processed
-/// through the standard `EventProcessor`.
+/// Creates a `DotfileServiceImpl` over the package and standalone dotfiles
+/// repositories and delegates to `apply_all` or `apply` based on whether a
+/// package name was given. Events are processed through the standard
+/// `EventProcessor`.
 pub(crate) async fn handle_apply(
     args: &ApplyArgs,
     config: &CliConfig,
@@ -223,7 +222,7 @@ pub(crate) async fn handle_apply(
 
     // The shared constructor, so apply runs provider commands under the same
     // shell as install and check.
-    let service = create_dotfile_service(config, display, cancellation_token);
+    let service = create_dotfile_service(config, cancellation_token);
 
     let event_stream = if let Some(name) = &args.name {
         info!("Applying dotfiles for package: {}", name);

@@ -11,13 +11,17 @@ use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
     fs::real::RealFileSystem,
     namespace,
-    package::{SpecOrigin, port::PackageRepository, repository::yaml::YamlPackageRepository},
+    package::{
+        SpecOrigin,
+        port::{PackageListError, PackageRepository},
+        repository::yaml::YamlPackageRepository,
+    },
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::common::{self, create_package_repository, dotfiles_repository},
+    commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
     display_manager::DisplayManager,
 };
@@ -56,11 +60,11 @@ pub(crate) async fn handle_track(
 
     let repo = create_package_repository(config);
 
-    // Shared with the namespace check below.
-    let dotfiles_repo = dotfiles_repository(config, display);
+    // The namespace check below uses the same repository.
+    let dotfiles_repo = create_dotfiles_repository(config);
 
     // Check if this file is already tracked anywhere
-    let (existing_tracker, unchecked) = find_existing_tracker(file, config, dotfiles_repo.as_ref());
+    let (existing_tracker, unchecked) = find_existing_tracker(file, config, &dotfiles_repo);
 
     if let Some((pkg_name, tracked_target)) = existing_tracker {
         display.print_info(format!(
@@ -104,7 +108,7 @@ pub(crate) async fn handle_track(
         }
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
-            if let Err(e) = namespace::validate_unique_name(name, &repo, dotfiles_repo.as_ref()) {
+            if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
                 display.print_error(format!("Cannot use name '{name}': {e}"));
                 return 1;
             }
@@ -214,16 +218,12 @@ fn suggest_name(file_path: &str) -> String {
 fn find_existing_tracker(
     file: &str,
     config: &CliConfig,
-    dotfiles_repo: Option<&YamlPackageRepository<RealFileSystem>>,
+    dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
 ) -> (Option<(String, String)>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
 
-    // Takes the dotfiles repository rather than building its own, so that a
-    // missing directory is reported by the caller once. Dropping it silently
-    // made an already-tracked file look untracked, and the run that followed
-    // tracked it a second time.
     let package_repo = YamlPackageRepository::new(
         RealFileSystem,
         config.selfie_config().package_directory().to_path_buf(),
@@ -232,22 +232,18 @@ fn find_existing_tracker(
     // Each repository is carried with the name of the directory it reads, so a
     // run told one of them could not be listed knows which one to go and look
     // at. The path is left to the error, which already carries it.
-    let repos: Vec<(&YamlPackageRepository<RealFileSystem>, &str)> = [
-        Some((&package_repo, "package directory")),
-        dotfiles_repo.map(|repo| (repo, "dotfiles directory")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let repos = [
+        (&package_repo, "package directory"),
+        (dotfiles_repo, "dotfiles directory"),
+    ];
 
     for (repo, directory) in repos {
         // A spec selfie could not read may already track this file, and so may
-        // every spec in a directory it could not list. Both used to leave by the
-        // same door as "nothing tracks it", and the caller then wrote a second
-        // entry for a target some package already covers -- the duplicate the
-        // comment above records, arriving by a different route.
+        // every spec in a directory it could not list, so both are reported.
+        // A directory that is not there holds no spec that could track it.
         let output = match repo.list_packages() {
             Ok(output) => output,
+            Err(PackageListError::PackageDirectoryNotFound(_)) => continue,
             Err(e) => {
                 skipped.push(format!("Could not check the {directory}: {e}"));
                 continue;
@@ -321,6 +317,10 @@ mod tests {
         let packages = temp.path().join("packages");
         std::fs::create_dir_all(&packages).unwrap();
         std::fs::write(packages.join("brokenpkg.yaml"), "{{{\n").unwrap();
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let dotfiles_repo =
+            YamlPackageRepository::new(RealFileSystem, dotfiles, SpecOrigin::DotfilesDirectory);
 
         let config = CliConfig::wrap_for_test(
             SelfieConfigBuilder::default()
@@ -329,7 +329,8 @@ mod tests {
                 .build(),
         );
 
-        let (found, skipped) = find_existing_tracker("~/.config/fish/config.fish", &config, None);
+        let (found, skipped) =
+            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
         assert!(found.is_none(), "nothing readable tracks that file");
         assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
@@ -350,6 +351,10 @@ mod tests {
             "name: bat\nenvironments:\n  test-env:\n    install: \"true\"\n",
         )
         .unwrap();
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let dotfiles_repo =
+            YamlPackageRepository::new(RealFileSystem, dotfiles, SpecOrigin::DotfilesDirectory);
 
         let config = CliConfig::wrap_for_test(
             SelfieConfigBuilder::default()
@@ -358,7 +363,37 @@ mod tests {
                 .build(),
         );
 
-        let (found, skipped) = find_existing_tracker("~/.config/fish/config.fish", &config, None);
+        let (found, skipped) =
+            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+
+        assert!(found.is_none());
+        assert!(skipped.is_empty(), "got: {skipped:?}");
+    }
+
+    // A dotfiles directory that is not there holds no spec that could track the
+    // file, so it is not something the scan failed to check.
+    #[test]
+    fn find_existing_tracker_is_silent_about_a_dotfiles_directory_that_is_not_there() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let dotfiles_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            temp.path().join("dotfiles"),
+            SpecOrigin::DotfilesDirectory,
+        );
+
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages)
+                .build(),
+        );
+
+        let (found, skipped) =
+            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
         assert!(found.is_none());
         assert!(skipped.is_empty(), "got: {skipped:?}");

@@ -20,7 +20,7 @@ pub(crate) async fn handle_status(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    let service = create_sync_service(config, display, cancellation_token);
+    let service = create_sync_service(config, cancellation_token);
 
     let event_stream = service.status().await;
 
@@ -105,6 +105,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             drifted_targets,
             total_deployed,
             refused_count,
+            unloaded_specs,
             ..
         } => {
             display.println("");
@@ -116,11 +117,16 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             // names neither.
             if *refused_count > 0 {
                 display.print_warning(format!(
-                    "{refused_count} refusal(s) left dotfiles unchecked -- run 'selfie dotfiles drift' for the reason"
+                    "{refused_count} refusal(s) left dotfiles unchecked -- see the warnings above"
+                ));
+            }
+            if *unloaded_specs > 0 {
+                display.print_warning(format!(
+                    "{unloaded_specs} spec(s) could not be loaded, so nothing they declare was checked -- see the warnings above"
                 ));
             }
             if drifted_targets.is_empty() {
-                let (line, clean) = no_drift_line(*total_deployed, *refused_count);
+                let (line, clean) = no_drift_line(*total_deployed, *refused_count, *unloaded_specs);
                 if clean {
                     display.print_success(line);
                 } else {
@@ -164,15 +170,19 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 // The wording and the level for a run that found no drift.
 //
 // The check mark is what a reader scans for, so it may not appear over a run
-// that skipped something: "No dotfile drift" is true of the packages that were
-// examined and reads as a clean bill of health for the repository. With a
-// refusal present the line stays a warning and names what it covers.
+// that skipped something: "No dotfile drift" is true only of what was
+// examined. A refusal or an unloaded spec keeps the line a warning that names
+// what it covers.
 //
 // Split out because it is the only part of this renderer a test can see --
 // `DisplayManager` writes through a `MultiProgress`, so what reaches the
 // terminal cannot be captured.
-fn no_drift_line(total_deployed: usize, refused_count: usize) -> (String, bool) {
-    if refused_count > 0 {
+fn no_drift_line(
+    total_deployed: usize,
+    refused_count: usize,
+    unloaded_specs: usize,
+) -> (String, bool) {
+    if refused_count > 0 || unloaded_specs > 0 {
         (
             format!("No drift among what could be checked ({total_deployed} deployed)"),
             false,
@@ -243,18 +253,41 @@ mod tests {
     // removes from `dotfiles drift`, reproduced one command over.
     #[test]
     fn a_run_that_skipped_nothing_may_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0);
+        let (line, clean) = super::no_drift_line(5, 0, 0);
         assert!(clean, "nothing was skipped, so the check mark is earned");
         assert!(line.contains("No dotfile drift"), "got: {line}");
     }
 
     #[test]
     fn a_run_that_skipped_a_package_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 2);
+        let (line, clean) = super::no_drift_line(5, 2, 0);
         assert!(!clean, "a skipped package must not be reported as clean");
         assert!(
             line.contains("could be checked"),
             "the line must name what it covers: {line}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_an_unloaded_spec_may_not_report_success() {
+        let (line, clean) = super::no_drift_line(5, 0, 1);
+        assert!(!clean, "an unloaded spec must not be reported as clean");
+        assert!(
+            !line.contains("No dotfile drift"),
+            "the line must not claim no drift: {line}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_and_an_unloaded_spec_together_stay_non_clean() {
+        let (line, clean) = super::no_drift_line(5, 2, 1);
+        assert!(
+            !clean,
+            "a refusal and an unloaded spec together must not be reported as clean"
+        );
+        assert!(
+            !line.contains("No dotfile drift"),
+            "the line must not claim no drift: {line}"
         );
     }
 
@@ -266,6 +299,7 @@ mod tests {
             drifted_targets: vec![],
             total_deployed: 5,
             refused_count: 0,
+            unloaded_specs: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -279,6 +313,21 @@ mod tests {
             drifted_targets: vec!["~/.config/starship.toml".to_string()],
             total_deployed: 5,
             refused_count: 0,
+            unloaded_specs: 0,
+        };
+
+        assert!(handle_status_event(&event, &display, false));
+    }
+
+    #[test]
+    fn handles_drift_summary_with_an_unloaded_spec() {
+        let display = DisplayManager::new(false);
+        let event = PackageEvent::SyncDriftSummary {
+            operation_info: make_operation_info(),
+            drifted_targets: vec![],
+            total_deployed: 5,
+            refused_count: 0,
+            unloaded_specs: 1,
         };
 
         assert!(handle_status_event(&event, &display, false));

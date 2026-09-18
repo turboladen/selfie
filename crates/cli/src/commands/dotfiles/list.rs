@@ -32,7 +32,7 @@ pub(crate) async fn handle_list(
 ) -> i32 {
     info!("Listing dotfiles");
 
-    let service = create_dotfile_service(config, display, cancellation_token);
+    let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.list().await;
 
     let config_for_handler = config.clone();

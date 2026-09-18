@@ -2202,6 +2202,15 @@ pub enum PackageEvent {
         /// refuses, which is the answer that sends a reader to run the command
         /// that will not run.
         refused_count: usize,
+        /// How many specs the drift check could not load, so nothing they
+        /// declare was checked.
+        ///
+        /// Its own field rather than part of `refused_count`, which counts work
+        /// selfie refused, and rather than part of `total_deployed`, which this
+        /// summary renders as entries that are in place. A reader told only a
+        /// deployed total would take a run that skipped half the repository for
+        /// a clean one.
+        unloaded_specs: usize,
     },
 
     /// A commit was created during sync push

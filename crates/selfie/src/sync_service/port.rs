@@ -130,9 +130,13 @@ pub struct ConfirmedCommit {
 pub trait SyncService: Send + Sync {
     /// Get combined repo status and dotfile drift summary.
     ///
-    /// Emits [`SyncRepoStatus`](crate::package::event::PackageEvent::SyncRepoStatus)
-    /// and [`SyncDriftSummary`](crate::package::event::PackageEvent::SyncDriftSummary)
-    /// events, then completes.
+    /// Emits [`SyncRepoStatus`](crate::package::event::PackageEvent::SyncRepoStatus),
+    /// then the drift check's own
+    /// [`Warning`](crate::package::event::PackageEvent::Warning) and
+    /// [`SpecSkipped`](crate::package::event::PackageEvent::SpecSkipped) events
+    /// in the order the drift check reported them, then
+    /// [`SyncDriftSummary`](crate::package::event::PackageEvent::SyncDriftSummary),
+    /// then completes.
     fn status(&self) -> impl Future<Output = EventStream> + Send;
 
     /// Analyze uncommitted changes and generate per-package commit proposals.

@@ -134,15 +134,13 @@ fn get_valid_package_name(
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
 
-    // Build an optional dotfiles repo for namespace validation. `spec create`
-    // writes into the *package* directory and has no refusal of its own, so this
-    // is the one namespace check that proceeds to a write when the dotfiles
-    // directory is not there.
-    let dotfiles_repo = common::dotfiles_repository(config, display);
+    // A dotfiles directory that is not there holds no names, so the check below
+    // is complete without it.
+    let dotfiles_repo = common::create_dotfiles_repository(config);
 
     loop {
         // Check namespace conflict (packages + dotfiles directories)
-        match namespace::validate_unique_name(&current_name, repo, dotfiles_repo.as_ref()) {
+        match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
             Err(NamespaceValidationError::LookupFailed(msg)) => {
                 display.print_error(format!("Failed to check namespace: {msg}"));
                 return Err(1);
