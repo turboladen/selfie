@@ -44,8 +44,9 @@ When changes exist:
 
 The summary reports counts and target paths. Above it, in the order the drift check reported them,
 `sync status` prints everything that check warned about, such as a package it would refuse, and
-every spec it skipped because it could not be parsed. A spec that could not be loaded is counted and
-named, and the summary line stops claiming no drift when any were.
+every spec it could not load. A spec that could not be loaded is counted and named, and any other
+relayed warning, such as a configured dotfiles directory that does not exist, is counted too; the
+summary line stops claiming no drift when either count is non-zero.
 
 It does not print why an individual target drifted. When a target keeps reappearing here and
 `selfie apply` never clears it, run `selfie dotfiles drift`, which shows the reason beside the

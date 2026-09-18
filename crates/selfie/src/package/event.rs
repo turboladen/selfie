@@ -2211,6 +2211,15 @@ pub enum PackageEvent {
         /// deployed total would take a run that skipped half the repository for
         /// a clean one.
         unloaded_specs: usize,
+        /// How many warnings the drift check relayed about work it could not
+        /// complete, such as a configured dotfiles directory that does not
+        /// exist or a deploy state file it could not read.
+        ///
+        /// Its own field rather than part of `refused_count`, which counts work
+        /// selfie refused, or `unloaded_specs`, which counts specs that would
+        /// not load. Without it this summary reports a clean run under a
+        /// warning that named a problem neither count captures.
+        warned: usize,
     },
 
     /// A commit was created during sync push

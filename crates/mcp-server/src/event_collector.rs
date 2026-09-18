@@ -438,6 +438,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             total_deployed,
             refused_count,
             unloaded_specs,
+            warned,
             ..
         } => Some(serde_json::json!({
             "type": "sync_drift_summary",
@@ -445,6 +446,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "total_deployed": total_deployed,
             "refused_count": refused_count,
             "unloaded_specs": unloaded_specs,
+            "warned": warned,
         })),
         PackageEvent::SyncCommitCreated {
             package_name,
@@ -654,6 +656,7 @@ mod tests {
                 total_deployed: 3,
                 refused_count: 0,
                 unloaded_specs: 2,
+                warned: 0,
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -664,6 +667,31 @@ mod tests {
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         assert_eq!(result.data["data"][0]["unloaded_specs"], 2);
+    }
+
+    // An assistant reading `sync_drift_summary` needs to tell a relayed
+    // warning from an unloaded spec, because only the spec count also names
+    // which specs it is.
+    #[tokio::test]
+    async fn sync_drift_summary_carries_the_warned_count() {
+        let events = vec![
+            PackageEvent::SyncDriftSummary {
+                operation_info: test_op_info(),
+                drifted_targets: vec![],
+                total_deployed: 3,
+                refused_count: 0,
+                unloaded_specs: 0,
+                warned: 1,
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(result.data["data"][0]["warned"], 1);
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load

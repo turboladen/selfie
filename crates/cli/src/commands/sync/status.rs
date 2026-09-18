@@ -106,6 +106,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             total_deployed,
             refused_count,
             unloaded_specs,
+            warned,
             ..
         } => {
             display.println("");
@@ -126,7 +127,8 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 ));
             }
             if drifted_targets.is_empty() {
-                let (line, clean) = no_drift_line(*total_deployed, *refused_count, *unloaded_specs);
+                let (line, clean) =
+                    no_drift_line(*total_deployed, *refused_count, *unloaded_specs, *warned);
                 if clean {
                     display.print_success(line);
                 } else {
@@ -171,8 +173,8 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 //
 // The check mark is what a reader scans for, so it may not appear over a run
 // that skipped something: "No dotfile drift" is true only of what was
-// examined. A refusal or an unloaded spec keeps the line a warning that names
-// what it covers.
+// examined. A refusal, an unloaded spec, or another relayed warning keeps the
+// line a warning that names what it covers.
 //
 // Split out because it is the only part of this renderer a test can see --
 // `DisplayManager` writes through a `MultiProgress`, so what reaches the
@@ -181,8 +183,9 @@ fn no_drift_line(
     total_deployed: usize,
     refused_count: usize,
     unloaded_specs: usize,
+    warned: usize,
 ) -> (String, bool) {
-    if refused_count > 0 || unloaded_specs > 0 {
+    if refused_count > 0 || unloaded_specs > 0 || warned > 0 {
         (
             format!("No drift among what could be checked ({total_deployed} deployed)"),
             false,
@@ -253,14 +256,14 @@ mod tests {
     // removes from `dotfiles drift`, reproduced one command over.
     #[test]
     fn a_run_that_skipped_nothing_may_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 0);
+        let (line, clean) = super::no_drift_line(5, 0, 0, 0);
         assert!(clean, "nothing was skipped, so the check mark is earned");
         assert!(line.contains("No dotfile drift"), "got: {line}");
     }
 
     #[test]
     fn a_run_that_skipped_a_package_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 2, 0);
+        let (line, clean) = super::no_drift_line(5, 2, 0, 0);
         assert!(!clean, "a skipped package must not be reported as clean");
         assert!(
             line.contains("could be checked"),
@@ -270,7 +273,7 @@ mod tests {
 
     #[test]
     fn a_run_with_an_unloaded_spec_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 1);
+        let (line, clean) = super::no_drift_line(5, 0, 1, 0);
         assert!(!clean, "an unloaded spec must not be reported as clean");
         assert!(
             !line.contains("No dotfile drift"),
@@ -280,11 +283,24 @@ mod tests {
 
     #[test]
     fn a_refusal_and_an_unloaded_spec_together_stay_non_clean() {
-        let (line, clean) = super::no_drift_line(5, 2, 1);
+        let (line, clean) = super::no_drift_line(5, 2, 1, 0);
         assert!(
             !clean,
             "a refusal and an unloaded spec together must not be reported as clean"
         );
+        assert!(
+            !line.contains("No dotfile drift"),
+            "the line must not claim no drift: {line}"
+        );
+    }
+
+    // A warning alone, with zero refusals and zero unloaded specs, has to
+    // move the gate by itself -- a case that also set a refusal would pass
+    // even if `warned` were never read.
+    #[test]
+    fn a_relayed_warning_alone_may_not_report_success() {
+        let (line, clean) = super::no_drift_line(5, 0, 0, 1);
+        assert!(!clean, "a relayed warning must not be reported as clean");
         assert!(
             !line.contains("No dotfile drift"),
             "the line must not claim no drift: {line}"
@@ -300,6 +316,7 @@ mod tests {
             total_deployed: 5,
             refused_count: 0,
             unloaded_specs: 0,
+            warned: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -314,6 +331,7 @@ mod tests {
             total_deployed: 5,
             refused_count: 0,
             unloaded_specs: 0,
+            warned: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -328,6 +346,7 @@ mod tests {
             total_deployed: 5,
             refused_count: 0,
             unloaded_specs: 1,
+            warned: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));

@@ -214,10 +214,11 @@ where
 
     /// Add a standalone dotfiles repository for the `dotfiles/` directory.
     ///
-    /// `list`, `apply`, `apply_all`, `check_drift` and `track_standalone` all
-    /// read it alongside the main package repository. Attach it whether or
-    /// not its directory exists: each of those operations decides for itself
-    /// what a missing or unlistable directory means.
+    /// `list`, `apply`, `apply_all` and `check_drift` read it alongside the
+    /// main package repository. `track_standalone` writes a new spec into it
+    /// instead. Attach it whether or not its directory exists: each of those
+    /// operations decides for itself what a missing or unlistable directory
+    /// means.
     #[must_use]
     pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
         self.dotfiles_repository = Some(repo);
@@ -2165,13 +2166,19 @@ where
 
     let dotfiles_dir = config.dotfiles_directory();
 
-    // This check precedes every target check and every write.
-    // `write_file_no_follow` creates missing parent directories, so tracking
-    // into a directory that is not there would create it, and a mistyped
-    // `dotfiles_directory` would become a new directory holding one spec.
-    if !filesystem.path_exists(&dotfiles_dir) {
+    // `write_file_no_follow` creates missing parent directories, so this
+    // check precedes every target check and every write: tracking into a
+    // directory that is not there would otherwise create it, turning a
+    // mistyped `dotfiles_directory` into a new directory holding one spec.
+    //
+    // Asks the repository rather than `filesystem.path_exists`, which reads
+    // false for a symlink loop exactly as it does for a missing path and
+    // would send this refusal down the "does not exist" branch with a
+    // `mkdir -p` hint that cannot work. Listing for `name` is the cheapest
+    // repository call that still classifies the directory.
+    if let Err(error) = dotfiles_repo.find_package_files(name) {
         return OperationResult::Failure(OperationFailure::Generic(
-            super::directory::track_refusal(&dotfiles_dir),
+            super::directory::track_listing_refusal(&dotfiles_dir, error),
         ));
     }
 

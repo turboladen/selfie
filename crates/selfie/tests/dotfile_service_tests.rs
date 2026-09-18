@@ -1988,6 +1988,46 @@ async fn track_standalone_refuses_a_missing_dotfiles_directory_and_does_not_crea
     );
 }
 
+// A directory that exists and cannot be listed is a refusal, not an absence.
+// `filesystem.path_exists` reads false for a symlink loop exactly as it does
+// for a missing path, and the "does not exist" sentence carries a `mkdir -p`
+// hint that cannot work on a path that is already there.
+#[cfg(unix)]
+#[tokio::test]
+async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistable() {
+    let dirs = TestDirs::new();
+    let target_file = dirs.target_dir.join("starship.toml");
+    std::fs::write(&target_file, "format = \"$all\"").unwrap();
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    std::os::unix::fs::symlink(&dirs.dotfiles_dir, &dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(
+        service
+            .track_standalone("starship", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let message = failure_message(&events);
+    assert!(
+        message.contains("Cannot track a standalone dotfile"),
+        "got: {message}"
+    );
+    assert!(
+        !message.contains("mkdir -p"),
+        "an unlistable directory offers no hint that cannot work, got: {message}"
+    );
+    assert!(
+        !dirs.dotfiles_dir.join("starship.yml").exists(),
+        "nothing must be written when the directory cannot be listed"
+    );
+    assert!(
+        !dirs.dotfiles_dir.join("starship").exists(),
+        "nothing must be written when the directory cannot be listed"
+    );
+}
+
 #[tokio::test]
 async fn test_track_for_package_adds_dotfile_to_existing_package() {
     let dirs = TestDirs::new();

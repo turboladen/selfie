@@ -53,6 +53,26 @@ pub(crate) fn track_refusal(path: &Path) -> String {
     )
 }
 
+/// The refusal for `track_standalone`, given `error` from listing the
+/// dotfiles directory at `path` for the name about to be tracked.
+///
+/// A directory that is not there gets [`track_refusal`]'s sentence and its
+/// `mkdir -p` hint. Any other listing error is a directory that exists and
+/// could not be read, which offers no hint, because creating a directory
+/// that is already there would not fix anything.
+pub(crate) fn track_listing_refusal(
+    path: &Path,
+    error: crate::package::port::PackageListError,
+) -> String {
+    match error {
+        crate::package::port::PackageListError::PackageDirectoryNotFound(_) => track_refusal(path),
+        other => format!(
+            "Cannot track a standalone dotfile: the dotfiles directory could not be listed: {} — {other}",
+            path.display()
+        ),
+    }
+}
+
 /// How to create the dotfiles directory at `path`.
 fn create_suggestion(path: &Path) -> String {
     format!("Create it with: mkdir -p {}", path.display())
@@ -106,6 +126,30 @@ mod tests {
                 "configured: {configured}"
             );
         }
+    }
+
+    // A missing directory is the one case `track_listing_refusal` hands off to
+    // `track_refusal` outright, so the two must produce identical sentences,
+    // `mkdir -p` remedy included.
+    #[test]
+    fn a_missing_directory_produces_the_same_refusal_as_track_refusal() {
+        let dir = Path::new("/home/me/dotfiles");
+
+        assert_eq!(track_listing_refusal(dir, not_found()), track_refusal(dir));
+    }
+
+    // Any other listing error names the directory and says it could not be
+    // listed, but offers no `mkdir -p` hint: the directory already exists, so
+    // creating it again would not fix anything.
+    #[test]
+    fn any_other_listing_error_names_the_directory_without_a_mkdir_hint() {
+        let dir = Path::new("/home/me/dotfiles");
+
+        let refusal = track_listing_refusal(dir, unlistable());
+
+        assert!(refusal.contains("/home/me/dotfiles"), "{refusal}");
+        assert!(refusal.contains("could not be listed"), "{refusal}");
+        assert!(!refusal.contains("mkdir"), "{refusal}");
     }
 
     // Apply warns and track refuses about the same directory in one session, so
