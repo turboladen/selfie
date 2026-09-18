@@ -214,10 +214,11 @@ where
 
     /// Add a standalone dotfiles repository for the `dotfiles/` directory.
     ///
-    /// `list`, `apply`, `apply_all`, `check_drift` and `track_standalone` all
-    /// read it alongside the main package repository. Attach it whether or
-    /// not its directory exists: each of those operations decides for itself
-    /// what a missing or unlistable directory means.
+    /// `list`, `apply`, `apply_all` and `check_drift` read it alongside the
+    /// main package repository. `track_standalone` writes a new spec into it
+    /// instead. Attach it whether or not its directory exists: each of those
+    /// operations decides for itself what a missing or unlistable directory
+    /// means.
     #[must_use]
     pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
         self.dotfiles_repository = Some(repo);
