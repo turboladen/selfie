@@ -618,12 +618,16 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_config_get",
-        description = "Get the current selfie configuration including environment, package directory, and settings"
+        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, and settings. `dotfiles_directory` is the path in effect: the configured one, or the default beside the package directory when none is set. It is reported whether or not it exists; the dotfile tools say when a configured one is missing."
     )]
     async fn config_get(&self) -> Result<CallToolResult, McpError> {
         let config_data = serde_json::json!({
             "environment": self.config.environment(),
             "package_directory": self.config.package_directory().display().to_string(),
+            // The path in effect rather than the configured one, so a consumer
+            // reads the same shape whether or not the default applies. Whether
+            // it exists is the dotfile tools' answer to give, and they do.
+            "dotfiles_directory": self.config.dotfiles_directory().display().to_string(),
             "command_timeout_secs": self.config.command_timeout().as_secs(),
             // Always present, empty when the file is clean, so a consumer can
             // read the same shape every time.
@@ -974,6 +978,44 @@ mod tests {
             .expect("tool results are text")
             .text;
         serde_json::from_str(text).unwrap()
+    }
+
+    // An assistant that asks where dotfiles live gets an answer. Every dotfile
+    // tool resolves paths against this directory, and until it was reported the
+    // only way to learn it was to infer it from a path in some other result.
+    #[tokio::test]
+    async fn config_get_reports_a_configured_dotfiles_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let dotfiles = temp.path().join("elsewhere");
+
+        let server = server_over(&packages, Some(&dotfiles));
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert_eq!(
+            json["dotfiles_directory"].as_str(),
+            Some(dotfiles.display().to_string().as_str()),
+            "got: {json}"
+        );
+    }
+
+    // Unset, the sibling default applies, and the field carries that rather
+    // than going absent -- one shape either way.
+    #[tokio::test]
+    async fn config_get_reports_the_default_dotfiles_directory_when_none_is_set() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_over(&packages, None);
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert_eq!(
+            json["dotfiles_directory"].as_str(),
+            Some(temp.path().join("dotfiles").display().to_string().as_str()),
+            "got: {json}"
+        );
     }
 
     // An assistant reading the list result has no stderr to look at, so the
