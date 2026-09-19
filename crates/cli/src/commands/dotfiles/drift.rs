@@ -50,15 +50,19 @@ pub(crate) async fn handle_drift(
                 result: OperationResult::Success(success),
                 ..
             } if !success.had_refusals() => {
-                let has_drift = matches!(
+                // A spec that could not be loaded leaves part of the check
+                // undone, so a green check would claim more than was examined.
+                // `sync status` gates its clean line on the same count.
+                let unclean = matches!(
                     success,
                     OperationSuccess::DotfileDriftChecked {
                         drift_count,
+                        unloaded_specs,
                         ..
-                    } if *drift_count > 0
+                    } if *drift_count > 0 || *unloaded_specs > 0
                 );
 
-                if has_drift {
+                if unclean {
                     display_for_handler.print_warning(success.to_string());
                 } else {
                     display_for_handler.print_success(success.to_string());

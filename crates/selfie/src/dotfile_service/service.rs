@@ -632,11 +632,25 @@ where
                     // `handle_check_drift` counts the unlistable directory as a
                     // refusal.
                     let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
+                    // Counted here rather than from the relayed events: this is
+                    // where the collection reports what it could not load, so
+                    // the count and the warnings cannot disagree.
+                    let unloaded_specs = warnings
+                        .iter()
+                        .filter(|warning| matches!(warning, ApplyWarning::SkippedSpec(_)))
+                        .count();
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
-                    handle_check_drift(&packages, &fs, &config, &sender, unreadable_repository)
-                        .await
+                    handle_check_drift(
+                        &packages,
+                        &fs,
+                        &config,
+                        &sender,
+                        unreadable_repository,
+                        unloaded_specs,
+                    )
+                    .await
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -1940,6 +1954,7 @@ async fn handle_check_drift<F>(
     config: &SelfieConfig,
     sender: &EventSender,
     unreadable_repository: bool,
+    unloaded_specs: usize,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -2132,6 +2147,7 @@ where
         drift_count,
         total_count,
         refused_count,
+        unloaded_specs,
         environment: config.environment().to_string(),
         steps_completed: StepCount::new(total_count, total_count),
     })

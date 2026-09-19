@@ -781,6 +781,14 @@ pub enum OperationSuccess {
         /// does include its refusals, because that one feeds a step count and
         /// records outcomes rather than entries.
         refused_count: usize,
+        /// How many specs the check skipped rather than loaded.
+        ///
+        /// Separate from `refused_count` because the two have different
+        /// remedies: a refusal is selfie declining to act, while an unloaded
+        /// spec is a file the user has to fix. Both mean the same thing to a
+        /// caller deciding whether the check was complete, and neither is
+        /// counted in `total_count`, which covers only what was examined.
+        unloaded_specs: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1213,13 +1221,14 @@ impl std::fmt::Display for OperationSuccess {
                 drift_count,
                 total_count,
                 refused_count,
+                unloaded_specs,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused {steps_completed}"
+                     {refused_count} refused, {unloaded_specs} not loaded {steps_completed}"
                 )
             }
             OperationSuccess::DotfileTracked {
