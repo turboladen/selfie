@@ -89,10 +89,13 @@ contributes, not the first one — the third defect above survived in `suggestio
 was fixed and tested.
 
 **Run the binary and read the output.** All three were found that way, twice from a container run,
-never from the suite. Behavior that depends on process identity — euid, `SUDO_UID` — cannot be
-exercised from `cargo test` at all: mock the port for the rule, then confirm the real thing in a
-throwaway container (`docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/build rust:latest`
-— a separate target dir because macOS artifacts are Mach-O).
+never from the suite. Behavior that depends on the effective uid cannot be exercised from
+`cargo test` at all: mock the port for the rule, then confirm the real thing in a throwaway
+container. `SUDO_UID` is different: the sudo check compares that variable against the effective uid,
+so a test that sets `SUDO_UID=0` on a spawned binary exercises the refusal without privilege, and
+one does. Confirm the container case in a throwaway container
+(`docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/build rust:latest` — a separate target
+dir because macOS artifacts are Mach-O).
 
 ## Ordering
 
