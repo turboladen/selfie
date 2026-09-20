@@ -7333,6 +7333,63 @@ mod irregular_targets {
     }
 }
 
+// A write failure names the target exactly once.
+//
+// The writer re-tags its IO errors with the target path, so a warning that
+// prefixes the path as well prints it twice.
+mod write_failure_warnings {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // An existing target inside a directory the user cannot write to is
+    // refused, because the replacement has to be created beside it, and the
+    // original is left as it was.
+    #[tokio::test]
+    async fn an_unwritable_target_directory_is_named_once() {
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP an_unwritable_target_directory_is_named_once: running as root");
+            return;
+        }
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("config.toml");
+        std::fs::write(&target, "OLD").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let options = ApplyOptions {
+            // Without this the entry is a conflict and never reaches the write.
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        // Restore before asserting, so a failure still leaves a removable
+        // temporary directory behind.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let warnings = warning_messages(&events);
+        let failure = warnings
+            .iter()
+            .find(|w| w.starts_with("Failed to write: "))
+            .unwrap_or_else(|| panic!("no write failure was reported: {warnings:?}"));
+        assert_eq!(
+            failure.matches(target.to_str().unwrap()).count(),
+            1,
+            "the target is not named exactly once: {failure}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD");
+        assert_eq!(refused_count(&events), 1);
+    }
+}
+
 // The permanent `not tracked` drift line for a target selfie will never manage.
 //
 // An untracked dotfile whose target is a symlink and whose contents already match

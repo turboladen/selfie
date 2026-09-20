@@ -1149,11 +1149,10 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
+            // The error already names the target; naming it here too would print
+            // the path twice.
             self.sender
-                .send_warning(format!(
-                    "Failed to tighten permissions on '{}': {e}",
-                    target.path.display()
-                ))
+                .send_warning(format!("Failed to tighten permissions: {e}"))
                 .await;
             return Err(SecretOutcome::Failed);
         }
@@ -1268,8 +1267,10 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
+            // The error already names the target; naming it here too would print
+            // the path twice.
             self.sender
-                .send_warning(format!("Failed to write '{}': {e}", target.path.display()))
+                .send_warning(format!("Failed to write: {e}"))
                 .await;
             return SecretOutcome::Failed;
         }
@@ -1480,18 +1481,20 @@ async fn perform_deploy<F: FileSystem>(
         filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
     {
         // A refusal is not a failure. "Failed to write" would read as something
-        // going wrong rather than as selfie declining, and the error already names
-        // both the target and where the link points.
+        // going wrong rather than as selfie declining. The error names the target
+        // in both arms, so neither repeats it.
         //
-        // Reaching the refusal arm here means the link appeared between the check
-        // in `handle_apply` and this write. It is exercised by
+        // Reaching the refusal arm here means the link or fifo appeared between
+        // the checks in `handle_apply` and this write. It is exercised by
         // `the_writer_refuses_even_when_the_check_is_blinded`, which asserts only
         // that the message names a symlink — not the `Skipping '{source}': `
         // wrapper. Share `refusal_warning` rather than repeating the wording, or
         // that unpinned half can drift.
         let message = match &e {
-            FileSystemError::SymlinkedTarget { .. } => refusal_warning(unit.source_key, &e),
-            _ => format!("Failed to write '{}': {e}", unit.target_path.display()),
+            FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
+                refusal_warning(unit.source_key, &e)
+            }
+            _ => format!("Failed to write: {e}"),
         };
         sender.send_warning(message).await;
         // `Err` has the caller count this as refused and leaves the deploy state
