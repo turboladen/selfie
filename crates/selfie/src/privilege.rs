@@ -208,10 +208,6 @@ impl<P: Privilege> SudoPolicy<P> {
 /// An unparsable value is treated as `sudo`. It cannot be compared, and
 /// refusing is the safe direction; a real `sudo` always sets a decimal uid, so
 /// anything else was not written by the thing this rule is about.
-///
-/// Only the `cfg(unix)` impl and the tests call it, so a non-unix build without
-/// them would warn it dead — and clippy runs with `-D warnings`.
-#[cfg(any(unix, test))]
 fn classify(euid: u32, sudo_uid: Option<&str>) -> Elevation {
     let invoked_by_someone_else = match sudo_uid {
         None => false,
@@ -247,7 +243,6 @@ pub struct RealPrivilege;
 /// place this leans permissive, and deliberately: a uid is decimal ASCII, so a
 /// non-UTF-8 `SUDO_UID` was not written by sudo and says nothing about how this
 /// process was started.
-#[cfg(unix)]
 impl Privilege for RealPrivilege {
     fn elevation(&self) -> Elevation {
         let sudo_uid = std::env::var_os("SUDO_UID");
@@ -255,14 +250,6 @@ impl Privilege for RealPrivilege {
             nix::unistd::Uid::effective().as_raw(),
             sudo_uid.as_ref().and_then(|v| v.to_str()),
         )
-    }
-}
-
-/// Windows has no euid and no sudo, so there is nothing here to refuse.
-#[cfg(not(unix))]
-impl Privilege for RealPrivilege {
-    fn elevation(&self) -> Elevation {
-        Elevation::Unprivileged
     }
 }
 

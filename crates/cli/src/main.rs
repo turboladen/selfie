@@ -43,30 +43,23 @@ fn init_tracing(verbose: bool) {
     }
 }
 
-/// Wait for a shutdown signal (SIGINT or SIGTERM on Unix, SIGINT on Windows).
+/// Wait for a shutdown signal, SIGINT or SIGTERM.
 ///
 /// Returns when the first signal is received. Call again to wait for a second signal.
 async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = sigterm.recv() => {}
-                }
-            }
-            Err(_) => {
-                // SIGTERM registration can fail in sandboxed environments;
-                // fall back to SIGINT-only.
-                let _ = tokio::signal::ctrl_c().await;
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
             }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+        Err(_) => {
+            // SIGTERM registration can fail in sandboxed environments;
+            // fall back to SIGINT-only.
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

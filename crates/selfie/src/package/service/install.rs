@@ -267,11 +267,7 @@ async fn find_executable_path<CR>(
 where
     CR: CommandRunner,
 {
-    let finder_command = if cfg!(target_os = "windows") {
-        format!("where {package_name}")
-    } else {
-        format!("which {package_name}")
-    };
+    let finder_command = format!("which {package_name}");
 
     match command_runner.execute(&finder_command, token).await {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {

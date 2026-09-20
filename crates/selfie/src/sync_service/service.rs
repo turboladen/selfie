@@ -3245,7 +3245,6 @@ mod name_collision_tests {
     // A symlink is how the two spellings are made to differ on demand; a
     // `--package-directory /tmp/...` on a host where `/tmp` resolves elsewhere
     // reaches the same state without one.
-    #[cfg(unix)]
     #[test]
     fn a_package_directory_named_through_a_symlink_is_still_validated() {
         use super::{FileChangeKind, validate_changed_packages};

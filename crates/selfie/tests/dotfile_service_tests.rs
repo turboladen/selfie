@@ -1208,7 +1208,6 @@ async fn test_apply_nonexistent_package_name() {
 
 // The package asked for may be a standalone dotfile in the directory selfie
 // could not list, so "not found" alone would send the user looking for a typo.
-#[cfg(unix)]
 #[tokio::test]
 async fn apply_by_name_says_an_unlistable_directory_may_hold_the_package() {
     let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
@@ -2031,7 +2030,6 @@ async fn track_standalone_refuses_a_missing_dotfiles_directory_and_does_not_crea
 // `filesystem.path_exists` reads false for a symlink loop exactly as it does
 // for a missing path, and the "does not exist" sentence carries a `mkdir -p`
 // hint that cannot work on a path that is already there.
-#[cfg(unix)]
 #[tokio::test]
 async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistable() {
     let dirs = TestDirs::new();
@@ -2661,7 +2659,6 @@ mod secret_bearing {
         assert!(state.contains("myapp/config.toml"), "got: {state}");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_secret_target_is_written_owner_only_even_over_a_world_readable_file() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2682,7 +2679,6 @@ mod secret_bearing {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn an_in_sync_target_with_lax_permissions_is_tightened() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2723,7 +2719,6 @@ mod secret_bearing {
         assert_no_event_mentions(&events, SECRET);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn an_in_sync_target_readable_only_by_its_group_is_still_tightened() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2746,7 +2741,6 @@ mod secret_bearing {
         assert_eq!(mode, 0o600, "group-readable is not owner-only");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn an_in_sync_target_already_owner_only_is_left_completely_alone() {
         use std::os::unix::fs::MetadataExt as _;
@@ -2782,7 +2776,6 @@ mod secret_bearing {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_secret_target_is_replaced_not_written_through() {
         let dirs = TestDirs::new();
@@ -3247,7 +3240,6 @@ mod secret_bearing {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn an_existing_but_unreadable_target_is_not_silently_overwritten() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3283,7 +3275,6 @@ mod secret_bearing {
         assert_no_event_mentions(&events, SECRET);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn an_unreadable_target_conflict_says_so_rather_than_reporting_zero_lines() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4507,7 +4498,6 @@ mod secret_bearing {
     // The shell is a script standing in for the user's, so nothing here reads or
     // writes the developer's own configuration. See `commands::shell`'s
     // `content_tests` for why that is a faithful stand-in.
-    #[cfg(unix)]
     mod noisy_shell {
         use super::*;
         use selfie::commands::ShellCommandRunner;
@@ -4623,7 +4613,6 @@ mod secret_bearing {
 // assertions that matter here — where the bytes actually landed, and what mode the
 // state file carries — cannot be expressed against it. Everything runs inside a
 // `TempDir`, so nothing outside it is touched.
-#[cfg(unix)]
 mod symlinked_targets {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
@@ -5276,7 +5265,6 @@ mod symlinked_targets {
 //
 // These are behavior changes rather than fixes, asserted so they are deliberate
 // and visible rather than discovered later.
-#[cfg(unix)]
 mod target_expansion {
     use selfie::fs::{RealFileSystem, expand_target_path};
     use tempfile::TempDir;
@@ -5330,7 +5318,6 @@ mod target_expansion {
 // the other two commands and the guard's documented limit. Unix-only:
 // `MockFileSystem` has no filesystem behind it, so none of this is observable
 // through it. Everything runs inside a `TempDir`.
-#[cfg(unix)]
 mod symlink_consistency {
     use super::*;
     use std::path::Path;
@@ -5793,7 +5780,6 @@ mod symlink_consistency {
 // Unix-only because everything runs against a real filesystem in a `TempDir`.
 // Nothing creates a CWD-relative fixture -- a relative target is refused before
 // anything stats it, which is the property under test.
-#[cfg(unix)]
 mod target_rule {
     use super::*;
 
@@ -6248,7 +6234,6 @@ mod deploy_state_diagnostics {
     // privileges the way a `chmod 000` file would. Unix in practice, and this
     // module is not gated, so the assertion tolerates either failure wording — what
     // it pins is that the *load* is reported and named apart from the save.
-    #[cfg(unix)]
     #[tokio::test]
     async fn apply_reports_an_unreadable_state_file_apart_from_the_failed_save() {
         let dirs = TestDirs::new();
@@ -7101,7 +7086,6 @@ environments:
 // `flavor = "multi_thread"` is load-bearing. The service works in a spawned
 // task, so on a current-thread runtime a blocking `read` stalls the whole
 // runtime including the timer, which then never fires.
-#[cfg(unix)]
 mod irregular_targets {
     use super::*;
     use std::path::Path;
@@ -7293,7 +7277,6 @@ mod irregular_targets {
 // Both commands say the same sentence in the channel each already uses, raising
 // no warning that did not exist, which is what keeps the two in-sync tests
 // passing unmodified.
-#[cfg(unix)]
 mod unmanageable_symlink_reason {
     use super::*;
     use std::path::Path;
@@ -7488,7 +7471,6 @@ mod unmanageable_symlink_reason {
 // Every fixture plants a **dangling** link on purpose. A link to an existing
 // file is caught by the `path_exists` guard; a dangling one returns `false`
 // there, passes the guard, and reaches the write. selfie-yw7i
-#[cfg(unix)]
 mod repository_writes_do_not_follow_symlinks {
     use super::*;
     use std::path::{Path, PathBuf};
@@ -7638,7 +7620,6 @@ mod repository_writes_do_not_follow_symlinks {
 // Four reads, not one: `handle_apply`, `handle_check_drift`, `resolve_content`'s
 // `Template` arm, and `read_referenced_file`. `flavor = "multi_thread"` is
 // load-bearing -- the blocking read sits in a spawned task. selfie-lwv5
-#[cfg(unix)]
 mod irregular_sources {
     use super::*;
     use std::path::Path;
@@ -8296,10 +8277,8 @@ async fn list_reports_a_listing_it_could_not_perform() {
 // Test directories whose dotfiles directory is mode 0o000 until this is
 // dropped. Restoring in `Drop` runs before the `TestDirs` field is dropped, so
 // the temp directory can still be removed when an assertion panics first.
-#[cfg(unix)]
 struct UnlistableDotfilesDirectory(TestDirs);
 
-#[cfg(unix)]
 impl std::ops::Deref for UnlistableDotfilesDirectory {
     type Target = TestDirs;
 
@@ -8308,7 +8287,6 @@ impl std::ops::Deref for UnlistableDotfilesDirectory {
     }
 }
 
-#[cfg(unix)]
 impl Drop for UnlistableDotfilesDirectory {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -8321,7 +8299,6 @@ impl Drop for UnlistableDotfilesDirectory {
 
 // A package with one deployable dotfile, and a dotfiles directory that exists
 // and cannot be listed. `None` when running as root, which ignores the mode bits.
-#[cfg(unix)]
 fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDirectory, PathBuf)> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -8345,7 +8322,6 @@ fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDir
 // Every standalone dotfile in an unlistable directory was asked for and none can
 // deploy, so the run carries a refusal. The package dotfile still deploys, which
 // is what keeps this a refusal rather than a failure.
-#[cfg(unix)]
 #[tokio::test]
 async fn apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
     let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
@@ -8370,7 +8346,6 @@ async fn apply_all_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
 
 // A named apply that matches a package outside the directory lost nothing to it,
 // so the run is not refused.
-#[cfg(unix)]
 #[tokio::test]
 async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
     let Some((dirs, target)) = dirs_with_an_unlistable_dotfiles_directory() else {
@@ -8419,7 +8394,6 @@ async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn drift_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
     let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
@@ -8448,7 +8422,6 @@ async fn drift_counts_an_unlistable_dotfiles_directory_as_a_refusal() {
 // A dotfiles directory that exists and cannot be listed is fatal to a LISTING,
 // because the table would be missing every standalone entry. Apply and drift
 // have the package dotfiles to act on, so they count it as a refusal instead.
-#[cfg(unix)]
 #[tokio::test]
 async fn list_fails_when_a_dotfiles_directory_cannot_be_listed() {
     let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {

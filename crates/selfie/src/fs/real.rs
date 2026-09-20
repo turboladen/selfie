@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -41,26 +42,23 @@ fn symlink_refusal(path: &Path) -> Option<FileSystemError> {
 /// `stat` never blocks, including on a fifo. Only `open` does, which is what makes
 /// it safe to ask this question about the very targets that would hang.
 fn irregular_kind(path: &Path) -> Option<&'static str> {
+    use std::os::unix::fs::FileTypeExt as _;
+
     let metadata = fs::metadata(path).ok()?;
     let file_type = metadata.file_type();
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt as _;
-
-        if file_type.is_fifo() {
-            // The blocking one: `open` waits for the other end.
-            return Some("named pipe (fifo)");
-        }
-        if file_type.is_socket() {
-            return Some("socket");
-        }
-        if file_type.is_char_device() {
-            return Some("character device");
-        }
-        if file_type.is_block_device() {
-            return Some("block device");
-        }
+    if file_type.is_fifo() {
+        // The blocking one: `open` waits for the other end.
+        return Some("named pipe (fifo)");
+    }
+    if file_type.is_socket() {
+        return Some("socket");
+    }
+    if file_type.is_char_device() {
+        return Some("character device");
+    }
+    if file_type.is_block_device() {
+        return Some("block device");
     }
 
     // A **directory** is deliberately not one of these: opening one never blocks,
@@ -71,9 +69,6 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
     // `a_write_that_fails_after_an_accepted_conflict_is_refused` reaches
     // `perform_deploy`'s second `Err` arm by putting a directory at the target --
     // folding directories in here would silently stop covering that arm.
-    //
-    // `file_type` is consumed here so the non-unix build has no unused variable.
-    let _ = file_type;
     None
 }
 
@@ -132,14 +127,10 @@ impl FileSystem for RealFileSystem {
 
         let mut builder = tempfile::Builder::new();
         builder.prefix(".selfie-");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            // Applied by the creating syscall, so the content is never briefly
-            // world-readable. The umask may restrict this further but can never
-            // loosen it.
-            builder.permissions(fs::Permissions::from_mode(0o600));
-        }
+        // Applied by the creating syscall, so the content is never briefly
+        // world-readable. The umask may restrict this further but can never
+        // loosen it.
+        builder.permissions(fs::Permissions::from_mode(0o600));
 
         // Randomly named and unlinked on drop, so it cannot collide with a concurrent
         // write and no *error* path leaves it behind. A crash is another matter: being
@@ -164,10 +155,8 @@ impl FileSystem for RealFileSystem {
         Ok(())
     }
 
-    // On unix the refusal is the kernel's: `O_NOFOLLOW` on the creating `open(2)`,
-    // so there is no interval between deciding and writing. Elsewhere it is a
-    // `symlink_metadata` check before the write, which a concurrent planter can win
-    // — hence the weaker claim the trait makes for those platforms.
+    // The refusal is the kernel's: `O_NOFOLLOW` on the creating `open(2)`, so
+    // there is no interval between deciding and writing.
     //
     // A failed open is classified by stat-ing the path afterwards rather than by
     // matching an errno, which is why a link deleted in that window reports as an
@@ -185,45 +174,17 @@ impl FileSystem for RealFileSystem {
 
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            // The kernel refuses the open when the final component is a symlink, so
-            // there is no interval between deciding and writing for a planter to
-            // win. Checking first and then writing would be exactly that race.
-            //
-            // `O_NONBLOCK` is for a second kind of target: opening a fifo for
-            // writing blocks until a reader arrives, and no timeout in selfie
-            // bounds it. With the flag the open fails `ENXIO` instead.
-            //
-            // It is not the guarantee on its own -- with a reader attached the open
-            // succeeds -- which is what the descriptor check after it is for.
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        #[cfg(not(unix))]
-        {
-            // No equivalent flag here, so this is a check and therefore racy. Said
-            // plainly rather than presented as the guarantee the Unix path gives.
-            //
-            // Written out rather than reusing `symlink_refusal`, which answers "is
-            // it a symlink" and folds a failed stat into "no". That is right where
-            // it only classifies an open that already failed, and wrong here, where
-            // it is the whole enforcement: a stat that fails for any reason other
-            // than the path being absent leaves us unable to tell, and proceeding
-            // would write through a link we simply could not see.
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    return Err(FileSystemError::SymlinkedTarget {
-                        path: path.to_path_buf(),
-                        points_to: fs::read_link(path).ok(),
-                    });
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(io_err(e)),
-            }
-        }
+        // The kernel refuses the open when the final component is a symlink, so
+        // there is no interval between deciding and writing for a planter to
+        // win. Checking first and then writing would be exactly that race.
+        //
+        // `O_NONBLOCK` is for a second kind of target: opening a fifo for
+        // writing blocks until a reader arrives, and no timeout in selfie
+        // bounds it. With the flag the open fails `ENXIO` instead.
+        //
+        // It is not the guarantee on its own -- with a reader attached the open
+        // succeeds -- which is what the descriptor check after it is for.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
 
         let mut file = match options.open(path) {
             Ok(file) => file,
@@ -267,8 +228,7 @@ impl FileSystem for RealFileSystem {
             }
             // Fails **closed**, and matched explicitly rather than folded into the
             // arm above: a descriptor selfie cannot classify is one it must not
-            // write to, for the reason the non-unix symlink branch gives -- being
-            // unable to tell is not permission to proceed.
+            // write to. Being unable to tell is not permission to proceed.
             //
             // The error is propagated rather than turned into a refusal. Reporting
             // `IrregularTarget` here would name a file type nothing observed; this
@@ -302,7 +262,6 @@ impl FileSystem for RealFileSystem {
         //
         // Only the immediate parent, and on macOS `sync_all` is `fsync(2)`,
         // which APFS does not treat as a write barrier. Do not claim more.
-        #[cfg(unix)]
         if let Ok(dir) = fs::File::open(parent) {
             let _ = dir.sync_all();
         }
@@ -321,9 +280,6 @@ impl FileSystem for RealFileSystem {
     // stat and is `None`, which is right: nothing to open, and `symlink_refusal`
     // reports it. The two guards answer different questions and need different
     // syscalls; mirroring this one on the other reintroduces the hang.
-    //
-    // Unix only. Elsewhere it is always `None` — the file types it distinguishes
-    // do not exist there.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         irregular_refusal(path.path())
     }
@@ -332,17 +288,8 @@ impl FileSystem for RealFileSystem {
         let metadata =
             fs::metadata(path.path()).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            // Any group or other bit set means someone else can reach it.
-            Ok(metadata.permissions().mode() & 0o077 == 0)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            Ok(true)
-        }
+        // Any group or other bit set means someone else can reach it.
+        Ok(metadata.permissions().mode() & 0o077 == 0)
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
@@ -560,41 +507,35 @@ mod tests {
 
     #[test]
     fn test_permission_denied() {
-        // This test is conditional because it's hard to reliably create
-        // permission-denied scenarios across different platforms
-        if cfg!(unix) {
-            use std::os::unix::fs::PermissionsExt;
+        let fs = RealFileSystem;
 
-            let fs = RealFileSystem;
+        // Create a temporary directory and file
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("no_access.txt");
 
-            // Create a temporary directory and file
-            let dir = tempdir().unwrap();
-            let file_path = dir.path().join("no_access.txt");
+        // Write test content
+        let test_content = "Hello, world!";
+        fs::write(&file_path, test_content).unwrap();
 
-            // Write test content
-            let test_content = "Hello, world!";
-            fs::write(&file_path, test_content).unwrap();
+        // Set permissions to read-only for owner, nothing for others
+        let metadata = fs::metadata(&file_path).unwrap();
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o400); // Read-only for owner
+        fs::set_permissions(&file_path, perms).unwrap();
 
-            // Set permissions to read-only for owner, nothing for others
-            let metadata = fs::metadata(&file_path).unwrap();
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o400); // Read-only for owner
-            fs::set_permissions(&file_path, perms).unwrap();
+        // If running as root, this test won't work properly
+        if !nix::unistd::Uid::effective().is_root() {
+            // Remove read permission for current user
+            // This is a best-effort test - it may not work in all environments
+            let _ = std::process::Command::new("chmod")
+                .args(["000", file_path.to_str().unwrap()])
+                .output();
 
-            // If running as root, this test won't work properly
-            if !nix::unistd::Uid::effective().is_root() {
-                // Remove read permission for current user
-                // This is a best-effort test - it may not work in all environments
-                let _ = std::process::Command::new("chmod")
-                    .args(["000", file_path.to_str().unwrap()])
-                    .output();
-
-                // Try to read the file - may or may not fail with permission denied
-                // depending on the environment
-                let result = fs.read_file(&file_path);
-                if let Err(FileSystemError::IoError(_)) = result {
-                    // Test passed
-                }
+            // Try to read the file - may or may not fail with permission denied
+            // depending on the environment
+            let result = fs.read_file(&file_path);
+            if let Err(FileSystemError::IoError(_)) = result {
+                // Test passed
             }
         }
     }
@@ -785,10 +726,9 @@ mod private_write_tests {
         assert_eq!(entries(dir.path()), ["creds"]);
     }
 
-    #[cfg(unix)]
     mod unix {
         use super::*;
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
 
         fn mode_of(path: &Path) -> u32 {
             fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -1055,10 +995,8 @@ mod no_follow_write_tests {
         );
     }
 
-    #[cfg(unix)]
     mod unix {
         use super::*;
-        use std::os::unix::fs::PermissionsExt as _;
 
         fn mode_of(path: &Path) -> u32 {
             fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -1239,7 +1177,7 @@ mod no_follow_write_tests {
 /// rather than a wedged run. `tokio::time::timeout` around the call itself would
 /// not do: these are synchronous, so the future polls the blocking call inline
 /// and the timer never gets to run.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod irregular_targets {
     use super::*;
     use std::io::Read as _;

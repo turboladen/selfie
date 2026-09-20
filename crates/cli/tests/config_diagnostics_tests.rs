@@ -14,7 +14,6 @@ use common::sandboxed_command;
 
 /// A fifo at the configuration path, which every command reads before doing
 /// anything else.
-#[cfg(unix)]
 fn config_dir_with_fifo() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().unwrap();
     let config_dir = temp_dir.path().join(".config").join("selfie");
@@ -38,7 +37,6 @@ fn config_dir_with_fifo() -> tempfile::TempDir {
 // Asserting on the wording as well as the status matters here. A timeout kill
 // also exits non-zero, so "exited non-zero" alone would pass on the very hang
 // this exists to catch.
-#[cfg(unix)]
 #[test]
 fn a_fifo_config_file_does_not_hang_the_cli() {
     let temp_dir = config_dir_with_fifo();
@@ -67,7 +65,6 @@ fn a_fifo_config_file_does_not_hang_the_cli() {
 // The refusal must not read as "there is no configuration file". Skipping
 // irregular files during discovery would produce that, and would still exit
 // non-zero — so the negative assertion is the one carrying the weight.
-#[cfg(unix)]
 #[test]
 fn a_fifo_config_file_is_not_reported_as_a_missing_one() {
     let temp_dir = config_dir_with_fifo();
@@ -88,7 +85,6 @@ fn a_fifo_config_file_is_not_reported_as_a_missing_one() {
 // A config file symlinked into a dotfiles repository that is not checked out
 // yet. `path_exists` follows, so this reads as "no configuration file" — and the
 // user's configuration is right there, being ignored.
-#[cfg(unix)]
 #[test]
 fn a_dangling_config_symlink_is_not_reported_as_absent() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -128,7 +124,6 @@ fn a_dangling_config_symlink_is_not_reported_as_absent() {
 // The control: a symlinked config that *does* resolve is the supported, common
 // setup — pointing selfie at a file kept in a dotfiles repository. A guard that
 // refused every symlink would break it.
-#[cfg(unix)]
 #[test]
 fn a_config_symlink_that_resolves_is_read_normally() {
     let temp_dir = tempfile::tempdir().unwrap();

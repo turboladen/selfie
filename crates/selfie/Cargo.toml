@@ -10,7 +10,12 @@ dunce.workspace = true
 etcetera = "0.11"
 futures.workspace = true
 gix.workspace = true
+libc = "0.2"
 mockall = { workspace = true, optional = true }
+# "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
+# has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
+# `unsafe` for the same reason the dev entry below did.
+nix = { version = "0.31", features = ["user"] }
 pretty_assertions = "1.4.1"
 serde.workspace = true
 serde_ignored.workspace = true
@@ -39,6 +44,11 @@ which = "8.0"
 
 [dev-dependencies]
 mockall.workspace = true
+# "fs" is for `mkfifo`, which the irregular-target tests need to build a target
+# that blocks on open. There is no std equivalent; the alternatives were a
+# subprocess or the crate's first `unsafe` block. "user" comes from the
+# production entry above, which cargo unifies into the test build.
+nix = { version = "0.31", features = ["fs"] }
 test-common = { path = "../test-common/" }
 tracing-subscriber.workspace = true
 tokio = { version = "1.44", features = [
@@ -51,20 +61,6 @@ tokio = { version = "1.44", features = [
   "sync",
   "time",
 ] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-# "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
-# has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
-# `unsafe` for the same reason the dev entry below did.
-nix = { version = "0.31", features = ["user"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-# "fs" is for `mkfifo`, which the irregular-target tests need to build a target
-# that blocks on open. There is no std equivalent; the alternatives were a
-# subprocess or the crate's first `unsafe` block. "user" comes from the
-# production entry above, which cargo unifies into the test build.
-nix = { version = "0.31", features = ["fs"] }
 
 [features]
 default = []

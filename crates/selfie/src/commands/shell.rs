@@ -24,9 +24,6 @@ use super::runner::{
     CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
 };
 
-/// Unix-only: the separation is built out of descriptor redirection and a
-/// `printf` builtin, neither of which `cmd.exe` has.
-#[cfg(unix)]
 mod content;
 
 /// Shell command runner implementation
@@ -72,31 +69,20 @@ impl ShellCommandRunner {
 
     /// Create a login shell command runner that sources the user's profile.
     ///
-    /// On Unix, uses the user's default shell (from `SHELL` env var, falling
-    /// back to `/bin/sh`) with the `-l` flag to source login profiles
-    /// (`.bash_profile`, `.zshrc`, etc.). This ensures PATH includes
-    /// user-installed tools like `~/.cargo/bin`, homebrew paths, etc.
-    ///
-    /// On non-Unix platforms, falls back to the default shell without `-l`
-    /// since login shell semantics don't apply.
+    /// Uses the user's default shell (from `SHELL` env var, falling back to
+    /// `/bin/sh`) with the `-l` flag to source login profiles (`.bash_profile`,
+    /// `.zshrc`, etc.). This ensures PATH includes user-installed tools like
+    /// `~/.cargo/bin`, homebrew paths, etc.
     ///
     /// Use this when the process is launched from a non-shell context
     /// (e.g., an MCP server started by a GUI application).
     #[must_use]
     pub fn login_shell(default_timeout: Duration) -> Self {
-        #[cfg(unix)]
-        {
-            let shell =
-                std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
-            Self {
-                shell,
-                default_timeout,
-                login: true,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            Self::new(Self::default_shell(), default_timeout)
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
+        Self {
+            shell,
+            default_timeout,
+            login: true,
         }
     }
 
@@ -127,7 +113,6 @@ impl ShellCommandRunner {
     /// removed here are the ways it could be made to: `ENV` and `BASH_ENV` name a
     /// file it would source, and `SHELLOPTS`/`BASH_XTRACEFD` put its own trace
     /// output on a descriptor of the caller's choosing.
-    #[cfg(unix)]
     fn build_content_command(&self, recipe: &str, working_dir: &Path, fd: u8) -> Command {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
@@ -236,22 +221,10 @@ impl ShellCommandRunner {
         })
     }
 
-    /// Return the platform-appropriate default shell path.
-    ///
-    /// - **Unix**: `/bin/sh`
-    /// - **Windows**: the value of `COMSPEC` (usually `cmd.exe`)
+    /// The default shell path, `/bin/sh`.
     #[must_use]
     pub fn default_shell() -> &'static str {
-        #[cfg(unix)]
-        {
-            "/bin/sh"
-        }
-        #[cfg(windows)]
-        {
-            // COMSPEC is always set on Windows; fall back to cmd.exe
-            static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-            SHELL.get_or_init(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()))
-        }
+        "/bin/sh"
     }
 }
 
@@ -412,7 +385,6 @@ impl CommandRunner for ShellCommandRunner {
     /// quieter, not silent, and gating on the flag would leave every test built
     /// with [`ShellCommandRunner::new`] passing against a splicing production
     /// path.
-    #[cfg(unix)]
     async fn execute_for_content(
         &self,
         command: &str,
@@ -462,41 +434,6 @@ impl CommandRunner for ShellCommandRunner {
                 working_directory: working_dir.to_path_buf(),
             }),
         }
-    }
-
-    /// Run a command whose stdout becomes a file's content.
-    ///
-    /// Windows has no login profile to source and no `printf` in `cmd.exe`, so
-    /// the command runs as it always did and the tail is reported unverified —
-    /// which is what it is. Nothing separates a `cmd.exe` `AutoRun` command's
-    /// output from the command's own here.
-    #[cfg(not(unix))]
-    async fn execute_for_content(
-        &self,
-        command: &str,
-        working_dir: &Path,
-        timeout: Duration,
-        token: &CancellationToken,
-    ) -> Result<ContentOutput, CommandError> {
-        let output = self
-            .run_buffered(
-                self.build_command(command, Some(working_dir)),
-                command,
-                Some(working_dir),
-                timeout,
-                token,
-            )
-            .await?;
-
-        let success = output.is_success();
-        let stderr = output.stderr().to_vec();
-        Ok(ContentOutput::from_capture(
-            success,
-            output.into_stdout(),
-            stderr,
-            0,
-            false,
-        ))
     }
 }
 
@@ -1959,7 +1896,7 @@ mod tests {
 //
 // fish is not tested here. CI does not have it, and a test that skips when its
 // subject is missing reports success for having done nothing.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod content_tests {
     use super::*;
     use std::path::PathBuf;

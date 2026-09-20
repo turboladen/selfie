@@ -94,7 +94,6 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
 // the repository is built only when the directory is there. Once it is, a
 // listing selfie could not perform must not come back as a successful listing
 // that happens to be missing everything in that directory.
-#[cfg(unix)]
 #[test]
 fn an_unreadable_dotfiles_directory_fails_the_listing() {
     use std::os::unix::fs::PermissionsExt as _;

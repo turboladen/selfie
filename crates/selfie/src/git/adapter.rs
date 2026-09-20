@@ -48,17 +48,11 @@ fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
 }
 
 /// Check if a file has the executable bit set.
-#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(_path: &Path) -> bool {
-    false
 }
 
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.

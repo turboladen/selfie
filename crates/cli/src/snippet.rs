@@ -302,7 +302,6 @@ mod tests {
     // already printed the sentence and with nothing to interrupt it. The deadline
     // is what turns that into a failure rather than a wedged suite; a real fifo
     // because `MockFileSystem` cannot block and would prove nothing.
-    #[cfg(unix)]
     #[test]
     fn a_fifo_at_the_failing_path_has_no_window_and_does_not_block() {
         use std::sync::mpsc;

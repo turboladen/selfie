@@ -103,7 +103,6 @@ fn only_the_missing_setting_is_named() {
 // A fifo at the configuration path is not an absent file, and must not be
 // quietly replaced by the flags — the flags would "work" while selfie ignored a
 // configuration file that is really there.
-#[cfg(unix)]
 #[test]
 fn a_fifo_config_is_still_fatal_when_every_flag_is_supplied() {
     let temp = sandbox_without_config();
@@ -273,7 +272,6 @@ fn an_empty_required_flag_counts_as_missing() {
 // When the file is absent the flags stand in for it. When it is present but
 // unresolvable they must not, because the user would be told nothing while
 // selfie silently ignored the configuration they have.
-#[cfg(unix)]
 #[test]
 fn a_dangling_config_symlink_is_still_fatal_when_every_flag_is_supplied() {
     let temp = sandbox_without_config();

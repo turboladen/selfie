@@ -240,17 +240,9 @@ impl CommandRunner for FakeCommandRunner {
 
 /// Build a `CommandOutput` with the given exit code and streams.
 fn command_output(exit_code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> CommandOutput {
-    #[cfg(unix)]
-    let status = {
-        use std::os::unix::process::ExitStatusExt as _;
-        // Wait status encodes the exit code in the high byte.
-        std::process::ExitStatus::from_raw(exit_code << 8)
-    };
-    #[cfg(windows)]
-    let status = {
-        use std::os::windows::process::ExitStatusExt as _;
-        std::process::ExitStatus::from_raw(exit_code as u32)
-    };
+    use std::os::unix::process::ExitStatusExt as _;
+    // Wait status encodes the exit code in the high byte.
+    let status = std::process::ExitStatus::from_raw(exit_code << 8);
 
     CommandOutput::from_parts(status, stdout, stderr, Duration::ZERO)
 }

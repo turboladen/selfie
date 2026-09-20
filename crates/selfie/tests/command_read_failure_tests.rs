@@ -139,11 +139,7 @@ async fn an_executable_path_is_not_reported_when_its_lookup_could_not_be_read() 
     // read yields a path that either fails to resolve or, worse, resolves to a
     // different binary than the command actually named.
     let temp = TempDir::new().unwrap();
-    let which = if cfg!(target_os = "windows") {
-        "where pkg"
-    } else {
-        "which pkg"
-    };
+    let which = "which pkg";
     let runner = FakeCommandRunner::new()
         .succeeding(CHECK_CMD, b"already here")
         .stdout_read_failing(which);
@@ -173,11 +169,7 @@ async fn an_executable_path_is_reported_when_its_lookup_can_be_read() {
     // Control for the test above: it would pass against an install that never
     // reports a path at all.
     let temp = TempDir::new().unwrap();
-    let which = if cfg!(target_os = "windows") {
-        "where pkg"
-    } else {
-        "which pkg"
-    };
+    let which = "which pkg";
     let runner = FakeCommandRunner::new()
         .succeeding(CHECK_CMD, b"already here")
         .succeeding(which, b"/usr/local/bin/pkg\n");
