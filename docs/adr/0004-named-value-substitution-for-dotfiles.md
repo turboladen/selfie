@@ -8,6 +8,9 @@ Accepted
 
 Refines the rejection of templating in [ADR-0001](0001-machine-specific-and-secret-dotfiles.md).
 
+Refined by [ADR-0005](0005-directory-and-target-state.md), which classifies the target a templated
+entry writes to and orders the symlink check ahead of that classification.
+
 ## Context
 
 ADR-0001 rejected a templating language on the grounds that it duplicates what external tools
