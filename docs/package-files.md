@@ -628,13 +628,25 @@ selfie apply --yes
 ### Conflict Detection
 
 Selfie tracks checksums of deployed files. If you modify a deployed file locally _and_ the source
-file changes, selfie detects this as a conflict:
+file changes, selfie detects this as a conflict and shows the difference, with the target on the `-`
+side and the repository file on the `+` side:
 
 ```
-⚠ Conflict: ~/.config/starship.toml
-  Source and target both changed since last deploy.
-  Use --yes to overwrite, or resolve manually.
+⚠   Conflict: ~/.config/starship.toml
+  ~/.selfie/packages/starship/starship.toml → ~/.config/starship.toml
+  --- ~/.config/starship.toml
+  +++ ~/.selfie/packages/starship/starship.toml
+  ──────────────────────────────────────────────────────────────────────
+  @@ -1 +1 @@
+  -format = "$all"
+  +format = "$directory$git_branch$character"
+  ──────────────────────────────────────────────────────────────────────
+? How should this conflict be resolved? ›
+❯ Skip (keep target as-is)
+  Accept (overwrite target with the new content)
 ```
+
+The prompt appears only in a terminal; a run without one skips the conflict and reports it.
 
 Without `--yes`, conflicts are reported but the target file is left untouched. With `--dry-run` they
 are reported the same way, diff included, and you are not asked to resolve them: nothing would be
