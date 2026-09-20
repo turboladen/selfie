@@ -66,11 +66,8 @@ pub(crate) async fn handle_track(
     // Check if this file is already tracked anywhere
     let (existing_tracker, unchecked) = find_existing_tracker(file, config, &dotfiles_repo);
 
-    if let Some((pkg_name, tracked_target)) = existing_tracker {
-        display.print_info(format!(
-            "Already tracking '{tracked_target}' in spec '{pkg_name}'"
-        ));
-        return 0;
+    if let Some(tracked) = existing_tracker {
+        return report_existing_tracker(&tracked, display);
     }
 
     // Collect available package names for the prompt. Done before anything from
@@ -119,6 +116,70 @@ pub(crate) async fn handle_track(
             0
         }
     }
+}
+
+/// Report a file some spec already tracks, and the exit code for it.
+///
+/// Returns 1 for an entry no apply can ever deploy, 0 otherwise.
+fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) -> i32 {
+    let ExistingTracker {
+        spec_name,
+        spec_path,
+        target,
+    } = tracked;
+
+    use selfie::fs::filesystem::FileSystem as _;
+
+    let fs = RealFileSystem;
+
+    // `deploy_target` rather than `TargetRejection::of`: the textual rule cannot
+    // see a `~/…` whose home directory could not be determined, which falls
+    // through to a relative path that apply refuses. Asking the same function the
+    // library asks is also what keeps the two from drifting.
+    //
+    // Reported as tracked *and* undeployable. Saying only the first half tells the
+    // user the file is handled when no deploy will ever touch it, with an exit
+    // code a script reads as done.
+    let expanded = match selfie::fs::deploy_target(&fs, target) {
+        Ok(expanded) => expanded,
+        Err(rejection) => {
+            display.print_error(format!(
+                "'{target}' is tracked in spec '{spec_name}', but {}",
+                rejection.message()
+            ));
+            // `NoHome` is the machine's state rather than the spec's: that entry
+            // is correct and editing it would break a spec that works everywhere
+            // else, so it keeps the rule's own advice. The other two are defects
+            // in a file the user can open, and the path to open is what they
+            // need rather than advice on choosing a target.
+            if matches!(rejection, selfie::fs::TargetRejection::NoHome) {
+                display.print_suggestion(rejection.suggestion());
+            } else {
+                display.print_suggestion(format!(
+                    "Edit {} to correct the target.",
+                    spec_path.display()
+                ));
+            }
+            return 1;
+        }
+    };
+
+    // The same silence the library breaks for its own two track commands: this
+    // answer is given before the library is reached, so an already-tracked target
+    // that is not a regular file would otherwise be reported here as plainly
+    // tracked and mentioned by nothing. Shares the library's wording so the two
+    // cannot describe one situation differently.
+    if let Some(refusal) = fs
+        .symlink_refusal(&expanded)
+        .or_else(|| fs.irregular_target_refusal(&expanded))
+    {
+        display.print_warning(
+            selfie::dotfile_service::service::already_tracked_refusal_warning(&refusal),
+        );
+    }
+
+    display.print_info(format!("Already tracking '{target}' in spec '{spec_name}'"));
+    0
 }
 
 /// Present the interactive selection prompt and return the user's choice.
@@ -202,6 +263,16 @@ fn suggest_name(file_path: &str) -> String {
     }
 }
 
+/// The spec entry that already tracks the file the caller named.
+struct ExistingTracker {
+    spec_name: String,
+    /// The file to open to change the entry, which a refusal has to name.
+    spec_path: std::path::PathBuf,
+    /// The entry's own target, which differs from the argument: the spec holds
+    /// `~/…` and the caller may name the same file absolutely.
+    target: String,
+}
+
 /// Check if a file is already tracked by any package or standalone dotfile.
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
@@ -219,7 +290,7 @@ fn find_existing_tracker(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
-) -> (Option<(String, String)>, Vec<String>) {
+) -> (Option<ExistingTracker>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
@@ -259,7 +330,11 @@ fn find_existing_tracker(
                 let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
                 if entry_expanded == expanded {
                     return (
-                        Some((pkg.name().to_string(), entry.target().to_string())),
+                        Some(ExistingTracker {
+                            spec_name: pkg.name().to_string(),
+                            spec_path: pkg.path().to_path_buf(),
+                            target: entry.target().to_string(),
+                        }),
                         skipped,
                     );
                 }
