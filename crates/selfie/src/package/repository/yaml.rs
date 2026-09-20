@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    dotfile_service::service::repository_read_refusal,
+    dotfile_service::refusal::repository_read_refusal,
     fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
         GetPackage, Package, SpecOrigin, SpecRefusal,

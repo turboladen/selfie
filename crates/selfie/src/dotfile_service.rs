@@ -17,14 +17,17 @@
 //! - [`diff`] — Unified diff generation for conflict display
 //! - `directory` — What selfie says about the standalone dotfiles directory
 //! - `resolve` — Apply-time content resolution for secret-bearing entries
+//! - `refusal` — What is at a deploy target, and how a refused deploy is worded
 //! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
 //! - `template` — Named-value substitution for templated dotfiles
+//! - `state_file` — Reading and writing the deploy-state file
 
 mod backup;
 pub mod deploy;
 pub mod diff;
 pub(crate) mod directory;
 pub mod port;
+pub(crate) mod refusal;
 pub(crate) mod resolve;
 pub mod semantic;
 pub mod service;
