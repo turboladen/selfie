@@ -59,6 +59,45 @@ fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     })
 }
 
+// Restores `mode` on the path when dropped, so a directory made read-only for a
+// test can still be removed after an assertion panics.
+struct RestoreMode(PathBuf, u32);
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Ignored on failure: panicking in `Drop` during an unwind aborts the test
+        // binary, which would hide the assertion that started the unwind.
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
+// Make `dir` unwritable, restoring its mode when the guard drops. `None` where the
+// mode bits do not bite -- running as root, or a filesystem that ignores them --
+// so a caller skips instead of asserting about a write that succeeded.
+//
+// Restores the mode the directory actually had, not a fixed one: `TempDir`
+// creates at 0o700, so resetting to 0o755 would leave every caller's directory
+// looser than it found it, and a fixture whose own subject is a mode would have
+// this guard change it.
+
+// The probe is removed again: it is written inside the directory under test, and
+// one of the callers goes on to assert about that directory's contents.
+#[cfg(unix)]
+fn made_unwritable(dir: &std::path::Path) -> Option<RestoreMode> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = std::fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let restore = RestoreMode(dir.to_path_buf(), original);
+    let probe = dir.join("probe");
+    if std::fs::write(&probe, "x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        return None;
+    }
+    Some(restore)
+}
+
 // The message of a run that failed, for the operations that report one.
 fn failure_message(events: &[PackageEvent]) -> String {
     match get_operation_result(events).expect("no Completed event") {
@@ -6853,17 +6892,6 @@ mod deploy_state_diagnostics {
 mod refusal_accounting {
     use super::*;
 
-    // Restores `mode` on the path when dropped, so a temp directory made
-    // read-only for a test can still be removed after an assertion panics.
-    struct RestoreMode(PathBuf, u32);
-
-    impl Drop for RestoreMode {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
-        }
-    }
-
     // `(deployed, skipped, conflict, refused)`.
     fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
@@ -8219,6 +8247,14 @@ mod repository_writes_do_not_follow_symlinks {
             "the write followed the link and landed at {}",
             destination.display()
         );
+
+        // The copy is attempted before the spec is saved, so a refused copy
+        // leaves no spec at all. Reversing the two would write a spec naming a
+        // file that is not there, which every later apply and drift reports.
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "a refused copy still wrote the spec"
+        );
     }
 
     #[tokio::test]
@@ -8227,11 +8263,13 @@ mod repository_writes_do_not_follow_symlinks {
         let target = dirs.target_dir.join("gemrc");
         std::fs::write(&target, "gem: --no-document").unwrap();
 
+        let spec = dirs.package_dir.join("ruby.yml");
         std::fs::write(
-            dirs.package_dir.join("ruby.yml"),
+            &spec,
             "name: ruby\nversion: 1.0.0\nenvironments:\n  test:\n    install: true\n",
         )
         .unwrap();
+        let before = std::fs::read(&spec).unwrap();
 
         // `handle_track_for_package` composes alongside the package YAML.
         let source = dirs.package_dir.join("ruby").join("gemrc");
@@ -8255,6 +8293,17 @@ mod repository_writes_do_not_follow_symlinks {
             !destination.exists(),
             "the write followed the link and landed at {}",
             destination.display()
+        );
+
+        // The copy is attempted before the spec is saved, so a refused copy
+        // leaves the spec byte-for-byte as it was. Reversing the two would add a
+        // `dotfiles:` entry naming a file that is not there, which every later
+        // apply and drift reports. Compared as bytes rather than for an absent
+        // key, so a rewrite that changed anything at all fails here.
+        assert_eq!(
+            std::fs::read(&spec).unwrap(),
+            before,
+            "a refused copy still rewrote the spec"
         );
     }
 
@@ -10475,5 +10524,122 @@ mod track_entry_points_agree {
                 get_operation_result(&events)
             );
         }
+    }
+}
+
+// A track copies the user's file into the repository and then saves the spec. A
+// save that is refused or fails must leave no copy behind: a retry after fixing
+// the cause has to not trip over "Source file already exists" for a file the user
+// never knowingly created (selfie-dt22).
+mod a_failed_spec_save_strands_nothing {
+    use super::*;
+
+    // A package whose existing dotfile entry carries a key selfie does not
+    // model, which `save_package` refuses to rewrite because the rewrite would
+    // drop the key. The cheapest reachable save failure, and the one the bug was
+    // measured on.
+    fn package_that_cannot_be_rewritten(dirs: &TestDirs) -> PathBuf {
+        write_package_yaml(
+            &dirs.package_dir,
+            "creds",
+            "name: creds\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"creds/token\"\n    target: \"~/.token\"\n    var: oops\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_refused_package_save_leaves_no_copied_file() {
+        let dirs = TestDirs::new();
+        let spec = package_that_cannot_be_rewritten(&dirs);
+        let before = std::fs::read(&spec).unwrap();
+        let target = dirs.target_dir.join("newfile");
+        std::fs::write(&target, "kept").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("creds", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("var"),
+            "not the unknown-key refusal: {failure}"
+        );
+
+        let copy = dirs.package_dir.join("creds").join("newfile");
+        assert!(
+            !copy.exists(),
+            "the copy was stranded at {}",
+            copy.display()
+        );
+
+        // The controls. Without them this passes on a run that never copied
+        // anything, or that deleted the user's file instead of the copy.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "kept",
+            "the target file was touched"
+        );
+        assert_eq!(
+            std::fs::read(&spec).unwrap(),
+            before,
+            "the refused save still rewrote the spec"
+        );
+    }
+
+    // The same invariant from the other entry point, where the save fails for a
+    // filesystem reason rather than a refusal. The copy's own directory is
+    // pre-created and writable while the directory holding the spec is not, so
+    // the copy lands and only the spec save fails.
+    //
+    // `TestDirs` configures `state_directory`, which matters here: the deploy
+    // state is loaded before either write and would otherwise be looked for
+    // under the home directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_standalone_save_leaves_no_copied_file() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("gemrc")).unwrap();
+
+        let Some(_restore) = made_unwritable(&dirs.dotfiles_dir) else {
+            eprintln!("SKIP a_failed_standalone_save_leaves_no_copied_file: mode bits ignored");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        let copy = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        assert!(
+            !copy.exists(),
+            "the copy was stranded at {}: {failure}",
+            copy.display()
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "the spec was written after all, so this tested nothing: {failure}"
+        );
+        // Without these the assertions above pass on a run that never copied
+        // anything, or that failed somewhere before the spec save: an absent file
+        // proves nothing on its own. The second is also the only integration-level
+        // check that the failure names the spec, which the message leaves to the
+        // error rather than stating itself.
+        assert!(
+            failure.contains("was removed"),
+            "the copy was never written, so its absence proves nothing: {failure}"
+        );
+        assert!(
+            failure.contains("gemrc.yml"),
+            "the failure does not name the spec that could not be saved: {failure}"
+        );
     }
 }

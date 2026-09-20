@@ -36,7 +36,7 @@ use crate::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
             OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
         },
-        port::PackageRepository,
+        port::{PackageRepoError, PackageRepository},
     },
     paths::is_within,
     privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
@@ -1288,6 +1288,89 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
         "Cannot write the tracked copy at '{}': {what}. \
          Remove it, or track under a different name.",
         source_path.display()
+    )
+}
+
+// Why a track added nothing although it found no entry for the target: the spec
+// already carries one whose recorded target matches, by a comparison that
+// disagreed with the one made before the copy.
+//
+// Reported rather than swallowed. Selfie cannot say which of the two comparisons
+// is right, and the spec is the user's file, so it declines and names what it
+// found instead of rewriting either.
+fn unadded_entry_failure(recorded_target: &str, copy: &Path, removal: &CopyRemoval) -> String {
+    format!(
+        "The spec already has an entry for '{recorded_target}', so nothing was added. {}",
+        copy_fate(copy, removal)
+    )
+}
+
+/// What became of a copy a track had written, once a later step failed.
+enum CopyRemoval {
+    /// Gone. The path still held what this call wrote.
+    Removed,
+    /// Left alone: the path could not be confirmed to hold what this call wrote,
+    /// so removing it might have deleted a file selfie did not create.
+    Unconfirmed,
+    /// Removal was attempted on selfie's own copy and failed.
+    Failed(FileSystemError),
+}
+
+// Remove a copy this call wrote, and only that.
+//
+// The guard before the copy is advisory: it answers about the path at the moment
+// it is asked, and the write and this removal are two later moments. Between them
+// something else can occupy the path -- concurrent selfie runs are unsupported,
+// but "unsupported" is not "cannot happen", and the cost of being wrong here is
+// deleting a file that belongs to someone else. So ownership is established by
+// content rather than assumed from the earlier guard.
+
+// Reading back is itself one moment before the removal, so this narrows the
+// window rather than closing it. What it buys is that the ordinary case is
+// provably selfie's own file and every other case is reported instead of acted
+// on, which is the safe direction for a delete.
+fn remove_own_copy<F: FileSystem>(filesystem: &F, path: &Path, written: &str) -> CopyRemoval {
+    match filesystem.read_file(path) {
+        Ok(found) if found == written => match filesystem.remove_file(path) {
+            Ok(()) => CopyRemoval::Removed,
+            Err(e) => CopyRemoval::Failed(e),
+        },
+        // Both arms leave the file: content that differs is not selfie's to
+        // delete, and content it could not read back is content it cannot claim.
+        Ok(_) | Err(_) => CopyRemoval::Unconfirmed,
+    }
+}
+
+// What became of the copy, worded once so the two failures that compensate cannot
+// describe the same outcome differently.
+fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
+    let copy = copy.display();
+    match removal {
+        CopyRemoval::Removed => format!("The copy at '{copy}' was removed."),
+        CopyRemoval::Unconfirmed => format!(
+            "The copy at '{copy}' was left alone: it no longer holds what selfie wrote, so \
+             removing it could have deleted another file. Check it, and remove it yourself if \
+             it is not wanted."
+        ),
+        CopyRemoval::Failed(e) => format!(
+            "The copy at '{copy}' could not be removed either: {e}. Remove it before retrying."
+        ),
+    }
+}
+
+// Why a track could not save the spec, and what became of the copy it had
+// already written.
+//
+// Does not name the spec: every variant reaching here names it already -- the
+// rewrite refusals by construction, and a write failure through the writer's own
+// error -- and a message repeating a path the error carries reads twice as long
+// as it is. `a_failed_spec_save_names_the_spec_exactly_once` holds that by
+// counting rather than by checking presence, so a variant that stops naming the
+// spec fails a test instead of going quiet.
+fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> String {
+    format!(
+        "Cannot save the spec: {error}. {}",
+        copy_fate(copy, removal)
     )
 }
 
@@ -2634,9 +2717,37 @@ where
     spec.package
         .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
 
+    // `add_dotfile` drops the entry when an existing one carries the same target
+    // *string*, while the answer above compares expanded paths. The two agree as
+    // long as the recorded form derives from the same expansion, and a
+    // disagreement would otherwise save a spec that never names the copy, leave
+    // the copy behind, and record a deployment for a source the spec does not
+    // contain -- while reporting success. Checked rather than assumed, and
+    // compensated exactly as a failed save is.
+    if !spec
+        .package
+        .dotfiles()
+        .iter()
+        .any(|entry| entry.source() == Some(relative_source.as_str()))
+    {
+        let removal = remove_own_copy(filesystem, &source_path, &content);
+        return OperationResult::Failure(OperationFailure::Generic(unadded_entry_failure(
+            &recorded_target,
+            &source_path,
+            &removal,
+        )));
+    }
+
     if let Err(e) = repo.save_package(&spec.package, &spec.spec_path) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot save spec: {e}"
+        // Only the file, and only selfie's own. `remove_own_copy` establishes the
+        // second by content; the directory is the part selfie leaves, because it
+        // cannot tell one it created from one that was already there and an empty
+        // directory refuses nothing on a retry.
+        let removal = remove_own_copy(filesystem, &source_path, &content);
+        return OperationResult::Failure(OperationFailure::Generic(spec_save_failure(
+            &e,
+            &source_path,
+            &removal,
         )));
     }
 
@@ -2665,6 +2776,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::MockFileSystem;
 
     // selfie-yw7i. Track copies the user's file *into* the dotfiles repository, so
     // a refusal is about a repository path -- but every `FileSystemError` variant
@@ -2706,6 +2818,147 @@ mod tests {
                 "refusal offers the target-side remedy: {message}"
             );
         }
+    }
+
+    // The copy is removed only when the path still holds what this call wrote.
+    // The guard before the copy is advisory, so ownership has to be established
+    // rather than inherited from it: without the comparison, a file another
+    // process put at the path between the write and this removal is deleted.
+    //
+    // `expect_remove_file().never()` is the assertion. A test that only checked
+    // the message could not see the syscall, which is the thing that does harm.
+    #[test]
+    fn a_copy_whose_content_changed_is_not_removed() {
+        let copy = Path::new("/dotfiles/gemrc/gemrc");
+        let mut fs = MockFileSystem::default();
+        fs.mock_read_file(copy, "someone else's file");
+        fs.expect_remove_file().never();
+
+        let removal = remove_own_copy(&fs, copy, "gem: --no-document");
+
+        assert!(
+            matches!(removal, CopyRemoval::Unconfirmed),
+            "a foreign file must not be claimed"
+        );
+        let message = copy_fate(copy, &removal);
+        assert!(
+            message.contains("left alone"),
+            "the user is not told the copy survived: {message}"
+        );
+    }
+
+    // The control, and the reason the test above is not vacuous: with the bytes
+    // selfie wrote still at the path, the removal happens. Without this, refusing
+    // to remove anything at all would pass that test.
+    #[test]
+    fn a_copy_that_still_holds_what_was_written_is_removed() {
+        let copy = Path::new("/dotfiles/gemrc/gemrc");
+        let mut fs = MockFileSystem::default();
+        fs.mock_read_file(copy, "gem: --no-document");
+        fs.mock_remove_file(copy);
+
+        let removal = remove_own_copy(&fs, copy, "gem: --no-document");
+
+        assert!(
+            matches!(removal, CopyRemoval::Removed),
+            "selfie's own copy must be removed"
+        );
+        assert!(
+            copy_fate(copy, &removal).contains("was removed"),
+            "the copy's fate is not stated"
+        );
+    }
+
+    // A path selfie cannot read back is a path it cannot claim, so it is left
+    // rather than removed on the assumption that the read failure is benign.
+    #[test]
+    fn a_copy_that_cannot_be_read_back_is_not_removed() {
+        let copy = Path::new("/dotfiles/gemrc/gemrc");
+        let mut fs = MockFileSystem::default();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("gone"),
+            )))
+        });
+        fs.expect_remove_file().never();
+
+        let removal = remove_own_copy(&fs, copy, "gem: --no-document");
+
+        assert!(matches!(removal, CopyRemoval::Unconfirmed));
+    }
+
+    // Exactly once, counted rather than checked for presence. The message leaves
+    // naming the spec to the error, so a variant that stops naming it drops the
+    // count to zero and fails here rather than shipping a failure that names no
+    // file; re-adding a path to the frame takes it to two, which is the
+    // duplication this wording exists to avoid.
+    #[test]
+    fn a_failed_spec_save_names_the_spec_exactly_once() {
+        let spec = "/dotfiles/gemrc.yml";
+        let error =
+            PackageRepoError::FileSystemError(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other(format!("{spec}: Permission denied (os error 13)")),
+            )));
+
+        let message = spec_save_failure(
+            &error,
+            Path::new("/dotfiles/gemrc/gemrc"),
+            &CopyRemoval::Removed,
+        );
+
+        assert_eq!(
+            message.matches(spec).count(),
+            1,
+            "the spec must be named exactly once: {message}"
+        );
+        assert!(
+            message.contains("/dotfiles/gemrc/gemrc"),
+            "the copy is not named: {message}"
+        );
+        assert!(
+            message.contains("was removed"),
+            "the copy's fate is not stated: {message}"
+        );
+    }
+
+    // A copy that survived says so, and says it differently. The two arms are
+    // opposite advice -- one needs nothing from the user, the other needs a file
+    // deleted before a retry can work -- so a reader must be able to tell them
+    // apart.
+    #[test]
+    fn a_failed_spec_save_says_when_the_copy_survived() {
+        let error = PackageRepoError::UnknownDotfileFields {
+            path: PathBuf::from("/packages/creds.yml"),
+            fields: "dotfiles[0].var".to_string(),
+        };
+        let removal = FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Permission denied",
+        )));
+
+        let survived = spec_save_failure(
+            &error,
+            Path::new("/packages/creds/token"),
+            &CopyRemoval::Failed(removal),
+        );
+        let removed = spec_save_failure(
+            &error,
+            Path::new("/packages/creds/token"),
+            &CopyRemoval::Removed,
+        );
+
+        assert_ne!(
+            survived, removed,
+            "a copy that survived reads the same as one that was removed"
+        );
+        assert!(
+            !survived.contains("was removed"),
+            "a surviving copy is called removed: {survived}"
+        );
+        assert!(
+            survived.contains("Remove it before retrying"),
+            "the remedy is missing: {survived}"
+        );
     }
 
     // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
