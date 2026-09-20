@@ -121,9 +121,14 @@ pub trait DotfileService: Send + Sync {
 
     /// Track a file as a standalone dotfile.
     ///
-    /// Copies the file at `target_path` into the dotfiles directory under a
-    /// new spec named `name`, creates a YAML spec with the source→target
-    /// mapping, and records initial deploy state.
+    /// Copies the file at `target_path` into the dotfiles directory under a new
+    /// spec named `name`, writes the spec, and records initial deploy state.
+    ///
+    /// The writes are ordered so a failure leaves nothing to clean up: a refused
+    /// copy writes no spec, and a spec that cannot be saved has the copy removed
+    /// again. An unwritable deploy state is the one exception and the only partial
+    /// outcome — the copy and the entry are correct, the failure names both, and an
+    /// apply records the deployment. A second call is refused: the spec is there.
     fn track_standalone(
         &self,
         name: &str,
@@ -132,9 +137,14 @@ pub trait DotfileService: Send + Sync {
 
     /// Add a file to an existing package's dotfiles.
     ///
-    /// Copies the file at `target_path` into the package's directory
-    /// (alongside the YAML), adds a `dotfiles` entry to the package spec,
-    /// saves the updated YAML, and records initial deploy state.
+    /// Copies the file at `target_path` into the package's directory beside the
+    /// YAML, adds a `dotfiles` entry, saves it, and records initial deploy state.
+    ///
+    /// Orders its writes and reports an unrecorded deployment as
+    /// [`track_standalone`](Self::track_standalone) does. A second call reports the
+    /// target as already tracked and records nothing, so only an apply finishes an
+    /// unrecorded track — unless the target rule refuses it, which an existing entry
+    /// with a relative or `~user/…` target meets before that answer.
     fn track_for_package(
         &self,
         package_name: &str,

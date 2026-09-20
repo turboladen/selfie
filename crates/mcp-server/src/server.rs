@@ -704,7 +704,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when the dotfiles directory does not exist, or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when the dotfiles directory does not exist, or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -738,7 +738,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_package_track_dotfile",
-        description = "Add a file to an existing package's dotfiles section. The package must already exist. Fails, writing nothing, when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy."
+        description = "Add a file to an existing package's dotfiles section. The package must already exist. Fails, writing nothing, when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
     )]
     async fn selfie_package_track_dotfile(
         &self,

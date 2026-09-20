@@ -10643,3 +10643,107 @@ mod a_failed_spec_save_strands_nothing {
         );
     }
 }
+
+// The deploy state is recorded last, so its failure is the one that leaves both
+// writes in place. Neither is rolled back -- the copy and the entry are correct
+// and only the record is missing -- so the failure has to name what exists and
+// what recovers it.
+//
+// `TestDirs` configures `state_directory`, which is what makes the chmod below
+// bind: `deploy_state_path` probes only a configured directory, and an unset one
+// would be looked for under the home directory instead.
+#[cfg(unix)]
+mod an_unrecorded_track_names_what_it_wrote {
+    use super::*;
+
+    // A state directory that lists but cannot be written to. The load succeeds
+    // because an absent state file is the ordinary first run, and the save at the
+    // end is the only thing that fails.
+    fn unwritable_state_dir(dirs: &TestDirs) -> Option<RestoreMode> {
+        made_unwritable(&dirs.state_dir)
+    }
+
+    #[tokio::test]
+    async fn the_failure_names_the_copy_and_the_spec() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+
+        let Some(_restore) = unwritable_state_dir(&dirs) else {
+            eprintln!("SKIP the_failure_names_the_copy_and_the_spec: mode bits ignored");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        let copy = dirs.dotfiles_dir.join("starship").join("starship.toml");
+        let spec = dirs.dotfiles_dir.join("starship.yml");
+
+        // The controls first: both writes must actually have landed, or this is
+        // asserting about a run that failed somewhere earlier.
+        assert!(copy.exists(), "the copy was not written: {failure}");
+        assert!(spec.exists(), "the spec was not written: {failure}");
+        assert!(
+            !dirs.state_dir.join("deploy-state.yml").exists(),
+            "the state was written after all, so this tested nothing"
+        );
+
+        assert!(
+            failure.contains(copy.to_str().unwrap()),
+            "the copy is not named: {failure}"
+        );
+        assert!(
+            failure.contains(spec.to_str().unwrap()),
+            "the spec is not named: {failure}"
+        );
+    }
+
+    // What the user is told to do, and what they must not do. Re-running track
+    // hits the source-collision guard, and `selfie apply` records an untracked
+    // entry whose target already matches through its in-sync skip arm.
+    #[tokio::test]
+    async fn the_failure_sends_the_user_to_apply_rather_than_back_to_track() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+
+        let Some(_restore) = unwritable_state_dir(&dirs) else {
+            eprintln!("SKIP the_failure_sends_the_user_to_apply_rather_than_back_to_track");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("selfie apply"),
+            "the recovery is not named: {failure}"
+        );
+        // Asserted as absences, both of them remedies that do not work.
+        // "Drift will report it as not tracked" is half true -- with matching
+        // content drift says nothing.
+        assert!(
+            !failure.contains("not tracked"),
+            "the failure offers a remedy drift does not provide: {failure}"
+        );
+        // And a claim that tracking again is refused holds at neither entry
+        // point: `track_for_package` answers "already tracking" and exits 0
+        // having recorded nothing, and a standalone re-run is stopped by the
+        // spec-collision guard rather than by the copy.
+        assert!(
+            !failure.contains("Re-running track"),
+            "the failure claims a refusal that does not happen: {failure}"
+        );
+    }
+}

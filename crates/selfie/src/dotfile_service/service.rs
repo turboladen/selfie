@@ -44,7 +44,8 @@ use crate::{
 
 use super::port::{ApplyOptions, DotfileService};
 use super::state_file::{
-    LoadedState, StateLoad, load_deploy_state, read_only_state_warning, save_deploy_state,
+    LoadedState, StateLoad, StateSaveError, load_deploy_state, read_only_state_warning,
+    save_deploy_state,
 };
 
 /// How a cancelled apply is reported.
@@ -1371,6 +1372,37 @@ fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemova
     format!(
         "Cannot save the spec: {error}. {}",
         copy_fate(copy, removal)
+    )
+}
+
+// Why a track's copy and spec are in place with no deployment recorded, and how
+// to finish it.
+//
+// Nothing is rolled back for this: both writes are correct and only the record is
+// missing, so undoing them would throw away work to tidy a record.
+//
+// Sends the user to `selfie apply`, which finishes the job: the entry is
+// untracked and its target already matches the copy, so apply's in-sync skip arm
+// records it without asking.
+
+// Says nothing about re-running track, which does different things at the two
+// entry points and neither of them useful: with the entry saved, a second
+// `track_for_package` answers "already tracking" and exits 0 having recorded
+// nothing, while a second standalone track is refused by the spec-collision
+// guard. Naming either would be wrong at the other call site.
+fn unrecorded_track_failure(
+    error: &StateSaveError,
+    name: &str,
+    recorded_target: &str,
+    spec_path: &Path,
+    copy: &Path,
+) -> String {
+    format!(
+        "Tracked '{recorded_target}': the copy at '{}' and the entry in '{}' are written. \
+         The deployment was not recorded: {error}. Run `selfie apply {name}` once the state \
+         file can be written, and it records the deployment.",
+        copy.display(),
+        spec_path.display()
     )
 }
 
@@ -2757,8 +2789,17 @@ where
         &relative_source,
         &checksum,
     );
+    // Last, and nothing is rolled back for it: the copy and the entry are both
+    // correct and only the record is missing, so the failure names what exists and
+    // what recovers it rather than undoing two good writes.
     if let Err(e) = save_deploy_state(filesystem, &loaded) {
-        return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
+        return OperationResult::Failure(OperationFailure::Generic(unrecorded_track_failure(
+            &e,
+            &spec.name,
+            &recorded_target,
+            &spec.spec_path,
+            &source_path,
+        )));
     }
 
     // The recorded form, not the argument: an adapter that echoed the caller's

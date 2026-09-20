@@ -207,9 +207,12 @@ The state file (`deploy-state.yml`) is per-machine — it tracks what was deploy
 and is not meant to be shared or version-controlled.
 
 If the file exists but selfie cannot use it — it cannot be read, it is empty, or it does not parse —
-selfie names the file and says which. `selfie apply` and `selfie dotfiles track` then **refuse to
-run** until you repair the file or move it aside, because either command would end by writing the
-state back and selfie never writes over a state file it could not read. `selfie dotfiles drift` and
+selfie names the file and says which. `selfie apply` and every track command — `selfie track`,
+`selfie dotfiles track` and `selfie package track-dotfile` — then **refuse to run** until you repair
+the file or move it aside, because each of them would end by writing the state back and selfie never
+writes over a state file it could not read. A track only reads the state when it is going to write
+one: a call that answers earlier — the target is already tracked, or the target itself is refused —
+succeeds or fails on its own terms without looking at the file. `selfie dotfiles drift` and
 `selfie apply --dry-run` write nothing, so they warn and carry on as though nothing had been
 deployed: every tracked dotfile shows as untracked for that run. An **absent** state file is the
 ordinary first-run case and is not reported.
@@ -222,6 +225,11 @@ its source is recorded again without a prompt, and only a target that genuinely 
 It is written readable only by its owner (mode `0600`). Its contents are not credentials, but they
 name each repository-file dotfile selfie manages here, which is a useful map to anyone else with an
 account on the machine.
+
+A track that gets as far as writing the state and cannot is a separate case, reported separately:
+the file it copied and the spec entry are both in place and only the record is missing, so selfie
+names both and tells you to run `selfie apply` rather than the track command again. See
+[Tracking New Files](package-files.md#tracking-new-files).
 
 Provider-sourced and templated dotfiles are not recorded at all, so this is not a complete list of
 what selfie manages — see
