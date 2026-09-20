@@ -174,15 +174,14 @@ pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieCo
         Ok(path) => path,
         Err(failure) => return StateLoad::Unusable(failure),
     };
-    if !filesystem.path_exists(path.path()) {
-        return StateLoad::Usable(LoadedState {
-            path,
-            state: DeployState::empty(),
-        });
-    }
-    // Between the existence check and the read: `read_file` opens the path, and
-    // opening a fifo blocks until a writer arrives, which hangs every dotfile
-    // command before it does any work.
+    // Ahead of the read: `read_file` opens the path, and opening a fifo blocks
+    // until a writer arrives, which hangs every dotfile command before it does
+    // any work. A missing path answers `None` here, so an absent file goes on
+    // to the read and is told apart from an unreadable one by the error kind.
+    //
+    // There is no existence probe: the port's `path_exists` answers false for
+    // any path it cannot stat, which read a state file beneath an inaccessible
+    // parent as absent and let a run deploy what it could never record.
     match filesystem.irregular_target_refusal(&path) {
         Some(FileSystemError::IrregularTarget { path, kind }) => {
             return StateLoad::Unusable(StateLoadFailure::Irregular { path, kind });
@@ -197,6 +196,15 @@ pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieCo
     }
     let content = match filesystem.read_file(path.path()) {
         Ok(content) => content,
+        // A file that is not there is the ordinary first run. Only that one
+        // condition is absence; a permission failure on the file or any parent
+        // is a file selfie cannot read.
+        Err(FileSystemError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return StateLoad::Usable(LoadedState {
+                path,
+                state: DeployState::empty(),
+            });
+        }
         Err(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
@@ -342,10 +350,22 @@ mod tests {
         );
     }
 
+    // A filesystem with the state directory but no state file in it: the stat
+    // finds nothing irregular and the read reports `NotFound`.
+    fn filesystem_without_the_state_file() -> MockFileSystem {
+        let mut fs = under_a_state_directory();
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
+            )))
+        });
+        fs
+    }
+
     // A state file that exists and reads back as `content`.
     fn filesystem_holding(content: &str) -> MockFileSystem {
         let mut fs = under_a_state_directory();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
         fs.mock_no_irregular_files();
         fs.mock_read_file(PathBuf::from(STATE_FILE), content);
         fs
@@ -420,12 +440,33 @@ mod tests {
     // of never having deployed anything.
     #[test]
     fn an_absent_state_file_is_usable_and_empty() {
-        let mut fs = under_a_state_directory();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
+        let fs = filesystem_without_the_state_file();
 
         let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
 
         assert!(state.entries().is_empty());
+    }
+
+    // Absence is one error kind, not every failure to reach the file. A state
+    // file beneath a parent the process cannot search, or one it cannot open,
+    // is unusable: reading it as absent would let a run deploy what it can never
+    // record. The test above is the control that `NotFound` alone stays usable.
+    #[test]
+    fn a_state_file_that_cannot_be_reached_is_unusable_not_absent() {
+        let mut fs = under_a_state_directory();
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+            )))
+        });
+
+        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            message.contains("Cannot read deploy state") && message.contains(STATE_FILE),
+            "an unreachable file must be reported as unreadable, and named: {message}"
+        );
     }
 
     // A file that exists and holds nothing is not a first run: a first run has no
@@ -483,7 +524,6 @@ mod tests {
     #[test]
     fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
         let mut unreadable = under_a_state_directory();
-        unreadable.mock_path_exists(PathBuf::from(STATE_FILE), true);
         unreadable.mock_no_irregular_files();
         unreadable.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
@@ -516,7 +556,6 @@ mod tests {
     #[test]
     fn a_fifo_at_the_state_path_is_refused_before_it_is_read() {
         let mut fs = under_a_state_directory();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
@@ -835,8 +874,7 @@ mod tests {
     // one arm that can fire by handing the writer a failing filesystem.
     #[test]
     fn a_failed_write_names_the_file_in_its_own_words() {
-        let mut fs = under_a_state_directory();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
+        let mut fs = filesystem_without_the_state_file();
         fs.expect_write_file_private().returning(|_, _| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
                 std::io::Error::other("disk full"),
