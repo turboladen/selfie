@@ -18,6 +18,7 @@
 //! - `directory` — What selfie says about the standalone dotfiles directory
 //! - `resolve` — Apply-time content resolution for secret-bearing entries
 //! - `refusal` — What is at a deploy target, and how a refused deploy is worded
+//! - `secret` — Deploying the secret-bearing entries of one package
 //! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
 //! - `template` — Named-value substitution for templated dotfiles
 //! - `state_file` — Reading and writing the deploy-state file
@@ -29,6 +30,7 @@ pub(crate) mod directory;
 pub mod port;
 pub(crate) mod refusal;
 pub(crate) mod resolve;
+mod secret;
 pub mod semantic;
 pub mod service;
 pub mod state;
