@@ -15,9 +15,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// `deployed` has no default on purpose: a document without it -- a comment, a
+// null, a stray key -- must fail to parse rather than read as "nothing deployed",
+// which is what a first run looks like. The writer always emits the mapping.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeployState {
-    #[serde(default)]
     deployed: HashMap<String, DeployEntry>,
 }
 

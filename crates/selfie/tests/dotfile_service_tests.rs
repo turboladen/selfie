@@ -1665,12 +1665,14 @@ async fn test_apply_target_parent_dir_is_file() {
     }
 }
 
-// Recovery, not reporting: a corrupt state file does not stop the deploy.
+// A state file selfie cannot parse is never written over: apply refuses before
+// it deploys anything, so the file is still there to repair.
 //
-// That it is also *reported* is `deploy_state_diagnostics`' job — the two
-// properties are independent, and this one held while selfie was still silent.
+// The positive control runs the same package once the file is usable, so a
+// refusal that fires for every state file, or a package that never deploys,
+// cannot pass this.
 #[tokio::test]
-async fn test_apply_corrupt_state_file_recovers() {
+async fn apply_refuses_over_an_unparsable_state_file_and_leaves_it_untouched() {
     let dirs = TestDirs::new();
 
     let source_dir = dirs.package_dir.join("myapp");
@@ -1684,25 +1686,93 @@ async fn test_apply_corrupt_state_file_recovers() {
         &[("myapp/config.toml", target_file.to_str().unwrap())],
     );
 
-    // Write garbage to the state file
     let state_file = dirs.state_dir.join("deploy-state.yml");
-    std::fs::write(&state_file, "{{{{not valid yaml!!! garbage $$$").unwrap();
+    let garbage = b"{{{{not valid yaml!!! garbage $$$";
+    std::fs::write(&state_file, garbage).unwrap();
 
-    let service = dirs.service();
-    let stream = service.apply_all(ApplyOptions::default()).await;
-    let events = collect_events(stream).await;
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-    let result = get_operation_result(&events).expect("Should have a Completed event");
-    match result {
+    let message = failure_message(&events);
+    assert!(
+        message.contains("Cannot parse deploy state") && message.contains("deploy-state.yml"),
+        "the refusal must say the file could not be parsed and name it: {message}"
+    );
+    assert!(
+        !target_file.exists(),
+        "a dotfile was deployed by a run that could not record it"
+    );
+    assert_eq!(
+        std::fs::read(&state_file).unwrap(),
+        garbage,
+        "the unparsable state file was written over"
+    );
+
+    // Control: the same package deploys once the state file is usable.
+    std::fs::write(&state_file, "deployed: {}\n").unwrap();
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+    match get_operation_result(&events).expect("no Completed event") {
         OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
             assert_eq!(*deployed_count, 1);
         }
-        other => panic!("Expected DotfilesApplied success, got: {other:?}"),
+        other => panic!("control: expected the package to deploy, got {other:?}"),
     }
-
     assert!(
         target_file.exists(),
-        "Dotfile should be deployed despite corrupt state"
+        "control: the dotfile was not deployed"
+    );
+}
+
+// A dry run writes nothing, so it previews against an empty state and warns
+// rather than refusing; the file is left as it was.
+#[tokio::test]
+async fn a_dry_run_over_an_unparsable_state_file_warns_and_writes_nothing() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let state_file = dirs.state_dir.join("deploy-state.yml");
+    let garbage = b"{{{{not valid yaml!!! garbage $$$";
+    std::fs::write(&state_file, garbage).unwrap();
+
+    let events = collect_events(
+        dirs.service()
+            .apply_all(ApplyOptions {
+                dry_run: true,
+                ..ApplyOptions::default()
+            })
+            .await,
+    )
+    .await;
+
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "a dry run must not refuse: {events:?}"
+    );
+    let warnings = warning_messages(&events);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Cannot parse deploy state")
+                && w.contains("continuing as though nothing had been deployed")),
+        "the dry run must say what it ignored: {warnings:?}"
+    );
+    assert!(!target_file.exists(), "a dry run wrote a dotfile");
+    assert_eq!(
+        std::fs::read(&state_file).unwrap(),
+        garbage,
+        "a dry run wrote the state file"
     );
 }
 
@@ -6048,16 +6118,17 @@ mod target_rule {
     }
 }
 
-// That an unusable deploy-state file is reported, on every command that loads one.
+// What every command does with a deploy-state file it cannot use.
 //
-// `load_deploy_state`'s own four branches are covered at the unit layer in
-// `dotfile_service::service`. What these add is the wiring: each of the four
-// callers forwards the message through a separate `.await`, so deleting any one
-// leaves the other three green. One observing test per call site.
+// `load_deploy_state`'s own branches are covered at the unit layer in
+// `dotfile_service::state_file`. What these add is the wiring: each caller
+// decides separately whether to refuse or to warn, so one observing test per
+// call site, each asserting what the command left on disk as well as what it
+// said.
 mod deploy_state_diagnostics {
     use super::*;
 
-    const CORRUPT: &str = "{{{{not valid yaml!!! garbage $$$";
+    const CORRUPT: &[u8] = b"{{{{not valid yaml!!! garbage $$$";
 
     fn warnings(events: &[PackageEvent]) -> Vec<String> {
         events
@@ -6069,15 +6140,26 @@ mod deploy_state_diagnostics {
             .collect()
     }
 
-    fn state_warnings(events: &[PackageEvent]) -> Vec<String> {
+    // Everything a run said about the state file: the warnings, and the
+    // failure a refusing command ends with.
+    fn state_reports(events: &[PackageEvent]) -> Vec<String> {
+        let failure = match get_operation_result(events) {
+            Some(OperationResult::Failure(failure)) => Some(failure.to_string()),
+            _ => None,
+        };
         warnings(events)
             .into_iter()
-            .filter(|w| w.contains("deploy-state.yml"))
+            .chain(failure)
+            .filter(|report| report.contains("deploy-state.yml"))
             .collect()
     }
 
-    fn write_state_file(dirs: &TestDirs, contents: &str) {
-        std::fs::write(dirs.state_dir.join("deploy-state.yml"), contents).unwrap();
+    fn state_file(dirs: &TestDirs) -> PathBuf {
+        dirs.state_dir.join("deploy-state.yml")
+    }
+
+    fn write_state_file(dirs: &TestDirs, contents: &[u8]) {
+        std::fs::write(state_file(dirs), contents).unwrap();
     }
 
     fn corrupt_the_state_file(dirs: &TestDirs) {
@@ -6098,52 +6180,81 @@ mod deploy_state_diagnostics {
         );
     }
 
+    // A command that writes ended as a failure that names the parse problem and
+    // the file, and the file is still what it was.
     #[track_caller]
-    fn assert_reports_the_corrupt_file(events: &[PackageEvent]) {
-        let named = state_warnings(events);
-        assert_eq!(
-            named.len(),
-            1,
-            "expected one report naming the state file, got {:?}",
-            warnings(events)
-        );
+    fn assert_refused_over_the_corrupt_file(dirs: &TestDirs, events: &[PackageEvent]) {
+        let message = failure_message(events);
         assert!(
-            named[0].contains("Cannot parse"),
-            "the report must say the file could not be parsed: {named:?}"
+            message.contains("Cannot parse") && message.contains("deploy-state.yml"),
+            "the refusal must say the file could not be parsed, and name it: {message}"
+        );
+        assert_eq!(
+            std::fs::read(state_file(dirs)).unwrap(),
+            CORRUPT,
+            "the unusable state file was written over"
         );
     }
 
-    // Call site 1 of 4: `handle_apply`.
+    // Call site 1 of 4: `handle_apply`, which refuses.
     #[tokio::test]
-    async fn apply_reports_a_corrupt_state_file() {
+    async fn apply_refuses_a_corrupt_state_file() {
         let dirs = TestDirs::new();
         a_package_with_one_dotfile(&dirs);
         corrupt_the_state_file(&dirs);
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-        assert_reports_the_corrupt_file(&events);
+        assert_refused_over_the_corrupt_file(&dirs, &events);
+        assert!(
+            !dirs.target_dir.join("config.toml").exists(),
+            "a dotfile was deployed by a run that could not record it"
+        );
     }
 
-    // Call site 2 of 4: `handle_check_drift`.
+    // Call site 2 of 4: `handle_check_drift`, which warns and carries on.
     //
-    // The one that matters most. `drift` never saves, so it emits no "failed to
-    // save" warning of its own — without this the command that only reads would be
-    // the one command silent about a state file it could not read.
+    // The one command that only reads. It must still say what it ignored, and
+    // it must leave the file exactly as it found it.
     #[tokio::test]
-    async fn drift_reports_a_corrupt_state_file() {
+    async fn drift_warns_over_a_corrupt_state_file_and_writes_nothing() {
         let dirs = TestDirs::new();
         a_package_with_one_dotfile(&dirs);
         corrupt_the_state_file(&dirs);
 
         let events = collect_events(dirs.service().check_drift().await).await;
 
-        assert_reports_the_corrupt_file(&events);
+        let named = state_reports(&events);
+        assert_eq!(
+            named.len(),
+            1,
+            "expected one report naming the state file, got {:?}",
+            warnings(&events)
+        );
+        assert!(
+            named[0].contains("Cannot parse")
+                && named[0].contains("continuing as though nothing had been deployed"),
+            "drift must say the file could not be parsed and that it carried on: {named:?}"
+        );
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "drift must not refuse: {events:?}"
+        );
+        assert_eq!(
+            std::fs::read(state_file(&dirs)).unwrap(),
+            CORRUPT,
+            "drift wrote the state file"
+        );
     }
 
-    // Call site 3 of 4: `handle_track_standalone`.
+    // Call site 3 of 4: `handle_track_standalone`, which refuses before it
+    // copies anything. The three negatives are the copy, the spec, and the
+    // state file itself.
     #[tokio::test]
-    async fn track_standalone_reports_a_corrupt_state_file() {
+    async fn track_standalone_refuses_a_corrupt_state_file_before_copying() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("starship.toml");
         std::fs::write(&target, "format = \"$all\"").unwrap();
@@ -6156,18 +6267,26 @@ mod deploy_state_diagnostics {
         )
         .await;
 
-        assert_reports_the_corrupt_file(&events);
+        assert_refused_over_the_corrupt_file(&dirs, &events);
+        assert!(
+            !dirs.dotfiles_dir.join("starship/starship.toml").exists(),
+            "the target was copied into the dotfiles directory by a run that could not record it"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("starship.yml").exists(),
+            "a spec was written by a run that could not record it"
+        );
     }
 
-    // Call site 4 of 4: `handle_track_for_package`.
+    // Call site 4 of 4: `handle_track_for_package`, the same three negatives
+    // against the package directory and the package's own spec.
     #[tokio::test]
-    async fn track_for_package_reports_a_corrupt_state_file() {
+    async fn track_for_package_refuses_a_corrupt_state_file_before_copying() {
         let dirs = TestDirs::new();
-        std::fs::write(
-            dirs.package_dir.join("alacritty.yml"),
-            "name: alacritty\nenvironments:\n  test:\n    install: \"echo installed\"\n",
-        )
-        .unwrap();
+        let spec = dirs.package_dir.join("alacritty.yml");
+        let spec_text =
+            "name: alacritty\nenvironments:\n  test:\n    install: \"echo installed\"\n";
+        std::fs::write(&spec, spec_text).unwrap();
         let target = dirs.target_dir.join("alacritty.toml");
         std::fs::write(&target, "[font]\nsize = 12").unwrap();
         corrupt_the_state_file(&dirs);
@@ -6179,19 +6298,30 @@ mod deploy_state_diagnostics {
         )
         .await;
 
-        assert_reports_the_corrupt_file(&events);
+        assert_refused_over_the_corrupt_file(&dirs, &events);
+        assert!(
+            !dirs.package_dir.join("alacritty/alacritty.toml").exists(),
+            "the target was copied beside the spec by a run that could not record it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&spec).unwrap(),
+            spec_text,
+            "the spec was rewritten by a run that could not record it"
+        );
     }
 
-    // The warning must carry none of the file by the time it reaches an event.
+    // The report must carry none of the file by the time it reaches an event
+    // or a result.
     //
     // **`Debug` is not a superset of what egresses, so do not read the sweep below
     // as a boundary guarantee.** This crate ships deliberately redacting `Debug`
     // impls, so state-file text arriving behind one would render redacted and the
-    // sweep would pass. The real exit is `event_to_json`, which reads
-    // `Warning { message }` as a typed field rather than through `Debug`.
-    //
-    // The assertion that matches the egress is the one on the message itself, and
-    // the fixture is a duplicated key -- the one class whose text quotes the file.
+    // sweep would pass. The real exits are the typed `message` of a warning and
+    // the rendered failure, which is what `state_reports` collects.
+
+    // The assertion that matches the egress is the one on the reports
+    // themselves, and the fixture is a duplicated key -- the one class whose
+    // text quotes the file.
     #[tokio::test]
     async fn no_event_carries_the_state_file_contents() {
         const MARKER: &str = "zzz-recon-marker/id_rsa.conf";
@@ -6200,35 +6330,44 @@ mod deploy_state_diagnostics {
         a_package_with_one_dotfile(&dirs);
         write_state_file(
             &dirs,
-            &format!(
+            format!(
                 "deployed:\n  {MARKER}:\n    source_checksum: a\n    deployed_checksum: a\n    \
                  deployed_at: b\n  {MARKER}:\n    source_checksum: c\n    \
                  deployed_checksum: c\n    deployed_at: d\n"
-            ),
+            )
+            .as_bytes(),
         );
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-        // Controls: the file really was parsed and the failure really was
-        // reported, so this cannot pass by the state file never having been read
-        // -- and it was reported as a *duplicate key*, since the comment above is
-        // only true while that is the class this fixture produces.
-        assert_reports_the_corrupt_file(&events);
+        // Controls: the file really was parsed, the refusal really names it --
+        // so scanning the failure below is not vacuous -- and it was reported as
+        // a *duplicate key*, since the comment above is only true while that is
+        // the class this fixture produces.
+        let reports = state_reports(&events);
+        assert_eq!(reports.len(), 1, "expected one report: {reports:?}");
         assert!(
-            state_warnings(&events)[0].contains("a key is listed twice"),
+            reports[0].contains("Cannot parse") && reports[0].contains("a key is listed twice"),
             "this fixture no longer produces the one class whose text quotes the \
-             file, so it would pass against any implementation: {:?}",
-            state_warnings(&events)
+             file, so it would pass against any implementation: {reports:?}"
+        );
+        assert!(
+            failure_message(&events).contains("deploy-state.yml"),
+            "the refusal must name the file, or scanning it proves nothing"
         );
 
-        // The one that matches the egress: every warning message, as the field
-        // the MCP server reads.
-        for message in warnings(&events) {
+        // The ones that match the egress: every warning and the failure, as the
+        // fields the adapters read.
+        for report in reports.iter().chain(warnings(&events).iter()) {
             assert!(
-                !message.contains(MARKER),
-                "a warning message carried the state file's contents: {message}"
+                !report.contains(MARKER),
+                "a report carried the state file's contents: {report}"
             );
         }
+        assert!(
+            !failure_message(&events).contains(MARKER),
+            "the failure carried the state file's contents"
+        );
 
         // The cheap net over everything else, with the limits above understood.
         for event in &events {
@@ -6250,40 +6389,67 @@ mod deploy_state_diagnostics {
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
         assert_eq!(
-            state_warnings(&events),
+            state_reports(&events),
             Vec::<String>::new(),
             "a first run must not report an absent state file"
         );
     }
 
-    // A state file that cannot be *read* is reported differently from one that
-    // cannot be *parsed*, through the event stream and not just in isolation.
-    //
-    // The unreadable file is a directory at the state file's path: `path_exists`
-    // answers true and the read then fails, without depending on the runner's
-    // privileges the way a `chmod 000` file would. Unix in practice, and this
-    // module is not gated, so the assertion tolerates either failure wording — what
-    // it pins is that the *load* is reported and named apart from the save.
+    // A file that exists and holds nothing is not a first run. Reading it as one
+    // would make a state lost to an interrupted write look like a fresh machine,
+    // and the next apply would re-prompt for every dotfile with no explanation.
     #[tokio::test]
-    async fn apply_reports_an_unreadable_state_file_apart_from_the_failed_save() {
+    async fn an_empty_state_file_is_refused_not_read_as_a_first_run() {
         let dirs = TestDirs::new();
         a_package_with_one_dotfile(&dirs);
-        std::fs::create_dir(dirs.state_dir.join("deploy-state.yml")).unwrap();
+        write_state_file(&dirs, b"");
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-        let all = warnings(&events);
+        let message = failure_message(&events);
         assert!(
-            all.iter()
-                .any(|w| w.contains("Cannot read deploy state") && w.contains("deploy-state.yml")),
-            "the load failure must be reported and name the file: {all:?}"
+            message.contains("is empty") && message.contains("deploy-state.yml"),
+            "the refusal must say the file is empty and name it: {message}"
         );
-        // The same directory also defeats the save, which warns separately. Asserted
-        // so this test cannot pass off the save's warning instead of the load's.
         assert!(
-            all.iter()
-                .any(|w| w.contains("Failed to save deploy state")),
-            "control: the save fails too, and says so in its own words: {all:?}"
+            !dirs.target_dir.join("config.toml").exists(),
+            "a dotfile was deployed by a run that could not record it"
+        );
+        assert_eq!(
+            std::fs::read(state_file(&dirs)).unwrap(),
+            b"",
+            "the empty state file was written over"
+        );
+    }
+
+    // A state file that cannot be *read* is refused with a different sentence
+    // from one that cannot be *parsed*, through the result and not just in
+    // isolation.
+    //
+    // The unreadable file is a directory at the state file's path: `path_exists`
+    // answers true and the read then fails, without depending on the runner's
+    // privileges the way a `chmod 000` file would. The directory is a regular
+    // file's absence rather than an irregular file, so the wording is the read's.
+    #[tokio::test]
+    async fn apply_refuses_an_unreadable_state_file() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        std::fs::create_dir(state_file(&dirs)).unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("Cannot read deploy state") && message.contains("deploy-state.yml"),
+            "the refusal must say the file could not be read, and name it: {message}"
+        );
+        assert!(
+            state_file(&dirs).is_dir(),
+            "the directory at the state path was replaced"
+        );
+        assert!(
+            !dirs.target_dir.join("config.toml").exists(),
+            "a dotfile was deployed by a run that could not record it"
         );
     }
 }

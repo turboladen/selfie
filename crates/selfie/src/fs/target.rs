@@ -358,6 +358,17 @@ fn collapse_home(home: &Path, expanded: &Path) -> String {
     }
 }
 
+/// Why the deploy state file has no path. Each message names the fix.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StatePathError {
+    /// No `state_directory` is configured and the home directory cannot be
+    /// determined, so neither route to a path is open.
+    #[error(
+        "no state_directory is configured and the home directory cannot be determined. Set state_directory in the config, or fix HOME"
+    )]
+    NoHome,
+}
+
 // The deploy state file's path.
 //
 // Weaker than `expand_target_path`: the configured branch joins `state_dir`
@@ -371,7 +382,7 @@ pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
     home: &H,
     state_dir: Option<&Path>,
     filename: &str,
-) -> Result<TargetPath, FileSystemError> {
+) -> Result<TargetPath, StatePathError> {
     if let Some(state_dir) = state_dir {
         return Ok(TargetPath {
             path: state_dir.join(filename),
@@ -380,11 +391,7 @@ pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
 
     // XDG_STATE_HOME (`~/.local/state/selfie`) per the XDG Base Directory
     // Specification: deploy state is per-machine, non-portable data.
-    let home = home.home().map_err(|_| {
-        FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
-            "Cannot determine home directory for deploy state file",
-        )))
-    })?;
+    let home = home.home().map_err(|_| StatePathError::NoHome)?;
 
     Ok(TargetPath {
         path: home
