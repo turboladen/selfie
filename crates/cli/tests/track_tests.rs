@@ -247,3 +247,68 @@ fn already_tracking_says_nothing_about_a_plain_target() {
         "an ordinary target was reported as a symlink, got:\n{both}"
     );
 }
+
+// The sudo refusal is decided by `SUDO_UID` against the effective uid, not by
+// holding privilege, so a test can set the variable and drive the real binary.
+// Both track commands must stop before the service starts: the gate is in the
+// library and refuses either way, but a run that prints "Started" first has
+// announced work it is about to decline.
+#[test]
+fn track_commands_refuse_under_sudo_before_the_service_starts() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::write(home.join("thing.toml"), "x = 1").unwrap();
+
+    let packages = home.join("packages");
+    std::fs::create_dir_all(&packages).unwrap();
+    std::fs::write(
+        packages.join("bat.yaml"),
+        format!("name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\n"),
+    )
+    .unwrap();
+
+    // A uid that is not this process's, which is what makes `classify` answer
+    // `Sudo`. 0 serves unless the suite itself runs as root, in which case the
+    // run is not the one this test is about.
+    if nix::unistd::Uid::effective().is_root() {
+        eprintln!(
+            "SKIP track_commands_refuse_under_sudo_before_the_service_starts: running as root"
+        );
+        return;
+    }
+
+    for args in [
+        vec!["dotfiles", "track", "thing", "~/thing.toml"],
+        vec!["package", "track-dotfile", "bat", "~/thing.toml"],
+    ] {
+        let output = sandboxed_command(&temp)
+            .env("HOME", &home)
+            .env("SUDO_UID", "0")
+            .args(&args)
+            .output()
+            .unwrap();
+
+        let both = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{args:?} must refuse under sudo, got:\n{both}"
+        );
+        // Exit 1 alone proves almost nothing -- a missing config or an unreadable
+        // spec satisfies it -- so the refusal itself is asserted, and only then
+        // the absence this commit is about.
+        assert!(
+            both.contains("Refusing to run under sudo"),
+            "{args:?} failed for some other reason, got:\n{both}"
+        );
+        assert!(
+            !both.contains("Started"),
+            "{args:?} announced work it then declined, got:\n{both}"
+        );
+    }
+}

@@ -172,10 +172,10 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// to throw away. Both read the same [`sudo_policy`], so they cannot disagree
 /// about whether to refuse — only about how far the run got first.
 ///
-/// `handle_track_standalone` calls this before building the dotfile service,
-/// which skips the "Started" message the service would otherwise print ahead
-/// of its own refusal. `selfie track` calls this before its interactive
-/// prompts, whose answers a refusal afterward would discard.
+/// Both track helpers call this before building the dotfile service, which skips
+/// the "Started" message the service would otherwise print ahead of its own
+/// refusal. `selfie track` calls it before its interactive prompts as well,
+/// whose answers a refusal afterward would discard.
 pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<i32> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
     display.print_error(refusal.message());
@@ -222,6 +222,13 @@ pub(crate) async fn handle_track_for_package(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
+    // Ahead of building the service, as `handle_track_standalone` does, so a run
+    // under sudo prints only the refusal and not the "Started" message the
+    // service emits before its own.
+    if let Some(code) = refuse_under_sudo(config, display) {
+        return code;
+    }
+
     let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.track_for_package(package_name, file).await;
 
