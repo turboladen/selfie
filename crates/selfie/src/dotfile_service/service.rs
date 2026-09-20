@@ -1329,15 +1329,18 @@ fn track_target_refusal(target: &str, rejection: TargetRejection) -> String {
 struct DeployUnit<'a> {
     source_path: &'a Path,
     target_path: &'a TargetPath,
+    /// `target_path` as the deploy state keys it.
+    target_key: &'a str,
     source_content: &'a str,
     source_checksum: &'a str,
-    source_key: &'a str,
+    /// The entry's `source` as the spec names it, recorded beside the checksum.
+    source: &'a str,
 }
 
-/// Deploy a single config file to its target path, updating state and emitting events.
+/// Deploy a single config file to its target path and emit events. Records
+/// nothing: the caller records and saves once the write is known to have landed.
 async fn perform_deploy<F: FileSystem>(
     filesystem: &F,
-    deploy_state: &mut DeployState,
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     dry_run: bool,
@@ -1375,24 +1378,18 @@ async fn perform_deploy<F: FileSystem>(
         // that unpinned half can drift.
         let message = match &e {
             FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
-                refusal_warning(unit.source_key, &e)
+                refusal_warning(unit.source, &e)
             }
             _ => format!("Failed to write: {e}"),
         };
         sender.send_warning(message).await;
-        // `Err` has the caller count this as refused and leaves the deploy state
-        // untouched, so nothing is recorded as deployed that was not. An entry
-        // already in the state keeps its previous checksums and is stale rather than
-        // untracked, which is the honest record: a refusal writes nothing, and a
-        // failed write leaves the target as it was, so the previous checksums still
-        // describe it.
+        // `Err` has the caller count this as refused and record nothing, so
+        // nothing is recorded as deployed that was not. An entry already in the
+        // state keeps its previous checksum and is stale rather than untracked,
+        // which is the honest record: a refusal writes nothing, and a failed write
+        // leaves the target as it was, so the previous checksum still describes it.
         return Err(());
     }
-    deploy_state.record_deployment(
-        &unit.target_path.display().to_string(),
-        unit.source_key,
-        unit.source_checksum,
-    );
 
     sender
         .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
@@ -1400,16 +1397,60 @@ async fn perform_deploy<F: FileSystem>(
     Ok(())
 }
 
-/// The state an apply records into: the loaded one, or `unrecorded` when a dry
-/// run has none.
-fn recording<'a>(
-    loaded: &'a mut Option<LoadedState>,
-    unrecorded: &'a mut DeployState,
-) -> &'a mut DeployState {
-    match loaded {
-        Some(loaded) => loaded.state_mut(),
-        None => unrecorded,
+/// What an apply just recorded about a target.
+#[derive(Clone, Copy)]
+enum Recorded {
+    /// The target was written.
+    Deployed,
+    /// The target already matched its source and was left alone.
+    InSync,
+}
+
+impl std::fmt::Display for Recorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Recorded::Deployed => write!(f, "Deployed"),
+            Recorded::InSync => write!(f, "Found in sync"),
+        }
     }
+}
+
+/// Record `unit` in the loaded state and write the state back. On failure,
+/// warns with what happened to the target and returns the reason the run stops.
+// A dry run has no loaded state and records nothing. The state is written
+// after every record, so a run that cannot write it has recorded everything
+// before the failing entry. Stopping on the first failure keeps the
+// unrecorded set to one entry: a state directory that refused this write
+// refuses the next one too. An unrecorded target is re-evaluated by the next
+// run as untracked: one whose content still matches its source is recorded
+// silently through the in-sync skip arm, and only one whose source has
+// changed since is asked about.
+async fn record_and_save<F: FileSystem>(
+    filesystem: &F,
+    loaded: &mut Option<LoadedState>,
+    sender: &EventSender,
+    recorded: Recorded,
+    unit: &DeployUnit<'_>,
+) -> Option<String> {
+    let loaded = loaded.as_mut()?;
+    loaded
+        .state_mut()
+        .record_deployment(unit.target_key, unit.source, unit.source_checksum);
+    let Err(e) = save_deploy_state(filesystem, loaded) else {
+        return None;
+    };
+    // `e` already names the state file, so the message does not repeat it.
+    sender
+        .send_warning(format!(
+            "{recorded} '{}' but cannot record it: {e}",
+            unit.target_path.display()
+        ))
+        .await;
+    Some(format!(
+        "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
+         it once the state can be written",
+        unit.target_path.display()
+    ))
 }
 
 /// Everything an apply needs that does not vary from package to package.
@@ -1454,8 +1495,8 @@ where
 
     // A run that writes refuses to start over a state file it could not read:
     // proceeding would deploy files it can never record, and the next run would
-    // ask about every one of them again. A dry run writes nothing, so it warns
-    // instead and previews against an empty state.
+    // re-evaluate every one of them as untracked. A dry run writes nothing, so it
+    // warns instead and previews against an empty state.
     let mut loaded = match load_deploy_state(filesystem, config) {
         StateLoad::Usable(loaded) => Some(loaded),
         StateLoad::Unusable(failure) if options.dry_run => {
@@ -1466,10 +1507,9 @@ where
             return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
         }
     };
-    // What a dry run over an unusable state file records into. Nothing saves it
-    // and nothing reads it back; it exists so `loaded` being `None` -- which
-    // only a dry run reaches -- has somewhere for the loop's records to go.
-    let mut unrecorded = DeployState::empty();
+    // What a dry run over an unusable state file reads drift against. Only a dry
+    // run leaves `loaded` as `None`, and a dry run records nothing.
+    let empty = DeployState::empty();
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
@@ -1485,12 +1525,13 @@ where
     // never reached the repository-file path until now.
     let mut refused_count = usize::from(refused_repository);
 
-    // Set when `stop_on_error` aborts the run. Held rather than returned so the
-    // deploy state below is still saved.
+    // Set when the run stops early. Held rather than returned so every stop
+    // reports through the one failure below.
     //
-    // Note this flag currently governs secret-resolution failures only. The
-    // repository-file failure paths in this loop have always continued past an
-    // error, and changing that is a behavior change beyond this feature.
+    // `stop_on_error` governs secret-resolution failures only: a repository-file
+    // refusal or write failure is counted and the loop continues. A failed state
+    // record stops the run whatever `stop_on_error` says, because the next entry
+    // would fail the same way.
     let mut stopped: Option<String> = None;
 
     'packages: for package in packages {
@@ -1571,13 +1612,6 @@ where
                                 break 'packages;
                             }
                             if config.stop_on_error() {
-                                // Break rather than return: anything already
-                                // deployed in this run has been written to disk
-                                // and recorded in the in-memory deploy state, and
-                                // returning here would discard that record while
-                                // leaving the files in place. The next drift check
-                                // would then report correctly-deployed files as
-                                // untracked.
                                 stopped = Some(format!(
                                     "Stopped after failing to apply dotfile '{}' \
                                      (stop_on_error is enabled)",
@@ -1700,24 +1734,24 @@ where
             let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            // Detect drift. State is keyed by the expanded target, the one path
-            // that has one file and one checksum however many sources name it.
+            // State is keyed by the expanded target, the one path that has one
+            // file and one checksum however many sources name it.
             let target_key = target_path.display().to_string();
-            let drift = recording(&mut loaded, &mut unrecorded).detect_drift(
-                &target_key,
-                &source_checksum,
-                &target_checksum,
-            );
-            let decision =
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
-
             let unit = DeployUnit {
                 source_path: &source_path,
                 target_path: &target_path,
+                target_key: &target_key,
                 source_content: &source_content,
                 source_checksum: &source_checksum,
-                source_key: source,
+                source,
             };
+
+            let drift = loaded
+                .as_ref()
+                .map_or(&empty, LoadedState::state)
+                .detect_drift(&target_key, &source_checksum, &target_checksum);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             // Refuse a symlinked target before anything acts on the decision, so a
             // dry run previews what a real apply would do, an interactive resolver
@@ -1742,20 +1776,26 @@ where
 
             match decision {
                 DeployDecision::Deploy => {
-                    if perform_deploy(
-                        filesystem,
-                        recording(&mut loaded, &mut unrecorded),
-                        sender,
-                        &unit,
-                        options.dry_run,
-                    )
-                    .await
-                    .is_ok()
+                    if perform_deploy(filesystem, sender, &unit, options.dry_run)
+                        .await
+                        .is_ok()
                     {
                         if options.dry_run {
                             skipped_count += 1;
                         } else {
                             deployed_count += 1;
+                            if let Some(reason) = record_and_save(
+                                filesystem,
+                                &mut loaded,
+                                sender,
+                                Recorded::Deployed,
+                                &unit,
+                            )
+                            .await
+                            {
+                                stopped = Some(reason);
+                                break 'packages;
+                            }
                         }
                     } else {
                         // A refusal or a write failure. `perform_deploy` has
@@ -1775,12 +1815,20 @@ where
                     //
                     // A stale answer omits an entry the next run re-evaluates.
                     // The window that could manufacture one is small, not absent.
-                    if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
-                        recording(&mut loaded, &mut unrecorded).record_deployment(
-                            &target_key,
-                            source,
-                            &source_checksum,
-                        );
+                    if drift == DriftType::NotTracked
+                        && !options.dry_run
+                        && unmanaged.is_none()
+                        && let Some(reason) = record_and_save(
+                            filesystem,
+                            &mut loaded,
+                            sender,
+                            Recorded::InSync,
+                            &unit,
+                        )
+                        .await
+                    {
+                        stopped = Some(reason);
+                        break 'packages;
                     }
 
                     // Say why it will not settle, on the line the user is already
@@ -1846,20 +1894,26 @@ where
                     };
 
                     if accept {
-                        if perform_deploy(
-                            filesystem,
-                            recording(&mut loaded, &mut unrecorded),
-                            sender,
-                            &unit,
-                            options.dry_run,
-                        )
-                        .await
-                        .is_ok()
+                        if perform_deploy(filesystem, sender, &unit, options.dry_run)
+                            .await
+                            .is_ok()
                         {
                             if options.dry_run {
                                 skipped_count += 1;
                             } else {
                                 deployed_count += 1;
+                                if let Some(reason) = record_and_save(
+                                    filesystem,
+                                    &mut loaded,
+                                    sender,
+                                    Recorded::Deployed,
+                                    &unit,
+                                )
+                                .await
+                                {
+                                    stopped = Some(reason);
+                                    break 'packages;
+                                }
                             }
                         } else {
                             // The second of `perform_deploy`'s two failure sites,
@@ -1889,22 +1943,12 @@ where
     // cancellation leaves `stopped` as `None`. The run would then report success
     // for a run the user interrupted — and for a provider entry that means a
     // credential written to disk after Ctrl+C, with nothing in the stream saying
-    // so. Deploy state is still saved below, because the writes really happened.
+    // so.
     //
     // Does not overwrite an existing reason: `stop_on_error` names the entry that
     // failed, which is more specific than this.
     if stopped.is_none() && token.is_cancelled() {
         stopped = Some(APPLY_CANCELLED.to_string());
-    }
-
-    // Save deploy state (skip in dry-run mode)
-    if !options.dry_run
-        && let Some(state) = &loaded
-        && let Err(e) = save_deploy_state(filesystem, state)
-    {
-        sender
-            .send_warning(format!("Failed to save deploy state: {e}"))
-            .await;
     }
 
     if let Some(message) = stopped {

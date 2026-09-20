@@ -31,6 +31,10 @@ pub(super) struct LoadedState {
 }
 
 impl LoadedState {
+    pub(super) fn state(&self) -> &DeployState {
+        &self.state
+    }
+
     pub(super) fn state_mut(&mut self) -> &mut DeployState {
         &mut self.state
     }

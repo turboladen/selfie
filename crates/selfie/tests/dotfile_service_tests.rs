@@ -495,6 +495,172 @@ impl selfie::fs::FileSystem for HomeAt {
     }
 }
 
+// `RealFileSystem` whose private writes to one path succeed a fixed number of
+// times and fail afterwards, so a test can observe what was on disk between two
+// writes of the deploy state.
+#[derive(Clone, Debug)]
+struct StateWritesFailAfter {
+    inner: RealFileSystem,
+    state_file: PathBuf,
+    allowed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl selfie::fs::FileSystem for StateWritesFailAfter {
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if path.path() == self.state_file
+            && self
+                .allowed
+                .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                .is_err()
+        {
+            return Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("state directory is not writable"),
+            )));
+        }
+        self.inner.write_file_private(path, data)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.irregular_target_refusal(path)
+    }
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+    fn read_file_bytes(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
+        self.inner.read_file_bytes(path)
+    }
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.symlink_refusal(path)
+    }
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_owner_only(path)
+    }
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
+    }
+}
+
+// The deploy state is written after each record, not once at the end of the run.
+//
+// Two entries in one package, in declared order, so which deploys first does
+// not depend on directory listing. The filesystem allows exactly one write to
+// the state file. Written once after the loop, that write would carry both
+// entries and the run would report success; written after each record, the
+// first entry's save takes it, the second's fails, and the run stops naming
+// the target that went unrecorded while the first is already on disk.
+#[tokio::test]
+async fn state_is_recorded_after_each_deploy_not_after_the_run() {
+    let dirs = TestDirs::new();
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("a.toml"), "a = 1").unwrap();
+    std::fs::write(source_dir.join("b.toml"), "b = 2").unwrap();
+    let a = dirs.target_dir.join("a.toml");
+    let b = dirs.target_dir.join("b.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[
+            ("myapp/a.toml", a.to_str().unwrap()),
+            ("myapp/b.toml", b.to_str().unwrap()),
+        ],
+    );
+
+    let state_file = dirs.state_dir.join("deploy-state.yml");
+    let fs = StateWritesFailAfter {
+        inner: RealFileSystem,
+        state_file: state_file.clone(),
+        allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+    };
+    let config = SelfieConfigBuilder::default()
+        .environment("test")
+        .package_directory(&dirs.package_dir)
+        .dotfiles_directory(dirs.dotfiles_dir.clone())
+        .state_directory(dirs.state_dir.clone())
+        .build();
+    let service = DotfileServiceImpl::new(
+        YamlPackageRepository::new(
+            fs.clone(),
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        ),
+        fs,
+        FakeCommandRunner::new(),
+        config,
+        CancellationToken::new(),
+        dirs.sudo_policy,
+    );
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    let message = failure_message(&events);
+    assert!(
+        message.contains("failing to record") && message.contains(b.to_str().unwrap()),
+        "the run must stop and name the unrecorded target: {message}"
+    );
+    let warnings = warning_messages(&events);
+    assert!(
+        warnings.iter().any(|w| w.starts_with("Deployed")
+            && w.contains(b.to_str().unwrap())
+            && w.contains("deploy-state.yml")),
+        "the warning must say the target was deployed and where it could not be recorded: {warnings:?}"
+    );
+    assert!(a.exists() && b.exists(), "both targets were deployed");
+
+    let written = std::fs::read_to_string(&state_file).expect("the first save reached disk");
+    let state: DeployState = selfie::yaml::parse(&written).expect("state file parses");
+    assert!(
+        state.get(a.to_str().unwrap()).is_some(),
+        "the first deployment was not on disk before the second: {written}"
+    );
+    assert!(
+        state.get(b.to_str().unwrap()).is_none(),
+        "the second deployment reached disk through a save that was made to fail: {written}"
+    );
+}
+
 #[tokio::test]
 async fn test_apply_all_deploys_new_dotfile() {
     let dirs = TestDirs::new();
