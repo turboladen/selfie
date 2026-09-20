@@ -6,30 +6,35 @@ machines and operating systems.
 ## Commands
 
 ```bash
-just check                                     # Run the pre-commit gates (see below)
+just check                                     # Run every CI gate, in order (see below)
 just test-lib                                  # Test library only, the canonical form
-cargo build                                    # Build all crates
-cargo test                                     # Run all tests
-cargo test -p selfie-cli                       # Test CLI only
+just test-cli                                  # Test CLI only
+just test-mcp                                  # Test MCP server only
+just build                                     # Build all crates
+just test                                      # Run all tests
+just hack                                      # Test every feature combination of selfie
+just clippy                                    # Lint with -D warnings, the CI form (see below)
+just docs-check                                # Build the docs with warnings as errors
+just typos                                     # Spell-check the tree
+just fmt                                       # cargo fmt + dprint fmt (Markdown/YAML)
+just fmt-check                                 # Verify both without modifying
 cargo run -- <args>                            # Run the CLI (from workspace root)
 just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
-cargo clippy --all-targets -- -D warnings      # Lint, CI form (see below)
-cargo fmt --check                              # Check formatting
-dprint fmt                                     # Format Markdown/YAML (CI checks this)
-dprint check                                   # Verify Markdown/YAML formatting
 ```
 
-Three gate commands come with a catch:
+CI runs these same recipes (`.github/workflows/ci.yml`), so `Justfile` is the one place a gate's
+command is written. Change a gate there, never in the workflow. Three gate commands come with a
+catch:
 
 - `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
   rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form when
   running clippy directly; `just check` already does.
-- `cargo test -p selfie` takes no feature flag — `Justfile:31` (`just test-lib`) is the canonical
-  form. It compiles only because `crates/test-common/Cargo.toml:7` requests
-  `features = ["with_mocks"]`. **Do not drop that line**, or the build fails inside `test-common`
-  with an error naming a crate you did not touch. `.claude/rules/architecture.md` explains the
-  mechanism. The command compiles today. It did not before PR #67, which is why older instructions
-  prescribe a `--features with_mocks` flag that is now unnecessary.
+- `cargo test -p selfie` takes no feature flag — `just test-lib` is the canonical form. It compiles
+  only because `crates/test-common/Cargo.toml:7` requests `features = ["with_mocks"]`. **Do not drop
+  that line**, or the build fails inside `test-common` with an error naming a crate you did not
+  touch. `.claude/rules/architecture.md` explains the mechanism. The command compiles today. It did
+  not before PR #67, which is why older instructions prescribe a `--features with_mocks` flag that
+  is now unnecessary.
 - **Any cargo command in this repo waits on `target/`'s lock.** A `cargo-watch` the maintainer is
   running, or another agent's build, holds it — and `just check` then stalls silently rather than
   failing, so a ten-minute wait is indistinguishable from a slow compile. Point `CARGO_TARGET_DIR`
@@ -37,8 +42,9 @@ Three gate commands come with a catch:
 
   That trades one hazard for another, and the second one lies. A target directory reused across runs
   makes `cargo doc` exit 101 complaining that it could not remove `doc/selfie` because the directory
-  is not empty — that is the previous run's output, not a broken doc comment. Delete
-  `$CARGO_TARGET_DIR/doc` before the docs gate rather than reporting a failure it did not find.
+  is not empty — that is the previous run's output, not a broken doc comment. `just docs-check`
+  deletes it before building; when running `cargo doc` by hand, delete `$CARGO_TARGET_DIR/doc` first
+  rather than reporting a failure it did not find.
 
 ### Running the binary by hand
 
@@ -60,15 +66,15 @@ watch state change, drive the binary against the printed sandbox directory yours
 ### Pre-commit checklist
 
 Before every commit (unless instructed otherwise), run `just check` and fix any issues. It runs
-`cargo fmt`, `dprint fmt`, clippy with `-D warnings`, and the test suite, in that order, stopping at
-the first failure. `Justfile` is the source of truth for these gates — do not retype the commands.
+`fmt`, `typos`, `clippy`, `build`, `test`, `hack` and `docs-check`, in that order, stopping at the
+first failure. `Justfile` is the source of truth for these gates — do not retype the commands.
 
-Passing it means the checklist passed, not that CI will be green — CI also runs `typos`,
-`cargo build`, and every feature combination of `selfie` via `cargo hack`.
-
-**`just check` does not build the docs; CI does.** A broken intra-doc link fails nothing locally, so
-run `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features` before pushing a
-change to doc comments. CI's `docs` job runs exactly that.
+It needs `typos` and `cargo-hack` on `PATH` (`cargo install typos-cli cargo-hack`); the recipes fail
+with that instruction when either is missing. Passing it means every CI job's command passed here.
+The two things CI pins that the local run does not are tool versions: `typos` (the crate-ci action)
+and `dprint`, which CI installs at the version named in `.github/workflows/ci.yml`. A wrap that
+local `dprint` accepts and CI rejects means the two binaries differ; match CI's version rather than
+rewording the sentence.
 
 ### Running `/code-review` and dep bumps
 

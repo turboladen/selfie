@@ -4,8 +4,12 @@
 default:
     @just --list
 
-# Run all quality checks (pre-commit)
-check: fmt clippy test
+# CI calls these same recipes (`.github/workflows/ci.yml`), so a recipe
+# changed here changes CI with it. The typos job is the one exception: it
+# uses the crate-ci action, which pins the tool version.
+
+# Run every gate CI runs, in order, stopping at the first failure
+check: fmt typos clippy build test hack docs-check
     @echo "All checks passed."
 
 # Format code
@@ -17,6 +21,11 @@ fmt:
 fmt-check:
     cargo fmt --check
     dprint check
+
+# Spell-check the tree
+typos:
+    @command -v typos >/dev/null || { echo "typos is not installed; run: cargo install typos-cli" >&2; exit 1; }
+    typos
 
 # Lint with clippy (zero warnings)
 clippy:
@@ -34,9 +43,38 @@ test-lib:
 test-cli:
     cargo test -p selfie-cli
 
+# Test MCP server only
+test-mcp:
+    cargo test -p selfie-mcp
+
+# `selfie` is the only crate with optional features, and a plain `cargo test`
+# always builds it with `with_mocks` on because `test-common` requests it, so
+# only this catches a feature that has stopped compiling on its own.
+
+# Test every feature combination of the library
+hack:
+    @command -v cargo-hack >/dev/null || { echo "cargo-hack is not installed; run: cargo install cargo-hack" >&2; exit 1; }
+    cargo hack --each-feature test -p selfie
+
 # Build all crates
 build:
     cargo build
+
+# `--all-features` documents the `with_mocks` items too; without it their
+# links go unchecked. The previous run's output is removed first: with a reused
+# target directory, `cargo doc` exits 101 because `doc/selfie` is not empty,
+# which is stale output and not a broken doc comment. The path is asked of
+# cargo because `CARGO_TARGET_DIR` and `build.target-dir` both move it.
+#
+# Expect one cargo warning about an output filename collision on
+# `selfie/index.html`: `selfie` is documented both as a workspace member and as
+# test-common's dependency. It is a cargo warning, not a rustdoc one, so
+# `-D warnings` does not turn it into an error. Do not chase it.
+
+# Build the docs with a broken intra-doc link as an error
+docs-check:
+    rm -rf "$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/doc"
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features
 
 # Run the CLI against a throwaway sandbox: `just sandbox-run package list`
 [positional-arguments]

@@ -15,20 +15,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job but check-typos runs a `just` recipe, so the Justfile is the one
+# place a gate's command is written and `just check` runs what CI runs. The
+# typos job keeps the crate-ci action because it pins the tool version.
 jobs:
   check-typos:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: crate-ci/typos@v1.50.1
-
-  check-dprint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dprint/check@v2.3
-        with:
-          config-path: dprint.jsonc
 
   format:
     runs-on: ubuntu-latest
@@ -37,8 +32,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: 1.58.0
+      # Pinned so CI wraps Markdown the way the local binary does. The markdown
+      # plugin is pinned in dprint.jsonc, but an unpinned CLI once rejected a
+      # line wrap that local `dprint check` had accepted.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: dprint@0.57.0
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: just fmt-check
 
   clippy:
     runs-on: ubuntu-latest
@@ -48,8 +52,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: 1.58.0
       - name: Clippy (zero warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: just clippy
 
   docs:
     runs-on: ubuntu-latest
@@ -57,20 +64,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Nothing else builds the docs. `cargo test` does not, and neither does
-      # `just check`, so a broken intra-doc link used to fail nowhere -- eleven of
-      # them reached main that way. `--all-features` so the `with_mocks` items are
-      # documented too; without it their links go unchecked.
-      #
-      # Expect one cargo warning about an output filename collision on
-      # `selfie/index.html`: `selfie` is documented both as a workspace member and
-      # as test-common's dependency. It is a cargo warning rather than a rustdoc
-      # one, so `-D warnings` does not turn it into an error and the job still
-      # passes. Do not chase it.
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: 1.58.0
       - name: Rustdoc (zero warnings)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --workspace --all-features
+        run: just docs-check
 
   build-and-test:
     runs-on: ubuntu-latest
@@ -78,19 +76,19 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: 1.58.0
       # Installed up here rather than beside the step that uses it: a step with no
       # `if:` is skipped once an earlier one fails, which would leave the guarded
       # step below running without the tool.
       - uses: taiki-e/install-action@cargo-hack
       - name: Build
-        run: cargo build
+        run: just build
       - name: Run tests
-        run: cargo test
-      # `selfie` is the only crate with optional features, and the run above always
-      # builds it with `with_mocks` on because `test-common` requests it. Covering
-      # every combination catches a feature that has stopped compiling on its own,
-      # which that single combination cannot. Runs last, and runs even when the
-      # workspace suite failed, so neither result can hide the other.
+        run: just test
+      # Runs last, and runs even when the workspace suite failed, so neither
+      # result can hide the other.
       - name: Test each feature combination
         if: ${{ !cancelled() }}
-        run: cargo hack --each-feature test -p selfie
+        run: just hack

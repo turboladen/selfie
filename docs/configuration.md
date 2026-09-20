@@ -141,10 +141,9 @@ package_directory: /home/user/my-packages
 
 # Relative to home directory
 package_directory: ~/dev-packages
-
-# Using environment variables
-package_directory: ${SELFIE_PACKAGES:-~/.config/selfie/packages}
 ```
+
+A leading `~` is expanded; environment variables are not.
 
 ## Optional Settings
 
@@ -427,7 +426,6 @@ This checks:
 - Required fields presence
 - Path accessibility
 - Environment name validity
-- Repository connectivity (if configured)
 
 ## Troubleshooting
 

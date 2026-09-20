@@ -48,7 +48,7 @@ source <(COMPLETE=zsh selfie)
 COMPLETE=fish selfie | source
 ```
 
-After restarting your shell, `selfie install <TAB>` will show available package names.
+After restarting your shell, `selfie package install <TAB>` will show available package names.
 
 #### Static Completions (Fallback)
 

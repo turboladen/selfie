@@ -325,7 +325,7 @@ selfie --verbose package install package-name
 
 - **Issues**: Report bugs and request features in [GitHub Issues](../../issues)
 - **Discussions**: Share usage patterns and ask questions in [GitHub Discussions](../../discussions)
-- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
+- **Contributing**: Open an issue before a large change so the approach can be agreed first
 
 ## Status
 
@@ -339,7 +339,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Interactive spec creation and editing
 - ✅ Configuration management
 - ✅ Audit: detect installation sources and flag conflicts
-- ✅ Spec update: structured field modifications via CLI and MCP
+- ✅ Spec update: structured field modifications via MCP (`selfie_spec_update`); the CLI has no
+  `spec update` command
 - ✅ MCP server for AI assistant integration ([docs](crates/mcp-server/README.md))
 - ✅ Auto-formatting: `dprint fmt` runs on saved package files
 - ✅ Login shell execution for install/check/audit commands

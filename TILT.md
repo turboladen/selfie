@@ -1,220 +1,103 @@
-# Selfie Multi-Distribution Testing
+# Multi-Distribution Testing
 
-Test the Selfie Rust CLI across multiple Linux distributions using Tilt and Docker Compose.
+Run the selfie test suite inside Debian and Alpine containers with Tilt and Docker Compose. The two
+images cover different package managers and libc variants: Debian 12 (`apt`, glibc) and Alpine
+(`apk`, musl).
+
+## Prerequisites
+
+- **Docker** with the Compose plugin
+- **Tilt**: `brew install tilt-dev/tap/tilt`
+
+Each image has Rust installed. The repository is mounted at `/workspace` in both containers, with a
+separate `target/` per distribution (`target/debian`, `target/alpine`) so the two builds never share
+artifacts.
 
 ## Quick Start
 
 ```bash
-# Start containers
-just docker start
-# Start Tilt UI
-tilt up
-# Open http://localhost:10350
+docker compose up -d          # Build the images and start both containers
+tilt up                       # Start the Tilt UI at http://localhost:10350
 
-# Run tests on all distributions
-just tilt test
+tilt trigger test-all         # Run the test suite on every distribution
+tilt trigger debian-tests     # Debian only
+tilt trigger alpine-tests     # Alpine only
 
-# Test specific distribution
-just tilt test-debian
-just tilt test-alpine
+tilt down                     # Stop Tilt
+docker compose down -v        # Remove the containers and their cargo caches
 ```
 
-## Distributions
+## Tilt Resources
 
-- **Debian 12** - `.deb` + `apt` + `glibc` (stable ecosystem)
-- **Alpine Linux** - `apk` + `musl` (minimal/security-focused)
+`Tiltfile` defines every resource with a manual trigger, so nothing runs until you ask for it.
+Trigger a resource from the UI or with `tilt trigger <resource>`:
 
-Perfect coverage of different package managers and libc variants.
+- `debian` and `alpine` are the Docker Compose services.
+- `debian-tests` and `alpine-tests` run `cargo test --all` inside the matching container.
+- `test-all` triggers both test resources in sequence.
 
-## Using the Tilt UI
+Each resource's logs are shown in the UI as it runs.
 
-1. **Start containers**: `just docker start`, then **Start Tilt**: `tilt up`
-2. **Open UI**: http://localhost:10350
-3. **Run tests**: Click the trigger button for:
-   - `test-all` - Run tests on all distributions
-   - `debian-tests` - Test only Debian
-   - `alpine-tests` - Test only Alpine
-4. **View logs**: Click on any resource to see real-time output
-5. **Stop**: `tilt down` or Ctrl+C
-
-The Tilt UI provides visual feedback and real-time logs for all operations.
-
-## Just Commands
-
-### Essential Commands
+## Working Inside a Container
 
 ```bash
-just docker start   # Start containers
-tilt up            # Start Tilt UI
-just tilt test     # Run tests on all distributions
-just docker clean  # Clean up everything
-```
+# Open a shell
+docker compose exec debian bash
+docker compose exec alpine bash
 
-### Distribution-Specific Testing
-
-```bash
-just tilt test-debian    # Test only on Debian
-just tilt test-alpine    # Test only on Alpine
-```
-
-### Container Access
-
-```bash
-just docker shell-debian   # Open shell in Debian container
-just docker shell-alpine   # Open shell in Alpine container
-```
-
-### Local Development
-
-```bash
-just local-test     # Run tests locally (not in containers)
-just local-clippy   # Run clippy locally
-just build          # Build locally
-just fmt            # Format code with dprint and cargo
-just docs           # Generate documentation
-```
-
-### Docker Management
-
-```bash
-just docker start          # Start all containers
-just docker stop           # Stop all containers
-just docker status         # Show container status
-just docker build-images   # Build Docker images
-just docker logs           # Show container logs
-```
-
-## Running Selfie Commands in Containers
-
-### Method 1: Interactive Shell
-
-```bash
-# Get a shell in any distribution
-just docker shell-debian
-just docker shell-alpine
-
-# Inside the container, run selfie commands:
-cargo run -- package list
-cargo run -- package validate my-package.yml
-cargo run -- config validate
+# Inside the container, the usual commands work:
+cargo test --all
+cargo test --test cli_tests
 cargo run -- --help
+cargo run -- spec list
+cargo run -- spec validate my-package
+cargo run -- package check my-package
+cargo run -- --verbose package list
+cargo run -- config validate
 ```
 
-### Method 2: Direct Commands
+`cargo run` inside a container reads the container user's home directory, not yours, so it needs a
+config file there before commands that read the package directory succeed.
+
+The same commands run without a shell:
 
 ```bash
-# Run commands directly in containers
-docker-compose exec -T debian cargo run -- package list
-docker-compose exec -T alpine cargo run -- --help
-docker-compose exec -T debian cargo run -- config validate
-
-# Test specific functionality
-docker-compose exec -T alpine cargo test --test command_execution_tests
-docker-compose exec -T debian cargo test package_validation
+docker compose exec -T debian cargo run -- spec list
+docker compose exec -T alpine cargo test --test cli_tests
+docker compose exec -T debian bash -c "apt list --installed | head -5"
+docker compose exec -T alpine sh -c "apk list --installed | head -5"
 ```
 
-### Method 3: Via Tilt (for testing)
+## Local Gates
+
+The containers exercise platform behavior. The pre-commit gates still run on the host:
 
 ```bash
-# Through Tilt resources
-tilt trigger test-all           # Run all tests
-tilt trigger debian-tests       # Run tests on Debian
-tilt trigger alpine-tests       # Run tests on Alpine
+just check      # every CI gate, in order
+just test       # the test suite only
+just clippy     # clippy with -D warnings
 ```
 
-## Common Development Workflows
-
-### Quick Test Cycle
+## Troubleshooting
 
 ```bash
-# Make code changes, then:
-just tilt test-debian    # Quick test on one distro
-just tilt test           # Full test across all distros
+docker compose ps                  # Container status
+docker compose logs debian         # One container's logs
+docker compose build --no-cache    # Rebuild the images from scratch
+docker compose down -v             # Remove containers and volumes for a clean slate
+tilt down && tilt up               # Restart Tilt
 ```
 
-### Debugging Test Failures
-
-```bash
-# Get into the failing environment
-just docker shell-alpine
-
-# Inside container:
-cargo test test_that_failed
-cargo run -- package list --debug
-```
-
-### Cross-Platform Package Manager Testing
-
-```bash
-# Test package commands across different package managers
-docker-compose exec -T debian bash -c "apt list --installed | head -5"
-docker-compose exec -T alpine bash -c "apk list --installed | head -5"
-
-# Test selfie with different package managers available
-docker-compose exec -T debian cargo run -- package check my-package.yml
-docker-compose exec -T alpine cargo run -- package check my-package.yml
-```
-
-### Performance Testing
-
-```bash
-# Compare performance across distributions
-docker-compose exec -T debian time cargo run -- package list
-docker-compose exec -T alpine time cargo run -- package list
-```
-
-## File Structure
+## Files
 
 ```
-selfie-v4/
-├── Tiltfile                    # Tilt orchestration
-├── docker-compose.yml         # Container definitions
-├── Justfile                   # Command shortcuts
+selfie/
+├── Tiltfile                  # Tilt resources
+├── docker-compose.yml        # Container definitions
 ├── docker/
-│   ├── debian/Dockerfile     # Debian + Rust environment
-│   └── alpine/Dockerfile     # Alpine + Rust environment
+│   ├── debian/Dockerfile     # Debian + Rust
+│   └── alpine/Dockerfile     # Alpine + Rust
 └── target/
     ├── debian/               # Debian build artifacts
     └── alpine/               # Alpine build artifacts
 ```
-
-## Features
-
-- ✅ **Warning-free Tilt setup** - Loads cleanly without dependency issues
-- ✅ **ARM64 native** - Optimized for Apple Silicon performance
-- ✅ **Fast builds** - Cached layers and optimized Dockerfiles
-- ✅ **Separate build artifacts** - Per-distribution target directories
-- ✅ **CI-equivalent testing** - Reproduces production environments
-
-## Troubleshooting
-
-### Container Issues
-
-```bash
-just docker status                    # Check container status
-just docker logs                     # View all container logs
-docker-compose logs debian           # View specific container logs
-just docker build-images             # Rebuild images if needed
-```
-
-### Clean Slate
-
-```bash
-just docker clean                     # Remove all containers and volumes
-just docker rebuild-images           # Rebuild from scratch
-```
-
-### Tilt Issues
-
-```bash
-tilt down                      # Stop Tilt
-tilt up                        # Restart Tilt
-```
-
-## Prerequisites
-
-- **Docker** and **Docker Compose**
-- **Tilt**: `brew install tilt-dev/tap/tilt`
-- **Just**: `brew install just`
-
-Each distribution has Rust pre-installed and ready for testing.
