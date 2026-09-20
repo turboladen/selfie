@@ -5075,8 +5075,9 @@ mod symlinked_targets {
         // Counts writes so the test can prove the writer was actually reached.
         // Without that, a refactor that detects the link by some route other than
         // `symlink_refusal` would leave this decorator blinding nothing, the test
-        // would pass having exercised none of what it is named for, and
-        // `O_NOFOLLOW` would become deletable again — the exact hole this guards.
+        // would pass having exercised none of what it is named for, and the
+        // writer's own symlink check would become deletable again — the exact
+        // hole this guards.
         #[derive(Clone, Debug)]
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
@@ -5086,8 +5087,8 @@ mod symlinked_targets {
             }
 
             // Deliberately **not** blinded: this decorator blinds one check, the
-            // symlink one, so that the writer's `O_NOFOLLOW` is the only thing
-            // left to refuse. Blinding the irregular check too would widen what
+            // symlink one, so that the writer's own symlink check is the only
+            // thing left to refuse. Blinding the irregular check too would widen what
             // this test claims to cover and hide a real regression in it.
             fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
                 self.0.irregular_target_refusal(path)
@@ -7329,6 +7330,63 @@ mod irregular_targets {
 
         assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "REPO");
+    }
+}
+
+// A write failure names the target exactly once.
+//
+// The writer re-tags its IO errors with the target path, so a warning that
+// prefixes the path as well prints it twice.
+mod write_failure_warnings {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // An existing target inside a directory the user cannot write to is
+    // refused, because the replacement has to be created beside it, and the
+    // original is left as it was.
+    #[tokio::test]
+    async fn an_unwritable_target_directory_is_named_once() {
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP an_unwritable_target_directory_is_named_once: running as root");
+            return;
+        }
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("config.toml");
+        std::fs::write(&target, "OLD").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let options = ApplyOptions {
+            // Without this the entry is a conflict and never reaches the write.
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        // Restore before asserting, so a failure still leaves a removable
+        // temporary directory behind.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let warnings = warning_messages(&events);
+        let failure = warnings
+            .iter()
+            .find(|w| w.starts_with("Failed to write: "))
+            .unwrap_or_else(|| panic!("no write failure was reported: {warnings:?}"));
+        assert_eq!(
+            failure.matches(target.to_str().unwrap()).count(),
+            1,
+            "the target is not named exactly once: {failure}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD");
+        assert_eq!(refused_count(&events), 1);
     }
 }
 

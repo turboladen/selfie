@@ -476,9 +476,10 @@ fn save_deploy_state<F: FileSystem>(
     config: &SelfieConfig,
     state: &DeployState,
 ) -> Result<(), FileSystemError> {
-    // Deliberately less durable than `write_file_no_follow`: that syncs the file's
-    // data before renaming, and the directory fsync missing here is the safe
-    // direction. Losing this file costs nothing — the next run re-derives it.
+    // Deliberately less durable than `write_file_no_follow`: both sync the file's
+    // data before renaming, and `write_file_private` skips the directory fsync,
+    // which is the safe direction. Losing this file costs nothing — the next run
+    // re-derives it.
     //
     // Do not "fix" that by syncing harder. A record only lies when it outlives the
     // write it describes, so making the state survive a crash the target write did
@@ -1148,11 +1149,10 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
+            // The error already names the target; naming it here too would print
+            // the path twice.
             self.sender
-                .send_warning(format!(
-                    "Failed to tighten permissions on '{}': {e}",
-                    target.path.display()
-                ))
+                .send_warning(format!("Failed to tighten permissions: {e}"))
                 .await;
             return Err(SecretOutcome::Failed);
         }
@@ -1267,8 +1267,10 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
+            // The error already names the target; naming it here too would print
+            // the path twice.
             self.sender
-                .send_warning(format!("Failed to write '{}': {e}", target.path.display()))
+                .send_warning(format!("Failed to write: {e}"))
                 .await;
             return SecretOutcome::Failed;
         }
@@ -1479,28 +1481,28 @@ async fn perform_deploy<F: FileSystem>(
         filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
     {
         // A refusal is not a failure. "Failed to write" would read as something
-        // going wrong rather than as selfie declining, and the error already names
-        // both the target and where the link points.
+        // going wrong rather than as selfie declining. The error names the target
+        // in both arms, so neither repeats it.
         //
-        // Reaching the refusal arm here means the link appeared between the check
-        // in `handle_apply` and this write. It is exercised by
+        // Reaching the refusal arm here means the link or fifo appeared between
+        // the checks in `handle_apply` and this write. It is exercised by
         // `the_writer_refuses_even_when_the_check_is_blinded`, which asserts only
         // that the message names a symlink — not the `Skipping '{source}': `
         // wrapper. Share `refusal_warning` rather than repeating the wording, or
         // that unpinned half can drift.
         let message = match &e {
-            FileSystemError::SymlinkedTarget { .. } => refusal_warning(unit.source_key, &e),
-            _ => format!("Failed to write '{}': {e}", unit.target_path.display()),
+            FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
+                refusal_warning(unit.source_key, &e)
+            }
+            _ => format!("Failed to write: {e}"),
         };
         sender.send_warning(message).await;
         // `Err` has the caller count this as refused and leaves the deploy state
         // untouched, so nothing is recorded as deployed that was not. An entry
         // already in the state keeps its previous checksums and is stale rather than
-        // untracked, which is the honest record: for a refusal nothing was written,
-        // and for an IO failure the target may have been truncated or partly written
-        // first, since this writer truncates in place unlike `write_file_private`.
-        // Recording either as a fresh deployment is what would make a later drift
-        // check call the damage clean.
+        // untracked, which is the honest record: a refusal writes nothing, and a
+        // failed write leaves the target as it was, so the previous checksums still
+        // describe it.
         return Err(());
     }
     deploy_state.record_deployment(unit.source_key, unit.source_checksum);
@@ -1806,7 +1808,7 @@ where
             // `Skip` is excluded: an in-sync target is not written to. Recording one
             // as deployed would let `detect_drift` answer `None` forever for a path
             // selfie will never write (selfie-phnh), so the suppression below covers
-            // only the symlinked case. `write_file_no_follow` holds the TOCTOU half.
+            // only the symlinked case. `write_file_no_follow` checks again itself.
             if !matches!(decision, DeployDecision::Skip(_))
                 && let Some(refusal) = filesystem.symlink_refusal(&target_path)
             {
@@ -1850,7 +1852,7 @@ where
                     // Gating this on `symlink_refusal` is safe despite its
                     // advisory-and-racy documentation, because nothing is
                     // written here. Where this path does write, `perform_deploy`
-                    // relies on `write_file_no_follow`'s kernel refusal.
+                    // relies on `write_file_no_follow`'s own check.
                     //
                     // A stale answer omits an entry the next run re-evaluates.
                     // The window that could manufacture one is small, not absent.

@@ -2774,7 +2774,6 @@ dependencies = [
  "etcetera",
  "futures",
  "gix",
- "libc",
  "mockall",
  "nix",
  "serde",

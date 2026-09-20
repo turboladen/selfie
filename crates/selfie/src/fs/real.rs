@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -83,13 +83,164 @@ fn parent_dir(path: &Path) -> &Path {
 
 /// [`FileSystemError::IrregularTarget`] for anything `irregular_kind` names.
 ///
-/// Free function taking a `&Path` so `write_file_no_follow` can classify a failed
-/// `open` with it, the same shape `symlink_refusal` has and for the same reason.
+/// Free function taking a `&Path`, the same shape `symlink_refusal` has, so the
+/// writer can ask it of a plain path.
 fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
     irregular_kind(path).map(|kind| FileSystemError::IrregularTarget {
         path: path.to_path_buf(),
         kind,
     })
+}
+
+/// What the writer does with whatever is already at the target, and how far its
+/// durability reaches.
+#[derive(Clone, Copy)]
+enum Replacement {
+    /// Replace a symlink that does not resolve to an irregular target; create
+    /// owner-only. The parent directory is not fsynced.
+    // The deploy state is written this way and must stay less durable than the
+    // targets it records: a record outliving the write it describes turns a
+    // lost deploy into a conflict blamed on the user. `save_deploy_state` says
+    // so; losing a secret target's rename costs the deploy, not the data.
+    OwnerOnly,
+    /// Refuse a symlink; keep an existing regular file's mode, else create at
+    /// `0o666 & !umask`. The parent directory is fsynced, best effort.
+    KeepingMode,
+}
+
+/// Write `data` to a temporary file beside `path` and rename it into place.
+///
+/// # Errors
+///
+/// A refusal for an irregular target, or for a symlink under `KeepingMode`,
+/// present when checked; or an IO error naming `path` for anything else.
+fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), FileSystemError> {
+    use std::io::Write as _;
+
+    // The temporary file's name is random and the rename carries no path at all,
+    // so failures would otherwise name a file the operator never chose -- or
+    // nothing. Re-tag them with the target. `kind()` is preserved; only the raw
+    // OS error number is lost, which nothing here consumes.
+    let target_err = |e: std::io::Error| {
+        FileSystemError::IoError(Arc::new(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", path.display()),
+        )))
+    };
+
+    // A target whose directory does not exist yet is created rather than refused.
+    // See `parent_dir` for why the bare-relative-name case needs normalizing.
+    let parent = parent_dir(path);
+    // A directory that could not be created is the parent's failure, so the
+    // message names the parent; naming the target would blame a file that was
+    // never touched.
+    fs::create_dir_all(parent).map_err(|e| {
+        FileSystemError::IoError(Arc::new(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", parent.display()),
+        )))
+    })?;
+
+    // Refusals are decided here, before a temporary file exists, so a refused
+    // write leaves nothing beside the target. They are about the path as it is
+    // now: a link or fifo planted after this point is replaced by the rename
+    // below, never followed or opened, and the write succeeds.
+    //
+    // Symlink first: a link to a fifo would otherwise be reported as a fifo,
+    // naming the wrong problem and suggesting the wrong fix. The irregular
+    // check follows links, so a private write refuses a link to a fifo too:
+    // renaming over a fifo, or over a link to one, would silently destroy it.
+    let keep_mode = matches!(how, Replacement::KeepingMode);
+    if keep_mode && let Some(refusal) = symlink_refusal(path) {
+        return Err(refusal);
+    }
+    if let Some(refusal) = irregular_refusal(path) {
+        return Err(refusal);
+    }
+
+    // The permission bits only. setuid, setgid and sticky are not something a
+    // dotfile carries, and an unprivileged in-place write clears the first two
+    // anyway.
+    //
+    // A non-following stat, like the symlink check above: the mode has to come
+    // from what is at the name, never from what a link there points at. With a
+    // following stat, a link planted after that check hands its destination's
+    // mode -- chosen by whoever planted it -- to the file the rename then puts
+    // in the link's place.
+    let existing_mode = if keep_mode {
+        fs::symlink_metadata(path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+    } else {
+        None
+    };
+
+    // The temporary file must live in the target's own directory: elsewhere it may
+    // be on another filesystem, making the rename non-atomic, or world-readable.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".selfie-");
+    match (how, existing_mode) {
+        // Applied by the creating syscall, so the content is never briefly
+        // world-readable. The umask may restrict this further but can never
+        // loosen it.
+        (Replacement::OwnerOnly, _) => {
+            builder.permissions(fs::Permissions::from_mode(0o600));
+        }
+        // What an ordinary `open(O_CREAT)` gives: the umask is applied by the
+        // kernel, so this is exactly what `fs::write` would have created.
+        (Replacement::KeepingMode, None) => {
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        // Created at tempfile's default of 0o600 and widened by the `fchmod`
+        // below. Passing the mode here instead would put it through the umask,
+        // stripping group and other bits the user had set.
+        (Replacement::KeepingMode, Some(_)) => {}
+    }
+
+    // Randomly named and unlinked on drop, so it cannot collide with a concurrent
+    // write and no *error* path leaves it behind. A crash is another matter: being
+    // killed or losing power between here and the rename leaves a `.selfie-*` file
+    // beside the target holding the complete content. For a secret it is mode
+    // 0600, so this is debris rather than disclosure, but nothing sweeps it up.
+    let mut tmp = builder.tempfile_in(parent).map_err(target_err)?;
+    tmp.write_all(data).map_err(target_err)?;
+    if let Some(mode) = existing_mode {
+        tmp.as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(target_err)?;
+    }
+    // Flush before the rename: otherwise a crash can leave the target name
+    // pointing at a zero-length file.
+    //
+    // For an ordinary target this is also what lets a caller record the write as
+    // having happened. `perform_deploy` calls `record_deployment` immediately
+    // after the writer returns; if the write were lost to a crash while that
+    // record survived, the state would claim content the target does not have,
+    // and the entry would become a sticky conflict blamed on the user
+    // (selfie-aub). Ordering is the fix, so it belongs here, before the record.
+    tmp.as_file().sync_all().map_err(target_err)?;
+
+    // Replaces the target by rename, so readers see either the old file or the
+    // complete new one, and a symlink at the final component is replaced rather
+    // than followed.
+    tmp.persist(path).map_err(|e| target_err(e.error))?;
+
+    // The data is durable; the directory entry naming it is not. A freshly
+    // created file can survive its own fsync and still vanish. `OwnerOnly`
+    // skips this on purpose; see the variant.
+    //
+    // Best-effort, deliberately: opening a directory needs read permission, so
+    // a `0o300` directory refuses this open with `EACCES`, and failing here
+    // would break a deploy that works today.
+    // `a_write_only_parent_directory_still_succeeds` holds it. Only the
+    // immediate parent; on Apple targets std's `sync_all` is `fcntl(F_FULLFSYNC)`,
+    // and its failure is swallowed here like any other. Do not claim more.
+    if keep_mode && let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
+    Ok(())
 }
 
 impl FileSystem for RealFileSystem {
@@ -102,182 +253,26 @@ impl FileSystem for RealFileSystem {
     }
 
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
-        use std::io::Write as _;
-
-        let path = path.path();
-        let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
-        // The temporary file's name is random and the rename carries no path at all,
-        // so failures would otherwise name a file the operator never chose -- or
-        // nothing. Re-tag them with the target. `kind()` is preserved; only the raw
-        // OS error number is lost, which nothing here consumes.
-        let target_err = |e: std::io::Error| {
-            io_err(std::io::Error::new(
-                e.kind(),
-                format!("{}: {e}", path.display()),
-            ))
-        };
-
-        // The temporary file must live in the target's own directory: elsewhere it may
-        // be on another filesystem, making the rename non-atomic, or world-readable.
-        // See `parent_dir` for why the bare-relative-name case needs normalizing.
-        let parent = parent_dir(path);
-        fs::create_dir_all(parent).map_err(target_err)?;
-
-        let mut builder = tempfile::Builder::new();
-        builder.prefix(".selfie-");
-        // Applied by the creating syscall, so the content is never briefly
-        // world-readable. The umask may restrict this further but can never
-        // loosen it.
-        builder.permissions(fs::Permissions::from_mode(0o600));
-
-        // Randomly named and unlinked on drop, so it cannot collide with a concurrent
-        // write and no *error* path leaves it behind. A crash is another matter: being
-        // killed or losing power between here and the rename leaves a `.selfie-*` file
-        // beside the target holding the complete secret. It is mode 0600, so this is
-        // debris rather than disclosure, but nothing sweeps it up.
-        let mut tmp = builder.tempfile_in(parent).map_err(target_err)?;
-        tmp.write_all(data).map_err(target_err)?;
-        // Flush before the rename: otherwise a crash can leave the target name
-        // pointing at a zero-length file.
-        tmp.as_file().sync_all().map_err(target_err)?;
-
-        // Replaces the target by rename, so readers see either the old file or the
-        // complete new one, a pre-existing mode is discarded rather than inherited,
-        // and a symlink at the final component is replaced rather than followed.
-        //
-        // The directory entry itself is not fsynced, so a crash immediately after this
-        // can still lose the rename and leave the old file in place. That costs the
-        // deploy, not the data -- a reader never sees a partial file either way -- so
-        // it is a durability gap, not a correctness one.
-        tmp.persist(path).map_err(|e| target_err(e.error))?;
-        Ok(())
+        write_by_rename(path.path(), data, Replacement::OwnerOnly)
     }
 
-    // The refusal is the kernel's: `O_NOFOLLOW` on the creating `open(2)`, so
-    // there is no interval between deciding and writing.
-    //
-    // A failed open is classified by stat-ing the path afterwards rather than by
-    // matching an errno, which is why a link deleted in that window reports as an
-    // `IoError`.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
-        use std::io::Write as _;
-
-        let path = path.path();
-        let io_err = |e: std::io::Error| FileSystemError::IoError(Arc::new(e));
-
-        // A target whose directory does not exist yet is created rather than
-        // refused, matching `write_file_private`.
-        let parent = parent_dir(path);
-        fs::create_dir_all(parent).map_err(io_err)?;
-
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        // The kernel refuses the open when the final component is a symlink, so
-        // there is no interval between deciding and writing for a planter to
-        // win. Checking first and then writing would be exactly that race.
-        //
-        // `O_NONBLOCK` is for a second kind of target: opening a fifo for
-        // writing blocks until a reader arrives, and no timeout in selfie
-        // bounds it. With the flag the open fails `ENXIO` instead.
-        //
-        // It is not the guarantee on its own -- with a reader attached the open
-        // succeeds -- which is what the descriptor check after it is for.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-
-        let mut file = match options.open(path) {
-            Ok(file) => file,
-            // Classified by asking what is at the path rather than by matching an
-            // errno. What a caller has to tell apart is a refusal from a failure,
-            // and the two stats answer that directly -- so this needs no errno
-            // constant, and therefore makes no claim about which one any platform
-            // returns for `O_NOFOLLOW` or for a readerless fifo under
-            // `O_NONBLOCK`.
-            //
-            // Symlink first: a link to a fifo fails the open with `ELOOP` before
-            // the fifo is ever reached, so reporting it as a fifo would name the
-            // wrong problem and suggest the wrong fix.
-            Err(e) => {
-                return Err(symlink_refusal(path)
-                    .or_else(|| irregular_refusal(path))
-                    .unwrap_or_else(|| io_err(e)));
-            }
-        };
-
-        // Ask the descriptor, not the path. Everything above is a question about a
-        // name, and a name can be replaced between asking and answering; this
-        // inspects the object actually opened, so a fifo or device planted
-        // mid-apply is refused. It is the only check here that is not a race.
-        //
-        // Nothing has been written yet: `O_TRUNC` on a non-regular file is ignored
-        // for a fifo and unspecified elsewhere, so this must run before
-        // `write_all`.
-        match file.metadata() {
-            Ok(metadata) if metadata.file_type().is_file() => {}
-            Ok(_) => {
-                return Err(irregular_refusal(path).unwrap_or_else(|| {
-                    // The descriptor says it is not a regular file and the path no
-                    // longer agrees -- it was replaced in between. Refuse anyway,
-                    // naming what was opened rather than what is there now.
-                    FileSystemError::IrregularTarget {
-                        path: path.to_path_buf(),
-                        kind: "non-regular file",
-                    }
-                }));
-            }
-            // Fails **closed**, and matched explicitly rather than folded into the
-            // arm above: a descriptor selfie cannot classify is one it must not
-            // write to. Being unable to tell is not permission to proceed.
-            //
-            // The error is propagated rather than turned into a refusal. Reporting
-            // `IrregularTarget` here would name a file type nothing observed; this
-            // is a stat that failed, and it says so. `fstat` on a live descriptor
-            // is close to infallible, so this is a matter of not encoding the
-            // wrong precedent rather than a path anyone is expected to hit.
-            Err(e) => return Err(io_err(e)),
-        }
-
-        file.write_all(data).map_err(io_err)?;
-
-        // Durability, because a caller records the write as having happened.
-        //
-        // `perform_deploy` calls `record_deployment` immediately after this
-        // returns. If the write is lost to a crash while that record survives, the
-        // state claims content the target does not have, and the entry becomes a
-        // sticky conflict blamed on the user (selfie-aub).
-        //
-        // Ordering is the fix, so this belongs *before* the record: making the
-        // state file more durable while the target stays lossy would widen the
-        // window. Costs two fsyncs per file actually written.
-        file.sync_all().map_err(io_err)?;
-
-        // The data is durable; the directory entry naming it is not. A freshly
-        // created file can survive its own fsync and still vanish.
-        //
-        // Best-effort, deliberately: opening a directory needs read permission,
-        // so a `0o300` directory refuses this open with `EACCES`. Failing here
-        // would break a deploy that works today.
-        // `a_write_only_parent_directory_still_succeeds` holds it.
-        //
-        // Only the immediate parent, and on macOS `sync_all` is `fsync(2)`,
-        // which APFS does not treat as a write barrier. Do not claim more.
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-
-        Ok(())
+        write_by_rename(path.path(), data, Replacement::KeepingMode)
     }
 
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         symlink_refusal(path.path())
     }
 
-    // Uses a **following** stat, unlike `symlink_refusal` above. The question is
-    // what the next `open` lands on, and `read_file` and `write_file_no_follow`
-    // both resolve the path — so a non-following stat would see a symlink, answer
-    // `None`, and let the fifo behind it block the read. A dangling link fails the
-    // stat and is `None`, which is right: nothing to open, and `symlink_refusal`
-    // reports it. The two guards answer different questions and need different
-    // syscalls; mirroring this one on the other reintroduces the hang.
+    // Uses a **following** stat, unlike `symlink_refusal` above. `read_file`
+    // resolves the path, so a non-following stat would see a symlink, answer
+    // `None`, and let the fifo behind it block the read. The writers never open
+    // the target, but they ask the same question so that a symlink to a fifo is
+    // refused exactly as a fifo is, which is the documented rule. A dangling link
+    // fails the stat and is `None`, which is right: nothing to open, and
+    // `symlink_refusal` reports it. The two guards answer different questions and
+    // need different syscalls; mirroring this one on the other reintroduces the
+    // hang on the read path.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         irregular_refusal(path.path())
     }
@@ -618,34 +613,42 @@ fn tp(path: &Path) -> TargetPath {
     super::target::expand_target_path(&RealFileSystem, path.to_str().unwrap())
 }
 
-/// Tests for [`FileSystem::write_file_private`].
-///
-/// Grouped by what each test actually proves.
-///
-/// The six tests directly below all still pass against a naive `create_dir_all` +
-/// `fs::write`, so they guard against gross breakage rather than against the defects
-/// this method exists to fix. Named as that pair rather than as a method: the
-/// comparison is with the implementation someone might reach for, not with an API
-/// the port offers.
-///
-/// Everything in `unix` is load-bearing: temporarily swapping this implementation
-/// back to `create_dir_all` + `fs::write` was confirmed to fail all six of them that
-/// run there, and none of the six above. The `/dev/shm` test is Linux-only, so it was
-/// not part of that check.
+// Names of everything in `dir`, for asserting that no temporary file survived.
+#[cfg(test)]
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+// The permission bits of what `path` resolves to.
+#[cfg(test)]
+fn mode_of(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+// Tests for [`FileSystem::write_file_private`].
+
+// Grouped by what each test actually proves.
+
+// The six tests directly below all still pass against a naive `create_dir_all` +
+// `fs::write`, so they guard against gross breakage rather than against the defects
+// this method exists to fix. Named as that pair rather than as a method: the
+// comparison is with the implementation someone might reach for, not with an API
+// the port offers.
+
+// Everything in `unix` is load-bearing: against `create_dir_all` + `fs::write`,
+// every one of them that runs here fails, and none of the six above does. Two
+// are not part of that claim: the `/dev/shm` test is Linux-only, and
+// `refuses_a_fifo_rather_than_renaming_over_it` would hang on a following
+// open rather than fail.
 #[cfg(test)]
 mod private_write_tests {
     use super::*;
     use tempfile::tempdir;
-
-    // Names of everything in `dir`, for asserting that no temporary file survived.
-    fn entries(dir: &Path) -> Vec<String> {
-        let mut names: Vec<_> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
 
     #[test]
     fn writes_content_to_a_new_file() {
@@ -727,10 +730,6 @@ mod private_write_tests {
     mod unix {
         use super::*;
         use std::os::unix::fs::MetadataExt as _;
-
-        fn mode_of(path: &Path) -> u32 {
-            fs::metadata(path).unwrap().permissions().mode() & 0o777
-        }
 
         // The security property, asserted the only way that cannot flake: the
         // umask may restrict the mode further than the 0o600 we request, but it
@@ -838,6 +837,36 @@ mod private_write_tests {
             drop(held);
         }
 
+        // A fifo at a secret target is refused, not renamed over: the rename
+        // would destroy whatever was reading it, and the secret path checks
+        // for exactly this before it resolves the content.
+        #[test]
+        fn refuses_a_fifo_rather_than_renaming_over_it() {
+            use std::os::unix::fs::FileTypeExt as _;
+
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("creds");
+            nix::unistd::mkfifo(&target, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+            let err = RealFileSystem
+                .write_file_private(&tp(&target), b"secret")
+                .unwrap_err();
+
+            match err {
+                FileSystemError::IrregularTarget { kind, .. } => {
+                    assert_eq!(kind, "named pipe (fifo)");
+                }
+                other => panic!("expected an irregular-target refusal, got {other:?}"),
+            }
+            assert!(
+                fs::symlink_metadata(&target).unwrap().file_type().is_fifo(),
+                "the fifo must be left in place"
+            );
+            assert_eq!(entries(dir.path()), ["creds"]);
+        }
+
+        // The failure names the file it was writing, as the ordinary writer's
+        // does, and the original survives it.
         #[test]
         fn errors_when_the_parent_directory_is_not_writable() {
             if nix::unistd::Uid::effective().is_root() {
@@ -855,13 +884,21 @@ mod private_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
-            let result = RealFileSystem.write_file_private(&tp(&target), b"secret");
+            let err = RealFileSystem
+                .write_file_private(&tp(&target), b"secret")
+                .unwrap_err();
 
-            assert!(result.is_err());
-            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
-
-            // Restore write access so the temporary directory can be cleaned up.
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(matches!(err, FileSystemError::IoError(_)), "got {err:?}");
+            let message = err.to_string();
+            assert!(
+                message.contains(target.to_str().unwrap()),
+                "the failure does not name the target: {message}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
         }
 
         // Pins the temporary file to the target's own directory.
@@ -906,20 +943,22 @@ mod private_write_tests {
     }
 }
 
-/// Tests for [`FileSystem::write_file_no_follow`].
-///
-/// The plain-file tests below hold equally for a naive `create_dir_all` + `fs::write`,
-/// so they guard against gross breakage rather than against the defect this method
-/// exists to fix.
-///
-/// In `unix`, the three refusal tests are the ones that fail against that naive pair;
-/// the two mode tests are the ones that fail against
-/// [`FileSystem::write_file_private`], which would tighten a dotfile nobody asked to
-/// have tightened. Neither group covers both neighbors, which is why both are here.
-/// `a_symlinked_parent_directory_is_still_followed` passes against all three: it
-/// pins a documented limitation so it cannot later be overstated, and is not a
-/// distinguishing test. Stated per-test rather than as a blanket claim, because the
-/// blanket version was not true of all six.
+// Tests for [`FileSystem::write_file_no_follow`].
+
+// The plain-file tests below hold equally for a naive `create_dir_all` + `fs::write`,
+// so they guard against gross breakage rather than against the defects this method
+// exists to fix.
+
+// In `unix`, each group fails against a different neighbor, which is why all of
+// them are here. The three symlink refusal tests fail against the naive pair,
+// which follows the link. The two mode tests fail against
+// [`FileSystem::write_file_private`], which would tighten a dotfile nobody asked to
+// have tightened. `replaces_by_rename_rather_than_truncating_in_place`,
+// `errors_when_the_parent_directory_is_not_writable` and
+// `a_read_only_existing_file_is_replaced_and_keeps_its_mode` fail against a writer
+// that truncates the existing file in place, which is the one a partial write
+// damages. `a_symlinked_parent_directory_is_still_followed` passes against all of
+// them: it pins a documented limitation so it cannot later be overstated.
 #[cfg(test)]
 mod no_follow_write_tests {
     use super::*;
@@ -938,7 +977,7 @@ mod no_follow_write_tests {
     }
 
     #[test]
-    fn truncates_an_existing_file_rather_than_overwriting_in_place() {
+    fn replaces_the_content_of_an_existing_file() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
         fs::write(&target, b"a much longer previous value").unwrap();
@@ -947,7 +986,7 @@ mod no_follow_write_tests {
             .write_file_no_follow(&tp(&target), b"new")
             .unwrap();
 
-        // Without O_TRUNC the tail of the old value would survive past the new one.
+        // Nothing of the old value survives past the new one.
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 
@@ -976,6 +1015,32 @@ mod no_follow_write_tests {
     }
 
     #[test]
+    fn leaves_no_temporary_file_behind_on_success() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+
+        RealFileSystem
+            .write_file_no_follow(&tp(&target), b"content")
+            .unwrap();
+
+        assert_eq!(entries(dir.path()), ["config"]);
+    }
+
+    #[test]
+    fn leaves_no_temporary_file_behind_when_the_rename_fails() {
+        let dir = tempdir().unwrap();
+        // A directory at the target cannot be replaced by a rename, so the write
+        // gets as far as the temporary file and then fails.
+        let target = dir.path().join("config");
+        fs::create_dir(&target).unwrap();
+
+        let err = RealFileSystem.write_file_no_follow(&tp(&target), b"content");
+
+        assert!(err.is_err());
+        assert_eq!(entries(dir.path()), ["config"]);
+    }
+
+    #[test]
     fn a_directory_at_the_target_is_an_ordinary_error() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
@@ -995,10 +1060,6 @@ mod no_follow_write_tests {
 
     mod unix {
         use super::*;
-
-        fn mode_of(path: &Path) -> u32 {
-            fs::metadata(path).unwrap().permissions().mode() & 0o777
-        }
 
         #[test]
         fn refuses_a_symlink_and_leaves_its_destination_alone() {
@@ -1062,21 +1123,50 @@ mod no_follow_write_tests {
             }
         }
 
+        // An executable dotfile stays executable, and so do the group and other
+        // bits the user set; `write_file_private` would discard the mode.
+
+        // The fixture has bits an ordinary umask strips: a writer passing the
+        // mode through the creating `open` comes back `0o745` under `022` and
+        // would pass at `0o755`. Where the umask strips nothing the two are
+        // indistinguishable, so the test skips instead of asserting vacuously.
+
+        // The control creates a file through `open` with the fixture mode, so
+        // it shows whether this umask strips anything. `fs::write` asks for
+        // `0o666`, which has no execute bit to strip, so a control made with it
+        // could never come back `0o767` and the guard would never fire.
         #[test]
         fn leaves_an_existing_files_mode_alone() {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
             let dir = tempdir().unwrap();
+            let control = dir.path().join("control");
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o767)
+                .open(&control)
+                .unwrap();
+            if mode_of(&control) == 0o767 {
+                let message = "the ambient umask strips no bits from 0o767, \
+                               so this cannot tell the two apart";
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "leaves_an_existing_files_mode_alone: {message}"
+                );
+                eprintln!("SKIP leaves_an_existing_files_mode_alone: {message}");
+                return;
+            }
+
             let target = dir.path().join("script");
             fs::write(&target, b"old").unwrap();
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o767)).unwrap();
 
             RealFileSystem
                 .write_file_no_follow(&tp(&target), b"new")
                 .unwrap();
 
-            // An executable dotfile stays executable. This is where the method
-            // parts company with `write_file_private`, which would replace the
-            // file and discard the mode.
-            assert_eq!(mode_of(&target), 0o755);
+            assert_eq!(mode_of(&target), 0o767);
         }
 
         #[test]
@@ -1124,9 +1214,97 @@ mod no_follow_write_tests {
                 .unwrap();
 
             // Asserted rather than only documented, so the limitation cannot be
-            // quietly overstated later: `O_NOFOLLOW` covers the final component
-            // only.
+            // quietly overstated later: the symlink check covers the final
+            // component only.
             assert!(real.join("config").exists());
+        }
+
+        #[test]
+        fn replaces_by_rename_rather_than_truncating_in_place() {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("config");
+            fs::write(&target, b"old").unwrap();
+
+            // Holding the original open keeps its inode allocated, so it cannot be
+            // recycled for the replacement and make the comparison below flaky.
+            let held = fs::File::open(&target).unwrap();
+            let before = fs::metadata(&target).unwrap().ino();
+
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"new")
+                .unwrap();
+
+            // A truncate-in-place writer that fails part way leaves the user's
+            // file holding whatever it got to. Replacing the name is what makes a
+            // partial write land in the temporary file instead.
+            let after = fs::metadata(&target).unwrap().ino();
+            assert_ne!(
+                before, after,
+                "target kept its inode, so it was modified in place rather than replaced"
+            );
+            drop(held);
+        }
+
+        // Rewriting an existing file needs write permission on the file, not on
+        // its directory, so a truncate-in-place writer succeeds here. An atomic
+        // replace has to create a sibling, so it cannot, and the original must
+        // survive the failure untouched.
+        //
+        // The failure has to say which file it was writing: an apply over many
+        // dotfiles otherwise reports "No space left on device" and nothing else.
+        #[test]
+        fn errors_when_the_parent_directory_is_not_writable() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!("SKIP errors_when_the_parent_directory_is_not_writable: running as root");
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("locked");
+            fs::create_dir(&parent).unwrap();
+            let target = parent.join("config");
+            fs::write(&target, b"old").unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+
+            let err = RealFileSystem
+                .write_file_no_follow(&tp(&target), b"new")
+                .unwrap_err();
+
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(matches!(err, FileSystemError::IoError(_)), "got {err:?}");
+            let message = err.to_string();
+            assert!(
+                message.contains(target.to_str().unwrap()),
+                "the failure does not name the target: {message}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
+        }
+
+        // The directory, not the file, decides whether a name can be replaced, so
+        // a read-only target is replaced and comes back read-only.
+        #[test]
+        fn a_read_only_existing_file_is_replaced_and_keeps_its_mode() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!(
+                    "SKIP a_read_only_existing_file_is_replaced_and_keeps_its_mode: running as root"
+                );
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("config");
+            fs::write(&target, b"old").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"new")
+                .unwrap();
+
+            assert_eq!(fs::read(&target).unwrap(), b"new");
+            assert_eq!(mode_of(&target), 0o444);
         }
 
         // The directory fsync must not turn a working write into a failure.
@@ -1162,19 +1340,19 @@ mod no_follow_write_tests {
     }
 }
 
-/// Targets that are neither absent nor a regular file.
-///
-/// Unix-only: fifos, sockets and device nodes are Unix file types, and
-/// `irregular_target_refusal` answers `None` everywhere else by construction.
-///
-/// A fifo is the reason this exists. Opening one blocks until the other end is
-/// opened — for reading *and* for writing — so a test that reaches the unguarded
-/// path does not fail, it **hangs**, and a hang is scored as neither pass nor
-/// fail. Every test here that could reach an open runs the call on a blocking
-/// thread and times out the handle, so the failure mode is a failed assertion
-/// rather than a wedged run. `tokio::time::timeout` around the call itself would
-/// not do: these are synchronous, so the future polls the blocking call inline
-/// and the timer never gets to run.
+// Targets that are neither absent nor a regular file.
+
+// Unix-only: fifos, sockets and device nodes are Unix file types, and
+// `irregular_target_refusal` answers `None` everywhere else by construction.
+
+// A fifo is the reason this exists. Opening one blocks until the other end is
+// opened — for reading *and* for writing — so a test that reaches the unguarded
+// path does not fail, it **hangs**, and a hang is scored as neither pass nor
+// fail. Every test here that could reach an open runs the call on a blocking
+// thread and times out the handle, so the failure mode is a failed assertion
+// rather than a wedged run. `tokio::time::timeout` around the call itself would
+// not do: these are synchronous, so the future polls the blocking call inline
+// and the timer never gets to run.
 #[cfg(test)]
 mod irregular_targets {
     use super::*;
@@ -1309,10 +1487,8 @@ mod irregular_targets {
         assert!(symlink_refusal(&link).is_some(), "control: it is a symlink");
     }
 
-    // The writer refuses a fifo with no reader, and does not block doing it.
-    //
-    // Without `O_NONBLOCK` the `open` itself blocks here and never reaches the
-    // descriptor check, so this is the test that observes the flag.
+    // The writer refuses a fifo with no reader, and does not block doing it: the
+    // refusal comes from a stat, and a stat never blocks on a fifo.
     #[test]
     fn the_writer_refuses_a_readerless_fifo_without_blocking() {
         let dir = tempdir().unwrap();
@@ -1330,16 +1506,10 @@ mod irregular_targets {
         }
     }
 
-    // With a reader attached the open succeeds, and the descriptor check refuses.
-    //
-    // Pinned by construction rather than asserted: POSIX guarantees
-    // `open(O_WRONLY | O_NONBLOCK)` cannot return `ENXIO` while a reader holds the
-    // fifo, so only the `fstat` after the open can produce the refusal. The reader
+    // A fifo with a reader attached is refused the same way, and the reader
+    // receives nothing: the refusal precedes any open of the target. The reader
     // is opened by this thread -- a reader thread could not signal readiness,
-    // because its own open would block until the writer arrived, and the test
-    // would fall back to the readerless route it exists to exclude.
-    //
-    // That the `fstat` fired is observable: the reader receives nothing.
+    // because its own open would block until a writer arrived.
     #[test]
     fn the_writer_refuses_a_fifo_that_has_a_reader() {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -1349,7 +1519,7 @@ mod irregular_targets {
 
         let mut reader = fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NONBLOCK)
+            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
             .open(&fifo)
             .expect("a reader may open a fifo with O_NONBLOCK before any writer");
 
