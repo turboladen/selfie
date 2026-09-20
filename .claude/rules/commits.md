@@ -57,6 +57,13 @@ fold felt smaller, and two commits reached `main` uncertified.
 A green tip cannot stand in for it. A commit that fails to build is invisible at the tip whenever a
 later commit fixes it, which is the ordinary shape of a fold.
 
+**Give every archived commit its own `CARGO_TARGET_DIR`.** `git archive` stamps files with the
+commit's timestamp, which is older than any artifact already in a shared target directory, so cargo
+sees nothing to rebuild and runs the tip's binary against the older commit's source. The check then
+reports a test that does not exist at that commit as passing. Two reviewers hit this in one session.
+A fresh directory per commit is the fix; a run that prints no `Compiling selfie v` or
+`Checking selfie v` line never built anything and must be scored as never-ran, not as passed.
+
 ## Messages
 
 Conventional-commit subjects, as the log already uses: `fix(scope):`, `docs:`, `refactor:`, `test:`,
