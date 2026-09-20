@@ -10,7 +10,8 @@
 //! ## Module layout
 //!
 //! - [`port`] — The `DotfileService` trait and `ApplyOptions` request type
-//! - [`service`] — Concrete implementation: apply, conflict resolution, drift checking
+//! - [`service`] — The adapter: collecting packages, and the `DotfileService` impl
+//! - `apply` — Applying every entry of every selected package
 //! - `backup` — Copies of what a target held before an apply overwrote it
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
 //! - `deploy_entry` — Writing one entry to its target and recording what was written
@@ -24,6 +25,7 @@
 //! - `template` — Named-value substitution for templated dotfiles
 //! - `state_file` — Reading and writing the deploy-state file
 
+mod apply;
 mod backup;
 pub mod deploy;
 mod deploy_entry;
