@@ -1292,6 +1292,19 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
     )
 }
 
+// Where an entry's repository file sits, for the already-tracked answer.
+//
+// `source` is relative to the spec's own directory, which is the same rule the
+// copy is composed under. A provider entry has no file in the repository, so
+// there is nothing to resolve and the spec itself is the closest true answer.
+fn tracked_copy_path(spec_path: &Path, entry: &DotfileEntry) -> PathBuf {
+    let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    match entry.source() {
+        Some(source) => spec_dir.join(source),
+        None => spec_path.to_path_buf(),
+    }
+}
+
 // Why a track added nothing although it found no entry for the target: the spec
 // already carries one whose recorded target matches, by a comparison that
 // disagreed with the one made before the copy.
@@ -2636,11 +2649,13 @@ where
         .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
 
     if let Some(entry) = already_tracked {
-        // The entry's own target, not the argument: "already tracking X" should
-        // name what the spec says, which is what a later apply will use.
+        // The entry's own paths, not the argument and not the target: "already
+        // tracking X" should name what the spec says, which is what a later apply
+        // will use, and `source_path` means the file in the repository in every
+        // other arm of this event.
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: spec.name,
-            source_path: expanded_target.path().to_path_buf(),
+            source_path: tracked_copy_path(&spec.spec_path, entry),
             target_path: entry.target().to_string(),
             was_already_tracked: true,
             environment: config.environment().to_string(),

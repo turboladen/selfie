@@ -10759,3 +10759,54 @@ mod an_unrecorded_track_names_what_it_wrote {
         );
     }
 }
+
+// `source_path` means the file in the dotfiles repository in every arm of
+// `DotfileTracked`, the already-tracked answer included: one arm of one event
+// carrying a different kind of path than the rest is what this pins (selfie-fbr1).
+//
+// No adapter renders the field today -- the event's `Display` names only the spec
+// and the target, and the MCP server serializes that `Display` -- so this is
+// library correctness rather than a visible defect. The first adapter to render
+// it is what the consistency is for.
+#[tokio::test]
+async fn an_already_tracked_entry_reports_the_copy_the_spec_holds() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+    let target = home.join(".config").join("bat").join("config");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "--theme=ansi").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat/config", "~/.config/bat/config")],
+    );
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("bat", target.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            source_path,
+            was_already_tracked,
+            ..
+        }) => {
+            assert!(was_already_tracked, "the entry was already in the spec");
+            assert_eq!(
+                source_path,
+                &dirs.package_dir.join("bat").join("config"),
+                "the copy in the repository, derived from the entry's own source"
+            );
+            // The two paths differ, which is what makes the assertion above
+            // capable of failing.
+            assert_ne!(
+                source_path, &target,
+                "reported the deploy target as the source"
+            );
+        }
+        other => panic!("expected an already-tracked success, got: {other:?}"),
+    }
+}
