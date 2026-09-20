@@ -643,7 +643,7 @@ side and the repository file on the `+` side:
   ──────────────────────────────────────────────────────────────────────
 ? How should this conflict be resolved? ›
 ❯ Skip (keep target as-is)
-  Accept (overwrite target with the new content)
+  Accept (overwrite target; anything it would destroy is copied aside first)
 ```
 
 The prompt appears only in a terminal; a run without one skips the conflict and reports it.
@@ -678,6 +678,68 @@ Because the target is replaced rather than rewritten, any other hard link to it 
 content, and the new file does not carry over the old one's extended attributes, ACLs, or ownership:
 a target owned by another user, or given another group, comes back owned by you. A dotfile kept as a
 hard link into another directory stops being one on the first apply that writes it.
+
+### What an overwrite keeps
+
+[Writing a target](#how-targets-are-written) replaces it, so what it held is gone once the write
+lands. Before selfie overwrites a target whose content differs from what it is about to write, it
+copies that content to `<state_directory>/backups/`, and the apply names the copy:
+
+```
+✓   starship/starship.toml → ~/.config/starship.toml
+ℹ     previous content copied to ~/.local/state/selfie/backups/starship.toml-3f9a1c…/20260920T143005.117Z-8b2e41
+```
+
+The directory is named after the target's file name and a checksum of its full path, so two targets
+with the same file name never share one. The copy is named for the moment it was made, so a listing
+sorts oldest first, and the trailing characters keep two copies made in the same millisecond apart.
+
+What the copy holds is what the write is about to destroy, read immediately before it — not what a
+conflict prompt showed you. Those differ if you edit the target while the prompt is open, and it is
+the newer bytes that would otherwise be lost. If the target stops being readable in that window,
+selfie refuses the entry and leaves it alone rather than overwriting content it cannot copy first.
+
+That covers an accepted conflict — at the prompt, with `--yes`, or through the MCP server — and it
+covers the quieter case as well: when a repository file changes and you have not touched the target,
+selfie refreshes it with no prompt at all, and the copy is the only record of what was there.
+
+Two things are **not** copied because there is nothing to keep: a target that did not exist, and a
+target that already holds what is being written.
+
+A [provider-sourced or templated entry](#no-deploy-state-and-what-follows-from-it) is not copied for
+a different reason. There _is_ something to keep — the credential the target already held — and
+selfie deliberately refuses to keep it, because a plaintext copy of a credential on disk is worse
+than the checksum it already declines to store.
+
+**One copy survives per target.** An overwrite keeps its copy first and removes the previous one
+only once the write has landed, so the surviving copy always holds the content the most recent
+_successful_ overwrite displaced. An overwrite that fails leaves both copies in place rather than
+consuming the older one, which may be the only record of content the target no longer holds; the
+next successful overwrite reduces them to one again. A target that two entries deploy to in the same
+run is copied once, before the first write, and both lines name that one copy.
+
+Copies are keyed by target path, so retargeting an entry leaves the old target's directory and its
+copy behind for good — nothing prunes a path selfie is no longer asked to deploy to. Over a long
+life the directory holds one copy per target _ever_ deployed, not per target currently deployed.
+
+If selfie cannot write the copy it **refuses the overwrite** rather than proceeding without it. The
+target is left exactly as it was, the entry counts as refused, and the run exits `1`. Free up space
+under the state directory, or point `--state-directory` somewhere writable, and run apply again.
+
+Recovering is a `cp` — nothing reads these files and no command manages them:
+
+```bash
+ls ~/.local/state/selfie/backups/            # find the directory for your target
+dir=~/.local/state/selfie/backups/<directory>
+cp "$dir/$(ls -t "$dir" | head -1)" ~/.config/starship.toml
+```
+
+`ls -t | head -1` takes the newest, because a failed overwrite leaves two — and the newest is the
+one that failed overwrite would have displaced.
+
+Deleting a copy by hand is safe, and there is no retention setting: selfie keeps the most recent per
+target and nothing else prunes them. See [`state_directory`](configuration.md#state_directory) for
+what that directory discloses and where not to put it.
 
 ### Symlinked targets
 
@@ -1030,6 +1092,10 @@ Consequences worth knowing before you adopt this:
 - `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
   checking them. Checking would mean resolving, which would run your commands from a read-only
   command.
+- Overwriting one keeps **no copy** of what was there, unlike
+  [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
+  itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
+  refuses. The prompt says so before you accept, and accepting is the only way past the conflict.
 
 #### Deploy behavior and permissions
 
@@ -1072,6 +1138,7 @@ CONFLICT  ~/.gem/credentials
   resolved output : 3 lines
   current target  : 12 lines
   (content hidden)
+  no copy of the current target is kept
 ```
 
 Line counts are enough to tell a rotated token (1 line vs 1 line) from a hand-edited file (1 line vs

@@ -365,10 +365,18 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "source": source,
             "target": target,
         })),
-        PackageEvent::DotfileDeployed { source, target, .. } => Some(serde_json::json!({
+        PackageEvent::DotfileDeployed {
+            source,
+            target,
+            backup,
+            ..
+        } => Some(serde_json::json!({
             "type": "dotfile_deployed",
             "source": source,
             "target": target,
+            // Null when nothing was kept, so an assistant can tell "no copy" from
+            // a field this server forgot to send.
+            "backup": backup,
         })),
         PackageEvent::DotfileSkipped {
             source,
@@ -578,6 +586,40 @@ mod tests {
             context: OperationContext::default(),
             timestamp: Instant::now(),
         }
+    }
+
+    // An assistant that reports a deploy has to be able to tell the user how to
+    // get their old file back, and has to be able to say "nothing was kept" when
+    // that is the truth rather than when the field went missing. Hence a
+    // key that is always present and null when nothing was copied.
+    #[tokio::test]
+    async fn a_deployment_carries_the_copy_it_kept_or_null() {
+        let deployed = |backup: Option<&str>| PackageEvent::DotfileDeployed {
+            operation_info: test_op_info(),
+            source: "myapp/config.toml".to_string(),
+            target: "/home/u/.config/app.toml".to_string(),
+            backup: backup.map(str::to_string),
+        };
+
+        let result = collect_events(Box::pin(stream::iter(vec![
+            deployed(Some(
+                "/home/u/.local/state/selfie/backups/app.toml-abc/stamp",
+            )),
+            deployed(None),
+        ])))
+        .await;
+
+        let rows = result.data["data"].as_array().expect("two rows");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            rows[0]["backup"],
+            "/home/u/.local/state/selfie/backups/app.toml-abc/stamp"
+        );
+        assert!(
+            rows[1]["backup"].is_null(),
+            "a deploy that kept nothing says so rather than omitting the key: {:?}",
+            rows[1]
+        );
     }
 
     // An apply that refused an entry comes back as an error result, and the

@@ -227,6 +227,32 @@ Provider-sourced and templated dotfiles are not recorded at all, so this is not 
 what selfie manages — see
 [No deploy state, and what follows from it](package-files.md#no-deploy-state-and-what-follows-from-it).
 
+##### What else lives there
+
+Alongside `deploy-state.yml`, selfie keeps a `backups/` directory holding one copy per target of the
+content [an overwrite displaced](package-files.md#what-an-overwrite-keeps). Four things are worth
+knowing before you point `state_directory` somewhere:
+
+- **The copies are mode `0600`; the directories holding them are not.** Only files go through the
+  owner-only writer, and a created directory gets the usual `0o777 & !umask`. Each directory is
+  named after the target's own file name plus a checksum of its full path, so the listing tells
+  anyone with an account on the machine which files selfie manages here — the same disclosure
+  `deploy-state.yml` makes, one level up.
+- **A copy is a verbatim copy of whatever was at the target.** Selfie knows where an entry writes,
+  not what you had there first, so pointing an ordinary `source` entry at a path that currently
+  holds a credential leaves that credential in plaintext under this directory. Provider-sourced and
+  templated _entries_ are never copied; that is a statement about the entry, not about what its
+  target happened to contain.
+- **Do not put `state_directory` inside `dotfiles_directory`.** `selfie sync push` would commit
+  every copy to your dotfiles repository.
+- **Two applies running at once are not supported**, and this is one of the places it shows: each
+  run removes copies of a target it did not just write, including the other run's.
+
+Deleting a copy by hand is safe. Nothing reads them, no command manages them, and there is no
+retention setting — selfie keeps the most recent per target and nothing else prunes them. Copies are
+keyed by target path, so retargeting an entry orphans the old target's copy for good: over time the
+directory holds one copy per target _ever_ deployed here.
+
 ### Global Behavior
 
 #### `cli.verbose`

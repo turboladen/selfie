@@ -409,6 +409,10 @@ pub fn state_directory<H: HomeDir + ?Sized>(
 
 // The deploy state file's path: `state_directory` plus the filename, joined
 // unresolved.
+//
+// `filename` holds no separator, so anything a caller needs beside this file --
+// the backups directory, say -- is one `with_file_name` away and comes from this
+// same resolution rather than a second one.
 pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
     home: &H,
     configured: Option<&Path>,

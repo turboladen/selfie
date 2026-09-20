@@ -501,16 +501,21 @@ impl EventSender {
     }
 
     /// Send a dotfile-deployed event
+    ///
+    /// `backup` is where the target's former content was copied, or `None` when
+    /// nothing was kept.
     pub(crate) async fn send_dotfile_deployed(
         &self,
         source: impl fmt::Display,
         target: impl fmt::Display,
+        backup: Option<&std::path::Path>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDeployed {
             operation_info,
             source: source.to_string(),
             target: target.to_string(),
+            backup: backup.map(|path| path.display().to_string()),
         })
         .await;
     }
@@ -2144,6 +2149,14 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         source: String,
         target: String,
+        /// Where the content the target held before this run wrote to it was
+        /// copied, so a consumer can tell the user how to get it back.
+        ///
+        /// `None` when nothing was kept: the target did not exist, it already
+        /// held what was written, or the entry is secret-bearing and so is never
+        /// copied. A target two entries deploy to in one run is copied once, and
+        /// both events name that one copy.
+        backup: Option<String>,
     },
 
     /// A config file was skipped (already current or user declined)

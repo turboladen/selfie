@@ -246,7 +246,9 @@ Two things are deliberately **not** refusals, and neither of them makes the exit
 - **A skip.** The entry was already in sync, so there was nothing to do.
 - **A conflict.** The target exists, is untracked, and differs from the repository file. Selfie
   leaves it alone and reports it, because overwriting it is your decision — see
-  [Dotfiles](docs/package-files.md#dotfiles).
+  [Dotfiles](docs/package-files.md#dotfiles). When you do decide to overwrite, selfie copies the
+  content it displaced under `state_directory` first and names the copy, so the decision is
+  reversible — see [What an overwrite keeps](docs/package-files.md#what-an-overwrite-keeps).
 
 `selfie apply --dry-run` follows the same rule: a refusal it can predict without writing anything is
 still reported, and still exits `1`. A preview whose job is to tell you what `apply` would do must
@@ -334,7 +336,9 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Package installation with environment-specific commands
 - ✅ Dependency resolution and installation
 - ✅ Soft dependencies (`recommends`) with `--no-recommends` flag
-- ✅ Dotfile deployment (`selfie apply`) with conflict and drift detection
+- ✅ Dotfile deployment (`selfie apply`) with conflict and drift detection, keeping a copy of the
+  content an overwrite displaces (not for provider-sourced files — see
+  [What an overwrite keeps](docs/package-files.md#what-an-overwrite-keeps))
 - ✅ Spec validation and package listing
 - ✅ Interactive spec creation and editing
 - ✅ Configuration management
