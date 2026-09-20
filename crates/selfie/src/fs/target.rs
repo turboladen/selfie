@@ -306,36 +306,22 @@ pub fn deploy_target<H: HomeDir + ?Sized>(
 
 // The form of `target` to record in a spec: `~`-relative when it names a path
 // under the home directory, so the entry means the same file on another machine.
-//
-// The inverse of `expand_target_path`. A target outside the home directory is
-// left absolute -- `/etc/nginx.conf` names the same file everywhere.
-//
-// Returns `target` unchanged when there is no home directory to measure against.
-// Home is taken as `expand_path` gives it, which canonicalizes, so a `$HOME` with
-// a symlinked component named unresolved records absolute.
+// The inverse of `expand_target_path`. A target outside the home directory is left
+// absolute -- `/etc/nginx.conf` names the same file everywhere -- and so is one
+// with no home directory to measure against. Home is taken as `expand_path` gives
+// it, which canonicalizes, so a `$HOME` with a symlinked component named
+// unresolved records absolute.
+
+// Takes the expansion, never the string it came from: what is recorded has to be
+// derived from the `TargetPath` the target rule checked, or a rule landing on one
+// expansion and not the other makes the two disagree (selfie-uhs7).
 #[must_use]
-pub(crate) fn portable_target<H: HomeDir + ?Sized>(home_dir: &H, target: &str) -> String {
+pub(crate) fn portable_target<H: HomeDir + ?Sized>(home_dir: &H, expanded: &TargetPath) -> String {
     let Ok(home) = home_dir.home() else {
-        return target.to_string();
+        return expanded.display().to_string();
     };
 
-    // One lookup, used for both halves. Expanding against one home and
-    // collapsing against another would leave the tilde in place or strip the
-    // wrong prefix.
-    let home = KnownHome(home);
-    let expanded = expand_target_path(&home, target);
-
-    collapse_home(&home.0, expanded.path())
-}
-
-// A home directory already in hand, so `portable_target` can hand the same one
-// to `expand_target_path` instead of asking twice.
-struct KnownHome(PathBuf);
-
-impl HomeDir for KnownHome {
-    fn home(&self) -> Result<PathBuf, FileSystemError> {
-        Ok(self.0.clone())
-    }
+    collapse_home(&home, expanded.path())
 }
 
 // Comparison must stay component-wise. `/home/steven` is not under `/home/steve`,
@@ -426,6 +412,18 @@ pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A home directory already in hand, where a mock cannot serve:
+    // `mock_expand_path` answers once, and both a rule table expanding `~`
+    // repeatedly and a `portable_target` call whose expansion also asks need one
+    // that always answers.
+    struct KnownHome(PathBuf);
+
+    impl HomeDir for KnownHome {
+        fn home(&self) -> Result<PathBuf, FileSystemError> {
+            Ok(self.0.clone())
+        }
+    }
     use crate::fs::MockFileSystem;
 
     #[test]
@@ -608,10 +606,12 @@ mod tests {
 
     #[test]
     fn a_hand_written_tilde_target_round_trips_unchanged() {
-        let mut fs = MockFileSystem::default();
-        fs.mock_expand_path("~", "/home/user");
+        // `KnownHome` rather than a mock, for the reason
+        // `the_textual_rule_and_the_deploy_rule_agree` gives: the expansion and
+        // the collapse each ask for home, and `mock_expand_path` answers once.
+        let fs = KnownHome(PathBuf::from("/home/user"));
         assert_eq!(
-            portable_target(&fs, "~/.config/bat/config"),
+            portable_target(&fs, &expand_target_path(&fs, "~/.config/bat/config")),
             "~/.config/bat/config"
         );
     }
@@ -620,9 +620,11 @@ mod tests {
     // `expand_target_path`'s `normalize_path`, so nothing else asserts it.
     #[test]
     fn a_recorded_target_is_normalized() {
-        let mut fs = MockFileSystem::default();
-        fs.mock_expand_path("~", "/home/user");
-        assert_eq!(portable_target(&fs, "~/.config/../.gemrc"), "~/.gemrc");
+        let fs = KnownHome(PathBuf::from("/home/user"));
+        assert_eq!(
+            portable_target(&fs, &expand_target_path(&fs, "~/.config/../.gemrc")),
+            "~/.gemrc"
+        );
     }
 
     #[test]
@@ -634,7 +636,7 @@ mod tests {
             )))
         });
         assert_eq!(
-            portable_target(&fs, "/Users/sloveless/.gemrc"),
+            portable_target(&fs, &expand_target_path(&fs, "/Users/sloveless/.gemrc")),
             "/Users/sloveless/.gemrc"
         );
     }

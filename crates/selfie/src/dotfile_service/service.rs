@@ -2630,7 +2630,7 @@ where
         )));
     }
 
-    let recorded_target = portable_target(filesystem, target_path);
+    let recorded_target = portable_target(filesystem, &expanded_target);
     spec.package
         .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
 
