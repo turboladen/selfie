@@ -59,6 +59,45 @@ fn get_operation_result(events: &[PackageEvent]) -> Option<&OperationResult> {
     })
 }
 
+// Restores `mode` on the path when dropped, so a directory made read-only for a
+// test can still be removed after an assertion panics.
+struct RestoreMode(PathBuf, u32);
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Ignored on failure: panicking in `Drop` during an unwind aborts the test
+        // binary, which would hide the assertion that started the unwind.
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
+// Make `dir` unwritable, restoring its mode when the guard drops. `None` where the
+// mode bits do not bite -- running as root, or a filesystem that ignores them --
+// so a caller skips instead of asserting about a write that succeeded.
+//
+// Restores the mode the directory actually had, not a fixed one: `TempDir`
+// creates at 0o700, so resetting to 0o755 would leave every caller's directory
+// looser than it found it, and a fixture whose own subject is a mode would have
+// this guard change it.
+
+// The probe is removed again: it is written inside the directory under test, and
+// one of the callers goes on to assert about that directory's contents.
+#[cfg(unix)]
+fn made_unwritable(dir: &std::path::Path) -> Option<RestoreMode> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = std::fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let restore = RestoreMode(dir.to_path_buf(), original);
+    let probe = dir.join("probe");
+    if std::fs::write(&probe, "x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        return None;
+    }
+    Some(restore)
+}
+
 // The message of a run that failed, for the operations that report one.
 fn failure_message(events: &[PackageEvent]) -> String {
     match get_operation_result(events).expect("no Completed event") {
@@ -2468,9 +2507,21 @@ async fn test_track_for_package_fails_when_package_not_found() {
     let events = collect_events(stream).await;
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
+    // Typed, not stringified. Every other single-package path carries the load
+    // error through with its type intact, so an adapter rendering the parts in its
+    // own channels -- a source snippet, a structured location -- reaches this
+    // command too instead of silently skipping it.
     assert!(
-        matches!(result, OperationResult::Failure(_)),
-        "Should fail when package doesn't exist"
+        matches!(
+            result,
+            OperationResult::Failure(OperationFailure::Package(_))
+        ),
+        "the load failure must keep its type, got: {result:?}"
+    );
+    let message = failure_message(&events);
+    assert!(
+        message.contains("nonexistent"),
+        "the failure must still name the package, got: {message}"
     );
 }
 
@@ -6853,17 +6904,6 @@ mod deploy_state_diagnostics {
 mod refusal_accounting {
     use super::*;
 
-    // Restores `mode` on the path when dropped, so a temp directory made
-    // read-only for a test can still be removed after an assertion panics.
-    struct RestoreMode(PathBuf, u32);
-
-    impl Drop for RestoreMode {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
-        }
-    }
-
     // `(deployed, skipped, conflict, refused)`.
     fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
@@ -8219,6 +8259,14 @@ mod repository_writes_do_not_follow_symlinks {
             "the write followed the link and landed at {}",
             destination.display()
         );
+
+        // The copy is attempted before the spec is saved, so a refused copy
+        // leaves no spec at all. Reversing the two would write a spec naming a
+        // file that is not there, which every later apply and drift reports.
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "a refused copy still wrote the spec"
+        );
     }
 
     #[tokio::test]
@@ -8227,11 +8275,13 @@ mod repository_writes_do_not_follow_symlinks {
         let target = dirs.target_dir.join("gemrc");
         std::fs::write(&target, "gem: --no-document").unwrap();
 
+        let spec = dirs.package_dir.join("ruby.yml");
         std::fs::write(
-            dirs.package_dir.join("ruby.yml"),
+            &spec,
             "name: ruby\nversion: 1.0.0\nenvironments:\n  test:\n    install: true\n",
         )
         .unwrap();
+        let before = std::fs::read(&spec).unwrap();
 
         // `handle_track_for_package` composes alongside the package YAML.
         let source = dirs.package_dir.join("ruby").join("gemrc");
@@ -8255,6 +8305,17 @@ mod repository_writes_do_not_follow_symlinks {
             !destination.exists(),
             "the write followed the link and landed at {}",
             destination.display()
+        );
+
+        // The copy is attempted before the spec is saved, so a refused copy
+        // leaves the spec byte-for-byte as it was. Reversing the two would add a
+        // `dotfiles:` entry naming a file that is not there, which every later
+        // apply and drift reports. Compared as bytes rather than for an absent
+        // key, so a rewrite that changed anything at all fails here.
+        assert_eq!(
+            std::fs::read(&spec).unwrap(),
+            before,
+            "a refused copy still rewrote the spec"
         );
     }
 
@@ -10303,5 +10364,552 @@ mod backups_before_overwrite {
         let named = reported(&events);
         assert_eq!(named.len(), 2, "both entries deployed: {events:?}");
         assert!(named.iter().all(Option::is_none), "{named:?}");
+    }
+}
+
+// `selfie dotfiles track` and `selfie package track-dotfile` run one function,
+// so neither can refuse an input the other accepts, nor describe the same
+// refusal differently. Each test here drives both entry points over one fixture
+// and compares the rendered failure, which is the only thing that catches a
+// wording forked back into a per-entry-point copy.
+//
+// Each also asserts what the shared message says. Comparing two strings for
+// equality alone passes when both runs failed for some unrelated reason, which
+// is how a parity test goes vacuous.
+mod track_entry_points_agree {
+    use super::*;
+
+    // A package with no dotfile entries, so `track_for_package` reaches the same
+    // checks a brand-new standalone spec does.
+    fn fixture() -> TestDirs {
+        let dirs = TestDirs::new();
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        dirs
+    }
+
+    // Both entry points' rendered failure for `target`, standalone first.
+    async fn both_failures(dirs: &TestDirs, target: &str) -> (String, String) {
+        let standalone = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("fresh", target)
+                .await,
+        )
+        .await;
+        let for_package = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("bat", target)
+                .await,
+        )
+        .await;
+        (failure_message(&standalone), failure_message(&for_package))
+    }
+
+    #[tokio::test]
+    async fn a_relative_target_is_refused_the_same_way() {
+        let dirs = fixture();
+
+        let (standalone, for_package) = both_failures(&dirs, "relative/config.toml").await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("not absolute"),
+            "not the target rule's refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_user_target_is_refused_the_same_way() {
+        let dirs = fixture();
+
+        let (standalone, for_package) = both_failures(&dirs, "~alice/.gemrc").await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("~user"),
+            "not the named-user refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_target_is_refused_the_same_way() {
+        let dirs = fixture();
+        let absent = dirs.target_dir.join("not-there.toml");
+
+        let (standalone, for_package) = both_failures(&dirs, absent.to_str().unwrap()).await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("does not exist"),
+            "not the missing-target refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_target_is_refused_the_same_way() {
+        let dirs = fixture();
+        let destination = dirs.target_dir.join("real.toml");
+        std::fs::write(&destination, "key = 1").unwrap();
+        let link = dirs.target_dir.join("link.toml");
+        std::os::unix::fs::symlink(&destination, &link).unwrap();
+
+        let (standalone, for_package) = both_failures(&dirs, link.to_str().unwrap()).await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("symlink"),
+            "not the symlink refusal: {standalone}"
+        );
+    }
+
+    // The collision remedy has to name something both entry points can do. A spec name
+    // is a lever only `dotfiles track` has -- `package track-dotfile` takes the name
+    // from its package argument and the basename from the target -- so advice to choose
+    // a different name describes nothing at that call site.
+    #[tokio::test]
+    async fn a_source_collision_offers_a_remedy_both_entry_points_have() {
+        let dirs = TestDirs::new();
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        let target = dirs.target_dir.join("config");
+        std::fs::write(&target, "--theme=ansi").unwrap();
+        // Occupy exactly where each entry point composes its copy.
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat").join("config"), "squatter").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("fresh")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("fresh").join("config"), "squatter").unwrap();
+
+        for events in [
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_for_package("bat", target.to_str().unwrap())
+                    .await,
+            )
+            .await,
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("fresh", target.to_str().unwrap())
+                    .await,
+            )
+            .await,
+        ] {
+            let failure = failure_message(&events);
+            assert!(
+                failure.contains("Source file already exists"),
+                "not the collision refusal: {failure}"
+            );
+            assert!(
+                failure.contains("Remove it first, or track a different file."),
+                "the remedy is not one both entry points have: {failure}"
+            );
+        }
+    }
+
+    // The control: with a target both entry points accept, both succeed. Without
+    // it every test above could pass on an implementation that refused
+    // everything.
+    #[tokio::test]
+    async fn a_plain_target_is_accepted_by_both() {
+        let dirs = fixture();
+        let target = dirs.target_dir.join("plain.toml");
+        std::fs::write(&target, "key = 1").unwrap();
+        let target = target.to_str().unwrap();
+
+        for events in [
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("fresh", target)
+                    .await,
+            )
+            .await,
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_for_package("bat", target)
+                    .await,
+            )
+            .await,
+        ] {
+            assert!(
+                matches!(
+                    get_operation_result(&events),
+                    Some(OperationResult::Success(_))
+                ),
+                "a plain target must track, got: {:?}",
+                get_operation_result(&events)
+            );
+        }
+    }
+}
+
+// A track copies the user's file into the repository and then saves the spec. A
+// save that is refused or fails must leave no copy behind: a retry after fixing
+// the cause has to not trip over "Source file already exists" for a file the user
+// never knowingly created (selfie-dt22).
+mod a_failed_spec_save_strands_nothing {
+    use super::*;
+
+    // A package whose existing dotfile entry carries a key selfie does not
+    // model, which `save_package` refuses to rewrite because the rewrite would
+    // drop the key. The cheapest reachable save failure, and the one the bug was
+    // measured on.
+    fn package_that_cannot_be_rewritten(dirs: &TestDirs) -> PathBuf {
+        write_package_yaml(
+            &dirs.package_dir,
+            "creds",
+            "name: creds\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"creds/token\"\n    target: \"~/.token\"\n    var: oops\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_refused_package_save_leaves_no_copied_file() {
+        let dirs = TestDirs::new();
+        let spec = package_that_cannot_be_rewritten(&dirs);
+        let before = std::fs::read(&spec).unwrap();
+        let target = dirs.target_dir.join("newfile");
+        std::fs::write(&target, "kept").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("creds", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("var"),
+            "not the unknown-key refusal: {failure}"
+        );
+
+        let copy = dirs.package_dir.join("creds").join("newfile");
+        assert!(
+            !copy.exists(),
+            "the copy was stranded at {}",
+            copy.display()
+        );
+
+        // The controls. Without them this passes on a run that never copied
+        // anything, or that deleted the user's file instead of the copy.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "kept",
+            "the target file was touched"
+        );
+        assert_eq!(
+            std::fs::read(&spec).unwrap(),
+            before,
+            "the refused save still rewrote the spec"
+        );
+    }
+
+    // The same invariant from the other entry point, where the save fails for a
+    // filesystem reason rather than a refusal. The copy's own directory is
+    // pre-created and writable while the directory holding the spec is not, so
+    // the copy lands and only the spec save fails.
+    //
+    // `TestDirs` configures `state_directory`, which matters here: the deploy
+    // state is loaded before either write and would otherwise be looked for
+    // under the home directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_standalone_save_leaves_no_copied_file() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("gemrc")).unwrap();
+
+        let Some(_restore) = made_unwritable(&dirs.dotfiles_dir) else {
+            eprintln!("SKIP a_failed_standalone_save_leaves_no_copied_file: mode bits ignored");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        let copy = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        assert!(
+            !copy.exists(),
+            "the copy was stranded at {}: {failure}",
+            copy.display()
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "the spec was written after all, so this tested nothing: {failure}"
+        );
+        // Without these the assertions above pass on a run that never copied
+        // anything, or that failed somewhere before the spec save: an absent file
+        // proves nothing on its own. The second is also the only integration-level
+        // check that the failure names the spec, which the message leaves to the
+        // error rather than stating itself.
+        assert!(
+            failure.contains("was removed"),
+            "the copy was never written, so its absence proves nothing: {failure}"
+        );
+        assert!(
+            failure.contains("gemrc.yml"),
+            "the failure does not name the spec that could not be saved: {failure}"
+        );
+    }
+}
+
+// The deploy state is recorded last, so its failure is the one that leaves both
+// writes in place. Neither is rolled back -- the copy and the entry are correct
+// and only the record is missing -- so the failure has to name what exists and
+// what recovers it.
+//
+// `TestDirs` configures `state_directory`, which is what makes the chmod below
+// bind: `deploy_state_path` probes only a configured directory, and an unset one
+// would be looked for under the home directory instead.
+#[cfg(unix)]
+mod an_unrecorded_track_names_what_it_wrote {
+    use super::*;
+
+    // A state directory that lists but cannot be written to. The load succeeds
+    // because an absent state file is the ordinary first run, and the save at the
+    // end is the only thing that fails.
+    fn unwritable_state_dir(dirs: &TestDirs) -> Option<RestoreMode> {
+        made_unwritable(&dirs.state_dir)
+    }
+
+    #[tokio::test]
+    async fn the_failure_names_the_copy_and_the_spec() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+
+        let Some(_restore) = unwritable_state_dir(&dirs) else {
+            eprintln!("SKIP the_failure_names_the_copy_and_the_spec: mode bits ignored");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        let copy = dirs.dotfiles_dir.join("starship").join("starship.toml");
+        let spec = dirs.dotfiles_dir.join("starship.yml");
+
+        // The controls first: both writes must actually have landed, or this is
+        // asserting about a run that failed somewhere earlier.
+        assert!(copy.exists(), "the copy was not written: {failure}");
+        assert!(spec.exists(), "the spec was not written: {failure}");
+        assert!(
+            !dirs.state_dir.join("deploy-state.yml").exists(),
+            "the state was written after all, so this tested nothing"
+        );
+
+        assert!(
+            failure.contains(copy.to_str().unwrap()),
+            "the copy is not named: {failure}"
+        );
+        assert!(
+            failure.contains(spec.to_str().unwrap()),
+            "the spec is not named: {failure}"
+        );
+    }
+
+    // What the user is told to do, and what they must not do. Re-running track
+    // hits the source-collision guard, and `selfie apply` records an untracked
+    // entry whose target already matches through its in-sync skip arm.
+    #[tokio::test]
+    async fn the_failure_sends_the_user_to_apply_rather_than_back_to_track() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+
+        let Some(_restore) = unwritable_state_dir(&dirs) else {
+            eprintln!("SKIP the_failure_sends_the_user_to_apply_rather_than_back_to_track");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("selfie apply"),
+            "the recovery is not named: {failure}"
+        );
+        // Asserted as absences, both of them remedies that do not work.
+        // "Drift will report it as not tracked" is half true -- with matching
+        // content drift says nothing.
+        assert!(
+            !failure.contains("not tracked"),
+            "the failure offers a remedy drift does not provide: {failure}"
+        );
+        // And a claim that tracking again is refused holds at neither entry
+        // point: `track_for_package` answers "already tracking" and exits 0
+        // having recorded nothing, and a standalone re-run is stopped by the
+        // spec-collision guard rather than by the copy.
+        assert!(
+            !failure.contains("Re-running track"),
+            "the failure claims a refusal that does not happen: {failure}"
+        );
+    }
+}
+
+// `source_path` means the file in the dotfiles repository in every arm of
+// `DotfileTracked`, the already-tracked answer included: one arm of one event
+// carrying a different kind of path than the rest is what this pins (selfie-fbr1).
+//
+// No adapter renders the field today -- the event's `Display` names only the spec
+// and the target, and the MCP server serializes that `Display` -- so this is
+// library correctness rather than a visible defect. The first adapter to render
+// it is what the consistency is for.
+#[tokio::test]
+async fn an_already_tracked_entry_reports_the_copy_the_spec_holds() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+    let target = home.join(".config").join("bat").join("config");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "--theme=ansi").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat/config", "~/.config/bat/config")],
+    );
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("bat", target.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            source_path,
+            was_already_tracked,
+            ..
+        }) => {
+            assert!(was_already_tracked, "the entry was already in the spec");
+            assert_eq!(
+                source_path,
+                &dirs.package_dir.join("bat").join("config"),
+                "the copy in the repository, derived from the entry's own source"
+            );
+            // The two paths differ, which is what makes the assertion above
+            // capable of failing.
+            assert_ne!(
+                source_path, &target,
+                "reported the deploy target as the source"
+            );
+        }
+        other => panic!("expected an already-tracked success, got: {other:?}"),
+    }
+}
+
+// A target selfie cannot write to, already recorded in the spec, was the one
+// track answer nobody heard about. Track reported it as tracked and said nothing;
+// drift said nothing either, because with matching content the drift type is
+// `None` and there is no line to carry a reason. So a user who ran both commands
+// was told nothing by either (selfie-ykfc).
+//
+// Nothing is written on this path, so it is reported rather than refused:
+// refusing an idempotent no-op helps nobody, and the entry genuinely is tracked.
+#[cfg(unix)]
+mod an_already_tracked_target_selfie_cannot_write {
+    use super::*;
+    use std::path::Path;
+
+    // A package tracking `~/.config/bat/config`, with the target in whatever
+    // shape the caller plants, and the repository copy holding the same content.
+    fn tracked(dirs: &TestDirs, home: &Path) -> PathBuf {
+        let target = home.join(".config").join("bat").join("config");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat").join("config"), "--theme=ansi").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat/config", "~/.config/bat/config")],
+        );
+        target
+    }
+
+    async fn track_again(dirs: &TestDirs, home: &Path, target: &Path) -> Vec<PackageEvent> {
+        collect_events(
+            dirs.service_with_home(home)
+                .track_for_package("bat", target.to_str().unwrap())
+                .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_target_is_reported_without_being_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = tracked(&dirs, &home);
+
+        let destination = dirs.state_dir.join("real-config");
+        std::fs::write(&destination, "--theme=ansi").unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let events = track_again(&dirs, &home, &target).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(OperationSuccess::DotfileTracked {
+                    was_already_tracked: true,
+                    ..
+                }))
+            ),
+            "an idempotent track must not be refused, got: {:?}",
+            get_operation_result(&events)
+        );
+
+        let warnings = warning_messages(&events);
+        assert_eq!(warnings.len(), 1, "expected one warning, got: {warnings:?}");
+        assert!(
+            warnings[0].contains("symlink"),
+            "the warning does not say what is wrong: {}",
+            warnings[0]
+        );
+        // Not the refusal's remedy: the entry already exists, so "track the path
+        // it points to" describes something the user cannot now do.
+        assert!(
+            !warnings[0].contains("track the path it points to"),
+            "the warning offers the refusal's remedy: {}",
+            warnings[0]
+        );
+    }
+
+    // The control. Without it the warning could be unconditional and the test
+    // above would still pass.
+    #[tokio::test]
+    async fn a_plain_target_is_reported_in_silence() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = tracked(&dirs, &home);
+        std::fs::write(&target, "--theme=ansi").unwrap();
+
+        let events = track_again(&dirs, &home, &target).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "the idempotent track must succeed"
+        );
+        assert!(
+            warning_messages(&events).is_empty(),
+            "an ordinary already-tracked file warned: {:?}",
+            warning_messages(&events)
+        );
     }
 }

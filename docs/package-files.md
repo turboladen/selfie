@@ -1228,6 +1228,22 @@ selfie package track-dotfile starship ~/.config/starship.toml
 The track commands copy the file into the repo, create or update the YAML spec with the
 source→target mapping, and record initial deploy state for drift detection.
 
+Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
+takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
+cause does not trip over a file you never knowingly created. If that removal fails too, selfie says
+so and names the file to delete. The causes are ordinary ones, a permission problem or a spec
+carrying a key selfie will not rewrite. If the copy itself is refused, no spec is written, so no
+entry ever names a file that is not there.
+
+The deploy state is recorded last, and a failure there is the one case that leaves work in place:
+the copy and the spec entry are both correct and only the record is missing. Selfie says so and
+names both files. Run `selfie apply` once the state file can be written: the target already matches
+the copy, so it records the deployment without asking. Running the track command again does not
+finish the job. `selfie package track-dotfile` and `selfie track` report the entry as already
+tracked and record nothing; `selfie dotfiles track` refuses, because the spec it would create is now
+there. The exception at both is a target selfie could never deploy to — a relative path, or one
+naming another user's home — which is refused before either answer is reached.
+
 The recorded `target` is `~/…` whenever the file lives under your home directory, whichever form you
 passed on the command line — so a spec tracked on one machine works on the next. A file elsewhere is
 recorded absolute. The path is also normalized, so `~/.config/../.gemrc` is recorded as `~/.gemrc`.
