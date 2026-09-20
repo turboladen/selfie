@@ -55,6 +55,12 @@ pub(super) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
     Locate(#[source] StatePathError),
+    /// Something that is not a regular file sits at the path.
+    #[error(
+        "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
+        .path.display()
+    )]
+    Irregular { path: PathBuf, kind: &'static str },
     /// The file exists and could not be read.
     #[error(
         "Cannot read deploy state '{}': {source}. Fix the file's permissions, or move it aside",
@@ -130,6 +136,21 @@ pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieCo
             path,
             state: DeployState::empty(),
         });
+    }
+    // Between the existence check and the read: `read_file` opens the path, and
+    // opening a fifo blocks until a writer arrives, which hangs every dotfile
+    // command before it does any work.
+    match filesystem.irregular_target_refusal(&path) {
+        Some(FileSystemError::IrregularTarget { path, kind }) => {
+            return StateLoad::Unusable(StateLoadFailure::Irregular { path, kind });
+        }
+        Some(source) => {
+            return StateLoad::Unusable(StateLoadFailure::Read {
+                path: path.path().to_path_buf(),
+                source,
+            });
+        }
+        None => {}
     }
     let content = match filesystem.read_file(path.path()) {
         Ok(content) => content,
@@ -228,6 +249,7 @@ mod tests {
     fn filesystem_holding(content: &str) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
+        fs.mock_no_irregular_files();
         fs.mock_read_file(PathBuf::from(STATE_FILE), content);
         fs
     }
@@ -365,6 +387,7 @@ mod tests {
     fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
         let mut unreadable = MockFileSystem::default();
         unreadable.mock_path_exists(PathBuf::from(STATE_FILE), true);
+        unreadable.mock_no_irregular_files();
         unreadable.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
                 std::io::Error::other("permission denied"),
@@ -387,6 +410,32 @@ mod tests {
         assert_ne!(
             unreadable_message, corrupt_message,
             "two different conditions reported identically"
+        );
+    }
+
+    // A fifo at the state path is refused before it is opened. The mock has no
+    // `read_file` expectation, so reaching the read is a panic rather than a
+    // hang, and the failure names what was found rather than a read error.
+    #[test]
+    fn a_fifo_at_the_state_path_is_refused_before_it_is_read() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
+        fs.expect_irregular_target_refusal().returning(|path| {
+            Some(FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "named pipe (fifo)",
+            })
+        });
+
+        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            message.contains("named pipe (fifo)") && message.contains(STATE_FILE),
+            "the refusal must say what sits at the path, and where: {message}"
+        );
+        assert!(
+            !message.contains("Cannot read deploy state '"),
+            "a fifo was reported as a failed read: {message}"
         );
     }
 

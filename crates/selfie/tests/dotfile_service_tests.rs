@@ -6395,6 +6395,55 @@ mod deploy_state_diagnostics {
         );
     }
 
+    // A fifo at the state path is refused rather than opened. Opening a fifo to
+    // read blocks until a writer arrives, so without the guard every dotfile
+    // command hangs before doing any work; the deadline turns that hang into a
+    // failure. Drift is exercised because it only reads, so the refusal cannot
+    // be the save's.
+    //
+    // The run lives on a detached thread with its own runtime, and the test
+    // waits on a channel with a deadline. `tokio::time::timeout` cannot do this:
+    // the open blocks a runtime thread, and dropping the runtime joins that
+    // thread, so a missing guard would hang the suite rather than fail the test.
+    #[test]
+    fn a_fifo_at_the_state_path_does_not_hang_drift() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        let status = std::process::Command::new("mkfifo")
+            .arg(state_file(&dirs))
+            .status()
+            .expect("mkfifo runs");
+        assert!(status.success(), "mkfifo failed to create the fixture");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the drift check");
+            let events = runtime
+                .block_on(async { collect_events(dirs.service().check_drift().await).await });
+            // Nothing listens once the deadline has passed; a failed send is
+            // not this thread's problem.
+            let _ = tx.send(events);
+        });
+        let events = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("drift hung on the fifo at the state path");
+
+        let named = state_reports(&events);
+        assert_eq!(
+            named.len(),
+            1,
+            "expected one report: {:?}",
+            warnings(&events)
+        );
+        assert!(
+            named[0].contains("named pipe (fifo)"),
+            "the report must say what sits at the path: {named:?}"
+        );
+    }
+
     // A file that exists and holds nothing is not a first run. Reading it as one
     // would make a state lost to an interrupted write look like a fresh machine,
     // and the next apply would re-prompt for every dotfile with no explanation.
