@@ -64,6 +64,22 @@ covers the inputs it was given and nothing else, so the fixture list is the clai
 with no commit. Labels drive `bd ready`: every open bead carries `mvp` or `post-mvp`, and one phase
 or roadmap label. Bead writes are serialized through one agent; reads are free.
 
+## Pick each agent's model by what a wrong answer costs
+
+The lead's own model is the ceiling, not the default. Choose per spawn, by how much judgment the
+task needs and how expensive a mistake is:
+
+- **Sonnet** for search, inventory, counting, and gate watching: an Explore agent surveying files, a
+  script that tallies beads, a watcher that reports when a log ends.
+- **Sonnet** for a docs-only or single-file mechanical unit, and for a reviewer of one.
+- **Opus** for an author of a substantive unit (several commits, tests with mutations, a binary
+  diff) and for every plan reviewer and final code reviewer of such a unit.
+- **The lead's model** only for a final reviewer of a data-loss or secrets unit, where a missed
+  defect destroys a user's file or leaks a credential, and for the lead itself.
+
+State the choice in the spawn prompt's first line so the transcript shows it. When unsure between
+two tiers, take the cheaper one for search and the dearer one for review.
+
 ## What the lead reports at the end of a session
 
 Beads closed against beads filed this session, with a target of at most 1.5 filed per closed. The
