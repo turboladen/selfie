@@ -247,17 +247,17 @@ fn without_a_flag_the_config_files_dotfiles_directory_decides() {
 }
 
 // The control the four state tests below share. Each of them is about *where*
-// the file landed, and `apply` writes one whether or not it deployed anything —
-// a run with no entries leaves `deployed: {}` behind. Asserting existence alone
-// therefore stays green on a fixture that stopped loading packages at all: a
-// renamed environment, an unparsable spec, a moved source. Naming the entry is
-// what makes the four prove precedence rather than the mere reachability of a
-// write.
-//
-// The entry is named by its key, the target expanded against `home`. The
-// source path also appears in the file, as a value, so matching on it would
-// pass a state keyed the wrong way round.
+// the file landed, so it names the fixture's entry rather than asserting that a
+// file exists: any recorded entry writes the file, so existence alone stays
+// green when the sentinel's package stopped loading and another entry deployed.
+// The entry is named by its key, the target expanded against `home`. The source
+// path also appears in the file, as a value, so matching on it would pass a
+// state keyed the wrong way round. `home` is canonicalized because the key is:
+// `~` expands through a canonicalizing lookup, and on macOS a sandbox minted as
+// `/var/...` is written as `/private/var/...`. Without that, the substring
+// match passes on the suffix alone.
 fn assert_state_records_the_fixture(state_file: &Path, home: &Path) {
+    let home = home.canonicalize().unwrap();
     let state = fs::read_to_string(state_file).unwrap_or_else(|e| {
         panic!(
             "deploy state should be readable at {}: {e}",
@@ -345,6 +345,59 @@ fn the_state_directory_flag_beats_the_config_file() {
     assert!(
         !temp.path().join("config-state/deploy-state.yml").exists(),
         "the flag should have kept deploy state out of the file's directory"
+    );
+}
+
+// A configured state directory must exist, as the package directory must. A
+// flag naming one that does not is refused with the setting and the path
+// named, and nothing is created for it.
+#[test]
+fn a_state_directory_flag_naming_a_missing_directory_is_refused() {
+    let temp = fixture();
+    let missing = temp.path().join("no-such-state");
+
+    sandboxed_command(&temp)
+        .arg("--state-directory")
+        .arg(&missing)
+        .args(["apply", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("state_directory"))
+        .stderr(predicate::str::contains(missing.to_str().unwrap()))
+        .stderr(predicate::str::contains("does not exist"));
+
+    assert!(
+        !missing.exists(),
+        "the missing state directory was created rather than required"
+    );
+    assert!(
+        !temp.path().join("sentinel-target").exists(),
+        "a dotfile was deployed by a run that could not record it"
+    );
+}
+
+// A `~` in a flag value is not expanded, so `--state-directory='~/state'` is a
+// relative path. It is refused as one, and no directory named `~` appears in
+// the working directory.
+#[test]
+fn a_literal_tilde_state_directory_is_refused_and_creates_nothing() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["--state-directory=~/state", "apply", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("~/state"))
+        .stderr(predicate::str::contains("not an absolute path"));
+
+    assert!(
+        !temp.path().join("~").exists(),
+        "a directory literally named `~` was created in the working directory"
+    );
+    assert!(
+        !temp.path().join("sentinel-target").exists(),
+        "a dotfile was deployed by a run that could not record it"
     );
 }
 

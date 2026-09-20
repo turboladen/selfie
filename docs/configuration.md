@@ -81,7 +81,8 @@ package_directory: ~/.config/selfie/packages
 # Directory for standalone dotfile definitions (default: sibling of package_directory)
 dotfiles_directory: ~/.config/selfie/dotfiles
 
-# Directory for deploy state tracking (default: ~/.local/state/selfie)
+# Directory for deploy state tracking (default: ~/.local/state/selfie).
+# A directory named here must already exist; only the default is created for you.
 state_directory: ~/.local/state/selfie
 
 # Command timeout in seconds (default: 60)
@@ -196,6 +197,11 @@ never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` h
 ```yaml
 state_directory: ~/.local/state/selfie
 ```
+
+A directory you name must already exist, be a directory, and be an absolute path, as
+`package_directory` must: with the line above in the file, `selfie apply` refuses until
+`~/.local/state/selfie` is created. Leave the setting out and selfie creates that same default on
+its first write. `selfie config validate` reports the directory in effect either way.
 
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
@@ -356,14 +362,14 @@ path settings in the configuration file; a flag value is used exactly as typed. 
 bare `~/packages`, but neither bash nor zsh expands `--package-directory=~/packages`, so that form
 reaches selfie as the literal string and fails with `Package directory not found: ~/packages` even
 though the identical value works in the file. Use the separated form (`-p ~/packages`) or an
-absolute path. Flag values also skip the absolute-path check `selfie config validate` applies to the
-file.
+absolute path. `selfie config validate` reads only the file, so it checks no flag value; a relative
+`--state-directory` is refused when the command runs instead.
 
-Only `--package-directory` fails loudly, and the other two fail differently from each other:
+`--package-directory` and `--state-directory` fail loudly; `--dotfiles-directory` does not:
 
-- `--state-directory='~/state'` **creates a directory literally named `~`** in the current working
-  directory and reports success, so `selfie --state-directory='~/state' apply -y` exits 0 having
-  written its deploy state somewhere nobody will look for it.
+- `--state-directory='~/state'` is refused as not absolute, and a directory that is absolute but
+  does not exist is refused by name, so `selfie --state-directory='~/state' apply -y` exits 1 and
+  creates nothing.
 - `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
   dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
   `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,

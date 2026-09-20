@@ -59,6 +59,23 @@ pub(super) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
     Locate(#[source] StatePathError),
+    /// The configured `state_directory` does not exist.
+    #[error(
+        "Cannot use the deploy state: state_directory '{}' does not exist. Create it, or change the setting",
+        .0.display()
+    )]
+    Missing(PathBuf),
+    /// The configured `state_directory` exists and is not a directory selfie
+    /// can read.
+    #[error(
+        "Cannot use the deploy state: state_directory '{}' cannot be read as a directory: {source}. Point the setting at a directory selfie can read",
+        .path.display()
+    )]
+    Unlistable {
+        path: PathBuf,
+        #[source]
+        source: FileSystemError,
+    },
     /// Something that is not a regular file sits at the path.
     #[error(
         "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
@@ -117,12 +134,34 @@ fn deploy_state_path<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
 ) -> Result<TargetPath, StateLoadFailure> {
-    state_file_path(
+    let path = state_file_path(
         filesystem,
         config.state_directory().map(PathBuf::as_path),
         DEPLOY_STATE_FILENAME,
     )
-    .map_err(StateLoadFailure::Locate)
+    .map_err(StateLoadFailure::Locate)?;
+    // A directory the user configured must already exist, as `package_directory`
+    // must. Only the default under the home directory is selfie's to create,
+    // which `write_file_private` does on the first write. Checked after the
+    // path rule above, so a relative value is reported as relative rather than
+    // as absent from the working directory.
+    //
+    // Listed as well as stat'ed: `path_exists` answers true for a regular file,
+    // and the state path beneath one then reads as absent, so the load would be
+    // usable and the first save would be the failure. A directory is the one
+    // thing `list_directory` succeeds on.
+    if let Some(configured) = config.state_directory() {
+        if !filesystem.path_exists(configured) {
+            return Err(StateLoadFailure::Missing(configured.clone()));
+        }
+        if let Err(source) = filesystem.list_directory(configured) {
+            return Err(StateLoadFailure::Unlistable {
+                path: configured.clone(),
+                source,
+            });
+        }
+    }
+    Ok(path)
 }
 
 /// Load the deploy state.
@@ -249,9 +288,63 @@ mod tests {
             .build()
     }
 
+    // A filesystem on which the configured state directory exists and lists.
+    fn under_a_state_directory() -> MockFileSystem {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_DIR), true);
+        fs.mock_list_directory(PathBuf::from(STATE_DIR), &[]);
+        fs
+    }
+
+    // A configured directory that does not exist is refused before the file is
+    // looked for, with the setting named: nothing else on the mock is expected,
+    // so looking further would panic.
+    #[test]
+    fn a_missing_configured_state_directory_is_refused_by_name() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_DIR), false);
+
+        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            message.contains("state_directory")
+                && message.contains(STATE_DIR)
+                && message.contains("does not exist"),
+            "the refusal must name the setting, the directory and the condition: {message}"
+        );
+    }
+
+    // A configured path that exists but is not a directory is refused before
+    // the file is looked for, and apart from a missing one: "create it" is the
+    // wrong remedy for a path that is already taken. The state file's own
+    // existence is not mocked, so reaching that check would panic.
+    #[test]
+    fn a_configured_state_directory_that_is_not_a_directory_is_refused() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_path_exists(PathBuf::from(STATE_DIR), true);
+        fs.expect_list_directory().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::other("Not a directory"),
+            )))
+        });
+
+        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            message.contains("state_directory")
+                && message.contains(STATE_DIR)
+                && message.contains("cannot be read as a directory"),
+            "the refusal must name the setting, the path and the condition: {message}"
+        );
+        assert!(
+            !message.contains("does not exist"),
+            "a path that exists was reported as missing: {message}"
+        );
+    }
+
     // A state file that exists and reads back as `content`.
     fn filesystem_holding(content: &str) -> MockFileSystem {
-        let mut fs = MockFileSystem::default();
+        let mut fs = under_a_state_directory();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
         fs.mock_no_irregular_files();
         fs.mock_read_file(PathBuf::from(STATE_FILE), content);
@@ -327,7 +420,7 @@ mod tests {
     // of never having deployed anything.
     #[test]
     fn an_absent_state_file_is_usable_and_empty() {
-        let mut fs = MockFileSystem::default();
+        let mut fs = under_a_state_directory();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
 
         let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
@@ -389,7 +482,7 @@ mod tests {
     // because the property is that the two *differ*, which neither alone can see.
     #[test]
     fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
-        let mut unreadable = MockFileSystem::default();
+        let mut unreadable = under_a_state_directory();
         unreadable.mock_path_exists(PathBuf::from(STATE_FILE), true);
         unreadable.mock_no_irregular_files();
         unreadable.expect_read_file().returning(|_| {
@@ -422,7 +515,7 @@ mod tests {
     // hang, and the failure names what was found rather than a read error.
     #[test]
     fn a_fifo_at_the_state_path_is_refused_before_it_is_read() {
-        let mut fs = MockFileSystem::default();
+        let mut fs = under_a_state_directory();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
@@ -742,7 +835,7 @@ mod tests {
     // one arm that can fire by handing the writer a failing filesystem.
     #[test]
     fn a_failed_write_names_the_file_in_its_own_words() {
-        let mut fs = MockFileSystem::default();
+        let mut fs = under_a_state_directory();
         fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
         fs.expect_write_file_private().returning(|_, _| {
             Err(FileSystemError::IoError(std::sync::Arc::new(

@@ -6632,6 +6632,42 @@ mod deploy_state_diagnostics {
         );
     }
 
+    // A configured state directory that does not exist is refused by apply and
+    // warned about by drift, naming the setting. The default under the home
+    // directory is created on first write; a directory the user named is not.
+    #[tokio::test]
+    async fn a_missing_configured_state_directory_refuses_apply_and_warns_drift() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let message = failure_message(&events);
+        assert!(
+            message.contains("state_directory")
+                && message.contains(dirs.state_dir.to_str().unwrap())
+                && message.contains("does not exist"),
+            "apply must refuse and name the missing directory: {message}"
+        );
+        assert!(
+            !dirs.target_dir.join("config.toml").exists(),
+            "a dotfile was deployed by a run that could not record it"
+        );
+        assert!(
+            !dirs.state_dir.exists(),
+            "the configured state directory was created rather than required"
+        );
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("state_directory")
+                && w.contains("does not exist")
+                && w.contains("continuing as though nothing had been deployed")),
+            "drift must warn and carry on: {warnings:?}"
+        );
+    }
+
     // A fifo at the state path is refused rather than opened. Opening a fifo to
     // read blocks until a writer arrives, so without the guard every dotfile
     // command hangs before doing any work; the deadline turns that hang into a
