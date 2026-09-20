@@ -13,6 +13,7 @@
 //! - [`service`] — Concrete implementation: apply, conflict resolution, drift checking
 //! - `backup` — Copies of what a target held before an apply overwrote it
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
+//! - `deploy_entry` — Writing one entry to its target and recording what was written
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
 //! - [`diff`] — Unified diff generation for conflict display
 //! - `directory` — What selfie says about the standalone dotfiles directory
@@ -25,6 +26,7 @@
 
 mod backup;
 pub mod deploy;
+mod deploy_entry;
 pub mod diff;
 pub(crate) mod directory;
 pub mod port;
