@@ -5,6 +5,7 @@
 //! the file system (for reading/writing dotfiles), and the application config
 //! to perform dotfile deployment operations.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::{
     commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
+        backup,
         deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
@@ -1159,7 +1161,11 @@ where
         }
 
         self.sender
-            .send_dotfile_deployed(&target.origin, target.path.display())
+            // Never a copy. ADR-0003 keeps nothing derived from a credential on
+            // disk, and the former content of a secret target is the credential
+            // itself -- worse to persist than the checksum that ADR already
+            // refuses. Owner-only permissions do not change that.
+            .send_dotfile_deployed(&target.origin, target.path.display(), None)
             .await;
 
         // No deploy state is recorded: a stored checksum of a credential is a
@@ -1335,15 +1341,24 @@ struct DeployUnit<'a> {
     source_checksum: &'a str,
     /// The entry's `source` as the spec names it, recorded beside the checksum.
     source: &'a str,
+    /// Where copies of overwritten targets go, or `None` if there is nowhere to
+    /// put one. `Some` does not mean a copy will be made.
+    // A dry run has a root here and writes nothing: `perform_deploy` returns on
+    // `dry_run` before it reaches one.
+    backups: Option<&'a Path>,
 }
 
 /// Deploy a single config file to its target path and emit events. Records
 /// nothing: the caller records and saves once the write is known to have landed.
+///
+/// `backed_up` carries what this run has already copied aside, keyed by target,
+/// so a target two entries deploy to is copied once.
 async fn perform_deploy<F: FileSystem>(
     filesystem: &F,
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     dry_run: bool,
+    backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> Result<(), ()> {
     if dry_run {
         sender
@@ -1359,6 +1374,37 @@ async fn perform_deploy<F: FileSystem>(
     sender
         .send_dotfile_deploying(unit.source_path.display(), unit.target_path.display())
         .await;
+
+    // `kept` is `Some` only for the entry that actually made the copy, so only it
+    // prunes, and only once the write below has landed.
+    let (backup, kept) = match backed_up.get(unit.target_key) {
+        // This run has already settled this target. Report the copy it made --
+        // which holds what the target held before the run touched it -- and make
+        // no second one. `None` means the run found nothing there to keep.
+        //
+        // Without this, two entries naming one target destroy the very thing the
+        // copy exists for: the first copies the user's file, the second finds the
+        // first entry's output, copies that, and the prune deletes the user's.
+        // Two entries can name one target -- an apply covers every package, and
+        // the only same-target check anywhere looks inside a single package.
+        Some(existing) => (existing.clone(), None),
+        None => match keep_current(filesystem, unit) {
+            Ok(kept) => {
+                let path = kept.as_ref().map(|kept| kept.path().to_path_buf());
+                // Recorded before the write, not after: a copy that was made and a
+                // target write that then failed still holds what the target held,
+                // so a later entry for this target must report it.
+                backed_up.insert(unit.target_key.to_string(), path.clone());
+                (path, kept)
+            }
+            Err(warning) => {
+                sender.send_warning(warning).await;
+                // Left out of `backed_up`, so a refused entry does not mark the
+                // target as settled for a later one.
+                return Err(());
+            }
+        },
+    };
 
     // Refuses a symlinked target rather than writing through it: the content would
     // otherwise land wherever the link points, which may be a path chosen by
@@ -1391,10 +1437,80 @@ async fn perform_deploy<F: FileSystem>(
         return Err(());
     }
 
+    // Only now that the overwrite has landed is an earlier copy redundant. Before
+    // this point it may be the only record of content the target no longer holds,
+    // while this run's copy holds what is still at the target -- so pruning on the
+    // way to a write that then fails trades the irreplaceable for a duplicate.
+    // Both returns above therefore leave two copies, and the next successful
+    // overwrite reduces them to one. Do not delete either on the way out: a delete
+    // path fails too, and losing a copy is worse than keeping a redundant one.
+    if let Some(kept) = kept
+        && let Some(stale) = kept.prune_earlier(filesystem)
+    {
+        sender.send_warning(stale).await;
+    }
+
     sender
-        .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
+        .send_dotfile_deployed(
+            unit.source_path.display(),
+            unit.target_path.display(),
+            backup.as_deref(),
+        )
         .await;
     Ok(())
+}
+
+/// Copy the target's content aside, if this overwrite would destroy any.
+///
+/// `Ok(None)` when there is nothing to keep: nowhere to put a copy, no target,
+/// or the target already holds what is about to be written.
+///
+/// # Errors
+///
+/// The warning to report, when the target cannot be read or the copy cannot be
+/// written. Nothing has been written to the target in either case.
+fn keep_current<F: FileSystem>(
+    filesystem: &F,
+    unit: &DeployUnit<'_>,
+) -> Result<Option<backup::Kept>, String> {
+    let Some(root) = unit.backups else {
+        return Ok(None);
+    };
+
+    // Read again here rather than reuse the bytes the deploy decision was made
+    // from. An interactive resolver sits at a prompt for as long as the user
+    // takes, and the target can change while it waits -- so the earlier read is
+    // what the user was shown, and this one is what the write is about to
+    // destroy. Copying the first would keep bytes that are still reachable and
+    // lose the ones that are not.
+    let current = match read_target_state(filesystem, unit.target_path) {
+        // Gone since the decision. Nothing to keep, and the write will recreate it.
+        TargetState::Absent => return Ok(None),
+        TargetState::Readable(bytes) => bytes,
+        // Readable when the decision was made and not now. Refusing leaves the
+        // target alone, which is the same answer apply gives a target it could
+        // not read in the first place, in the same words.
+        TargetState::Unreadable(e) => {
+            return Err(unreadable_target_refusal(
+                filesystem,
+                unit.source,
+                unit.target_path,
+                &e,
+            ));
+        }
+    };
+
+    // Decided from the bytes rather than from the deploy decision. A refresh whose
+    // repository file changed is `Deploy` and overwrites differing content with no
+    // prompt at all, so gating on an accepted conflict would leave the commonest
+    // overwrite uncovered.
+    if current == unit.source_content.as_bytes() {
+        return Ok(None);
+    }
+
+    backup::keep(filesystem, root, unit.target_key, &current)
+        .map(Some)
+        .map_err(|e| backup::refusal(unit.source, unit.target_path.path(), &e))
 }
 
 /// What an apply just recorded about a target.
@@ -1510,6 +1626,18 @@ where
     // What a dry run over an unusable state file reads drift against. Only a dry
     // run leaves `loaded` as `None`, and a dry run records nothing.
     let empty = DeployState::empty();
+
+    // Owned rather than borrowed from `loaded`, which is mutably borrowed inside
+    // the loop. Taken from the loaded state rather than resolved again, so the
+    // copies land beside the state file this run is updating.
+    //
+    // `None` only where the state could not be loaded at all, which is a dry run
+    // and nothing else. A dry run over a state file selfie *can* read still has a
+    // root here; what keeps it from writing a copy is `perform_deploy` returning
+    // on `dry_run` before it reaches one.
+    let backups_root: Option<PathBuf> = loaded.as_ref().map(LoadedState::backups_root);
+    // Targets this run has settled, and where each one's former content went.
+    let mut backed_up: HashMap<String, Option<PathBuf>> = HashMap::new();
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
@@ -1744,6 +1872,7 @@ where
                 source_content: &source_content,
                 source_checksum: &source_checksum,
                 source,
+                backups: backups_root.as_deref(),
             };
 
             let drift = loaded
@@ -1776,7 +1905,7 @@ where
 
             match decision {
                 DeployDecision::Deploy => {
-                    if perform_deploy(filesystem, sender, &unit, options.dry_run)
+                    if perform_deploy(filesystem, sender, &unit, options.dry_run, &mut backed_up)
                         .await
                         .is_ok()
                     {
@@ -1894,9 +2023,15 @@ where
                     };
 
                     if accept {
-                        if perform_deploy(filesystem, sender, &unit, options.dry_run)
-                            .await
-                            .is_ok()
+                        if perform_deploy(
+                            filesystem,
+                            sender,
+                            &unit,
+                            options.dry_run,
+                            &mut backed_up,
+                        )
+                        .await
+                        .is_ok()
                         {
                             if options.dry_run {
                                 skipped_count += 1;

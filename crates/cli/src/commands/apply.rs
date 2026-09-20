@@ -236,9 +236,15 @@ pub(crate) async fn handle_apply(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
-            // Suppress per-file progress lines — the summary is sufficient
-            selfie::package::event::PackageEvent::DotfileDeploying { .. }
-            | selfie::package::event::PackageEvent::DotfileDeployed { .. } => true,
+            // Suppress per-file progress lines — the summary is sufficient.
+            //
+            // A deploy that displaced content is let through, because it is not
+            // progress: it carries the only path that leads back to what was
+            // overwritten, and the summary counts deployments without naming any.
+            selfie::package::event::PackageEvent::DotfileDeploying { .. } => true,
+            selfie::package::event::PackageEvent::DotfileDeployed { backup, .. } => {
+                backup.is_none()
+            }
 
             selfie::package::event::PackageEvent::Completed { result, .. } => {
                 match summary_to_render(result) {

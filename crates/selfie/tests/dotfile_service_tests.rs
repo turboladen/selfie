@@ -3547,6 +3547,40 @@ mod secret_bearing {
         assert_no_event_mentions(&events, SECRET);
     }
 
+    // ADR-0003 keeps nothing derived from a credential on disk, and the content a
+    // secret target already held is the credential itself — worse to persist than
+    // the checksum the ADR already refuses. Owner-only permissions do not change
+    // that, and the only way past the conflict is a human answering a prompt,
+    // where a CLI may offer to show them both values first.
+    #[tokio::test]
+    async fn a_secret_target_is_not_backed_up() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "previous-credential-DO-NOT-KEEP").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(accepting()).await).await;
+
+        // Control: the resolver accepted and the overwrite happened, so the run
+        // really did reach the point where a copy would have been made.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert!(
+            !dirs.state_dir.join("backups").exists(),
+            "no copy of a credential may be left on disk"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PackageEvent::DotfileDeployed { backup: None, .. })),
+            "the deployment must report that nothing was kept: {events:?}"
+        );
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, "previous-credential-DO-NOT-KEEP");
+    }
+
     #[tokio::test]
     async fn auto_accept_still_overwrites_an_ordinary_repo_file() {
         // The guard above is specific to secret-bearing entries; `--yes` keeps
@@ -9642,4 +9676,598 @@ environments:
         "the reason must name the key, got: {}",
         listed.refused[0].reason
     );
+}
+
+// Copies of what a target held before an apply overwrote it.
+//
+// The invariant: an overwrite of a target whose content differs leaves a
+// recoverable copy under the state directory. Everything else here bounds it —
+// what is not copied, how many copies survive, and what happens when a copy
+// cannot be made.
+mod backups_before_overwrite {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn accepting() -> ApplyOptions {
+        ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        }
+    }
+
+    // Every copy under the backups tree, as (path, content).
+    //
+    // Sorted by path, so a test reading one of several does not depend on
+    // enumeration order.
+    fn copies(state_dir: &std::path::Path) -> Vec<(PathBuf, String)> {
+        let root = state_dir.join("backups");
+        if !root.exists() {
+            return Vec::new();
+        }
+        let mut found: Vec<(PathBuf, String)> = std::fs::read_dir(&root)
+            .unwrap()
+            .flat_map(|target_dir| std::fs::read_dir(target_dir.unwrap().path()).unwrap())
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let content = std::fs::read_to_string(&path).unwrap();
+                (path, content)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    // What each deployment reported about a kept copy, in order.
+    fn reported(events: &[PackageEvent]) -> Vec<Option<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDeployed { backup, .. } => Some(backup.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A package named `name` with one repository-file dotfile pointing at
+    // `target`, and `target` seeded with `target_content` when given.
+    fn one_entry(
+        dirs: &TestDirs,
+        name: &str,
+        source_content: &str,
+        target: &std::path::Path,
+        target_content: Option<&str>,
+    ) {
+        let source_dir = dirs.package_dir.join(name);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), source_content).unwrap();
+        let source = format!("{name}/config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            name,
+            &[(&source, target.to_str().unwrap())],
+        );
+        if let Some(content) = target_content {
+            std::fs::write(target, content).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_overwrite_keeps_a_recoverable_copy_under_the_state_directory() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(
+            &dirs,
+            "myapp",
+            "key = \"from-repo\"",
+            &target,
+            Some("key = \"hand-edited\""),
+        );
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 1, "one copy per overwritten target: {kept:?}");
+        assert_eq!(
+            kept[0].1, "key = \"hand-edited\"",
+            "the copy must hold what the target held"
+        );
+        // Control: the overwrite happened, so this is not a copy of a target
+        // selfie decided to leave alone.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "key = \"from-repo\""
+        );
+        // The control says what an ordinary write produces in this environment.
+        // Under a umask of 077 an owner-only assertion passes whatever the code
+        // does -- swapping the owner-only writer for the ordinary one goes
+        // unnoticed -- so without this the test could be green while proving
+        // nothing.
+        let control = dirs.state_dir.join("control");
+        std::fs::write(&control, b"x").unwrap();
+        let control_mode = std::fs::metadata(&control).unwrap().permissions().mode();
+        if control_mode & 0o077 == 0 {
+            let message = "the ambient umask makes ordinary writes owner-only, so this \
+                           cannot tell an owner-only write from a default one";
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "an_accepted_overwrite_keeps_a_recoverable_copy_under_the_state_directory: \
+                 {message}"
+            );
+            eprintln!(
+                "SKIP an_accepted_overwrite_keeps_a_recoverable_copy_under_the_state_directory: \
+                 {message}"
+            );
+            return;
+        }
+
+        // Owner-only, like the state file beside it. Selfie cannot know that what
+        // a user had at a target was not a credential.
+        //
+        // `& 0o077`, not `& 0o007`: group-readable exposes it to exactly the people
+        // it is being kept from on a shared machine.
+        let mode = std::fs::metadata(&kept[0].0).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "group/other bits set on the copy: {:04o}",
+            mode & 0o777
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "the entry must have deployed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_deployed_event_names_the_backup() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "new", &target, Some("old"));
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        let named = reported(&events);
+        assert_eq!(named.len(), 1, "one deployment: {named:?}");
+        let named = named[0].as_ref().expect("the event must name the copy");
+        assert_eq!(
+            std::path::Path::new(named),
+            kept[0].0,
+            "the event must name the file that is on disk"
+        );
+    }
+
+    // The commonest overwrite of all: the repository file changed, the target is
+    // untouched, and selfie refreshes it with no prompt. Nothing asks the user,
+    // so nothing else would tell them their old content had gone.
+    #[tokio::test]
+    async fn a_silent_refresh_of_a_tracked_target_keeps_a_copy_too() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "version-one", &target, None);
+
+        let service = dirs.service();
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "version-two").unwrap();
+
+        // No `auto_accept` and no resolver: this must not be a conflict.
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].1, "version-one");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "version-two");
+        assert!(
+            reported(&events).iter().all(Option::is_some),
+            "the refresh must name its copy: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_target_is_not_backed_up() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "fresh", &target, None);
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert!(
+            !dirs.state_dir.join("backups").exists(),
+            "nothing was at the target, so there is nothing to keep"
+        );
+        assert_eq!(reported(&events), vec![None]);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fresh");
+    }
+
+    // A control for the pair below it: an in-sync target is skipped, and a skip
+    // writes nothing. It cannot fail on its own under a content-based rule, since
+    // an in-sync target's bytes already equal the source's — which is what
+    // `an_overwrite_with_identical_content_is_not_backed_up` exists to catch.
+    #[tokio::test]
+    async fn an_in_sync_target_is_not_backed_up() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "same", &target, Some("same"));
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert!(!dirs.state_dir.join("backups").exists());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileSkipped { .. })),
+            "an in-sync target is skipped: {events:?}"
+        );
+    }
+
+    // The write happens and there is still nothing to keep, because what is at
+    // the target is already what is about to be written. A rule that copied
+    // whenever a target existed and the decision was not `Skip` would keep a
+    // pointless copy here, and every other test in this module would pass.
+    #[tokio::test]
+    async fn an_overwrite_with_identical_content_is_not_backed_up() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "version-one", &target, None);
+
+        let service = dirs.service();
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        // Both sides move to the same new content, so the recorded checksum
+        // matches neither: `BothChanged`, which is a conflict.
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "version-two").unwrap();
+        std::fs::write(&target, "version-two").unwrap();
+
+        let events = collect_events(service.apply_all(accepting()).await).await;
+
+        // Control: the write path really ran. Content equality alone cannot show
+        // that, because the target would look the same either way.
+        assert_eq!(
+            reported(&events),
+            vec![None],
+            "the entry must have deployed and kept nothing: {events:?}"
+        );
+        assert!(!dirs.state_dir.join("backups").exists());
+    }
+
+    // The copy an earlier run made is the only record of content that is nowhere
+    // else. A later overwrite that fails must not consume it: the copy it would
+    // leave behind holds what is still sitting at the target, so trading one for
+    // the other loses the user's file and gains a duplicate.
+    #[tokio::test]
+    async fn an_earlier_copy_survives_a_failed_overwrite() {
+        let dirs = TestDirs::new();
+        let holder = dirs.target_dir.join("sub");
+        std::fs::create_dir_all(&holder).unwrap();
+        let target = holder.join("config.toml");
+        one_entry(&dirs, "myapp", "v1", &target, Some("USER-ORIGINAL"));
+
+        let service = dirs.service();
+        let _ = collect_events(service.apply_all(accepting()).await).await;
+        assert_eq!(
+            copies(&dirs.state_dir)
+                .iter()
+                .map(|(_, content)| content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["USER-ORIGINAL"],
+            "the first apply must have kept the user's content"
+        );
+
+        // Both halves, because the two writers fail on different things: writing a
+        // target in place needs write permission on the file, and replacing it by
+        // rename needs write permission on its directory. The target stays
+        // readable and the state directory stays writable either way.
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "v2").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let events = collect_events(service.apply_all(accepting()).await).await;
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Fails rather than passes vacuously if the write did not fail -- running
+        // as root, where the mode above is not enforced.
+        assert_eq!(
+            refused_count(&events),
+            1,
+            "the target write had to fail for this test to mean anything: {events:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "v1");
+
+        let after: Vec<String> = copies(&dirs.state_dir)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect();
+        assert!(
+            after.iter().any(|content| content == "USER-ORIGINAL"),
+            "the only copy of the user's content must survive a failed overwrite, got {after:?}"
+        );
+    }
+
+    // A resolver that edits the target before accepting, standing in for a user who
+    // changes the file while the prompt waits for them.
+    struct EditsThenAccepts {
+        target: PathBuf,
+        content: &'static str,
+    }
+
+    impl selfie::dotfile_service::port::ConflictResolver for EditsThenAccepts {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            std::fs::write(&self.target, self.content).unwrap();
+            selfie::dotfile_service::port::ConflictResolution::Accept
+        }
+    }
+
+    // The copy has to hold what the write destroys, not what the prompt showed.
+    // An interactive resolver blocks for as long as the user takes, and the target
+    // can change in that window -- so a copy taken from the bytes the deploy
+    // decision was made on would preserve content still reachable on disk and lose
+    // the content the write is about to overwrite.
+    #[tokio::test]
+    async fn the_copy_holds_the_bytes_the_write_destroys_not_the_ones_the_prompt_showed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "from-repo", &target, Some("at-prompt-time"));
+
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(EditsThenAccepts {
+                target: target.clone(),
+                content: "edited-while-prompting",
+            })),
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        // Control: the resolver ran and the write went ahead, so the run really did
+        // reach the point where a copy is made.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "from-repo");
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(
+            kept[0].1, "edited-while-prompting",
+            "the copy must hold the bytes the write destroyed"
+        );
+        assert!(
+            reported(&events).iter().all(Option::is_some),
+            "the deployment must name its copy: {events:?}"
+        );
+    }
+
+    // The target became unreadable while the prompt was open. Refusing leaves it
+    // alone; writing would destroy content selfie cannot copy first.
+    #[tokio::test]
+    async fn a_target_that_becomes_unreadable_before_the_write_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "from-repo", &target, Some("at-prompt-time"));
+
+        // A directory at the path reads as unreadable rather than absent, and needs
+        // no permission games, so it holds for root too.
+        struct ReplacesWithADirectory(PathBuf);
+        impl selfie::dotfile_service::port::ConflictResolver for ReplacesWithADirectory {
+            fn resolve(
+                &self,
+                _target: &str,
+                _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+            ) -> selfie::dotfile_service::port::ConflictResolution {
+                std::fs::remove_file(&self.0).unwrap();
+                std::fs::create_dir(&self.0).unwrap();
+                selfie::dotfile_service::port::ConflictResolution::Accept
+            }
+        }
+
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(ReplacesWithADirectory(target.clone()))),
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing may be deployed over a target selfie cannot read: {events:?}"
+        );
+        assert!(target.is_dir(), "the target must be left as it was found");
+        assert!(!dirs.state_dir.join("backups").exists());
+    }
+
+    // A preview writes nothing, copies included. Worth pinning separately from the
+    // deploy path: the run still resolves a place to put a copy, so the only thing
+    // stopping one is the dry-run return, and moving the copy above it would make
+    // `--dry-run` write to the state directory.
+    #[tokio::test]
+    async fn a_dry_run_keeps_no_copy() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "from-repo", &target, Some("hand-edited"));
+
+        let options = ApplyOptions {
+            dry_run: true,
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert!(
+            !dirs.state_dir.join("backups").exists(),
+            "a dry run must not write into the state directory"
+        );
+        // Control: the entry really was considered, so the run did not skip it for
+        // some unrelated reason and pass this test by doing nothing.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileSkipped { .. })),
+            "the entry must have been previewed: {events:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hand-edited");
+    }
+
+    #[tokio::test]
+    async fn the_second_overwrite_replaces_the_first_backup() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "version-one", &target, None);
+        let service = dirs.service();
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "version-two").unwrap();
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "version-three").unwrap();
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(
+            kept.len(),
+            1,
+            "only the most recent copy survives: {kept:?}"
+        );
+        assert_eq!(
+            kept[0].1, "version-two",
+            "the surviving copy is the one the last overwrite displaced"
+        );
+    }
+
+    // Proceeding would overwrite the target with no way back, which is the one
+    // outcome this whole module exists to prevent. A regular file where the
+    // backups directory has to go is the failure: `create_dir_all` cannot pass
+    // it, and unlike a permission fixture it also fails for root.
+    #[tokio::test]
+    async fn a_backup_that_cannot_be_written_refuses_the_overwrite() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "from-repo", &target, Some("hand-edited"));
+        std::fs::write(dirs.state_dir.join("backups"), "not a directory").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hand-edited",
+            "the target must be left exactly as it was"
+        );
+        assert_eq!(refused_count(&events), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing was deployed: {events:?}"
+        );
+        let warning = warning_messages(&events)
+            .into_iter()
+            .find(|message| message.contains("cannot keep a copy"))
+            .expect("the refusal must be reported");
+        assert!(
+            warning.contains(target.to_str().unwrap())
+                && warning.contains("--state-directory")
+                && warning.contains("The target is unchanged"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("Failed to write"),
+            "a copy that could not be made is not a failed target write: {warning}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_targets_with_the_same_basename_get_separate_backups() {
+        let dirs = TestDirs::new();
+        let first = dirs.target_dir.join("a/.npmrc");
+        let second = dirs.target_dir.join("b/.npmrc");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, "registry-a").unwrap();
+        std::fs::write(&second, "registry-b").unwrap();
+
+        let source_dir = dirs.package_dir.join("npm");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("a.npmrc"), "managed-a").unwrap();
+        std::fs::write(source_dir.join("b.npmrc"), "managed-b").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "npm",
+            &[
+                ("npm/a.npmrc", first.to_str().unwrap()),
+                ("npm/b.npmrc", second.to_str().unwrap()),
+            ],
+        );
+
+        let _ = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 2, "one copy per target: {kept:?}");
+        let mut held: Vec<&str> = kept.iter().map(|(_, content)| content.as_str()).collect();
+        held.sort_unstable();
+        assert_eq!(held, vec!["registry-a", "registry-b"]);
+        let directories: std::collections::HashSet<&std::path::Path> = kept
+            .iter()
+            .map(|(path, _)| path.parent().unwrap())
+            .collect();
+        assert_eq!(
+            directories.len(),
+            2,
+            "two targets sharing a file name must not share a directory: {kept:?}"
+        );
+    }
+
+    // Two packages may name one target and nothing refuses it. Copying again for
+    // the second entry would replace the user's content with the first entry's
+    // output and then delete the user's copy, so the run would destroy the only
+    // thing worth keeping.
+    #[tokio::test]
+    async fn two_entries_for_one_target_keep_the_copy_made_before_the_run_wrote() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("shared.toml");
+        one_entry(&dirs, "first", "from-first", &target, Some("hand-edited"));
+        one_entry(&dirs, "second", "from-second", &target, None);
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        let kept = copies(&dirs.state_dir);
+        assert_eq!(kept.len(), 1, "one copy per target per run: {kept:?}");
+        assert_eq!(
+            kept[0].1, "hand-edited",
+            "the copy must hold what the target held before the run, whichever \
+             package the apply reached first"
+        );
+        let named = reported(&events);
+        assert_eq!(named.len(), 2, "both entries deployed: {events:?}");
+        assert_eq!(
+            named[0], named[1],
+            "both deployments must name the one copy: {named:?}"
+        );
+        assert_eq!(
+            std::path::Path::new(named[0].as_ref().expect("a copy was kept")),
+            kept[0].0
+        );
+    }
+
+    // The run created the target, so the honest answer is that nothing was kept.
+    // Copying for the second entry would keep the first entry's own output and
+    // call it the previous content.
+    #[tokio::test]
+    async fn a_target_this_run_created_is_not_backed_up_by_a_later_entry() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("shared.toml");
+        one_entry(&dirs, "first", "from-first", &target, None);
+        one_entry(&dirs, "second", "from-second", &target, None);
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert!(
+            !dirs.state_dir.join("backups").exists(),
+            "the target did not exist when the run started"
+        );
+        let named = reported(&events);
+        assert_eq!(named.len(), 2, "both entries deployed: {events:?}");
+        assert!(named.iter().all(Option::is_none), "{named:?}");
+    }
 }

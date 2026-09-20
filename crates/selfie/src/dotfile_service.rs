@@ -11,6 +11,7 @@
 //!
 //! - [`port`] — The `DotfileService` trait and `ApplyOptions` request type
 //! - [`service`] — Concrete implementation: apply, conflict resolution, drift checking
+//! - `backup` — Copies of what a target held before an apply overwrote it
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
 //! - [`diff`] — Unified diff generation for conflict display
@@ -19,6 +20,7 @@
 //! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
 //! - `template` — Named-value substitution for templated dotfiles
 
+mod backup;
 pub mod deploy;
 pub mod diff;
 pub(crate) mod directory;

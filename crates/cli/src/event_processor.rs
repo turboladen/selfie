@@ -339,11 +339,23 @@ impl EventProcessor {
                     .print_info(format!("  Deploying {short_source} → {short_target}"));
             }
 
-            PackageEvent::DotfileDeployed { source, target, .. } => {
+            PackageEvent::DotfileDeployed {
+                source,
+                target,
+                backup,
+                ..
+            } => {
                 let short_source = crate::display_manager::shorten_path(&source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
                     .print_success(format!("  {short_source} → {short_target}"));
+                // Only when something was kept. Saying so on every deploy would
+                // train the reader to skip the line that matters.
+                if let Some(backup) = backup {
+                    let short_backup = crate::display_manager::shorten_path(&backup);
+                    self.display
+                        .print_info(format!("    previous content copied to {short_backup}"));
+                }
             }
 
             PackageEvent::DotfileSkipped { source, reason, .. } => {

@@ -21,6 +21,9 @@ use crate::{
 
 const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
 
+/// Where copies of overwritten targets live, relative to the state directory.
+const BACKUPS_DIRNAME: &str = "backups";
+
 /// A deploy state read from disk, or found absent, which may be written back.
 ///
 /// An absent file and a loaded one are the same case here: both may be saved,
@@ -33,6 +36,14 @@ pub(super) struct LoadedState {
 impl LoadedState {
     pub(super) fn state(&self) -> &DeployState {
         &self.state
+    }
+
+    /// Where a deploy keeps a copy of a target it is about to overwrite.
+    pub(super) fn backups_root(&self) -> PathBuf {
+        // Derived from the loaded path, not resolved again: `state_file_path`
+        // joins a separator-free filename, so replacing it names the directory
+        // that same resolution produced.
+        self.path.path().with_file_name(BACKUPS_DIRNAME)
     }
 
     pub(super) fn state_mut(&mut self) -> &mut DeployState {
