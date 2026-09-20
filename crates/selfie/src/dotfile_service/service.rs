@@ -2340,8 +2340,29 @@ where
     })
 }
 
-/// Handle `track_standalone`: copy target file into dotfiles dir, create a new
-/// YAML spec, and record initial deploy state.
+/// Which of the two specs a track writes into.
+///
+/// The only difference between the two entry points once their setup is done.
+enum SpecKind {
+    /// A spec this track creates. A file already at its path refuses the track.
+    New,
+    /// A spec that already exists and was loaded, whose entries this track's
+    /// target may already be one of.
+    Existing,
+}
+
+/// The spec a track writes, before this track's own entry is added to it.
+struct TrackSpec {
+    /// Names the spec, and the directory inside the spec's own that the copy
+    /// goes in.
+    name: String,
+    spec_path: PathBuf,
+    package: Package,
+    kind: SpecKind,
+}
+
+/// Handle `track_standalone`: copy the target file into the dotfiles directory,
+/// create a new YAML spec, and record initial deploy state.
 async fn handle_track_standalone<R, F>(
     name: &str,
     target_path: &str,
@@ -2384,6 +2405,89 @@ where
         ));
     }
 
+    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
+
+    // Deliberately not `set_source`. `top_level_refusal` answers only for a
+    // package carrying stored source text, and a spec built here has none, so
+    // `save_package`'s unknown-key guards stay quiet -- which is what lets a
+    // freshly built spec save at all. Making the two variants symmetric by
+    // storing source here would start refusing every standalone track.
+    let package = crate::package::PackageBuilder::default()
+        .name(name)
+        .path(spec_path.clone())
+        .build();
+
+    handle_track(
+        TrackSpec {
+            name: name.to_string(),
+            spec_path,
+            package,
+            kind: SpecKind::New,
+        },
+        target_path,
+        dotfiles_repo,
+        filesystem,
+        config,
+    )
+    .await
+}
+
+/// Handle `track_for_package`: load an existing package, copy the target file
+/// alongside the YAML, add a dotfiles entry, save, and record deploy state.
+async fn handle_track_for_package<R, F>(
+    package_name: &str,
+    target_path: &str,
+    repo: &R,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
+    let package_blob = match repo.get_package(package_name) {
+        Ok(blob) => blob,
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot load package '{package_name}': {e}"
+            )));
+        }
+    };
+
+    let spec_path = package_blob.file_path().to_path_buf();
+
+    handle_track(
+        TrackSpec {
+            name: package_name.to_string(),
+            spec_path,
+            package: package_blob.into_package(),
+            kind: SpecKind::Existing,
+        },
+        target_path,
+        repo,
+        filesystem,
+        config,
+    )
+    .await
+}
+
+/// Track `target_path` into `spec`: refuse what cannot be tracked, copy the file
+/// into the repository beside the spec, add the entry, save the spec, and record
+/// the deployment.
+///
+/// One body for both entry points, because every check and every write they
+/// perform is the same one. [`SpecKind`] carries the single difference.
+async fn handle_track<R, F>(
+    mut spec: TrackSpec,
+    target_path: &str,
+    repo: &R,
+    filesystem: &F,
+    config: &SelfieConfig,
+) -> OperationResult
+where
+    R: PackageRepository,
+    F: FileSystem,
+{
     // Expand the target, or refuse it if selfie could never deploy to it.
     //
     // First of the three refusals, and ahead of `symlink_refusal` for a reason of
@@ -2391,6 +2495,9 @@ where
     // `path_exists` both stat a relative path against the *process working
     // directory* -- which is what made track record entries every later apply
     // refuses (selfie-q9t3). It therefore also sits ahead of all three writes.
+    //
+    // Ahead of the already-tracked answer below as well: an entry recording a
+    // target that can never deploy is not a reason to report it as tracked.
     let expanded_target = match deploy_target(filesystem, target_path) {
         Ok(path) => path,
         Err(rejection) => {
@@ -2401,11 +2508,39 @@ where
         }
     };
 
+    // An entry for this target already in the spec. Each entry's own target goes
+    // through `expand_target_path`, not the rule: this compares a recorded entry
+    // rather than writing to it, and a spec may hold one the rule refuses.
+    //
+    // A `SpecKind::New` spec has no entries, so this answers `None` for one
+    // without a branch of its own.
+    let already_tracked = spec
+        .package
+        .dotfiles()
+        .iter()
+        .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
+
+    if let Some(entry) = already_tracked {
+        // The entry's own target, not the argument: "already tracking X" should
+        // name what the spec says, which is what a later apply will use.
+        return OperationResult::Success(OperationSuccess::DotfileTracked {
+            name: spec.name,
+            source_path: expanded_target.path().to_path_buf(),
+            target_path: entry.target().to_string(),
+            was_already_tracked: true,
+            environment: config.environment().to_string(),
+            steps_completed: StepCount::new(1, 1),
+        });
+    }
+
     // Position is load-bearing at both ends. Before the writes: tracking reads
     // *through* a link, so accepting one copies the destination into the dotfiles
     // directory — where `sync push` commits it — and records a deployment that never
     // happened. Before the existence check: `path_exists` follows the link, so a
     // dangling one would be reported as a missing file.
+    //
+    // After the already-tracked answer above, because refusing an idempotent
+    // no-op helps nobody.
     if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
         return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
     }
@@ -2432,7 +2567,6 @@ where
         )));
     }
 
-    // Read the target file content
     let content = match filesystem.read_file(expanded_target.path()) {
         Ok(c) => c,
         Err(e) => {
@@ -2452,7 +2586,6 @@ where
         }
     };
 
-    // Determine source filename (just the basename of the target)
     let filename = expanded_target
         .path()
         .file_name()
@@ -2460,22 +2593,30 @@ where
         .to_string_lossy()
         .to_string();
 
-    // Check for existing spec (prevent silent overwrite)
-    let spec_path = dotfiles_dir.join(format!("{name}.yml"));
-    if filesystem.path_exists(&spec_path) {
+    // Only for a spec this track would create. The other kind was loaded from
+    // this path, so something being there is what was expected.
+    if matches!(spec.kind, SpecKind::New) && filesystem.path_exists(&spec.spec_path) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "A dotfile spec already exists at {}. Remove it first or choose a different name.",
-            spec_path.display()
+            spec.spec_path.display()
         )));
     }
 
-    // Copy the file into dotfiles_dir/name/filename
-    let source_dir = dotfiles_dir.join(name);
+    // The copy goes in a directory named for the spec, beside the spec itself:
+    // `dotfiles/bat/config` for `dotfiles/bat.yml`, `packages/bat/config` for
+    // `packages/bat.yml`. One formula, because the two entry points compose the
+    // same shape from different roots.
+    let source_dir = spec
+        .spec_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&spec.name);
     let source_path = source_dir.join(&filename);
+    let relative_source = format!("{}/{filename}", spec.name);
 
     if filesystem.path_exists(&source_path) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Source file already exists at {}. Remove it first or choose a different name.",
+            "Source file already exists at {}. Remove it first, or track a different file.",
             source_path.display()
         )));
     }
@@ -2489,205 +2630,16 @@ where
         )));
     }
 
-    // Create the YAML spec (spec_path already computed above for overwrite check)
     let recorded_target = portable_target(filesystem, target_path);
-    let package = crate::package::PackageBuilder::default()
-        .name(name)
-        .dotfiles(vec![DotfileEntry::new(
-            format!("{name}/{filename}"),
-            &recorded_target,
-        )])
-        .path(spec_path.clone())
-        .build();
+    spec.package
+        .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
 
-    if let Err(e) = dotfiles_repo.save_package(&package, &spec_path) {
+    if let Err(e) = repo.save_package(&spec.package, &spec.spec_path) {
         return OperationResult::Failure(OperationFailure::Generic(format!(
             "Cannot save spec: {e}"
         )));
     }
 
-    // Record initial deploy state
-    let checksum = compute_checksum(content.as_bytes());
-    let source_key = format!("{name}/{filename}");
-    loaded.state_mut().record_deployment(
-        &expanded_target.display().to_string(),
-        &source_key,
-        &checksum,
-    );
-    if let Err(e) = save_deploy_state(filesystem, &loaded) {
-        return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
-    }
-
-    // The recorded form, not the argument: an adapter that echoed the caller's
-    // path would name a target the spec does not contain.
-    OperationResult::Success(OperationSuccess::DotfileTracked {
-        name: name.to_string(),
-        source_path,
-        target_path: recorded_target,
-        was_already_tracked: false,
-        environment: config.environment().to_string(),
-        steps_completed: StepCount::new(1, 1),
-    })
-}
-
-/// Handle `track_for_package`: load an existing package, copy the target file
-/// alongside the YAML, add a dotfiles entry, save, and record deploy state.
-async fn handle_track_for_package<R, F>(
-    package_name: &str,
-    target_path: &str,
-    repo: &R,
-    filesystem: &F,
-    config: &SelfieConfig,
-) -> OperationResult
-where
-    R: PackageRepository,
-    F: FileSystem,
-{
-    // Load the existing package
-    let mut package_blob = match repo.get_package(package_name) {
-        Ok(blob) => blob,
-        Err(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot load package '{package_name}': {e}"
-            )));
-        }
-    };
-
-    // Same rule and same wording as `handle_track_standalone`, and ahead of the
-    // already-tracked lookup below rather than after it: an entry recording a
-    // target that can never deploy is not a reason to report it as tracked.
-    let expanded_target = match deploy_target(filesystem, target_path) {
-        Ok(path) => path,
-        Err(rejection) => {
-            return OperationResult::Failure(OperationFailure::Generic(track_target_refusal(
-                target_path,
-                rejection,
-            )));
-        }
-    };
-
-    // Check if this target is already tracked in the package. Each entry's own
-    // target goes through `expand_target_path`, not the rule: this compares a
-    // recorded entry rather than writing to it, and a spec may hold one the rule
-    // refuses.
-    let already_tracked = package_blob
-        .package()
-        .dotfiles()
-        .iter()
-        .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
-
-    if let Some(entry) = already_tracked {
-        // The entry's own target, not the argument: "already tracking X" should
-        // name what the spec says, which is what a later apply will use.
-        return OperationResult::Success(OperationSuccess::DotfileTracked {
-            name: package_name.to_string(),
-            source_path: expanded_target.path().to_path_buf(),
-            target_path: entry.target().to_string(),
-            was_already_tracked: true,
-            environment: config.environment().to_string(),
-            steps_completed: StepCount::new(1, 1),
-        });
-    }
-
-    // Same ordering constraint as `handle_track_standalone`, and it applies to
-    // this guard only. The target-rule check above deliberately sits *before* the
-    // already-tracked short-circuit, because an entry recording a target that can
-    // never deploy must not be reported as tracked. This one sits after it,
-    // because refusing an idempotent no-op helps nobody.
-    if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
-    }
-
-    // Also ahead of the read: tracking copies the target into the dotfiles
-    // repository, and reading a fifo blocks until a writer arrives. There is
-    // nothing to track in a fifo or a device node in any case.
-    //
-    // Deliberately not `track_refusal`, which the symlink case above uses: that
-    // one appends "replace the symlink with a regular file, or track the path it
-    // points to", and neither half applies here -- a fifo points at nothing, and
-    // "replace it with a regular file" describes deleting the user's pipe. The
-    // remedy that does apply is naming a different target, so this says that.
-    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "{refusal}. Point the entry at a regular file instead."
-        )));
-    }
-
-    // Validate the target path
-    if !filesystem.path_exists(expanded_target.path()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Target file does not exist: {}",
-            expanded_target.display()
-        )));
-    }
-
-    // Read the target file content
-    let content = match filesystem.read_file(expanded_target.path()) {
-        Ok(c) => c,
-        Err(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot read target file: {e}"
-            )));
-        }
-    };
-
-    // Ahead of every write below, for the reason `handle_track_standalone`
-    // gives at the same point.
-    let mut loaded = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => loaded,
-        StateLoad::Unusable(failure) => {
-            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
-        }
-    };
-
-    // Determine where to copy the file — alongside the package YAML
-    let package_dir = package_blob
-        .file_path()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let filename = expanded_target
-        .path()
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let source_dir = package_dir.join(package_name);
-    let source_path = source_dir.join(&filename);
-    let relative_source = format!("{package_name}/{filename}");
-
-    // Prevent silent overwrite of existing source files
-    if filesystem.path_exists(&source_path) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Source file already exists at {}. Remove it first or choose a different file.",
-            source_path.display()
-        )));
-    }
-
-    // Copy the file
-    if let Err(e) =
-        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
-    {
-        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
-            &source_path,
-            &e,
-        )));
-    }
-
-    // Add dotfiles entry and save — source is relative to the YAML's parent dir
-    let recorded_target = portable_target(filesystem, target_path);
-    package_blob
-        .package_mut()
-        .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
-
-    let file_path = package_blob.file_path().to_path_buf();
-    if let Err(e) = repo.save_package(package_blob.package(), &file_path) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot save updated package: {e}"
-        )));
-    }
-
-    // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
     loaded.state_mut().record_deployment(
         &expanded_target.display().to_string(),
@@ -2698,8 +2650,10 @@ where
         return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
     }
 
+    // The recorded form, not the argument: an adapter that echoed the caller's
+    // path would name a target the spec does not contain.
     OperationResult::Success(OperationSuccess::DotfileTracked {
-        name: package_name.to_string(),
+        name: spec.name,
         source_path,
         target_path: recorded_target,
         was_already_tracked: false,

@@ -10305,3 +10305,175 @@ mod backups_before_overwrite {
         assert!(named.iter().all(Option::is_none), "{named:?}");
     }
 }
+
+// `selfie dotfiles track` and `selfie package track-dotfile` run one function,
+// so neither can refuse an input the other accepts, nor describe the same
+// refusal differently. Each test here drives both entry points over one fixture
+// and compares the rendered failure, which is the only thing that catches a
+// wording forked back into a per-entry-point copy.
+//
+// Each also asserts what the shared message says. Comparing two strings for
+// equality alone passes when both runs failed for some unrelated reason, which
+// is how a parity test goes vacuous.
+mod track_entry_points_agree {
+    use super::*;
+
+    // A package with no dotfile entries, so `track_for_package` reaches the same
+    // checks a brand-new standalone spec does.
+    fn fixture() -> TestDirs {
+        let dirs = TestDirs::new();
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        dirs
+    }
+
+    // Both entry points' rendered failure for `target`, standalone first.
+    async fn both_failures(dirs: &TestDirs, target: &str) -> (String, String) {
+        let standalone = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("fresh", target)
+                .await,
+        )
+        .await;
+        let for_package = collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("bat", target)
+                .await,
+        )
+        .await;
+        (failure_message(&standalone), failure_message(&for_package))
+    }
+
+    #[tokio::test]
+    async fn a_relative_target_is_refused_the_same_way() {
+        let dirs = fixture();
+
+        let (standalone, for_package) = both_failures(&dirs, "relative/config.toml").await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("not absolute"),
+            "not the target rule's refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_user_target_is_refused_the_same_way() {
+        let dirs = fixture();
+
+        let (standalone, for_package) = both_failures(&dirs, "~alice/.gemrc").await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("~user"),
+            "not the named-user refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_target_is_refused_the_same_way() {
+        let dirs = fixture();
+        let absent = dirs.target_dir.join("not-there.toml");
+
+        let (standalone, for_package) = both_failures(&dirs, absent.to_str().unwrap()).await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("does not exist"),
+            "not the missing-target refusal: {standalone}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_target_is_refused_the_same_way() {
+        let dirs = fixture();
+        let destination = dirs.target_dir.join("real.toml");
+        std::fs::write(&destination, "key = 1").unwrap();
+        let link = dirs.target_dir.join("link.toml");
+        std::os::unix::fs::symlink(&destination, &link).unwrap();
+
+        let (standalone, for_package) = both_failures(&dirs, link.to_str().unwrap()).await;
+
+        assert_eq!(standalone, for_package, "the two entry points disagree");
+        assert!(
+            standalone.contains("symlink"),
+            "not the symlink refusal: {standalone}"
+        );
+    }
+
+    // The collision remedy has to name something both entry points can do. A spec name
+    // is a lever only `dotfiles track` has -- `package track-dotfile` takes the name
+    // from its package argument and the basename from the target -- so advice to choose
+    // a different name describes nothing at that call site.
+    #[tokio::test]
+    async fn a_source_collision_offers_a_remedy_both_entry_points_have() {
+        let dirs = TestDirs::new();
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        let target = dirs.target_dir.join("config");
+        std::fs::write(&target, "--theme=ansi").unwrap();
+        // Occupy exactly where each entry point composes its copy.
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat").join("config"), "squatter").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("fresh")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("fresh").join("config"), "squatter").unwrap();
+
+        for events in [
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_for_package("bat", target.to_str().unwrap())
+                    .await,
+            )
+            .await,
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("fresh", target.to_str().unwrap())
+                    .await,
+            )
+            .await,
+        ] {
+            let failure = failure_message(&events);
+            assert!(
+                failure.contains("Source file already exists"),
+                "not the collision refusal: {failure}"
+            );
+            assert!(
+                failure.contains("Remove it first, or track a different file."),
+                "the remedy is not one both entry points have: {failure}"
+            );
+        }
+    }
+
+    // The control: with a target both entry points accept, both succeed. Without
+    // it every test above could pass on an implementation that refused
+    // everything.
+    #[tokio::test]
+    async fn a_plain_target_is_accepted_by_both() {
+        let dirs = fixture();
+        let target = dirs.target_dir.join("plain.toml");
+        std::fs::write(&target, "key = 1").unwrap();
+        let target = target.to_str().unwrap();
+
+        for events in [
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone("fresh", target)
+                    .await,
+            )
+            .await,
+            collect_events(
+                dirs.service_with_dotfiles()
+                    .track_for_package("bat", target)
+                    .await,
+            )
+            .await,
+        ] {
+            assert!(
+                matches!(
+                    get_operation_result(&events),
+                    Some(OperationResult::Success(_))
+                ),
+                "a plain target must track, got: {:?}",
+                get_operation_result(&events)
+            );
+        }
+    }
+}
