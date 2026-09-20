@@ -629,6 +629,14 @@ file changes, selfie detects this as a conflict:
 
 Without `--yes`, conflicts are reported but the target file is left untouched.
 
+A repository-file target that exists but selfie cannot read is not a conflict, and it is not empty.
+selfie refuses the entry with a warning naming the target and the read error, shows no diff, and
+writes nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning,
+counts the entry as refused, and exits `1` rather than calling the target changed. Make the target
+readable, or point the entry elsewhere, and run apply again. A secret-bearing entry handles an
+unreadable target [differently](#deploy-behavior-and-permissions): it is a conflict, reported and
+skipped unless an interactive prompt accepts it.
+
 ### Symlinked targets
 
 This section covers repository-file entries — a `source` with no `vars`. Provider-sourced and
@@ -987,6 +995,11 @@ truncated credential.
 
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
+
+For a secret-bearing entry, a target that exists but cannot be read is a conflict as well,
+summarized as "exists but could not be read", and is never treated as absent: an interactive prompt
+can still accept the overwrite, since replacing a file needs only write permission on its directory,
+and without one the entry is skipped.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the

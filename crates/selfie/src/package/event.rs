@@ -772,8 +772,9 @@ pub enum OperationSuccess {
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
-        /// What drift could not check: a package apply would refuse whole, or a
-        /// dotfiles directory that exists and could not be listed.
+        /// What drift could not check: a package apply would refuse whole, an
+        /// entry whose target exists but could not be read, or a dotfiles
+        /// directory that exists and could not be listed.
         ///
         /// Its own field rather than part of `total_count`: `sync status`
         /// renders that total as "N deployed", so a refusal counted there would

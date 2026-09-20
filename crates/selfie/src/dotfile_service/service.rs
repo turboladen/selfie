@@ -869,15 +869,36 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
     )
 }
 
-/// What is at a secret-bearing entry's target when apply reaches it.
+/// What is at an entry's target when apply or drift reaches it.
 ///
 /// Kept distinct from `Option<Vec<u8>>` because "absent" and "present but
 /// unreadable" call for opposite handling: the first is safe to write, the second
-/// must never be overwritten without asking.
+/// must never be written over as though nothing were there.
 enum TargetState {
     Absent,
     Readable(Vec<u8>),
-    Unreadable,
+    Unreadable(FileSystemError),
+}
+
+/// What is at `target`: absent, readable, or present but unreadable.
+///
+/// Read as raw bytes, so two different files are never reported identical after
+/// a lossy decode.
+// An unreadable file is still a file, and it may be the very thing an overwrite
+// would destroy. No caller treats it as absent, which would write over it
+// with no prompt: the secret-bearing path reports a conflict and lets an
+// interactive resolver choose, since replacing a file needs only write
+// permission on its directory; the repository-file path and drift refuse the
+// entry outright, because there is no content to show a diff against.
+fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
+    if !filesystem.path_exists(target.path()) {
+        return TargetState::Absent;
+    }
+
+    match filesystem.read_file_bytes(target.path()) {
+        Ok(bytes) => TargetState::Readable(bytes),
+        Err(e) => TargetState::Unreadable(e),
+    }
 }
 
 /// Outcome of handling one secret-bearing entry.
@@ -1083,22 +1104,9 @@ where
 
     /// What is at the target: absent, readable, or present but unreadable.
     ///
-    /// Conflating any two of those loses a credential. Read as raw bytes because
-    /// neither side is guaranteed to be UTF-8, and a lossy decode would report
-    /// two different files as identical.
+    /// Conflating any two of those loses a credential.
     fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
-        if !self.filesystem.path_exists(target.path.path()) {
-            return TargetState::Absent;
-        }
-
-        match self.filesystem.read_file_bytes(target.path.path()) {
-            Ok(bytes) => TargetState::Readable(bytes),
-            // An unreadable file is still a file, and it may well be the
-            // credential we would be destroying. Treating it as absent would
-            // overwrite it with no prompt, which is what the repository-file
-            // path avoids by routing an unreadable target into a conflict.
-            Err(_) => TargetState::Unreadable,
-        }
+        read_target_state(self.filesystem, &target.path)
     }
 
     /// Settle a target whose content already matches — including its mode.
@@ -1309,6 +1317,43 @@ fn unmanaged_symlink_reason<F: FileSystem>(
 // subject is claims going stale.
 fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
+}
+
+// Why an entry whose target exists but could not be read is refused, worded the
+// same by apply and drift. A symlink whose destination cannot be read is a
+// symlinked target first, which is the refusal every command already shares;
+// only a plain file gets the read failure.
+fn unreadable_target_refusal<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    target: &TargetPath,
+    error: &FileSystemError,
+) -> String {
+    match filesystem.symlink_refusal(target) {
+        Some(refusal) => refusal_warning(source, &refusal),
+        None => format!(
+            "Skipping '{source}': target '{}' exists but could not be read: {error}",
+            target.display()
+        ),
+    }
+}
+
+// The target's bytes if the entry can go on to a decision: `None` for an absent
+// target, `Err(warning)` for one that exists and could not be read. Apply and
+// drift both classify through here, so they cannot answer differently about one
+// file.
+fn readable_target<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    target: &TargetPath,
+) -> Result<Option<Vec<u8>>, String> {
+    match read_target_state(filesystem, target) {
+        TargetState::Absent => Ok(None),
+        TargetState::Readable(bytes) => Ok(Some(bytes)),
+        TargetState::Unreadable(e) => {
+            Err(unreadable_target_refusal(filesystem, source, target, &e))
+        }
+    }
 }
 
 // Both track handlers word a refused track. Same `FileSystemError` apply renders,
@@ -1724,17 +1769,21 @@ where
             };
 
             let source_checksum = compute_checksum(source_content.as_bytes());
-            let target_exists = filesystem.path_exists(target_path.path());
 
-            // Read target if exists
-            let target_checksum = if target_exists {
-                match filesystem.read_file(target_path.path()) {
-                    Ok(content) => compute_checksum(content.as_bytes()),
-                    Err(_) => String::new(),
+            // Ahead of the decision, like the fifo refusal, so it holds under
+            // `auto_accept`, under an interactive resolver, and in a dry run. The
+            // bytes read here are also what the conflict diff shows, so the
+            // checksum and the diff cannot disagree about the target.
+            let current = match readable_target(filesystem, source, &target_path) {
+                Ok(current) => current,
+                Err(warning) => {
+                    sender.send_warning(warning).await;
+                    refused_count += 1;
+                    continue;
                 }
-            } else {
-                String::new()
             };
+            let target_exists = current.is_some();
+            let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
             // Detect drift
             let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
@@ -1826,8 +1875,12 @@ where
                 DeployDecision::Conflict => {
                     // Build the diff for display/resolution (needed by both
                     // the resolver and the fallback conflict event).
+                    //
+                    // An absent target decides `Deploy`, so a conflict always has
+                    // bytes; the default is never reached. Lossy only for
+                    // display: the checksum above compared the raw bytes.
                     let target_content =
-                        filesystem.read_file(target_path.path()).unwrap_or_default();
+                        String::from_utf8_lossy(current.as_deref().unwrap_or_default());
                     let diff = unified_diff(
                         &target_content,
                         &source_content,
@@ -2096,19 +2149,26 @@ where
             };
             let source_checksum = compute_checksum(source_content.as_bytes());
 
-            // `read_file` follows a final-component symlink, so a symlinked target
-            // is checksummed by its destination. Following the link is deliberate:
-            // not following would change the drift type, and with it the counts
-            // `sync status` reads.
-            let target_exists = filesystem.path_exists(target_path.path());
-            let target_checksum = if target_exists {
-                match filesystem.read_file(target_path.path()) {
-                    Ok(content) => compute_checksum(content.as_bytes()),
-                    Err(_) => String::new(),
+            // `read_file_bytes` follows a final-component symlink, so a symlinked
+            // target is checksummed by its destination. Following the link is
+            // deliberate: not following would change the drift type, and with it
+            // the counts `sync status` reads.
+            let current = match readable_target(filesystem, source, &target_path) {
+                Ok(current) => current,
+                Err(warning) => {
+                    sender.send_warning(warning).await;
+                    // Refused and not examined, unlike the per-entry refusals
+                    // above it: a green "0 drifted" over a target drift could
+                    // not read is a false success, which outranks parity with
+                    // its neighbors, and `sync status` renders the total as
+                    // "N deployed".
+                    refused_count += 1;
+                    total_count -= 1;
+                    continue;
                 }
-            } else {
-                String::new()
             };
+            let target_exists = current.is_some();
+            let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
             let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
             let decision =
