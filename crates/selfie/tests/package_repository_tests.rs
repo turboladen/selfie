@@ -109,7 +109,6 @@ environments:
 
 // A package directory behind a parent that denies access exists, so listing it
 // is an IO error rather than a directory the user should create.
-#[cfg(unix)]
 #[test]
 fn a_package_directory_behind_an_unreadable_parent_is_not_reported_missing() {
     use selfie::package::port::PackageListError;

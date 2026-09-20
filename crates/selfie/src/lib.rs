@@ -15,6 +15,13 @@
 //! - [`validation`] — validation types
 //! - [`yaml`] — reading YAML files
 
+// Every non-unix code path was unbuilt by CI and silently disabled a security
+// check, so the workspace refuses to build on a non-unix target. The guard is
+// wider than the supported set: macOS and Linux are the targets CI builds and
+// tests, and another unix target compiles here without being one of them.
+#[cfg(not(unix))]
+compile_error!("selfie builds only on unix targets; macOS and Linux are the supported ones");
+
 pub mod commands;
 pub mod config;
 pub mod dotfile_service;

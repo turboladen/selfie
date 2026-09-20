@@ -9,7 +9,6 @@ pub mod events;
 pub mod fixtures;
 pub mod package;
 pub mod runner;
-#[cfg(unix)]
 pub mod scripts;
 pub mod secrets;
 pub mod service;
@@ -33,7 +32,6 @@ pub use fixtures::{
 };
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use runner::FakeCommandRunner;
-#[cfg(unix)]
 pub use scripts::write_executable;
 pub use secrets::assert_secret_free;
 pub use service::{

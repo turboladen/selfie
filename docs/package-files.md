@@ -881,11 +881,10 @@ file's parent directory — the same base that `source` paths resolve against. T
 shell, so pipes, redirection, and `$(…)` are available.
 
 That shell is your **login shell** — `$SHELL -l -c`, falling back to `/bin/sh` when `SHELL` is
-unset, and without `-l` on non-Unix. It is the same shell `selfie package install`, `check` and
-`audit` use, and the same one the MCP server uses, so a command written in fish or zsh syntax
-behaves identically however you invoke it. Because the login profile is sourced, anything your
-profile _sets_ rather than exports — `SSH_AUTH_SOCK`, `OP_*` variables, PATH additions — is
-available to a provider command.
+unset. It is the same shell `selfie package install`, `check` and `audit` use, and the same one the
+MCP server uses, so a command written in fish or zsh syntax behaves identically however you invoke
+it. Because the login profile is sourced, anything your profile _sets_ rather than exports —
+`SSH_AUTH_SOCK`, `OP_*` variables, PATH additions — is available to a provider command.
 
 **Only what your command itself writes to stdout becomes the file's content.** The shell's own
 output does not: selfie hands the shell a stdout of `/dev/null` and captures the command's on a
@@ -926,9 +925,6 @@ there a command could not already reach.
 
 A command that `cd`s, or a profile that does, still changes the working directory the command ends
 up in — that has always been true.
-
-On Windows there is no separation: `cmd.exe` has no login profile to source, and nothing
-distinguishes its output from the command's.
 
 Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
 your existing target lacks it you will get a conflict on first apply. Strip it in your own command

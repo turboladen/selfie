@@ -1169,7 +1169,6 @@ mod tests {
     // mocked fixture would pass against the unguarded code and prove nothing.
     // The deadline is what turns a regression into a failure instead of a wedged
     // suite -- the read blocks on this thread, so no async timeout would fire.
-    #[cfg(unix)]
     #[test]
     fn a_fifo_template_is_refused_by_validate() {
         use std::sync::mpsc;
@@ -1446,7 +1445,6 @@ mod tests {
     // the hang. The deadline is what turns a regression into a failure rather
     // than a wedged suite; the read blocks on the spawned thread, so no async
     // timeout would fire.
-    #[cfg(unix)]
     fn package_dir_with_a_fifo_spec() -> (TempDir, PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("packages");
@@ -1464,7 +1462,6 @@ mod tests {
         (temp_dir, package_dir)
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_fifo_spec_does_not_block_list_packages() {
         use std::sync::mpsc;
@@ -1496,7 +1493,6 @@ mod tests {
         assert!(invalid[0].contains("named pipe (fifo)"), "got: {invalid:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_fifo_spec_does_not_block_get_package() {
         use std::sync::mpsc;

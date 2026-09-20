@@ -66,13 +66,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// # Strength of the guarantee
     ///
-    /// On Unix the mode is `0o600` masked by the umask — never more permissive.
-    /// On Windows the atomic replace holds but owner-only is best-effort, the
-    /// file inheriting the parent directory's ACL, and the replace also fails if
-    /// the target is open in another process. On any other platform there is **no
-    /// owner-only guarantee at all**: the call may succeed and create the file
-    /// with default permissions. Do not treat a non-Unix, non-Windows target as
-    /// fail-safe.
+    /// The mode is `0o600` masked by the umask — never more permissive.
     ///
     /// # Errors
     ///
@@ -114,10 +108,8 @@ pub trait FileSystem: Send + Sync {
     /// against power loss only where the filesystem honors `fsync` — macOS does
     /// not. The directory flush covers only the immediate parent.
     ///
-    /// On Unix a link planted concurrently is refused just the same, there being
-    /// no interval between deciding and writing. On other platforms the check
-    /// precedes the write, so a concurrent planter can win: a mitigation there,
-    /// not a guarantee.
+    /// A link planted concurrently is refused just the same, there being no
+    /// interval between deciding and writing.
     ///
     /// # Errors
     ///
@@ -177,13 +169,8 @@ pub trait FileSystem: Send + Sync {
     /// permissions are independent: a target whose bytes already match may still
     /// be world-readable.
     ///
-    /// # Platform notes
-    ///
-    /// On Unix this is exact: true when no group or other permission bit is set.
-    /// Symlinks are followed, so it reports on the file the path resolves to.
-    ///
-    /// On every other platform it returns `true`, meaning "nothing to tighten"
-    /// rather than a claim that the file is private.
+    /// True when no group or other permission bit is set. Symlinks are
+    /// followed, so it reports on the file the path resolves to.
     ///
     /// # Errors
     ///

@@ -20,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 /// have HOME set, which breaks tilde expansion in config paths. We do this
 /// before tokio starts so set_var is safe (truly single-threaded).
 fn ensure_home_env() {
-    #[cfg(unix)]
     if std::env::var("HOME").is_err() {
         use std::ffi::CStr;
         let pw = unsafe { libc::getpwuid(libc::getuid()) };

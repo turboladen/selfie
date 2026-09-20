@@ -11,8 +11,8 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap = { version = "4.5.31", features = ["derive"] }
 clap_complete = { version = "4.5", features = ["unstable-dynamic"] }
-etcetera = "0.11"
-shellexpand = "3.1"
+etcetera.workspace = true
+shellexpand.workspace = true
 comfy-table = { version = "8.0.0", features = ["custom_styling"] }
 console.workspace = true
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
@@ -30,16 +30,14 @@ tracing-subscriber.workspace = true
 assert_cmd = "2.0"
 uuid.workspace = true
 mockall.workspace = true
+# "fs" is for `mkfifo`. The snippet reader opens a file the repository already
+# read, and a fifo at that path blocks on open — the guard against that is only
+# watchable with a real one, since a mock cannot block. Same reason as the
+# entry in `crates/selfie/Cargo.toml`.
+nix = { version = "0.31", features = ["fs"] }
 predicates = "3.1"
 selfie = { path = "../selfie/", features = ["with_mocks"] }
 serde-saphyr.workspace = true
 tempfile.workspace = true
 test-common = { path = "../test-common/" }
 tokio-test = "0.4"
-
-[target.'cfg(unix)'.dev-dependencies]
-# "fs" is for `mkfifo`. The snippet reader opens a file the repository already
-# read, and a fifo at that path blocks on open — the guard against that is only
-# watchable with a real one, since a mock cannot block. Same reason as the
-# entry in `crates/selfie/Cargo.toml`.
-nix = { version = "0.31", features = ["fs"] }
