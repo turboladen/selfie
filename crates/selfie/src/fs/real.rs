@@ -96,7 +96,8 @@ fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
 /// durability reaches.
 #[derive(Clone, Copy)]
 enum Replacement {
-    /// Replace a symlink; create owner-only. The parent directory is not fsynced.
+    /// Replace a symlink that does not resolve to an irregular target; create
+    /// owner-only. The parent directory is not fsynced.
     // The deploy state is written this way and must stay less durable than the
     // targets it records: a record outliving the write it describes turns a
     // lost deploy into a conflict blamed on the user. `save_deploy_state` says
@@ -111,8 +112,8 @@ enum Replacement {
 ///
 /// # Errors
 ///
-/// A refusal for a symlink (`KeepingMode` only) or an irregular target present
-/// when checked, or an IO error naming `path` for anything else.
+/// A refusal for an irregular target, or for a symlink under `KeepingMode`,
+/// present when checked; or an IO error naming `path` for anything else.
 fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), FileSystemError> {
     use std::io::Write as _;
 
@@ -146,12 +147,14 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // below, never followed or opened, and the write succeeds.
     //
     // Symlink first: a link to a fifo would otherwise be reported as a fifo,
-    // naming the wrong problem and suggesting the wrong fix.
+    // naming the wrong problem and suggesting the wrong fix. The irregular
+    // check follows links, so a private write refuses a link to a fifo too:
+    // renaming over a fifo, or over a link to one, would silently destroy it.
     let keep_mode = matches!(how, Replacement::KeepingMode);
     if keep_mode && let Some(refusal) = symlink_refusal(path) {
         return Err(refusal);
     }
-    if keep_mode && let Some(refusal) = irregular_refusal(path) {
+    if let Some(refusal) = irregular_refusal(path) {
         return Err(refusal);
     }
 
@@ -638,8 +641,10 @@ fn mode_of(path: &Path) -> u32 {
 // the port offers.
 
 // Everything in `unix` is load-bearing: against `create_dir_all` + `fs::write`,
-// every one of them that runs here fails, and none of the six above does. The
-// `/dev/shm` test is Linux-only and is not part of that claim.
+// every one of them that runs here fails, and none of the six above does. Two
+// are not part of that claim: the `/dev/shm` test is Linux-only, and
+// `refuses_a_fifo_rather_than_renaming_over_it` would hang on a following
+// open rather than fail.
 #[cfg(test)]
 mod private_write_tests {
     use super::*;
@@ -832,6 +837,36 @@ mod private_write_tests {
             drop(held);
         }
 
+        // A fifo at a secret target is refused, not renamed over: the rename
+        // would destroy whatever was reading it, and the secret path checks
+        // for exactly this before it resolves the content.
+        #[test]
+        fn refuses_a_fifo_rather_than_renaming_over_it() {
+            use std::os::unix::fs::FileTypeExt as _;
+
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("creds");
+            nix::unistd::mkfifo(&target, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+            let err = RealFileSystem
+                .write_file_private(&tp(&target), b"secret")
+                .unwrap_err();
+
+            match err {
+                FileSystemError::IrregularTarget { kind, .. } => {
+                    assert_eq!(kind, "named pipe (fifo)");
+                }
+                other => panic!("expected an irregular-target refusal, got {other:?}"),
+            }
+            assert!(
+                fs::symlink_metadata(&target).unwrap().file_type().is_fifo(),
+                "the fifo must be left in place"
+            );
+            assert_eq!(entries(dir.path()), ["creds"]);
+        }
+
+        // The failure names the file it was writing, as the ordinary writer's
+        // does, and the original survives it.
         #[test]
         fn errors_when_the_parent_directory_is_not_writable() {
             if nix::unistd::Uid::effective().is_root() {
@@ -849,13 +884,21 @@ mod private_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
-            let result = RealFileSystem.write_file_private(&tp(&target), b"secret");
+            let err = RealFileSystem
+                .write_file_private(&tp(&target), b"secret")
+                .unwrap_err();
 
-            assert!(result.is_err());
-            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
-
-            // Restore write access so the temporary directory can be cleaned up.
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(matches!(err, FileSystemError::IoError(_)), "got {err:?}");
+            let message = err.to_string();
+            assert!(
+                message.contains(target.to_str().unwrap()),
+                "the failure does not name the target: {message}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"old", "target was modified");
         }
 
         // Pins the temporary file to the target's own directory.

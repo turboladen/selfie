@@ -23,9 +23,10 @@ use crate::fs::target::TargetPath;
 /// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | kept | yes |
 ///
 /// Secret-bearing content takes the first; everything else takes the second.
-/// Neither follows a link at the final component, and both still follow
-/// symlinked **parent** directories — a planted directory symlink can redirect
-/// where a file lands either way.
+/// Neither follows a link at the final component, and neither renames over a
+/// fifo, socket or device node, including one a link resolves to. Both still
+/// follow symlinked **parent** directories — a planted directory symlink can
+/// redirect where a file lands either way.
 #[cfg_attr(feature = "with_mocks", mockall::automock)]
 pub trait FileSystem: Send + Sync {
     /// Read a file's contents as a UTF-8 string, all of it into memory.
@@ -70,11 +71,13 @@ pub trait FileSystem: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`FileSystemError`] if the parent directory cannot be created, the
-    /// temporary file cannot be created or written, the rename into place fails,
-    /// or flushing to disk fails — which can happen after the write itself
-    /// succeeded, `ENOSPC` surfacing only at flush time being the usual case.
-    /// Every such error names the target path.
+    /// [`FileSystemError::IrregularTarget`] if the path resolves to a fifo,
+    /// socket or device node, which is left as it is rather than renamed over.
+    /// Otherwise [`FileSystemError`] if the parent directory cannot be created,
+    /// the temporary file cannot be created or written, the rename into place
+    /// fails, or flushing to disk fails — which can happen after the write
+    /// itself succeeded, `ENOSPC` surfacing only at flush time being the usual
+    /// case. Every such error names the target path.
     ///
     /// Like [`write_file_no_follow`](FileSystem::write_file_no_follow), this
     /// cannot succeed on an existing file inside a directory the caller cannot

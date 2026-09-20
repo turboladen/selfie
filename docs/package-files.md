@@ -730,6 +730,8 @@ by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
 
 A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
 reason. A **directory** at the target is not in this group; it is reported as an ordinary error.
+Provider-sourced and templated entries refuse these targets too, and so does the deploy-state file:
+selfie renames nothing over a pipe, socket or device that is there when it checks.
 
 #### `selfie dotfiles track` refuses a symlinked target
 
