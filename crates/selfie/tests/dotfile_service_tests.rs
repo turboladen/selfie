@@ -1472,6 +1472,45 @@ async fn a_state_file_carrying_the_removed_target_field_still_loads() {
     }
 }
 
+// A spec the collection could not parse leaves part of the check undone, and
+// `unloaded_specs` is what a caller reads to learn that. The count comes from
+// the same warnings the run relays, so the two cannot disagree.
+#[tokio::test]
+async fn check_drift_counts_a_spec_it_could_not_load() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    std::fs::write(&target_file, "key = \"value\"").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+    std::fs::write(dirs.package_dir.join("broken.yml"), "environments: {oops\n").unwrap();
+
+    let events = collect_events(dirs.service().check_drift().await).await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            unloaded_specs,
+            refused_count,
+            ..
+        }) => {
+            assert_eq!(*unloaded_specs, 1, "events: {events:?}");
+            // Not a refusal: nothing declined to act here, and the remedy is
+            // the user's to apply to the file, so conflating the two would
+            // point a caller at the wrong fix.
+            assert_eq!(*refused_count, 0, "events: {events:?}");
+        }
+        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_dry_run_does_not_persist_state() {
     let dirs = TestDirs::new();

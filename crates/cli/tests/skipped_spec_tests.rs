@@ -166,3 +166,74 @@ fn apply_naming_no_package_fails() {
         "output was: {text}"
     );
 }
+
+fn drift_output(temp_dir: &tempfile::TempDir) -> (Option<i32>, String, String) {
+    let output = sandboxed_command(temp_dir)
+        .args(["dotfiles", "drift"])
+        .output()
+        .unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// `dotfiles drift` printed its clean check directly under the warning naming a
+// spec it could not load, so a run that examined none of that spec's dotfiles
+// read as all clear. The clean line and the incomplete one carry the same
+// sentence and differ only by stream and marker -- success to stdout with a
+// check mark, warning to stderr -- so both are asserted.
+#[test]
+fn drift_does_not_claim_a_clean_check_over_a_spec_it_could_not_load() {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+
+    let (code, stdout, stderr) = drift_output(&temp_dir);
+
+    assert!(
+        stderr.contains("creds.yml"),
+        "must name the spec it could not load: {stderr}"
+    );
+    assert!(
+        !stdout.contains("✓ Dotfile drift check"),
+        "must not claim a clean check over an unloaded spec: {stdout}"
+    );
+    assert!(
+        stderr.contains("⚠ Dotfile drift check"),
+        "must report the check as incomplete: {stderr}"
+    );
+    assert!(
+        stderr.contains("1 not loaded"),
+        "must count the spec it could not load: {stderr}"
+    );
+    // An unloaded spec is a file the user has to fix rather than something
+    // selfie refused, so the command still exits 0, as `sync status` does.
+    assert_eq!(code, Some(0), "output was: {stdout}{stderr}");
+}
+
+// Control for the assertion above: with every spec loadable the clean check is
+// still printed, to stdout, with nothing reported as unloaded. Without this, a
+// build that never prints the line at all would satisfy the negative.
+#[test]
+fn drift_reports_a_clean_check_when_every_spec_loads() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages_dir).unwrap();
+    fs::write(
+        packages_dir.join("good.yml"),
+        "name: good\nenvironments:\n  test-env:\n    install: \"true\"\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = drift_output(&temp_dir);
+
+    assert!(
+        stdout.contains("✓ Dotfile drift check"),
+        "a check with every spec loaded is clean: {stdout}"
+    );
+    assert!(
+        stdout.contains("0 not loaded"),
+        "nothing was skipped, and the line says so: {stdout}"
+    );
+    assert_eq!(code, Some(0), "output was: {stdout}{stderr}");
+}

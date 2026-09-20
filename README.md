@@ -132,6 +132,13 @@ manager?" problem without forcing you into a single ecosystem.
 
 ## Installation
 
+### Supported platforms
+
+selfie runs on macOS and Linux. Windows is not supported: nothing in this project builds or tests
+it, parts of the test suite do not compile there, and dotfile deployment assumes Unix file
+permissions throughout. A Windows build is not expected to work, and a green one would not mean
+selfie had been verified on it.
+
 ### From Source
 
 ```bash
