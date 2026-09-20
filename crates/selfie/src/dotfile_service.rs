@@ -23,6 +23,7 @@
 //! - `resolve` — Apply-time content resolution for secret-bearing entries
 //! - `refusal` — What is at a deploy target, and how a refused deploy is worded
 //! - `secret` — Deploying the secret-bearing entries of one package
+//! - `warning` — What collecting packages found worth saying, and name collisions
 //! - [`semantic`] — Heuristic analysis of shell config files for duplicate-detection warnings
 //! - `template` — Named-value substitution for templated dotfiles
 //! - `state_file` — Reading and writing the deploy-state file
@@ -44,3 +45,4 @@ pub mod state;
 mod state_file;
 pub(crate) mod template;
 pub mod track;
+mod warning;
