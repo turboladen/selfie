@@ -81,7 +81,8 @@ package_directory: ~/.config/selfie/packages
 # Directory for standalone dotfile definitions (default: sibling of package_directory)
 dotfiles_directory: ~/.config/selfie/dotfiles
 
-# Directory for deploy state tracking (default: ~/.local/state/selfie)
+# Directory for deploy state tracking (default: ~/.local/state/selfie).
+# A directory named here must already exist; only the default is created for you.
 state_directory: ~/.local/state/selfie
 
 # Command timeout in seconds (default: 60)
@@ -197,16 +198,26 @@ never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` h
 state_directory: ~/.local/state/selfie
 ```
 
+A directory you name must already exist, be a directory, and be an absolute path, as
+`package_directory` must: with the line above in the file, `selfie apply` refuses until
+`~/.local/state/selfie` is created. Leave the setting out and selfie creates that same default on
+its first write. `selfie config validate` reports the directory in effect either way.
+
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
 
-If the file exists but cannot be read or parsed, selfie says so — naming the file and whether it was
-the read or the contents that failed — and then proceeds as though nothing had been deployed. Every
-tracked dotfile looks untracked for that run, which turns routine applies into conflict prompts.
-**Answering them writes a fresh state file over the unusable one**, so anything that was salvageable
-in it is gone; if the contents matter to you, copy the file aside before running `selfie apply` or
-`selfie dotfiles track` again. Preserving it automatically is tracked, deferred rather than
-overlooked. An **absent** state file is the ordinary first-run case and is not reported.
+If the file exists but selfie cannot use it — it cannot be read, it is empty, or it does not parse —
+selfie names the file and says which. `selfie apply` and `selfie dotfiles track` then **refuse to
+run** until you repair the file or move it aside, because either command would end by writing the
+state back and selfie never writes over a state file it could not read. `selfie dotfiles drift` and
+`selfie apply --dry-run` write nothing, so they warn and carry on as though nothing had been
+deployed: every tracked dotfile shows as untracked for that run. An **absent** state file is the
+ordinary first-run case and is not reported.
+
+Entries are keyed by the target path, so one source deployed to two targets is two records. A state
+file written by an earlier selfie, whose entries were keyed by source, does not parse and is refused
+the same way. Move it aside and run `selfie apply` once: every target whose content already matches
+its source is recorded again without a prompt, and only a target that genuinely differs asks.
 
 It is written readable only by its owner (mode `0600`). Its contents are not credentials, but they
 name each repository-file dotfile selfie manages here, which is a useful map to anyone else with an
@@ -351,14 +362,14 @@ path settings in the configuration file; a flag value is used exactly as typed. 
 bare `~/packages`, but neither bash nor zsh expands `--package-directory=~/packages`, so that form
 reaches selfie as the literal string and fails with `Package directory not found: ~/packages` even
 though the identical value works in the file. Use the separated form (`-p ~/packages`) or an
-absolute path. Flag values also skip the absolute-path check `selfie config validate` applies to the
-file.
+absolute path. `selfie config validate` reads only the file, so it checks no flag value; a relative
+`--state-directory` is refused when the command runs instead.
 
-Only `--package-directory` fails loudly, and the other two fail differently from each other:
+`--package-directory` and `--state-directory` fail loudly; `--dotfiles-directory` does not:
 
-- `--state-directory='~/state'` **creates a directory literally named `~`** in the current working
-  directory and reports success, so `selfie --state-directory='~/state' apply -y` exits 0 having
-  written its deploy state somewhere nobody will look for it.
+- `--state-directory='~/state'` is refused as not absolute, and a directory that is absolute but
+  does not exist is refused by name, so `selfie --state-directory='~/state' apply -y` exits 1 and
+  creates nothing.
 - `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
   dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
   `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,

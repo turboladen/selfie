@@ -25,7 +25,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::{
             TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
-            repository_path, state_file_path,
+            repository_path,
         },
     },
     package::{
@@ -41,9 +41,9 @@ use crate::{
 };
 
 use super::port::{ApplyOptions, DotfileService};
-
-/// Default deploy state filename
-const DEPLOY_STATE_FILENAME: &str = "deploy-state.yml";
+use super::state_file::{
+    LoadedState, StateLoad, load_deploy_state, read_only_state_warning, save_deploy_state,
+};
 
 /// How a cancelled apply is reported.
 ///
@@ -384,114 +384,6 @@ where
     }
 }
 
-fn deploy_state_path<F: FileSystem>(
-    filesystem: &F,
-    config: &SelfieConfig,
-) -> Result<TargetPath, FileSystemError> {
-    state_file_path(
-        filesystem,
-        config.state_directory().map(PathBuf::as_path),
-        DEPLOY_STATE_FILENAME,
-    )
-}
-
-/// Load the deploy state, or an empty one if it cannot be used.
-///
-/// The second return is a warning naming the file and what went wrong. An absent
-/// file is the ordinary first run and warns nothing; a file that cannot be located,
-/// read, or parsed each warn differently, because the fixes differ.
-///
-/// Never fails: callers always proceed with whatever state came back. An empty one
-/// costs a round of conflict prompts, where refusing to run would block every apply
-/// until someone repairs the file by hand.
-fn load_deploy_state<F: FileSystem>(
-    filesystem: &F,
-    config: &SelfieConfig,
-) -> (DeployState, Option<String>) {
-    /// What each message says happens next, so the part that differs between them
-    /// is the condition and the path rather than the consequence.
-    const IGNORED: &str = "continuing as though nothing had been deployed";
-
-    let path = match deploy_state_path(filesystem, config) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                DeployState::empty(),
-                Some(format!(
-                    "Cannot locate the deploy state file: {e}; {IGNORED}"
-                )),
-            );
-        }
-    };
-    if !filesystem.path_exists(path.path()) {
-        return (DeployState::empty(), None);
-    }
-    let content = match filesystem.read_file(path.path()) {
-        Ok(content) => content,
-        Err(e) => {
-            return (
-                DeployState::empty(),
-                Some(format!(
-                    "Cannot read deploy state '{}': {e}; {IGNORED}",
-                    path.display()
-                )),
-            );
-        }
-    };
-
-    // This message reaches the MCP server's JSON. No credential can be in it --
-    // secret-bearing entries record nothing (ADR-0003) -- but the file names every
-    // repository-file dotfile on the machine, each with a checksum, which is why
-    // `save_deploy_state` writes it owner-only.
-    //
-    // `crate::yaml::parse` is what keeps the file's keys and values out:
-    // serde-saphyr's `Display` interpolates parsed content into several messages,
-    // and the duplicate-key one quotes the key, which here is a dotfile source
-    // path. A line, a column, and the single character a scanner failure stopped
-    // on still get through; the reasoning for accepting those is on `ParseFailure`.
-    match crate::yaml::parse(&content) {
-        Ok(state) => (state, None),
-        Err(e) => (
-            DeployState::empty(),
-            Some(format!(
-                "Cannot parse deploy state '{}': {e}; {IGNORED}",
-                path.display(),
-            )),
-        ),
-    }
-}
-
-/// Write the deploy state, owner-only where the platform allows it.
-///
-/// Owner-only because the file names every repository-file dotfile selfie manages
-/// here, with checksums — no credentials, but a reconnaissance aid on a shared
-/// host. Secret-bearing entries record nothing, so this is not a complete list.
-///
-/// # Errors
-///
-/// [`FileSystemError`] if the state path cannot be resolved, the state cannot be
-/// serialized, or the write fails.
-fn save_deploy_state<F: FileSystem>(
-    filesystem: &F,
-    config: &SelfieConfig,
-    state: &DeployState,
-) -> Result<(), FileSystemError> {
-    // Deliberately less durable than `write_file_no_follow`: both sync the file's
-    // data before renaming, and `write_file_private` skips the directory fsync,
-    // which is the safe direction. Losing this file costs nothing — the next run
-    // re-derives it.
-    //
-    // Do not "fix" that by syncing harder. A record only lies when it outlives the
-    // write it describes, so making the state survive a crash the target write did
-    // not would widen that window. The ordering is established at the other end:
-    // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
-    let path = deploy_state_path(filesystem, config)?;
-    let yaml = serde_saphyr::to_string(state).map_err(|e| {
-        FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(e.to_string())))
-    })?;
-    filesystem.write_file_private(&path, yaml.as_bytes())
-}
-
 /// Check that a name is safe for use as a filesystem path component.
 ///
 /// Rejects names containing path separators, `..`, or characters outside
@@ -785,7 +677,6 @@ where
                         dotfiles_repo.as_ref(),
                         &fs,
                         &config,
-                        &sender,
                     )
                     .await
                 }
@@ -816,15 +707,7 @@ where
             let result = match refusal {
                 Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
                 None => {
-                    handle_track_for_package(
-                        &package_name,
-                        &target_path,
-                        &repo,
-                        &fs,
-                        &config,
-                        &sender,
-                    )
-                    .await
+                    handle_track_for_package(&package_name, &target_path, &repo, &fs, &config).await
                 }
             };
 
@@ -1446,15 +1329,18 @@ fn track_target_refusal(target: &str, rejection: TargetRejection) -> String {
 struct DeployUnit<'a> {
     source_path: &'a Path,
     target_path: &'a TargetPath,
+    /// `target_path` as the deploy state keys it.
+    target_key: &'a str,
     source_content: &'a str,
     source_checksum: &'a str,
-    source_key: &'a str,
+    /// The entry's `source` as the spec names it, recorded beside the checksum.
+    source: &'a str,
 }
 
-/// Deploy a single config file to its target path, updating state and emitting events.
+/// Deploy a single config file to its target path and emit events. Records
+/// nothing: the caller records and saves once the write is known to have landed.
 async fn perform_deploy<F: FileSystem>(
     filesystem: &F,
-    deploy_state: &mut DeployState,
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     dry_run: bool,
@@ -1492,25 +1378,79 @@ async fn perform_deploy<F: FileSystem>(
         // that unpinned half can drift.
         let message = match &e {
             FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
-                refusal_warning(unit.source_key, &e)
+                refusal_warning(unit.source, &e)
             }
             _ => format!("Failed to write: {e}"),
         };
         sender.send_warning(message).await;
-        // `Err` has the caller count this as refused and leaves the deploy state
-        // untouched, so nothing is recorded as deployed that was not. An entry
-        // already in the state keeps its previous checksums and is stale rather than
-        // untracked, which is the honest record: a refusal writes nothing, and a
-        // failed write leaves the target as it was, so the previous checksums still
-        // describe it.
+        // `Err` has the caller count this as refused and record nothing, so
+        // nothing is recorded as deployed that was not. An entry already in the
+        // state keeps its previous checksum and is stale rather than untracked,
+        // which is the honest record: a refusal writes nothing, and a failed write
+        // leaves the target as it was, so the previous checksum still describes it.
         return Err(());
     }
-    deploy_state.record_deployment(unit.source_key, unit.source_checksum);
 
     sender
         .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
         .await;
     Ok(())
+}
+
+/// What an apply just recorded about a target.
+#[derive(Clone, Copy)]
+enum Recorded {
+    /// The target was written.
+    Deployed,
+    /// The target already matched its source and was left alone.
+    InSync,
+}
+
+impl std::fmt::Display for Recorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Recorded::Deployed => write!(f, "Deployed"),
+            Recorded::InSync => write!(f, "Found in sync"),
+        }
+    }
+}
+
+/// Record `unit` in the loaded state and write the state back. On failure,
+/// warns with what happened to the target and returns the reason the run stops.
+// A dry run has no loaded state and records nothing. The state is written
+// after every record, so a run that cannot write it has recorded everything
+// before the failing entry. Stopping on the first failure keeps the
+// unrecorded set to one entry: a state directory that refused this write
+// refuses the next one too. An unrecorded target is re-evaluated by the next
+// run as untracked: one whose content still matches its source is recorded
+// silently through the in-sync skip arm, and only one whose source has
+// changed since is asked about.
+async fn record_and_save<F: FileSystem>(
+    filesystem: &F,
+    loaded: &mut Option<LoadedState>,
+    sender: &EventSender,
+    recorded: Recorded,
+    unit: &DeployUnit<'_>,
+) -> Option<String> {
+    let loaded = loaded.as_mut()?;
+    loaded
+        .state_mut()
+        .record_deployment(unit.target_key, unit.source, unit.source_checksum);
+    let Err(e) = save_deploy_state(filesystem, loaded) else {
+        return None;
+    };
+    // `e` already names the state file, so the message does not repeat it.
+    sender
+        .send_warning(format!(
+            "{recorded} '{}' but cannot record it: {e}",
+            unit.target_path.display()
+        ))
+        .await;
+    Some(format!(
+        "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
+         it once the state can be written",
+        unit.target_path.display()
+    ))
 }
 
 /// Everything an apply needs that does not vary from package to package.
@@ -1553,10 +1493,23 @@ where
         token,
     } = *ctx;
 
-    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
-    if let Some(warning) = state_warning {
-        sender.send_warning(&warning).await;
-    }
+    // A run that writes refuses to start over a state file it could not read:
+    // proceeding would deploy files it can never record, and the next run would
+    // re-evaluate every one of them as untracked. A dry run writes nothing, so it
+    // warns instead and previews against an empty state.
+    let mut loaded = match load_deploy_state(filesystem, config) {
+        StateLoad::Usable(loaded) => Some(loaded),
+        StateLoad::Unusable(failure) if options.dry_run => {
+            sender.send_warning(read_only_state_warning(&failure)).await;
+            None
+        }
+        StateLoad::Unusable(failure) => {
+            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+        }
+    };
+    // What a dry run over an unusable state file reads drift against. Only a dry
+    // run leaves `loaded` as `None`, and a dry run records nothing.
+    let empty = DeployState::empty();
 
     let mut deployed_count: usize = 0;
     let mut skipped_count: usize = 0;
@@ -1572,12 +1525,13 @@ where
     // never reached the repository-file path until now.
     let mut refused_count = usize::from(refused_repository);
 
-    // Set when `stop_on_error` aborts the run. Held rather than returned so the
-    // deploy state below is still saved.
+    // Set when the run stops early. Held rather than returned so every stop
+    // reports through the one failure below.
     //
-    // Note this flag currently governs secret-resolution failures only. The
-    // repository-file failure paths in this loop have always continued past an
-    // error, and changing that is a behavior change beyond this feature.
+    // `stop_on_error` governs secret-resolution failures only: a repository-file
+    // refusal or write failure is counted and the loop continues. A failed state
+    // record stops the run whatever `stop_on_error` says, because the next entry
+    // would fail the same way.
     let mut stopped: Option<String> = None;
 
     'packages: for package in packages {
@@ -1658,13 +1612,6 @@ where
                                 break 'packages;
                             }
                             if config.stop_on_error() {
-                                // Break rather than return: anything already
-                                // deployed in this run has been written to disk
-                                // and recorded in the in-memory deploy state, and
-                                // returning here would discard that record while
-                                // leaving the files in place. The next drift check
-                                // would then report correctly-deployed files as
-                                // untracked.
                                 stopped = Some(format!(
                                     "Stopped after failing to apply dotfile '{}' \
                                      (stop_on_error is enabled)",
@@ -1787,18 +1734,24 @@ where
             let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            // Detect drift
-            let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
-            let decision =
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
-
+            // State is keyed by the expanded target, the one path that has one
+            // file and one checksum however many sources name it.
+            let target_key = target_path.display().to_string();
             let unit = DeployUnit {
                 source_path: &source_path,
                 target_path: &target_path,
+                target_key: &target_key,
                 source_content: &source_content,
                 source_checksum: &source_checksum,
-                source_key: source,
+                source,
             };
+
+            let drift = loaded
+                .as_ref()
+                .map_or(&empty, LoadedState::state)
+                .detect_drift(&target_key, &source_checksum, &target_checksum);
+            let decision =
+                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
             // Refuse a symlinked target before anything acts on the decision, so a
             // dry run previews what a real apply would do, an interactive resolver
@@ -1823,20 +1776,26 @@ where
 
             match decision {
                 DeployDecision::Deploy => {
-                    if perform_deploy(
-                        filesystem,
-                        &mut deploy_state,
-                        sender,
-                        &unit,
-                        options.dry_run,
-                    )
-                    .await
-                    .is_ok()
+                    if perform_deploy(filesystem, sender, &unit, options.dry_run)
+                        .await
+                        .is_ok()
                     {
                         if options.dry_run {
                             skipped_count += 1;
                         } else {
                             deployed_count += 1;
+                            if let Some(reason) = record_and_save(
+                                filesystem,
+                                &mut loaded,
+                                sender,
+                                Recorded::Deployed,
+                                &unit,
+                            )
+                            .await
+                            {
+                                stopped = Some(reason);
+                                break 'packages;
+                            }
                         }
                     } else {
                         // A refusal or a write failure. `perform_deploy` has
@@ -1856,8 +1815,20 @@ where
                     //
                     // A stale answer omits an entry the next run re-evaluates.
                     // The window that could manufacture one is small, not absent.
-                    if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
-                        deploy_state.record_deployment(source, &source_checksum);
+                    if drift == DriftType::NotTracked
+                        && !options.dry_run
+                        && unmanaged.is_none()
+                        && let Some(reason) = record_and_save(
+                            filesystem,
+                            &mut loaded,
+                            sender,
+                            Recorded::InSync,
+                            &unit,
+                        )
+                        .await
+                    {
+                        stopped = Some(reason);
+                        break 'packages;
                     }
 
                     // Say why it will not settle, on the line the user is already
@@ -1923,20 +1894,26 @@ where
                     };
 
                     if accept {
-                        if perform_deploy(
-                            filesystem,
-                            &mut deploy_state,
-                            sender,
-                            &unit,
-                            options.dry_run,
-                        )
-                        .await
-                        .is_ok()
+                        if perform_deploy(filesystem, sender, &unit, options.dry_run)
+                            .await
+                            .is_ok()
                         {
                             if options.dry_run {
                                 skipped_count += 1;
                             } else {
                                 deployed_count += 1;
+                                if let Some(reason) = record_and_save(
+                                    filesystem,
+                                    &mut loaded,
+                                    sender,
+                                    Recorded::Deployed,
+                                    &unit,
+                                )
+                                .await
+                                {
+                                    stopped = Some(reason);
+                                    break 'packages;
+                                }
                             }
                         } else {
                             // The second of `perform_deploy`'s two failure sites,
@@ -1966,21 +1943,12 @@ where
     // cancellation leaves `stopped` as `None`. The run would then report success
     // for a run the user interrupted — and for a provider entry that means a
     // credential written to disk after Ctrl+C, with nothing in the stream saying
-    // so. Deploy state is still saved below, because the writes really happened.
+    // so.
     //
     // Does not overwrite an existing reason: `stop_on_error` names the entry that
     // failed, which is more specific than this.
     if stopped.is_none() && token.is_cancelled() {
         stopped = Some(APPLY_CANCELLED.to_string());
-    }
-
-    // Save deploy state (skip in dry-run mode)
-    if !options.dry_run
-        && let Err(e) = save_deploy_state(filesystem, config, &deploy_state)
-    {
-        sender
-            .send_warning(format!("Failed to save deploy state: {e}"))
-            .await;
     }
 
     if let Some(message) = stopped {
@@ -2021,10 +1989,16 @@ async fn handle_check_drift<F>(
 where
     F: FileSystem,
 {
-    let (deploy_state, state_warning) = load_deploy_state(filesystem, config);
-    if let Some(warning) = state_warning {
-        sender.send_warning(&warning).await;
-    }
+    // Drift only reads, so an unusable state file is reported and the check runs
+    // against an empty one: every entry then shows as untracked, which is the
+    // honest answer while the file cannot be read.
+    let deploy_state = match load_deploy_state(filesystem, config) {
+        StateLoad::Usable(loaded) => loaded.into_state(),
+        StateLoad::Unusable(failure) => {
+            sender.send_warning(read_only_state_warning(&failure)).await;
+            DeployState::empty()
+        }
+    };
 
     let mut drift_count: usize = 0;
     let mut total_count: usize = 0;
@@ -2179,7 +2153,11 @@ where
             let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
+            let drift = deploy_state.detect_drift(
+                &target_path.display().to_string(),
+                &source_checksum,
+                &target_checksum,
+            );
             let decision =
                 deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
@@ -2230,7 +2208,6 @@ async fn handle_track_standalone<R, F>(
     dotfiles_repo: Option<&R>,
     filesystem: &F,
     config: &SelfieConfig,
-    sender: &EventSender,
 ) -> OperationResult
 where
     R: PackageRepository,
@@ -2325,6 +2302,16 @@ where
         }
     };
 
+    // Ahead of every write below. Track ends by recording the deployment, and a
+    // state file it could not load is one it must not write over, so the copy
+    // and the spec are not created for a record that cannot be kept.
+    let mut loaded = match load_deploy_state(filesystem, config) {
+        StateLoad::Usable(loaded) => loaded,
+        StateLoad::Unusable(failure) => {
+            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+        }
+    };
+
     // Determine source filename (just the basename of the target)
     let filename = expanded_target
         .path()
@@ -2381,16 +2368,14 @@ where
 
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
-    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
-    if let Some(warning) = state_warning {
-        sender.send_warning(&warning).await;
-    }
     let source_key = format!("{name}/{filename}");
-    deploy_state.record_deployment(&source_key, &checksum);
-    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot save deploy state: {e}"
-        )));
+    loaded.state_mut().record_deployment(
+        &expanded_target.display().to_string(),
+        &source_key,
+        &checksum,
+    );
+    if let Err(e) = save_deploy_state(filesystem, &loaded) {
+        return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
     }
 
     // The recorded form, not the argument: an adapter that echoed the caller's
@@ -2413,7 +2398,6 @@ async fn handle_track_for_package<R, F>(
     repo: &R,
     filesystem: &F,
     config: &SelfieConfig,
-    sender: &EventSender,
 ) -> OperationResult
 where
     R: PackageRepository,
@@ -2507,6 +2491,15 @@ where
         }
     };
 
+    // Ahead of every write below, for the reason `handle_track_standalone`
+    // gives at the same point.
+    let mut loaded = match load_deploy_state(filesystem, config) {
+        StateLoad::Usable(loaded) => loaded,
+        StateLoad::Unusable(failure) => {
+            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+        }
+    };
+
     // Determine where to copy the file — alongside the package YAML
     let package_dir = package_blob
         .file_path()
@@ -2556,15 +2549,13 @@ where
 
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
-    let (mut deploy_state, state_warning) = load_deploy_state(filesystem, config);
-    if let Some(warning) = state_warning {
-        sender.send_warning(&warning).await;
-    }
-    deploy_state.record_deployment(&relative_source, &checksum);
-    if let Err(e) = save_deploy_state(filesystem, config, &deploy_state) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot save deploy state: {e}"
-        )));
+    loaded.state_mut().record_deployment(
+        &expanded_target.display().to_string(),
+        &relative_source,
+        &checksum,
+    );
+    if let Err(e) = save_deploy_state(filesystem, &loaded) {
+        return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
     }
 
     OperationResult::Success(OperationSuccess::DotfileTracked {
@@ -2577,448 +2568,9 @@ where
     })
 }
 
-/// What [`load_deploy_state`] reports, and what it stays quiet about.
-///
-/// At this layer rather than through a service, because the path-resolution branch
-/// is unreachable from an integration test: those always configure a
-/// `state_directory`, and only an unset one with no determinable home reaches it.
-/// The wiring — that these messages actually leave the library as events — is
-/// covered per command in `tests/dotfile_service_tests.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SelfieConfigBuilder;
-    use crate::fs::MockFileSystem;
-
-    const STATE_DIR: &str = "/state";
-    const STATE_FILE: &str = "/state/deploy-state.yml";
-
-    fn config_with_state_dir() -> SelfieConfig {
-        SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory("/packages")
-            .state_directory(PathBuf::from(STATE_DIR))
-            .build()
-    }
-
-    // A state file that exists and reads back as `content`.
-    fn filesystem_holding(content: &str) -> MockFileSystem {
-        let mut fs = MockFileSystem::default();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), true);
-        fs.mock_read_file(PathBuf::from(STATE_FILE), content);
-        fs
-    }
-
-    // Text that must never reach a message. `KEY` is shaped like the dotfile
-    // source path a real state file keys on; `VALUE` like a checksum. Both are
-    // distinctive enough that a `contains` cannot match selfie's own wording.
-    const KEY: &str = "zzz-recon-marker/id_rsa.conf";
-    const VALUE: &str = "zzz-value-marker-9c1f";
-
-    // The malformed shapes, built once. Each test below picks the shapes whose
-    // error class it is about, so a fixture written slightly differently in two
-    // places cannot make two tests disagree about what they cover.
-    fn duplicate_key(key: &str) -> String {
-        format!(
-            "deployed:\n  {key}:\n    source_checksum: a\n    deployed_checksum: a\n    \
-             deployed_at: b\n  {key}:\n    source_checksum: c\n    deployed_checksum: c\n    \
-             deployed_at: d\n"
-        )
-    }
-
-    fn entry_is_a_scalar(key: &str, value: &str) -> String {
-        format!("deployed:\n  {key}: {value}\n")
-    }
-
-    fn entry_is_missing_a_field(key: &str, value: &str) -> String {
-        format!("deployed:\n  {key}:\n    source_checksum: {value}\n")
-    }
-
-    fn unclosed_bracket(key: &str, value: &str) -> String {
-        format!("{key}: [unclosed {value}\n")
-    }
-
-    const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
-         deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
-
-    // The positive control for every test below.
-    //
-    // Without it they would all pass against a `load_deploy_state` that returned an
-    // empty state and a message unconditionally.
-    #[test]
-    fn a_valid_state_file_loads_its_entries_with_no_message() {
-        let fs = filesystem_holding(VALID_STATE_YAML);
-
-        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        assert!(state.get("myapp/config.toml").is_some());
-        assert_eq!(warning, None);
-    }
-
-    // The first-run case, and the one branch that must stay silent.
-    //
-    // A warning here would fire on every fresh machine, for the ordinary condition
-    // of never having deployed anything.
-    #[test]
-    fn an_absent_state_file_loads_empty_and_says_nothing() {
-        let mut fs = MockFileSystem::default();
-        fs.mock_path_exists(PathBuf::from(STATE_FILE), false);
-
-        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        assert!(state.entries().is_empty());
-        assert_eq!(warning, None);
-    }
-
-    #[test]
-    fn an_unparsable_state_file_is_named_in_the_message() {
-        let fs = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
-
-        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        assert!(state.entries().is_empty());
-        let warning = warning.expect("a corrupt state file must be reported");
-        assert!(
-            warning.contains(STATE_FILE),
-            "the message must name the file: {warning}"
-        );
-    }
-
-    // The two conditions are distinguished, not merely both reported.
-    //
-    // Repairing malformed YAML and fixing permissions are different jobs, so one
-    // message for both sends the reader to the wrong one. Asserted in a single test
-    // because the property is that the two *differ*, which neither alone can see.
-    #[test]
-    fn an_unreadable_state_file_is_named_differently_from_an_unparsable_one() {
-        let mut unreadable = MockFileSystem::default();
-        unreadable.mock_path_exists(PathBuf::from(STATE_FILE), true);
-        unreadable.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("permission denied"),
-            )))
-        });
-
-        let (state, unreadable_warning) = load_deploy_state(&unreadable, &config_with_state_dir());
-        assert!(state.entries().is_empty());
-        let unreadable_warning = unreadable_warning.expect("an unreadable state file is reported");
-
-        let corrupt = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
-        let (_, corrupt_warning) = load_deploy_state(&corrupt, &config_with_state_dir());
-        let corrupt_warning = corrupt_warning.expect("a corrupt state file is reported");
-
-        assert!(
-            unreadable_warning.contains("Cannot read"),
-            "an I/O failure must say so: {unreadable_warning}"
-        );
-        assert!(
-            corrupt_warning.contains("Cannot parse"),
-            "a malformed file must say so: {corrupt_warning}"
-        );
-        assert_ne!(
-            unreadable_warning, corrupt_warning,
-            "two different conditions reported identically"
-        );
-    }
-
-    // Reachable only with no configured `state_directory` and no determinable home.
-    //
-    // `home()` is not on `FileSystem` — it comes from the blanket `HomeDir` impl,
-    // whose body is `expand_path("~")` — so this stubs the method that one calls.
-    // `MockFileSystem` has no `expect_home` to stub.
-    #[test]
-    fn a_state_file_whose_location_cannot_be_resolved_is_reported() {
-        let mut fs = MockFileSystem::default();
-        fs.expect_expand_path().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("no home"),
-            )))
-        });
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory("/packages")
-            .build();
-
-        let (state, warning) = load_deploy_state(&fs, &config);
-
-        assert!(state.entries().is_empty());
-        let warning = warning.expect("an unresolvable state path must be reported");
-        assert!(
-            warning.contains("Cannot locate"),
-            "the message must say the file could not be located: {warning}"
-        );
-    }
-
-    // A duplicated key must not reach the message.
-    //
-    // serde-saphyr interpolates a duplicated key into that error's own text, and
-    // no snippet option governs it, so the classifier has to keep it out.
-    //
-    // The controls below are part of the assertion: an inverted `contains` passes
-    // just as well against an empty message or an unreached branch.
-    #[test]
-    fn a_duplicate_key_does_not_reach_the_message() {
-        let fs = filesystem_holding(&duplicate_key(KEY));
-
-        let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        assert!(state.entries().is_empty());
-        let warning = warning.expect("a duplicated key must still be reported");
-        assert!(
-            !warning.contains(KEY),
-            "the duplicated key was quoted into the message: {warning}"
-        );
-        // `contains("line")` would pass on "at line , column " and on "line 0,
-        // column 0" -- the sentinel the classifier's own guard exists to drop --
-        // so the coordinates are asserted exactly.
-        assert!(
-            warning.contains(STATE_FILE)
-                && warning.contains("Cannot parse")
-                && warning.contains("a key is listed twice")
-                && warning.contains("at line 6, column 3"),
-            "the message must still identify the file, the condition and where: {warning}"
-        );
-    }
-
-    // The malformed shapes a deploy state file can take, scanned for their own
-    // content.
-    //
-    // The uncovered arms of `ParseFailure::of` are worth naming, since a partial
-    // list reads as a complete one: `MergeKeyNotAllowed`, the unbalanced-container
-    // group, the two alias groups and `Eof` have no row, and `InvalidScalar` and
-    // `IndentationError` cannot fire while every field here is a `String`.
-    //
-    // Every marker sits on the line its parse fails at, so a returning snippet
-    // would quote it and fail the scan below.
-    #[test]
-    fn no_malformed_state_file_shape_quotes_its_contents() {
-        const DUPLICATE: &str = "a key is listed twice";
-        const WRONG_SHAPE: &str = "the file has the wrong shape";
-        // The parser's own words. Only the bracket character reaches the message,
-        // never the key or value the row plants around it.
-        const UNCLOSED: &str = "unclosed bracket";
-        const TABS: &str = "tabs disallowed within this context";
-
-        let entry = "{source_checksum: x, deployed_checksum: y, deployed_at: z}";
-        // YAML escapes, so the key this builds is ordinary UTF-8 text holding
-        // U+00FF and U+00FE -- non-ASCII, not raw bytes.
-        let non_ascii_key = format!("\"{KEY}\\xff\\xfe\"");
-
-        let shapes: Vec<(&str, String, &str)> = vec![
-            ("duplicate key", duplicate_key(KEY), DUPLICATE),
-            (
-                "duplicate key inside an anchor",
-                format!("anchor: &a\n  {KEY}: 1\n  {KEY}: 2\ndeployed: *a\n"),
-                DUPLICATE,
-            ),
-            (
-                "duplicate key through a merge key",
-                format!("anchor: &a\n  {KEY}: 1\n  {KEY}: 2\ndeployed:\n  <<: *a\n"),
-                DUPLICATE,
-            ),
-            (
-                "duplicate key that is itself an alias",
-                format!("anchor: &a {KEY}\ndeployed:\n  *a : {entry}\n  *a : {entry}\n"),
-                DUPLICATE,
-            ),
-            (
-                "duplicate key holding non-ASCII characters",
-                duplicate_key(&non_ascii_key),
-                DUPLICATE,
-            ),
-            (
-                "entry is a scalar",
-                entry_is_a_scalar(KEY, VALUE),
-                WRONG_SHAPE,
-            ),
-            (
-                "field is a sequence",
-                format!(
-                    "deployed:\n  {KEY}:\n    source_checksum:\n      - {VALUE}\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
-                ),
-                WRONG_SHAPE,
-            ),
-            (
-                "field is null",
-                format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: ~\n    deployed_checksum: a\n    \
-                     deployed_at: b\n"
-                ),
-                "a value is empty where text is required",
-            ),
-            (
-                "entry is missing a field",
-                entry_is_missing_a_field(KEY, VALUE),
-                "an entry is missing the field",
-            ),
-            (
-                "deployed is a scalar",
-                format!("deployed: {VALUE}\n"),
-                WRONG_SHAPE,
-            ),
-            ("top level is a scalar", format!("{VALUE}\n"), WRONG_SHAPE),
-            ("unclosed bracket", unclosed_bracket(KEY, VALUE), UNCLOSED),
-            (
-                "tab indentation",
-                format!("deployed:\n\t{KEY}: {VALUE}\n"),
-                TABS,
-            ),
-            (
-                "unknown anchor",
-                format!("deployed: *{KEY}\n"),
-                "the file refers to an anchor it never defines",
-            ),
-            (
-                "merge key against a scalar",
-                format!("deployed:\n  {KEY}:\n    <<: {VALUE}\n"),
-                "a merge key does not refer to a mapping or a list of mappings",
-            ),
-            (
-                "!!binary that is not base64",
-                format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"@@@@\"\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
-                ),
-                "a !!binary value is not valid base64",
-            ),
-            (
-                "!!binary that is not text",
-                format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"//8=\"\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
-                ),
-                "a !!binary value is not text",
-            ),
-            (
-                "more than one document",
-                format!("deployed: {{}}\n---\ndeployed: {VALUE}\n"),
-                "the file holds more than one YAML document",
-            ),
-        ];
-
-        for (name, yaml, condition) in shapes {
-            let fs = filesystem_holding(&yaml);
-
-            let (state, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-            assert!(
-                state.entries().is_empty(),
-                "{name}: state was not discarded"
-            );
-            let warning = warning.unwrap_or_else(|| {
-                panic!("{name}: stopped being an error, so this row no longer tests anything")
-            });
-            assert!(
-                !warning.contains(KEY) && !warning.contains(VALUE),
-                "{name}: the file's contents were quoted into the message: {warning}"
-            );
-            assert!(
-                warning.contains("Cannot parse") && warning.contains(STATE_FILE),
-                "{name}: a malformed file must say so, and name itself: {warning}"
-            );
-            assert!(
-                warning.contains(condition),
-                "{name}: this row now reports a different condition, so it no \
-                 longer covers the class it was added for: {warning}"
-            );
-        }
-    }
-
-    // The classification survives, so the message is worth reading.
-    //
-    // Three failures a user fixes differently must not render alike. Compared
-    // with the location cut off, because the three fixtures fail at three
-    // different places: comparing whole messages, every kind could collapse to
-    // one string and the differing line numbers would still tell them apart.
-    #[test]
-    fn a_parse_failure_names_its_condition() {
-        let condition = |yaml: &str| {
-            let fs = filesystem_holding(yaml);
-            let warning = load_deploy_state(&fs, &config_with_state_dir())
-                .1
-                .expect("a corrupt state file must be reported");
-            let at = warning
-                .find(" at line ")
-                .unwrap_or_else(|| panic!("a parse failure must say where it happened: {warning}"));
-            warning[..at].to_string()
-        };
-
-        let duplicate = condition(&duplicate_key("a/b.conf"));
-        let wrong_shape = condition(&entry_is_a_scalar("a/b.conf", "scalar"));
-        let unparsable = condition(&unclosed_bracket("a/b.conf", "x"));
-
-        assert_ne!(duplicate, wrong_shape);
-        assert_ne!(wrong_shape, unparsable);
-        assert_ne!(duplicate, unparsable);
-    }
-
-    // The two classes that forward the library's own `&'static str`.
-    //
-    // Those strings are the deserializer's vocabulary, not the file's -- the field
-    // name comes from this crate's own derive, and "mapping start" names a YAML
-    // event. Checked here rather than taken on the type's word, which is the same
-    // trust the rest of this work withholds.
-    #[test]
-    fn no_passed_through_text_carries_input() {
-        for (yaml, expected) in [
-            (entry_is_a_scalar(KEY, VALUE), "expected mapping start"),
-            (entry_is_missing_a_field(KEY, VALUE), "deployed_checksum"),
-        ] {
-            let fs = filesystem_holding(&yaml);
-
-            let warning = load_deploy_state(&fs, &config_with_state_dir())
-                .1
-                .expect("a corrupt state file must be reported");
-
-            assert!(
-                warning.contains(expected),
-                "the library's own text stopped being forwarded, so this test no \
-                 longer proves anything about it: {warning}"
-            );
-            assert!(
-                !warning.contains(KEY) && !warning.contains(VALUE),
-                "forwarded library text carried the file's content: {warning}"
-            );
-        }
-    }
-
-    // A key whose length selfie does not control must not grow the message.
-    //
-    // An explicit key (`? <key>`) is not subject to YAML's 1024-byte simple-key
-    // limit, so it can be arbitrarily long. Nothing is forwarded, so nothing
-    // needs bounding.
-    #[test]
-    fn a_huge_duplicate_key_does_not_grow_the_message() {
-        let key = "k".repeat(2500);
-        let fs = filesystem_holding(&format!("? {key}\n: 1\n? {key}\n: 2\n"));
-
-        let (_, warning) = load_deploy_state(&fs, &config_with_state_dir());
-
-        let warning = warning.expect("a duplicated key must be reported");
-        // Control: if this fixture stops producing a duplicate-key error, the
-        // huge-key path goes untested and everything below still passes.
-        assert!(
-            warning.contains("a key is listed twice"),
-            "this fixture no longer exercises the huge-key path: {warning}"
-        );
-        // Neither assertion below is redundant, and the numbers are why. The
-        // invariant message measures 142 bytes against the 300-byte bound, so a
-        // leak of up to ~158 bytes of the key would satisfy the length check
-        // alone; the scan is what catches those. The scan in turn only fires on
-        // 32 consecutive key bytes, so the length check is what catches a long
-        // leak that somehow broke the run up. A fragment shorter than 32 bytes
-        // slips both -- the exact residual, and the reason to keep the pair.
-        assert!(
-            !warning.contains(&"k".repeat(32)),
-            "the key reached the message: {warning}"
-        );
-        assert!(
-            warning.len() < 300,
-            "the message grew with the file's content: {} bytes",
-            warning.len()
-        );
-    }
 
     // selfie-yw7i. Track copies the user's file *into* the dotfiles repository, so
     // a refusal is about a repository path -- but every `FileSystemError` variant

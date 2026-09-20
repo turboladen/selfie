@@ -214,8 +214,8 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // pointing at a zero-length file.
     //
     // For an ordinary target this is also what lets a caller record the write as
-    // having happened. `perform_deploy` calls `record_deployment` immediately
-    // after the writer returns; if the write were lost to a crash while that
+    // having happened. `record_and_save` records the deployment as soon as the
+    // writer returns; if the write were lost to a crash while that
     // record survived, the state would claim content the target does not have,
     // and the entry would become a sticky conflict blamed on the user
     // (selfie-aub). Ordering is the fix, so it belongs here, before the record.

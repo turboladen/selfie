@@ -65,6 +65,24 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             "package_directory:",
             raw_config.package_directory().display(),
         );
+        // The directories in effect: the configured value, or the default the
+        // file leaves selfie to derive. Whether either exists is reported in the
+        // table above, so a wrong value is visible here before a command
+        // behaves oddly.
+        report_with_style(
+            display,
+            "dotfiles_directory:",
+            raw_config.dotfiles_directory().display(),
+        );
+        report_with_style(
+            display,
+            "state_directory:",
+            match selfie::fs::state_directory(fs, raw_config.state_directory().map(|p| p.as_path()))
+            {
+                Ok(directory) => directory.display().to_string(),
+                Err(error) => format!("(unresolved: {error})"),
+            },
+        );
         report_with_style(
             display,
             "command_timeout:",
@@ -115,6 +133,9 @@ mod tests {
         "#;
         fs.mock_config_file(config_dir, config_yaml);
         fs.mock_expand_path("/test/packages", "/test/packages");
+        // The report resolves the default state directory under the home
+        // directory when the file names none.
+        fs.mock_expand_path("~", "/home/test");
         fs
     }
 

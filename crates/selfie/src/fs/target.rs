@@ -358,40 +358,64 @@ fn collapse_home(home: &Path, expanded: &Path) -> String {
     }
 }
 
-// The deploy state file's path.
-//
-// Weaker than `expand_target_path`: the configured branch joins `state_dir`
-// exactly as given, so what comes back is only as unresolved as the caller was
-// configured with.
-//
-// The fallback expands `~` alone rather than the whole path, because
-// `expand_path` canonicalizes and a canonicalized state path lets
-// `write_file_private` replace what a planted symlink points at.
-pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
+/// Why the deploy state has no directory. Each message names the fix.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StatePathError {
+    /// No `state_directory` is configured and the home directory cannot be
+    /// determined, so neither route to a path is open.
+    #[error(
+        "no state_directory is configured and the home directory cannot be determined. Set state_directory in the config, or fix HOME"
+    )]
+    NoHome,
+    /// The configured `state_directory` is not an absolute path.
+    #[error(
+        "state_directory '{}' is not an absolute path. Use an absolute path; `~` is expanded only in the config file, and only when the home directory can be determined",
+        .0.display()
+    )]
+    NotAbsolute(PathBuf),
+}
+
+/// The directory the deploy state lives in: `configured` as given, or the
+/// XDG state home fallback under the home directory.
+///
+/// # Errors
+///
+/// [`StatePathError`] if `configured` is not absolute, or if it is absent and
+/// the home directory cannot be determined.
+pub fn state_directory<H: HomeDir + ?Sized>(
     home: &H,
-    state_dir: Option<&Path>,
-    filename: &str,
-) -> Result<TargetPath, FileSystemError> {
-    if let Some(state_dir) = state_dir {
-        return Ok(TargetPath {
-            path: state_dir.join(filename),
-        });
+    configured: Option<&Path>,
+) -> Result<PathBuf, StatePathError> {
+    // Used exactly as given, so what comes back is only as unresolved as the
+    // caller was configured with. A relative value would resolve against the
+    // process working directory, and a flag's `~` is never expanded, so
+    // `--state-directory='~/state'` would otherwise land in `./~/state`.
+    if let Some(configured) = configured {
+        if !configured.is_absolute() {
+            return Err(StatePathError::NotAbsolute(configured.to_path_buf()));
+        }
+        return Ok(configured.to_path_buf());
     }
 
     // XDG_STATE_HOME (`~/.local/state/selfie`) per the XDG Base Directory
     // Specification: deploy state is per-machine, non-portable data.
-    let home = home.home().map_err(|_| {
-        FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
-            "Cannot determine home directory for deploy state file",
-        )))
-    })?;
+    //
+    // `home()` expands `~` alone rather than the whole path, because
+    // `expand_path` canonicalizes and a canonicalized state path lets
+    // `write_file_private` replace what a planted symlink points at.
+    let home = home.home().map_err(|_| StatePathError::NoHome)?;
+    Ok(home.join(".local").join("state").join("selfie"))
+}
 
+// The deploy state file's path: `state_directory` plus the filename, joined
+// unresolved.
+pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
+    home: &H,
+    configured: Option<&Path>,
+    filename: &str,
+) -> Result<TargetPath, StatePathError> {
     Ok(TargetPath {
-        path: home
-            .join(".local")
-            .join("state")
-            .join("selfie")
-            .join(filename),
+        path: state_directory(home, configured)?.join(filename),
     })
 }
 
@@ -655,6 +679,25 @@ mod tests {
         let state_dir = PathBuf::from("/var/state");
         let result = state_file_path(&fs, Some(&state_dir), "deploy-state.yml").unwrap();
         assert_eq!(result.path(), Path::new("/var/state/deploy-state.yml"));
+    }
+
+    // A relative configured directory is refused rather than joined: it would
+    // resolve against the process working directory, and `~/state` typed into a
+    // flag is relative because nothing expands it. The mock has no expectations,
+    // so consulting the home directory here would panic.
+    #[test]
+    fn a_relative_state_directory_is_refused() {
+        let fs = MockFileSystem::default();
+        for relative in ["relative/state", "~/state"] {
+            let error = state_file_path(&fs, Some(Path::new(relative)), "deploy-state.yml")
+                .expect_err("a relative directory must be refused");
+            assert_eq!(error, StatePathError::NotAbsolute(PathBuf::from(relative)));
+            let message = error.to_string();
+            assert!(
+                message.contains(relative) && message.contains("not an absolute path"),
+                "{message}"
+            );
+        }
     }
 
     #[test]

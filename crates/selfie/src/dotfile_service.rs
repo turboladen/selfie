@@ -27,4 +27,5 @@ pub(crate) mod resolve;
 pub mod semantic;
 pub mod service;
 pub mod state;
+mod state_file;
 pub(crate) mod template;

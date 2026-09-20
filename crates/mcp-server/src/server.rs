@@ -618,7 +618,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_config_get",
-        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, and settings. `dotfiles_directory` is the path in effect: the configured one, or the default beside the package directory when none is set. It is reported whether or not it exists; the dotfile tools say when a configured one is missing."
+        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, state directory, and settings. `dotfiles_directory` and `state_directory` are the paths in effect: the configured one, or the default when none is set (beside the package directory, and `~/.local/state/selfie`). Both are reported whether or not they exist; the dotfile tools say when a configured one is missing. `state_directory` is null when neither a setting nor a home directory gives it a value, or when the configured value is not an absolute path."
     )]
     async fn config_get(&self) -> Result<CallToolResult, McpError> {
         let config_data = serde_json::json!({
@@ -628,6 +628,12 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
             // reads the same shape whether or not the default applies. Whether
             // it exists is the dotfile tools' answer to give, and they do.
             "dotfiles_directory": self.config.dotfiles_directory().display().to_string(),
+            "state_directory": selfie::fs::state_directory(
+                &RealFileSystem,
+                self.config.state_directory().map(|p| p.as_path()),
+            )
+            .ok()
+            .map(|directory| directory.display().to_string()),
             "command_timeout_secs": self.config.command_timeout().as_secs(),
             // Always present, empty when the file is clean, so a consumer can
             // read the same shape every time.
@@ -650,7 +656,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\" or \"not_loaded\"; branch on `reason`, not on `error`. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to or cannot read, a source it cannot read — or, when deploying all, cannot list a dotfiles directory that exists, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\" or \"not_loaded\"; branch on `reason`, not on `error`. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to or cannot read, a source it cannot read — or, when deploying all, cannot list a dotfiles directory that exists, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run succeeded; a conflict is reported instead as a conflict and is not a refusal. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -687,7 +693,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_drift",
-        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift cannot check something — a package apply would refuse whole, a target that exists but cannot be read (reported as a `warning` row with no drift row), or a dotfiles directory that exists and cannot be listed — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift cannot check something — a package apply would refuse whole, a target that exists but cannot be read (reported as a `warning` row with no drift row), or a dotfiles directory that exists and cannot be listed — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. If `dotfiles_directory` is set and does not exist, a `warning` row says so and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is reported as a `warning` row and the check carries on as though nothing had been deployed, so every entry then shows as untracked."
     )]
     async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -698,7 +704,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when the dotfiles directory does not exist."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when the dotfiles directory does not exist, or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -732,7 +738,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_package_track_dotfile",
-        description = "Add a file to an existing package's dotfiles section. The package must already exist."
+        description = "Add a file to an existing package's dotfiles section. The package must already exist. Fails, writing nothing, when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy."
     )]
     async fn selfie_package_track_dotfile(
         &self,
@@ -949,11 +955,23 @@ mod tests {
     // sibling default when `None`. Listing runs no command, so the login-shell
     // runner is never used.
     fn server_over(packages: &std::path::Path, dotfiles: Option<&std::path::Path>) -> SelfieServer {
+        server_with(packages, dotfiles, None)
+    }
+
+    // As `server_over`, with a configured `state_directory` as well.
+    fn server_with(
+        packages: &std::path::Path,
+        dotfiles: Option<&std::path::Path>,
+        state: Option<&std::path::Path>,
+    ) -> SelfieServer {
         let mut builder = selfie::config::SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(packages);
         if let Some(dotfiles) = dotfiles {
             builder = builder.dotfiles_directory(dotfiles.to_path_buf());
+        }
+        if let Some(state) = state {
+            builder = builder.state_directory(state.to_path_buf());
         }
         let config = builder.build();
         let repo = YamlPackageRepository::new(
@@ -1015,6 +1033,72 @@ mod tests {
             json["dotfiles_directory"].as_str(),
             Some(temp.path().join("dotfiles").display().to_string().as_str()),
             "got: {json}"
+        );
+    }
+
+    // A configured state directory is echoed as given; it is where the deploy
+    // state the apply and drift tools read lives.
+    #[tokio::test]
+    async fn config_get_reports_a_configured_state_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let state = temp.path().join("state");
+
+        let server = server_with(&packages, None, Some(&state));
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert_eq!(
+            json["state_directory"].as_str(),
+            Some(state.display().to_string().as_str()),
+            "got: {json}"
+        );
+    }
+
+    // Unset, the field carries the default under the home directory rather
+    // than going absent, so a consumer reads one shape either way.
+    #[tokio::test]
+    async fn config_get_reports_the_default_state_directory_when_none_is_set() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_with(&packages, None, None);
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        let reported = json["state_directory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the default must be reported, got: {json}"));
+        assert!(
+            std::path::Path::new(reported).is_absolute()
+                && reported.ends_with("/.local/state/selfie"),
+            "the default is the XDG state home under the home directory, got: {reported}"
+        );
+    }
+
+    // A configured value with no usable resolution is null rather than echoed:
+    // a relative path is refused by every command that would read the state,
+    // and reporting it as the directory in effect would say otherwise.
+    #[tokio::test]
+    async fn config_get_reports_null_for_an_unresolvable_state_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_with(
+            &packages,
+            None,
+            Some(std::path::Path::new("relative/state")),
+        );
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert!(
+            json["state_directory"].is_null(),
+            "an unresolvable state directory must be null, got: {json}"
+        );
+        assert!(
+            json.get("state_directory").is_some(),
+            "the field must be present even when null, got: {json}"
         );
     }
 

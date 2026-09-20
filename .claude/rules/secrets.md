@@ -177,7 +177,7 @@ Test egress at the **boundary**, not by listing known paths:
   - **A deploy or track path must obtain its target from `deploy_target`; `expand_target_path` is
     for callers that only compare or display one.** Four functions hand out a `TargetPath` and only
     three construct one — the count is of **functions**, not of `TargetPath { … }` literals, of
-    which `state_file_path` holds two — and the four promise different things, so do not collapse
+    which `state_file_path` holds one — and the four promise different things, so do not collapse
     them into a list:
     - `deploy_target` is the **strongest** and the only one a deploy or track path may use. It
       refuses `~user/…` and anything not absolute _before_ expanding, and re-checks absoluteness
