@@ -20,7 +20,7 @@ use crate::fs::target::TargetPath;
 /// | | link at final component | mode | atomic |
 /// |---|---|---|---|
 /// | [`write_file_private`](FileSystem::write_file_private) | replaced | owner-only | yes |
-/// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | left alone | no |
+/// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | kept | yes |
 ///
 /// Secret-bearing content takes the first; everything else takes the second.
 /// Neither follows a link at the final component, and both still follow
@@ -62,7 +62,7 @@ pub trait FileSystem: Send + Sync {
     /// content is protected; the fact that it exists is not.
     ///
     /// Because the file is replaced rather than modified, it does not inherit the
-    /// old one's extended attributes, POSIX ACLs, or SELinux label.
+    /// old one's extended attributes, POSIX ACLs, SELinux label, or ownership.
     ///
     /// # Strength of the guarantee
     ///
@@ -74,25 +74,37 @@ pub trait FileSystem: Send + Sync {
     /// temporary file cannot be created or written, the rename into place fails,
     /// or flushing to disk fails — which can happen after the write itself
     /// succeeded, `ENOSPC` surfacing only at flush time being the usual case.
+    /// Every such error names the target path.
     ///
-    /// Unlike [`write_file_no_follow`](FileSystem::write_file_no_follow), this
-    /// cannot succeed on an existing file inside a read-only directory: an atomic
-    /// replace must create a sibling first.
+    /// Like [`write_file_no_follow`](FileSystem::write_file_no_follow), this
+    /// cannot succeed on an existing file inside a directory the caller cannot
+    /// write to: an atomic replace must create a sibling first.
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// Write a file, refusing a symlink at the final component. The ordinary
     /// writer, and the only one for content that is not a credential.
     ///
-    /// Parent directories are created, an existing file is truncated and
-    /// overwritten, and its mode is left alone. A symlink at the final component
-    /// is refused with [`FileSystemError::SymlinkedTarget`]: nothing is written,
-    /// neither the link nor what it points at is modified, and a dangling link's
-    /// destination is not created.
+    /// Parent directories are created. The content is written to a temporary
+    /// file beside the target and renamed into place, so a reader sees either
+    /// the old file or the complete new one, and an interrupted write leaves
+    /// the old one intact. An existing regular file's permission bits are
+    /// carried over; a new file gets `0o666 & !umask`, as an ordinary write
+    /// would. A symlink at the final component is refused with
+    /// [`FileSystemError::SymlinkedTarget`]: nothing is written, neither the
+    /// link nor what it points at is modified, and a dangling link's destination
+    /// is not created. A fifo, socket or device node is refused with
+    /// [`FileSystemError::IrregularTarget`] and never opened.
     ///
     /// For deploy targets and for paths selfie composes inside its own
     /// directories. A target names a path the user asked selfie to manage, so
     /// writing through a link there sends the content wherever the link points —
     /// possibly somewhere chosen by whoever planted it.
+    ///
+    /// Because the file is replaced rather than modified, other hard links to it
+    /// keep the old content, and it does not inherit the old one's extended
+    /// attributes, POSIX ACLs, or SELinux label. The replacement carries the
+    /// writing user's ownership, not the old file's: a target owned by another
+    /// user, or given another group, does not keep that.
     ///
     /// # Durability
     ///
@@ -105,21 +117,24 @@ pub trait FileSystem: Send + Sync {
     /// # Strength of the guarantee
     ///
     /// Durability orders against a process or kernel crash everywhere, but
-    /// against power loss only where the filesystem honors `fsync` — macOS does
-    /// not. The directory flush covers only the immediate parent.
+    /// against power loss only where the filesystem honors the flush. The
+    /// directory flush covers only the immediate parent.
     ///
-    /// A link planted concurrently is refused just the same, there being no
-    /// interval between deciding and writing.
+    /// The refusals are decided when the write is checked. A symlink or fifo
+    /// planted after that is replaced by the rename, never followed or opened,
+    /// and the write succeeds.
     ///
     /// # Errors
     ///
     /// [`FileSystemError::SymlinkedTarget`] if the final component is a symlink,
-    /// or [`FileSystemError`] if the parent directory cannot be created,
-    /// permission is denied, or any other IO error occurs.
-    ///
-    /// The refusal is exact; its *classification* is not quite. A link deleted
-    /// between the failed write and the report surfaces as an `IoError` rather
-    /// than `SymlinkedTarget`. Nothing was written either way.
+    /// [`FileSystemError::IrregularTarget`] if it resolves to a fifo, socket or
+    /// device node, or [`FileSystemError`] naming the target if the parent
+    /// directory cannot be created, the temporary file cannot be created,
+    /// written or flushed, or the rename fails. Replacing a file needs write
+    /// permission on its directory, not on the file: a read-only file is
+    /// replaced, and a file in a directory the caller cannot write to is not.
+    /// In a directory with the sticky bit set, a file owned by another user is
+    /// not replaced either, because rename there requires owning the file.
     fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
@@ -138,11 +153,11 @@ pub trait FileSystem: Send + Sync {
     /// time a caller acts on it.
     ///
     /// Never use it to decide whether a write is safe.
-    /// [`write_file_no_follow`](FileSystem::write_file_no_follow) refuses on its own,
-    /// and checking here as well would reintroduce the race that method avoids. This
-    /// may move *when the user is told* and *whether a deployment is recorded*, never
-    /// whether the write happens — a stale answer omits something the next run
-    /// re-evaluates.
+    /// [`write_file_no_follow`](FileSystem::write_file_no_follow) checks again
+    /// itself before it creates anything, and replaces rather than follows a link
+    /// planted after that. This may move *when the user is told* and *whether a
+    /// deployment is recorded*, never whether content goes through a link — a
+    /// stale answer omits something the next run re-evaluates.
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// [`FileSystemError::IrregularTarget`] if `path` resolves to something that
@@ -158,8 +173,9 @@ pub trait FileSystem: Send + Sync {
     /// **Call this before every read of a path selfie does not control.** Opening
     /// a fifo to read blocks, and nothing else on a read path checks.
     ///
-    /// Advisory for writes: stat-then-act is racy, so a fifo swapped in afterwards
-    /// is caught by the writer instead.
+    /// Advisory for writes: the writer checks again immediately before writing,
+    /// and a fifo planted after that check is replaced by the rename, never
+    /// opened.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner

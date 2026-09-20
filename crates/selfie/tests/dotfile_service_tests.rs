@@ -5075,8 +5075,9 @@ mod symlinked_targets {
         // Counts writes so the test can prove the writer was actually reached.
         // Without that, a refactor that detects the link by some route other than
         // `symlink_refusal` would leave this decorator blinding nothing, the test
-        // would pass having exercised none of what it is named for, and
-        // `O_NOFOLLOW` would become deletable again — the exact hole this guards.
+        // would pass having exercised none of what it is named for, and the
+        // writer's own symlink check would become deletable again — the exact
+        // hole this guards.
         #[derive(Clone, Debug)]
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
@@ -5086,8 +5087,8 @@ mod symlinked_targets {
             }
 
             // Deliberately **not** blinded: this decorator blinds one check, the
-            // symlink one, so that the writer's `O_NOFOLLOW` is the only thing
-            // left to refuse. Blinding the irregular check too would widen what
+            // symlink one, so that the writer's own symlink check is the only
+            // thing left to refuse. Blinding the irregular check too would widen what
             // this test claims to cover and hide a real regression in it.
             fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
                 self.0.irregular_target_refusal(path)

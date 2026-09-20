@@ -488,8 +488,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                     reason: format!("it is a {kind}"),
                 },
                 // Not a refusal -- a permission problem, a full disk. The
-                // filesystem's own message is the right one for those, and it
-                // does not claim anything about a target.
+                // filesystem's own message already names the path and the
+                // failure, so it is passed through rather than reworded.
                 _ => PackageRepoError::FileSystemError(e),
             })?;
 

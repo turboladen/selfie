@@ -10,7 +10,6 @@ dunce.workspace = true
 etcetera.workspace = true
 futures.workspace = true
 gix.workspace = true
-libc = "0.2"
 mockall = { workspace = true, optional = true }
 # "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
 # has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
@@ -44,8 +43,9 @@ which = "8.0"
 [dev-dependencies]
 mockall.workspace = true
 # "fs" is for `mkfifo`, which the irregular-target tests need to build a target
-# that blocks on open. There is no std equivalent; the alternatives were a
-# subprocess or the crate's first `unsafe` block. "user" comes from the
+# that blocks on open, and for `OFlag::O_NONBLOCK`, which one of them opens a
+# fifo for reading with. There is no std equivalent for either; the alternatives
+# were a subprocess or the crate's first `unsafe` block. "user" comes from the
 # production entry above, which cargo unifies into the test build.
 nix = { version = "0.31", features = ["fs"] }
 test-common = { path = "../test-common/" }

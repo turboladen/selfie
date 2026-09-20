@@ -660,6 +660,25 @@ readable, or point the entry elsewhere, and run apply again. A secret-bearing en
 unreadable target [differently](#deploy-behavior-and-permissions): it is a conflict, reported and
 skipped unless an interactive prompt accepts it.
 
+### How targets are written
+
+Every target, repository-file or secret, is written to a temporary file beside it and renamed into
+place, so a reader sees either the old file or the complete new one, and an interrupted
+`selfie apply` leaves the old file intact. What an interruption can leave behind is the temporary
+file itself, a `.selfie-*` name beside the target holding whatever had been written so far (readable
+only by you when it holds a secret); nothing sweeps those up. A repository-file target keeps its
+permission bits across the rewrite, and a new one is created the way an ordinary write would create
+it. The directory, not the file, decides whether a name can be replaced: a read-only target (mode
+`0444`) is replaced like any other once selfie decides to write it, and a write to a target inside a
+directory you cannot write to fails with a permission error even when the file itself is writable.
+In a directory with the sticky bit set, such as a shared drop directory, a target owned by someone
+else fails the same way, because replacing a name there requires owning the file.
+
+Because the target is replaced rather than rewritten, any other hard link to it keeps the old
+content, and the new file does not carry over the old one's extended attributes, ACLs, or ownership:
+a target owned by another user, or given another group, comes back owned by you. A dotfile kept as a
+hard link into another directory stops being one on the first apply that writes it.
+
 ### Symlinked targets
 
 This section covers repository-file entries — a `source` with no `vars`. Provider-sourced and
