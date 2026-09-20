@@ -1890,9 +1890,16 @@ where
 
                     // Determine whether to accept: --yes flag, interactive
                     // resolver, or neither (skip with conflict event).
+                    //
+                    // A dry run never asks: nothing will be written, so the
+                    // question has no answer to honor. It reports the conflict
+                    // with the diff a real run would prompt on. With `--yes` the
+                    // accept still lands in `perform_deploy`'s dry-run skip.
                     let accept = if options.auto_accept {
                         true
-                    } else if let Some(resolver) = &options.conflict_resolver {
+                    } else if !options.dry_run
+                        && let Some(resolver) = &options.conflict_resolver
+                    {
                         let src = source_path.display().to_string();
                         let tgt = target_path.display().to_string();
                         let d = diff.clone();

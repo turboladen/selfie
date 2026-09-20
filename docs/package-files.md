@@ -636,7 +636,9 @@ file changes, selfie detects this as a conflict:
   Use --yes to overwrite, or resolve manually.
 ```
 
-Without `--yes`, conflicts are reported but the target file is left untouched.
+Without `--yes`, conflicts are reported but the target file is left untouched. With `--dry-run` they
+are reported the same way, diff included, and you are not asked to resolve them: nothing would be
+written either way.
 
 A repository-file target that exists but selfie cannot read is not a conflict, and it is not empty.
 selfie refuses the entry with a warning naming the target and the read error, shows no diff, and

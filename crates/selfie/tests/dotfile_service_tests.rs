@@ -8435,6 +8435,64 @@ mod unreadable_targets {
     }
 }
 
+// A dry run writes nothing, so a repository-file conflict there is reported
+// with its diff rather than put to the interactive resolver.
+mod dry_run_conflicts {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The conflict prompt would ask the user to decide an overwrite that will
+    // not happen. The conflict is reported with its diff instead, which is what
+    // a real run would put to the resolver.
+    #[tokio::test]
+    async fn a_dry_run_never_asks_the_resolver_about_a_repo_file_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "EXISTING").unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "FROM REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            dry_run: true,
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "a dry run prompts for nothing"
+        );
+        let conflicts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(conflicts.len(), 1, "got: {events:?}");
+        assert!(
+            conflicts[0].contains("+FROM REPO"),
+            "the conflict carries the diff a real run would show: {}",
+            conflicts[0]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }))
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
+    }
+}
+
 // ── DotfileService::list ────────────────────────────────────────────────────
 //
 // The listing exists so both adapters stop reading the repositories themselves.
