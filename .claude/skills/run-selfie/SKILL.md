@@ -144,7 +144,7 @@ just test-lib          # canonical: cargo test -p selfie (needs test-common's wi
                         # see the root CLAUDE.md if this ever fails to compile)
 cargo test -p selfie-cli
 cargo test -p selfie-mcp
-just check             # fmt + dprint fmt + clippy -D warnings + cargo test, stops at first failure
+just check             # every CI gate: fmt, typos, clippy, build, test, hack, docs-check; stops at first failure
 ```
 
 `just test-lib` runs all unit and doc tests, including the two intentional `compile_fail` doctests
