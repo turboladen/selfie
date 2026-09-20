@@ -272,9 +272,9 @@ mod tests {
         }
     }
 
-    // Text that must never reach a message. `KEY` is shaped like the dotfile
-    // source path a real state file keys on; `VALUE` like a checksum. Both are
-    // distinctive enough that a `contains` cannot match selfie's own wording.
+    // Text that must never reach a message. `KEY` is shaped like a path a real
+    // state file holds; `VALUE` like a checksum. Both are distinctive enough
+    // that a `contains` cannot match selfie's own wording.
     const KEY: &str = "zzz-recon-marker/id_rsa.conf";
     const VALUE: &str = "zzz-value-marker-9c1f";
 
@@ -283,8 +283,8 @@ mod tests {
     // places cannot make two tests disagree about what they cover.
     fn duplicate_key(key: &str) -> String {
         format!(
-            "deployed:\n  {key}:\n    source_checksum: a\n    deployed_checksum: a\n    \
-             deployed_at: b\n  {key}:\n    source_checksum: c\n    deployed_checksum: c\n    \
+            "deployed:\n  {key}:\n    source: s\n    checksum: a\n    \
+             deployed_at: b\n  {key}:\n    source: s\n    checksum: c\n    \
              deployed_at: d\n"
         )
     }
@@ -294,15 +294,15 @@ mod tests {
     }
 
     fn entry_is_missing_a_field(key: &str, value: &str) -> String {
-        format!("deployed:\n  {key}:\n    source_checksum: {value}\n")
+        format!("deployed:\n  {key}:\n    source: {value}\n")
     }
 
     fn unclosed_bracket(key: &str, value: &str) -> String {
         format!("{key}: [unclosed {value}\n")
     }
 
-    const VALID_STATE_YAML: &str = "deployed:\n  myapp/config.toml:\n    source_checksum: abc\n    \
-         deployed_checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
+    const VALID_STATE_YAML: &str = "deployed:\n  /home/u/.config/app.toml:\n    source: myapp/config.toml\n    \
+         checksum: abc\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n";
 
     // The positive control for every test below.
     //
@@ -314,7 +314,7 @@ mod tests {
 
         let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
 
-        assert!(state.get("myapp/config.toml").is_some());
+        assert!(state.get("/home/u/.config/app.toml").is_some());
     }
 
     // The first-run case, and the one branch that must stay usable and silent.
@@ -519,7 +519,7 @@ mod tests {
         const UNCLOSED: &str = "unclosed bracket";
         const TABS: &str = "tabs disallowed within this context";
 
-        let entry = "{source_checksum: x, deployed_checksum: y, deployed_at: z}";
+        let entry = "{source: x, checksum: y, deployed_at: z}";
         // YAML escapes, so the key this builds is ordinary UTF-8 text holding
         // U+00FF and U+00FE -- non-ASCII, not raw bytes.
         let non_ascii_key = format!("\"{KEY}\\xff\\xfe\"");
@@ -554,15 +554,15 @@ mod tests {
             (
                 "field is a sequence",
                 format!(
-                    "deployed:\n  {KEY}:\n    source_checksum:\n      - {VALUE}\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
+                    "deployed:\n  {KEY}:\n    source:\n      - {VALUE}\n    \
+                     checksum: a\n    deployed_at: b\n"
                 ),
                 WRONG_SHAPE,
             ),
             (
                 "field is null",
                 format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: ~\n    deployed_checksum: a\n    \
+                    "deployed:\n  {KEY}:\n    source: ~\n    checksum: a\n    \
                      deployed_at: b\n"
                 ),
                 "a value is empty where text is required",
@@ -597,16 +597,16 @@ mod tests {
             (
                 "!!binary that is not base64",
                 format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"@@@@\"\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
+                    "deployed:\n  {KEY}:\n    source: !!binary \"@@@@\"\n    \
+                     checksum: a\n    deployed_at: b\n"
                 ),
                 "a !!binary value is not valid base64",
             ),
             (
                 "!!binary that is not text",
                 format!(
-                    "deployed:\n  {KEY}:\n    source_checksum: !!binary \"//8=\"\n    \
-                     deployed_checksum: a\n    deployed_at: b\n"
+                    "deployed:\n  {KEY}:\n    source: !!binary \"//8=\"\n    \
+                     checksum: a\n    deployed_at: b\n"
                 ),
                 "a !!binary value is not text",
             ),
@@ -679,7 +679,7 @@ mod tests {
     fn no_passed_through_text_carries_input() {
         for (yaml, expected) in [
             (entry_is_a_scalar(KEY, VALUE), "expected mapping start"),
-            (entry_is_missing_a_field(KEY, VALUE), "deployed_checksum"),
+            (entry_is_missing_a_field(KEY, VALUE), "checksum"),
         ] {
             let fs = filesystem_holding(&yaml);
 

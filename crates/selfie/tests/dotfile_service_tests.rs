@@ -1448,14 +1448,14 @@ async fn test_deploy_state_persists_across_service_instances() {
     }
 }
 
-// A state file written before `DeployEntry::target` was removed still loads.
+// A state file in the shape selfie wrote before entries were keyed by target is
+// refused like any other unparsable file, with the repair named. Drift warns
+// and carries on; apply refuses and leaves the file as it was.
 //
-// Every state file on every machine still carries a `target:` key. If it stopped
-// deserializing, `load_deploy_state` would swallow the error and return an empty
-// state, so every entry everywhere would become `NotTracked` at once — a mass
-// re-deploy and a conflict prompt per file, from a field nobody reads.
+// The cost of that refusal is one run: once the file is moved aside, the next
+// apply records every target whose content already matches without a prompt.
 #[tokio::test]
-async fn a_state_file_carrying_the_removed_target_field_still_loads() {
+async fn a_source_keyed_state_file_is_refused_with_the_repair_named() {
     let dirs = TestDirs::new();
 
     let source_dir = dirs.package_dir.join("myapp");
@@ -1471,32 +1471,103 @@ async fn a_state_file_carrying_the_removed_target_field_still_loads() {
     );
 
     let checksum = selfie::dotfile_service::deploy::compute_checksum(b"key = \"value\"");
-    std::fs::write(
-        dirs.state_dir.join("deploy-state.yml"),
-        format!(
-            "deployed:\n  myapp/config.toml:\n    target: {}\n    source_checksum: {checksum}\n    \
-             deployed_checksum: {checksum}\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n",
-            target_file.display()
-        ),
-    )
-    .unwrap();
+    let old_shape = format!(
+        "deployed:\n  myapp/config.toml:\n    target: {}\n    source_checksum: {checksum}\n    \
+         deployed_checksum: {checksum}\n    deployed_at: \"2026-01-01T00:00:00+00:00\"\n",
+        target_file.display()
+    );
+    let state_file = dirs.state_dir.join("deploy-state.yml");
+    std::fs::write(&state_file, &old_shape).unwrap();
 
     let events = collect_events(dirs.service().check_drift().await).await;
+    let warnings = warning_messages(&events);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Cannot parse deploy state") && w.contains("move it aside")),
+        "drift must report the old shape as unparsable and name the repair: {warnings:?}"
+    );
 
-    let result = get_operation_result(&events).expect("Should have a Completed event");
-    match result {
-        OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-            drift_count,
-            total_count,
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+    let message = failure_message(&events);
+    assert!(
+        message.contains("Cannot parse deploy state") && message.contains("move it aside"),
+        "apply must refuse over the old shape and name the repair: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&state_file).unwrap(),
+        old_shape,
+        "the old-shape state file was written over"
+    );
+
+    // The one-time cost: with the file gone, the matching target is recorded
+    // through the skip arm and nothing is deployed or asked about.
+    std::fs::remove_file(&state_file).unwrap();
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+    match get_operation_result(&events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
+            deployed_count,
+            skipped_count,
+            conflict_count,
             ..
         }) => {
-            assert_eq!(*total_count, 1);
             assert_eq!(
-                *drift_count, 0,
-                "the old entry was not read, so a tracked file was reported as drifted: {events:?}"
+                (*deployed_count, *skipped_count, *conflict_count),
+                (0, 1, 0)
             );
         }
-        other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
+        other => panic!("expected the matching target to be skipped and recorded, got {other:?}"),
+    }
+    let written = std::fs::read_to_string(&state_file).expect("state file rewritten");
+    let state: DeployState = selfie::yaml::parse(&written).expect("new shape parses");
+    assert!(
+        state.get(target_file.to_str().unwrap()).is_some(),
+        "the target was not recorded under its own path: {written}"
+    );
+}
+
+// One source deployed to two targets is two records, because each target has
+// its own file on disk and its own checksum.
+#[tokio::test]
+async fn one_source_deployed_to_two_targets_records_both() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("shell");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("rc"), "alias ll='ls -l'\n").unwrap();
+
+    let zshrc = dirs.target_dir.join(".zshrc");
+    let bashrc = dirs.target_dir.join(".bashrc");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "shell",
+        &[
+            ("shell/rc", zshrc.to_str().unwrap()),
+            ("shell/rc", bashrc.to_str().unwrap()),
+        ],
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+    match get_operation_result(&events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { deployed_count, .. }) => {
+            assert_eq!(*deployed_count, 2);
+        }
+        other => panic!("expected both targets to deploy, got {other:?}"),
+    }
+
+    let written =
+        std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).expect("state file");
+    let state: DeployState = selfie::yaml::parse(&written).expect("state file parses");
+    assert_eq!(
+        state.entries().len(),
+        2,
+        "two targets from one source collapsed into one record: {written}"
+    );
+    for target in [&zshrc, &bashrc] {
+        let entry = state
+            .get(target.to_str().unwrap())
+            .unwrap_or_else(|| panic!("{} was not recorded: {written}", target.display()));
+        assert_eq!(entry.source(), "shell/rc");
     }
 }
 
@@ -4836,11 +4907,11 @@ mod symlinked_targets {
         let state: DeployState = selfie::yaml::parse(&written).expect("state file parses");
 
         assert!(
-            state.get("myapp/plain.toml").is_some(),
+            state.get(plain.to_str().unwrap()).is_some(),
             "control: an ordinary already-in-sync target is still recorded: {written}"
         );
         assert!(
-            state.get("myapp/linked.toml").is_none(),
+            state.get(linked.to_str().unwrap()).is_none(),
             "a target selfie never wrote to was recorded as deployed: {written}"
         );
     }
@@ -6331,9 +6402,9 @@ mod deploy_state_diagnostics {
         write_state_file(
             &dirs,
             format!(
-                "deployed:\n  {MARKER}:\n    source_checksum: a\n    deployed_checksum: a\n    \
-                 deployed_at: b\n  {MARKER}:\n    source_checksum: c\n    \
-                 deployed_checksum: c\n    deployed_at: d\n"
+                "deployed:\n  {MARKER}:\n    source: s\n    checksum: a\n    \
+                 deployed_at: b\n  {MARKER}:\n    source: s\n    \
+                 checksum: c\n    deployed_at: d\n"
             )
             .as_bytes(),
         );

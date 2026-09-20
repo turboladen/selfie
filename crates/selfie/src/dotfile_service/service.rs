@@ -1388,7 +1388,11 @@ async fn perform_deploy<F: FileSystem>(
         // describe it.
         return Err(());
     }
-    deploy_state.record_deployment(unit.source_key, unit.source_checksum);
+    deploy_state.record_deployment(
+        &unit.target_path.display().to_string(),
+        unit.source_key,
+        unit.source_checksum,
+    );
 
     sender
         .send_dotfile_deployed(unit.source_path.display(), unit.target_path.display())
@@ -1696,9 +1700,11 @@ where
             let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            // Detect drift
+            // Detect drift. State is keyed by the expanded target, the one path
+            // that has one file and one checksum however many sources name it.
+            let target_key = target_path.display().to_string();
             let drift = recording(&mut loaded, &mut unrecorded).detect_drift(
-                source,
+                &target_key,
                 &source_checksum,
                 &target_checksum,
             );
@@ -1770,8 +1776,11 @@ where
                     // A stale answer omits an entry the next run re-evaluates.
                     // The window that could manufacture one is small, not absent.
                     if drift == DriftType::NotTracked && !options.dry_run && unmanaged.is_none() {
-                        recording(&mut loaded, &mut unrecorded)
-                            .record_deployment(source, &source_checksum);
+                        recording(&mut loaded, &mut unrecorded).record_deployment(
+                            &target_key,
+                            source,
+                            &source_checksum,
+                        );
                     }
 
                     // Say why it will not settle, on the line the user is already
@@ -2100,7 +2109,11 @@ where
             let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            let drift = deploy_state.detect_drift(source, &source_checksum, &target_checksum);
+            let drift = deploy_state.detect_drift(
+                &target_path.display().to_string(),
+                &source_checksum,
+                &target_checksum,
+            );
             let decision =
                 deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
@@ -2312,7 +2325,11 @@ where
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
     let source_key = format!("{name}/{filename}");
-    loaded.state_mut().record_deployment(&source_key, &checksum);
+    loaded.state_mut().record_deployment(
+        &expanded_target.display().to_string(),
+        &source_key,
+        &checksum,
+    );
     if let Err(e) = save_deploy_state(filesystem, &loaded) {
         return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
     }
@@ -2488,9 +2505,11 @@ where
 
     // Record initial deploy state
     let checksum = compute_checksum(content.as_bytes());
-    loaded
-        .state_mut()
-        .record_deployment(&relative_source, &checksum);
+    loaded.state_mut().record_deployment(
+        &expanded_target.display().to_string(),
+        &relative_source,
+        &checksum,
+    );
     if let Err(e) = save_deploy_state(filesystem, &loaded) {
         return OperationResult::Failure(OperationFailure::Generic(e.to_string()));
     }

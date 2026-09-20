@@ -208,6 +208,11 @@ state back and selfie never writes over a state file it could not read. `selfie 
 deployed: every tracked dotfile shows as untracked for that run. An **absent** state file is the
 ordinary first-run case and is not reported.
 
+Entries are keyed by the target path, so one source deployed to two targets is two records. A state
+file written by an earlier selfie, whose entries were keyed by source, does not parse and is refused
+the same way. Move it aside and run `selfie apply` once: every target whose content already matches
+its source is recorded again without a prompt, and only a target that genuinely differs asks.
+
 It is written readable only by its owner (mode `0600`). Its contents are not credentials, but they
 name each repository-file dotfile selfie manages here, which is a useful map to anyone else with an
 account on the machine.

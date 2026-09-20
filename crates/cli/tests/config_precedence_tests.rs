@@ -253,16 +253,26 @@ fn without_a_flag_the_config_files_dotfiles_directory_decides() {
 // renamed environment, an unparsable spec, a moved source. Naming the entry is
 // what makes the four prove precedence rather than the mere reachability of a
 // write.
-fn assert_state_records_the_fixture(state_file: &Path) {
+//
+// The entry is named by its key, the target expanded against `home`. The
+// source path also appears in the file, as a value, so matching on it would
+// pass a state keyed the wrong way round.
+fn assert_state_records_the_fixture(state_file: &Path, home: &Path) {
     let state = fs::read_to_string(state_file).unwrap_or_else(|e| {
         panic!(
             "deploy state should be readable at {}: {e}",
             state_file.display()
         )
     });
+    let key = format!("{}:", home.join("sentinel-target").display());
     assert!(
-        state.contains("sentinel/file.txt"),
-        "deploy state at {} should record the fixture's dotfile rather than be empty; got:\n{state}",
+        state.contains(&key),
+        "deploy state at {} should record the fixture's dotfile under its target; got:\n{state}",
+        state_file.display()
+    );
+    assert!(
+        !state.contains("sentinel/file.txt:"),
+        "deploy state at {} is keyed by source rather than by target; got:\n{state}",
         state_file.display()
     );
 }
@@ -278,7 +288,10 @@ fn the_state_directory_flag_decides_where_deploy_state_lands() {
         .assert()
         .success();
 
-    assert_state_records_the_fixture(&temp.path().join("flag-state/deploy-state.yml"));
+    assert_state_records_the_fixture(
+        &temp.path().join("flag-state/deploy-state.yml"),
+        temp.path(),
+    );
     // Paired with the assertion above: on its own, an absent fallback file is
     // also what a run that never reached the state write would leave behind.
     assert!(
@@ -299,7 +312,10 @@ fn without_a_flag_deploy_state_lands_under_home() {
         .assert()
         .success();
 
-    assert_state_records_the_fixture(&temp.path().join(".local/state/selfie/deploy-state.yml"));
+    assert_state_records_the_fixture(
+        &temp.path().join(".local/state/selfie/deploy-state.yml"),
+        temp.path(),
+    );
     // The negative half its three siblings each carry: without it the test also
     // passes on a build that writes the state file everywhere it can name.
     assert!(
@@ -322,7 +338,10 @@ fn the_state_directory_flag_beats_the_config_file() {
         .assert()
         .success();
 
-    assert_state_records_the_fixture(&temp.path().join("flag-state/deploy-state.yml"));
+    assert_state_records_the_fixture(
+        &temp.path().join("flag-state/deploy-state.yml"),
+        temp.path(),
+    );
     assert!(
         !temp.path().join("config-state/deploy-state.yml").exists(),
         "the flag should have kept deploy state out of the file's directory"
@@ -340,7 +359,10 @@ fn without_a_flag_the_config_files_state_directory_decides() {
         .assert()
         .success();
 
-    assert_state_records_the_fixture(&temp.path().join("config-state/deploy-state.yml"));
+    assert_state_records_the_fixture(
+        &temp.path().join("config-state/deploy-state.yml"),
+        temp.path(),
+    );
     assert!(
         !temp.path().join(".local/state/selfie").exists(),
         "the file's directory should have kept deploy state out of the home fallback"
