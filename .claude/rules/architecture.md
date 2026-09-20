@@ -82,8 +82,9 @@ Key differences from the CLI:
 - Status labels are AI-friendly (`"installed"`, `"not installed"`, `"error"`) rather than CLI log
   phrases (`"successfully"`, `"with failures"`).
 - Tools call `SpecService`/`PackageService` as the CLI does — `selfie_spec_validate_all` goes
-  through `SpecService::validate_all`. `selfie_dotfiles_list` reads the repository directly; that is
-  a known deviation from the boundary rule above, not a pattern to copy.
+  through `SpecService::validate_all`. `selfie_track_dotfile`'s name check reads the dotfiles
+  repository directly through `namespace::validate_unique_name`; that is a known deviation from the
+  boundary rule above, not a pattern to copy.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
   to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 
