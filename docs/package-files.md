@@ -226,9 +226,11 @@ misspelled optional key such as `audt:` is caught rather than ignored.
 deploying from it. An `_dotfiles:` there would otherwise leave that environment's list empty, so the
 shared entry would deploy over the file the environment meant to override. A key in an environment
 the run does not apply is left alone. The commands that rewrite a package file —
-`selfie package track-dotfile` and the MCP `spec_update` tool — refuse for the same reason: the key
-is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
-at the file's top level, where a rewrite would take every entry under it.
+`selfie package track-dotfile`, `selfie track` when it adds the file to an existing package, and the
+MCP `selfie_spec_update`, `selfie_spec_update_batch` and `selfie_package_track_dotfile` tools —
+refuse for the same reason: the key is not modeled, so rewriting from the struct would delete it
+silently. The same refusal covers a key at the file's top level, where a rewrite would take every
+entry under it.
 
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
@@ -255,6 +257,13 @@ without the file until the spec is corrected.
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
 would refuse to write can still be opened to fix it. Only a package that does not exist yet is
 written before the editor opens.
+
+The rewriting commands named above write the file back from selfie's own model of it, and that model
+holds no comments, no key order and no anchors. A rewrite that succeeds therefore drops every
+comment, replaces every anchor reference with the value it expanded to, and reorders the keys. A
+top-level key beginning with `_`, which selfie allows as an anchor definition, is dropped the same
+way unless its name shadows a real field, in which case the rewrite is refused. `selfie spec create`
+writes only a file that does not exist yet, so nothing is lost there.
 
 Keys beginning with `_` are treated as YAML anchor definitions and allowed, unless the rest of the
 name matches a real field — `_check:` cannot be told apart from a misspelling of `check:` and is
