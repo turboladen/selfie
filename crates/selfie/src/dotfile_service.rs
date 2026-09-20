@@ -12,6 +12,7 @@
 //! - [`port`] — The `DotfileService` trait and `ApplyOptions` request type
 //! - [`service`] — The adapter: collecting packages, and the `DotfileService` impl
 //! - `apply` — Applying every entry of every selected package
+//! - `drift` — Reporting how far every tracked target has drifted from its source
 //! - `backup` — Copies of what a target held before an apply overwrote it
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
 //! - `deploy_entry` — Writing one entry to its target and recording what was written
@@ -31,6 +32,7 @@ pub mod deploy;
 mod deploy_entry;
 pub mod diff;
 pub(crate) mod directory;
+mod drift;
 pub mod port;
 pub(crate) mod refusal;
 pub(crate) mod resolve;
