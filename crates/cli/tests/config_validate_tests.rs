@@ -14,6 +14,32 @@ fn test_validate_valid_config() {
         .stdout(predicates::str::contains("Configuration is valid"));
 }
 
+// Both optional directories are reported, as the values in effect: a wrong one
+// is then visible here rather than only when a command behaves oddly. The
+// default config names neither, so what is printed is the derived default for
+// each, and a report of only what the file says would print nothing.
+#[test]
+fn config_validate_reports_the_dotfiles_and_state_directories() {
+    let temp_dir = setup_default_test_config();
+    // The loader canonicalizes the package directory and the home directory,
+    // so both derived paths print in canonical form: `/private/var/...` where
+    // the sandbox was minted as `/var/...` on macOS.
+    let root = temp_dir.path().canonicalize().unwrap();
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["config", "validate"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "dotfiles_directory: {}",
+            root.join("dotfiles").display()
+        )))
+        .stdout(predicates::str::contains(format!(
+            "state_directory: {}",
+            root.join(".local/state/selfie").display()
+        )));
+}
+
 #[test]
 fn test_validate_invalid_config() {
     // Invalid config with missing required fields

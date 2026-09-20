@@ -618,7 +618,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_config_get",
-        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, and settings. `dotfiles_directory` is the path in effect: the configured one, or the default beside the package directory when none is set. It is reported whether or not it exists; the dotfile tools say when a configured one is missing."
+        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, state directory, and settings. `dotfiles_directory` and `state_directory` are the paths in effect: the configured one, or the default when none is set (beside the package directory, and `~/.local/state/selfie`). Both are reported whether or not they exist; the dotfile tools say when a configured one is missing. `state_directory` is null when neither a setting nor a home directory gives it a value, or when the configured value is not an absolute path."
     )]
     async fn config_get(&self) -> Result<CallToolResult, McpError> {
         let config_data = serde_json::json!({
@@ -628,6 +628,12 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
             // reads the same shape whether or not the default applies. Whether
             // it exists is the dotfile tools' answer to give, and they do.
             "dotfiles_directory": self.config.dotfiles_directory().display().to_string(),
+            "state_directory": selfie::fs::state_directory(
+                &RealFileSystem,
+                self.config.state_directory().map(|p| p.as_path()),
+            )
+            .ok()
+            .map(|directory| directory.display().to_string()),
             "command_timeout_secs": self.config.command_timeout().as_secs(),
             // Always present, empty when the file is clean, so a consumer can
             // read the same shape every time.
@@ -949,11 +955,23 @@ mod tests {
     // sibling default when `None`. Listing runs no command, so the login-shell
     // runner is never used.
     fn server_over(packages: &std::path::Path, dotfiles: Option<&std::path::Path>) -> SelfieServer {
+        server_with(packages, dotfiles, None)
+    }
+
+    // As `server_over`, with a configured `state_directory` as well.
+    fn server_with(
+        packages: &std::path::Path,
+        dotfiles: Option<&std::path::Path>,
+        state: Option<&std::path::Path>,
+    ) -> SelfieServer {
         let mut builder = selfie::config::SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(packages);
         if let Some(dotfiles) = dotfiles {
             builder = builder.dotfiles_directory(dotfiles.to_path_buf());
+        }
+        if let Some(state) = state {
+            builder = builder.state_directory(state.to_path_buf());
         }
         let config = builder.build();
         let repo = YamlPackageRepository::new(
@@ -1015,6 +1033,72 @@ mod tests {
             json["dotfiles_directory"].as_str(),
             Some(temp.path().join("dotfiles").display().to_string().as_str()),
             "got: {json}"
+        );
+    }
+
+    // A configured state directory is echoed as given; it is where the deploy
+    // state the apply and drift tools read lives.
+    #[tokio::test]
+    async fn config_get_reports_a_configured_state_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let state = temp.path().join("state");
+
+        let server = server_with(&packages, None, Some(&state));
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert_eq!(
+            json["state_directory"].as_str(),
+            Some(state.display().to_string().as_str()),
+            "got: {json}"
+        );
+    }
+
+    // Unset, the field carries the default under the home directory rather
+    // than going absent, so a consumer reads one shape either way.
+    #[tokio::test]
+    async fn config_get_reports_the_default_state_directory_when_none_is_set() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_with(&packages, None, None);
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        let reported = json["state_directory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the default must be reported, got: {json}"));
+        assert!(
+            std::path::Path::new(reported).is_absolute()
+                && reported.ends_with("/.local/state/selfie"),
+            "the default is the XDG state home under the home directory, got: {reported}"
+        );
+    }
+
+    // A configured value with no usable resolution is null rather than echoed:
+    // a relative path is refused by every command that would read the state,
+    // and reporting it as the directory in effect would say otherwise.
+    #[tokio::test]
+    async fn config_get_reports_null_for_an_unresolvable_state_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_with(
+            &packages,
+            None,
+            Some(std::path::Path::new("relative/state")),
+        );
+        let json = tool_json(&server.config_get().await.unwrap());
+
+        assert!(
+            json["state_directory"].is_null(),
+            "an unresolvable state directory must be null, got: {json}"
+        );
+        assert!(
+            json.get("state_directory").is_some(),
+            "the field must be present even when null, got: {json}"
         );
     }
 
