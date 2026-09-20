@@ -2507,9 +2507,21 @@ async fn test_track_for_package_fails_when_package_not_found() {
     let events = collect_events(stream).await;
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
+    // Typed, not stringified. Every other single-package path carries the load
+    // error through with its type intact, so an adapter rendering the parts in its
+    // own channels -- a source snippet, a structured location -- reaches this
+    // command too instead of silently skipping it.
     assert!(
-        matches!(result, OperationResult::Failure(_)),
-        "Should fail when package doesn't exist"
+        matches!(
+            result,
+            OperationResult::Failure(OperationFailure::Package(_))
+        ),
+        "the load failure must keep its type, got: {result:?}"
+    );
+    let message = failure_message(&events);
+    assert!(
+        message.contains("nonexistent"),
+        "the failure must still name the package, got: {message}"
     );
 }
 

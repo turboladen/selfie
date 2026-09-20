@@ -2560,13 +2560,13 @@ where
     R: PackageRepository,
     F: FileSystem,
 {
+    // Carried with its type rather than stringified, as every other
+    // single-package path carries it, so an adapter keyed on the typed error
+    // reaches this command too. Needs no frame of its own: `PackageError` names
+    // the package and the directory it searched.
     let package_blob = match repo.get_package(package_name) {
         Ok(blob) => blob,
-        Err(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot load package '{package_name}': {e}"
-            )));
-        }
+        Err(e) => return OperationResult::Failure(e.into()),
     };
 
     let spec_path = package_blob.file_path().to_path_buf();
