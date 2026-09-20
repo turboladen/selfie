@@ -64,11 +64,9 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
     // A **directory** is deliberately not one of these: opening one never blocks,
     // and writing to one fails `EISDIR` without touching anything.
     //
-    // Two tests hold that. `a_directory_at_the_target_is_an_ordinary_error` pins
-    // that it stays an `IoError`, and
-    // `a_write_that_fails_after_an_accepted_conflict_is_refused` reaches
-    // `perform_deploy`'s second `Err` arm by putting a directory at the target --
-    // folding directories in here would silently stop covering that arm.
+    // `a_directory_at_the_target_is_an_ordinary_error` pins that it stays an
+    // `IoError`. A directory at a deploy target is therefore refused by the read
+    // that precedes the deploy decision, as any unreadable target is.
     None
 }
 

@@ -220,8 +220,8 @@ not be loaded, is a failure and exits `1` with nothing deployed.
 `selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run
 succeeded and the command reports itself as completed. Selfie refuses an entry when it cannot deploy
 it safely or unambiguously — an unrecognized key in the entry, a target it will not write to (a
-symlink, or a path outside your home directory), or a source file it cannot read. Each refusal is
-named in the output, and the summary line counts them:
+symlink, or a path outside your home directory), a target that exists but it cannot read, or a
+source file it cannot read. Each refusal is named in the output, and the summary line counts them:
 
 ```
 Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)

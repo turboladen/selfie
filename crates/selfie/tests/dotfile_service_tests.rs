@@ -67,6 +67,22 @@ fn failure_message(events: &[PackageEvent]) -> String {
     }
 }
 
+// A conflict resolver that counts how often it is asked and always answers
+// `Accept`, so a run that reaches it both shows in the count and goes on to
+// write.
+struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl selfie::dotfile_service::port::ConflictResolver for Counting {
+    fn resolve(
+        &self,
+        _target: &str,
+        _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+    ) -> selfie::dotfile_service::port::ConflictResolution {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        selfie::dotfile_service::port::ConflictResolution::Accept
+    }
+}
+
 // Every warning a run emitted.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
@@ -87,6 +103,19 @@ fn dotfiles_directory_warnings(events: &[PackageEvent]) -> Vec<String> {
             lower.contains("dotfiles directory") || lower.contains("standalone dotfiles")
         })
         .collect()
+}
+
+// `(drift_count, total_count, refused_count)` of a drift check's completion.
+fn drift_summary(events: &[PackageEvent]) -> (usize, usize, usize) {
+    match get_operation_result(events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            drift_count,
+            total_count,
+            refused_count,
+            ..
+        })) => (*drift_count, *total_count, *refused_count),
+        other => panic!("expected a drift completion, got: {other:?}"),
+    }
 }
 
 // Entries an apply was asked to deploy and declined, which is the counter that
@@ -6267,6 +6296,17 @@ mod deploy_state_diagnostics {
 mod refusal_accounting {
     use super::*;
 
+    // Restores `mode` on the path when dropped, so a temp directory made
+    // read-only for a test can still be removed after an assertion panics.
+    struct RestoreMode(PathBuf, u32);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+        }
+    }
+
     // `(deployed, skipped, conflict, refused)`.
     fn counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
@@ -6346,18 +6386,39 @@ dotfiles:
     //
     // This is `perform_deploy`'s *second* failure site — the one inside the
     // conflict branch, which looks identical to the first and was missed when
-    // this fix was planned as "six sites". A target that is a directory reaches
-    // it: the target read fails, so the entry is a `Conflict`; `auto_accept`
-    // settles it; and the write then fails with `EISDIR`.
+    // this fix was planned as "six sites". A readable, owner read-only target
+    // reaches it: the target differs, so the entry is a `Conflict`; `auto_accept`
+    // settles it; and the in-place write then fails with `EACCES`. An unreadable
+    // target would not do, because it is refused before the decision.
     #[tokio::test]
     async fn a_write_that_fails_after_an_accepted_conflict_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dirs = TestDirs::new();
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
 
-        // A directory where the target file should be.
+        // Owner read-only, in an owner read-only directory: an in-place open
+        // for writing fails on the file, and a write-then-rename fails on the
+        // directory, so the accepted write fails under either writer.
         let target = dirs.target_dir.join("config.toml");
-        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&target, "TARGET").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&dirs.target_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = RestoreMode(dirs.target_dir.clone(), 0o755);
+        // Root writes through the mode bits, so the write this test needs to
+        // fail would succeed.
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .is_ok()
+            || std::fs::File::create(dirs.target_dir.join("probe")).is_ok()
+        {
+            eprintln!(
+                "SKIP a_write_that_fails_after_an_accepted_conflict_is_refused: running as root"
+            );
+            return;
+        }
 
         create_package_with_dotfiles(
             &dirs.package_dir,
@@ -6376,7 +6437,11 @@ dotfiles:
             (0, 0, 0, 1),
             "an accepted conflict that could not be written is a refusal, not a skip"
         );
-        assert!(target.is_dir(), "the directory must be left alone");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "TARGET",
+            "the target must be left alone"
+        );
     }
 
     // Every outcome is still a step.
@@ -8021,13 +8086,7 @@ mod apply_and_drift_agree {
     }
 
     fn drift_refused(events: &[PackageEvent]) -> usize {
-        match get_operation_result(events) {
-            Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-                refused_count,
-                ..
-            })) => *refused_count,
-            other => panic!("expected a drift completion, got: {other:?}"),
-        }
+        drift_summary(events).2
     }
 
     // The state selfie-9a1h measured on main: apply refuses and names the key,
@@ -8113,6 +8172,324 @@ mod apply_and_drift_agree {
             "a tracked dotfile has no environments by design: {:?}",
             warning_messages(&events)
         );
+    }
+}
+
+// A target that exists but cannot be read is refused: never shown as empty,
+// never overwritten, and worded the same by apply and drift.
+//
+// The fixture is mode 0200 (owner write-only) rather than 0000. Today's
+// in-place writer and a rename-based one can both replace a 0200 file, so an
+// assertion that the file survived is live; a 0000 target is saved by the
+// writer's own EACCES, which proves nothing about the decision under test.
+mod unreadable_targets {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A file held at mode 0200 until this is dropped. `Drop` restores 0600 so
+    // the content can be read back and the temp directory removed, even when
+    // an assertion panics first.
+    struct UnreadableTarget(PathBuf);
+
+    impl Drop for UnreadableTarget {
+        fn drop(&mut self) {
+            // Ignored on failure: panicking during an unwind aborts the test
+            // binary and hides the assertion that started it.
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    // `None` when the mode does not bite, which is what root sees: the caller
+    // prints a skip rather than asserting against a readable file.
+    fn make_unreadable(path: &Path) -> Option<UnreadableTarget> {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let guard = UnreadableTarget(path.to_path_buf());
+        if std::fs::read(path).is_ok() {
+            return None;
+        }
+        Some(guard)
+    }
+
+    fn skip(test: &str) {
+        eprintln!("SKIP {test}: running as root, mode bits ignored");
+    }
+
+    // A package whose one entry targets `target`, with `content` in the repository.
+    fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
+        let source = dirs.package_dir.join("myapp/config.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, content).unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    fn count_of(events: &[PackageEvent], matcher: fn(&PackageEvent) -> bool) -> usize {
+        events.iter().filter(|e| matcher(e)).count()
+    }
+
+    fn deployed(e: &PackageEvent) -> bool {
+        matches!(e, PackageEvent::DotfileDeployed { .. })
+    }
+
+    fn conflicted(e: &PackageEvent) -> bool {
+        matches!(e, PackageEvent::DotfileConflict { .. })
+    }
+
+    fn drifted(e: &PackageEvent) -> bool {
+        matches!(e, PackageEvent::DotfileDriftDetected { .. })
+    }
+
+    // The one warning a run emitted, which must say the target could not be read
+    // and name it, and must never describe it as empty.
+    fn the_unreadable_warning(events: &[PackageEvent], target: &Path) -> String {
+        let warnings = warning_messages(events);
+        assert_eq!(warnings.len(), 1, "expected one refusal, got: {warnings:?}");
+        let warning = warnings.into_iter().next().unwrap();
+        assert!(
+            warning.contains("could not be read") && warning.contains(&*target.to_string_lossy()),
+            "the refusal must say the target could not be read and name it: {warning}"
+        );
+        assert!(
+            !warning.to_lowercase().contains("empty"),
+            "an unreadable target is not an empty one: {warning}"
+        );
+        warning
+    }
+
+    // A1. `--yes` accepts conflicts; it must not accept one selfie fabricated
+    // from a read it could not perform.
+    #[tokio::test]
+    async fn apply_with_auto_accept_refuses_a_target_it_cannot_read() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "EXISTING").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+        let Some(guard) = make_unreadable(&target) else {
+            skip("apply_with_auto_accept_refuses_a_target_it_cannot_read");
+            return;
+        };
+
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            count_of(&events, deployed),
+            0,
+            "nothing may be written: {events:?}"
+        );
+        assert_eq!(
+            count_of(&events, conflicted),
+            0,
+            "a refusal is not a conflict: {events:?}"
+        );
+        the_unreadable_warning(&events, &target);
+        assert_eq!(refused_count(&events), 1);
+
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
+    }
+
+    // A2. The conflict prompt exists so a human can judge; it must not be
+    // handed a diff that presents the target as empty.
+    #[tokio::test]
+    async fn an_unreadable_target_is_never_diffed_against_empty_content() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "EXISTING").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+        let Some(guard) = make_unreadable(&target) else {
+            skip("an_unreadable_target_is_never_diffed_against_empty_content");
+            return;
+        };
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the resolver must not be asked"
+        );
+        assert_eq!(count_of(&events, conflicted), 0, "got: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| format!("{e:?}").contains("+FROM REPO")),
+            "no event may carry a diff adding the whole repository file: {events:?}"
+        );
+
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
+    }
+
+    // A3. Drift cannot say whether an unreadable target changed, so it says
+    // that, in apply's words, and counts the entry as one it could not check.
+    #[tokio::test]
+    async fn drift_reports_an_unreadable_target_rather_than_calling_it_changed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "V1", &target);
+        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "V1");
+        let Some(guard) = make_unreadable(&target) else {
+            skip("drift_reports_an_unreadable_target_rather_than_calling_it_changed");
+            return;
+        };
+
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(count_of(&drift, drifted), 0, "not drift: {drift:?}");
+        let from_drift = the_unreadable_warning(&drift, &target);
+        // Refused and not examined: a green summary, or a total that `sync
+        // status` renders as deployed, would claim more than was checked.
+        assert_eq!(drift_summary(&drift), (0, 0, 1));
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let from_apply = the_unreadable_warning(&apply, &target);
+        assert_eq!(from_drift, from_apply);
+
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "V1");
+    }
+
+    // A4. A link whose destination cannot be read is a symlinked target first,
+    // in both commands: that is the refusal every command already shares.
+    #[tokio::test]
+    async fn drift_and_apply_refuse_a_symlink_to_an_unreadable_file_as_a_symlink() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "EXISTING").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+        let Some(guard) = make_unreadable(&destination) else {
+            skip("drift_and_apply_refuse_a_symlink_to_an_unreadable_file_as_a_symlink");
+            return;
+        };
+
+        let drift = warning_messages(&collect_events(dirs.service().check_drift().await).await);
+        let apply = warning_messages(
+            &collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await,
+        );
+
+        assert_eq!(drift.len(), 1, "drift: {drift:?}");
+        assert_eq!(apply.len(), 1, "apply: {apply:?}");
+        assert_eq!(drift[0], apply[0]);
+        assert!(
+            apply[0].contains("is a symlink") && !apply[0].contains("could not be read"),
+            "a symlinked target is refused as a symlink: {}",
+            apply[0]
+        );
+
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "EXISTING");
+    }
+
+    // A5. Not UTF-8 is not unreadable. The bytes were read, they differ, and
+    // that is an ordinary conflict for the user to settle.
+    #[tokio::test]
+    async fn a_non_utf8_target_is_a_conflict_not_an_unreadable_one() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        let binary = [0xff_u8, 0xfe, 0x00, 0x41];
+        std::fs::write(&target, binary).unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(count_of(&events, conflicted), 1, "got: {events:?}");
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("could not be read")),
+            "the target was read: {events:?}"
+        );
+        // The diff shows the target's bytes, decoded lossily, as removed lines:
+        // it is built from the bytes the checksum read, not from a second read
+        // that defaults to empty and renders the whole file as an addition.
+        let diff = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                _ => None,
+            })
+            .expect("a conflict event");
+        assert!(
+            diff.lines()
+                .any(|line| line.starts_with('-') && !line.starts_with("---")),
+            "the diff must show what the target holds: {diff}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), binary);
+    }
+}
+
+// A dry run writes nothing, so a repository-file conflict there is reported
+// with its diff rather than put to the interactive resolver.
+mod dry_run_conflicts {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The conflict prompt would ask the user to decide an overwrite that will
+    // not happen. The conflict is reported with its diff instead, which is what
+    // a real run would put to the resolver.
+    #[tokio::test]
+    async fn a_dry_run_never_asks_the_resolver_about_a_repo_file_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "EXISTING").unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "FROM REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            dry_run: true,
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "a dry run prompts for nothing"
+        );
+        let conflicts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(conflicts.len(), 1, "got: {events:?}");
+        assert!(
+            conflicts[0].contains("+FROM REPO"),
+            "the conflict carries the diff a real run would show: {}",
+            conflicts[0]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }))
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
     }
 }
 

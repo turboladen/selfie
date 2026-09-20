@@ -226,9 +226,11 @@ misspelled optional key such as `audt:` is caught rather than ignored.
 deploying from it. An `_dotfiles:` there would otherwise leave that environment's list empty, so the
 shared entry would deploy over the file the environment meant to override. A key in an environment
 the run does not apply is left alone. The commands that rewrite a package file —
-`selfie package track-dotfile` and the MCP `spec_update` tool — refuse for the same reason: the key
-is not modeled, so rewriting from the struct would delete it silently. The same refusal covers a key
-at the file's top level, where a rewrite would take every entry under it.
+`selfie package track-dotfile`, `selfie track` when it adds the file to an existing package, and the
+MCP `selfie_spec_update`, `selfie_spec_update_batch` and `selfie_package_track_dotfile` tools —
+refuse for the same reason: the key is not modeled, so rewriting from the struct would delete it
+silently. The same refusal covers a key at the file's top level, where a rewrite would take every
+entry under it.
 
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
@@ -255,6 +257,13 @@ without the file until the spec is corrected.
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
 would refuse to write can still be opened to fix it. Only a package that does not exist yet is
 written before the editor opens.
+
+The rewriting commands named above write the file back from selfie's own model of it, and that model
+holds no comments, no key order and no anchors. A rewrite that succeeds therefore drops every
+comment, replaces every anchor reference with the value it expanded to, and reorders the keys. A
+top-level key beginning with `_`, which selfie allows as an anchor definition, is dropped the same
+way unless its name shadows a real field, in which case the rewrite is refused. `selfie spec create`
+writes only a file that does not exist yet, so nothing is lost there.
 
 Keys beginning with `_` are treated as YAML anchor definitions and allowed, unless the rest of the
 name matches a real field — `_check:` cannot be told apart from a misspelling of `check:` and is
@@ -619,15 +628,37 @@ selfie apply --yes
 ### Conflict Detection
 
 Selfie tracks checksums of deployed files. If you modify a deployed file locally _and_ the source
-file changes, selfie detects this as a conflict:
+file changes, selfie detects this as a conflict and shows the difference, with the target on the `-`
+side and the repository file on the `+` side:
 
 ```
-⚠ Conflict: ~/.config/starship.toml
-  Source and target both changed since last deploy.
-  Use --yes to overwrite, or resolve manually.
+⚠   Conflict: ~/.config/starship.toml
+  ~/.selfie/packages/starship/starship.toml → ~/.config/starship.toml
+  --- ~/.config/starship.toml
+  +++ ~/.selfie/packages/starship/starship.toml
+  ──────────────────────────────────────────────────────────────────────
+  @@ -1 +1 @@
+  -format = "$all"
+  +format = "$directory$git_branch$character"
+  ──────────────────────────────────────────────────────────────────────
+? How should this conflict be resolved? ›
+❯ Skip (keep target as-is)
+  Accept (overwrite target with the new content)
 ```
 
-Without `--yes`, conflicts are reported but the target file is left untouched.
+The prompt appears only in a terminal; a run without one skips the conflict and reports it.
+
+Without `--yes`, conflicts are reported but the target file is left untouched. With `--dry-run` they
+are reported the same way, diff included, and you are not asked to resolve them: nothing would be
+written either way.
+
+A repository-file target that exists but selfie cannot read is not a conflict, and it is not empty.
+selfie refuses the entry with a warning naming the target and the read error, shows no diff, and
+writes nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning,
+counts the entry as refused, and exits `1` rather than calling the target changed. Make the target
+readable, or point the entry elsewhere, and run apply again. A secret-bearing entry handles an
+unreadable target [differently](#deploy-behavior-and-permissions): it is a conflict, reported and
+skipped unless an interactive prompt accepts it.
 
 ### Symlinked targets
 
@@ -987,6 +1018,11 @@ truncated credential.
 
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
+
+For a secret-bearing entry, a target that exists but cannot be read is a conflict as well,
+summarized as "exists but could not be read", and is never treated as absent: an interactive prompt
+can still accept the overwrite, since replacing a file needs only write permission on its directory,
+and without one the entry is skipped.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the
