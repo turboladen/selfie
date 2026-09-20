@@ -747,9 +747,14 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
         None => "exists but could not be read".to_string(),
     };
 
+    // Says that nothing is kept, because every other overwrite selfie performs
+    // does keep a copy. A user who has seen that line elsewhere would otherwise
+    // assume this overwrite is recoverable too, and accepting is the only way
+    // past a secret conflict.
     format!(
         "  {}\n  target exists and differs from resolved output\n\n  \
-         resolved output : {} lines\n  current target  : {current_side}\n  (content hidden)",
+         resolved output : {} lines\n  current target  : {current_side}\n  (content hidden)\n  \
+         no copy of the current target is kept",
         origin,
         lines(incoming),
     )

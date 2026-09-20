@@ -67,18 +67,44 @@ struct InteractiveConflictResolver {
     display: DisplayManager,
 }
 
+/// Which conflict is being asked about, and so what accepting costs.
+// A type rather than a flag: the two kinds make opposite promises about the
+// target's current content, and one shared label cannot carry both.
+#[derive(Clone, Copy)]
+enum Prompt {
+    /// A repository file. Content the write would destroy is copied aside first.
+    RepositoryFile,
+    /// A secret-bearing entry. Nothing is copied aside, ever.
+    Secret {
+        /// Whether to offer showing the two values.
+        reveal: bool,
+    },
+}
+
+impl Prompt {
+    /// What accepting does, including what becomes of the current content.
+    fn accept_label(self) -> &'static str {
+        match self {
+            // "anything it would destroy" rather than "the current content":
+            // `BothChanged` is a conflict even when both sides hold the same
+            // content, and then there is nothing to copy.
+            Self::RepositoryFile => {
+                "Accept (overwrite target; anything it would destroy is copied aside first)"
+            }
+            Self::Secret { .. } => "Accept (overwrite target; no copy of the current one is kept)",
+        }
+    }
+}
+
 impl InteractiveConflictResolver {
-    /// Ask how to resolve, offering reveal only when `reveal` is set.
+    /// Ask how to resolve, offering reveal only for a secret conflict that asked
+    /// for it.
     ///
-    /// Accept is never the default for a secret-bearing conflict, and reveal is
-    /// never reachable by accepting a default: both require a deliberate
-    /// selection.
-    fn prompt(&self, reveal: bool) -> Option<usize> {
-        let mut items = vec![
-            "Skip (keep target as-is)",
-            "Accept (overwrite target with the new content)",
-        ];
-        if reveal {
+    /// Accept is never the default, and reveal is never reachable by accepting a
+    /// default: both require a deliberate selection.
+    fn prompt(&self, kind: Prompt) -> Option<usize> {
+        let mut items = vec!["Skip (keep target as-is)", kind.accept_label()];
+        if matches!(kind, Prompt::Secret { reveal: true }) {
             items.push("Reveal the two values, then choose");
         }
 
@@ -140,7 +166,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                     .print_progress(format!("{} → {short_target}", shorten_path(source)));
                 self.display.print_diff(diff);
 
-                match self.prompt(false) {
+                match self.prompt(Prompt::RepositoryFile) {
                     Some(1) => ConflictResolution::Accept,
                     _ => ConflictResolution::Skip,
                 }
@@ -159,12 +185,12 @@ impl ConflictResolver for InteractiveConflictResolver {
                 // rather than a fresh stdout-only probe.
                 let can_reveal = self.display.is_tty();
 
-                match self.prompt(can_reveal) {
+                match self.prompt(Prompt::Secret { reveal: can_reveal }) {
                     Some(1) => ConflictResolution::Accept,
                     Some(2) => {
                         self.reveal(incoming, current, target);
                         // Ask again, without offering reveal a second time.
-                        match self.prompt(false) {
+                        match self.prompt(Prompt::Secret { reveal: false }) {
                             Some(1) => ConflictResolution::Accept,
                             _ => ConflictResolution::Skip,
                         }
@@ -265,6 +291,36 @@ pub(crate) async fn handle_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Each label must say its own half and not the other's: accepting a
+    // repository-file conflict is recoverable and accepting a secret one is not,
+    // and a reader deciding has to be told which. Asserting what a label must
+    // *not* say is what catches a copy-paste between the two arms, which a test
+    // that only checks the prompt appeared cannot see.
+    #[test]
+    fn each_accept_label_says_what_happens_to_the_current_content() {
+        let repository = Prompt::RepositoryFile.accept_label();
+        let secret = Prompt::Secret { reveal: false }.accept_label();
+
+        assert!(
+            repository.contains("copied aside") && !repository.contains("no copy"),
+            "{repository}"
+        );
+        assert!(
+            !repository.contains("the current content"),
+            "a conflict whose two sides already hold the same content keeps no copy, \
+             so the label must not promise one: {repository}"
+        );
+        assert!(
+            secret.contains("no copy") && !secret.contains("copied aside"),
+            "{secret}"
+        );
+        assert_eq!(
+            Prompt::Secret { reveal: true }.accept_label(),
+            secret,
+            "offering to reveal must not change what accepting costs"
+        );
+    }
 
     const SECRET: &str = "s3cr3t-rotated-token";
 

@@ -3512,6 +3512,40 @@ mod secret_bearing {
         );
     }
 
+    // Every other overwrite selfie performs keeps a copy of what it displaced, so
+    // a user who has seen that said elsewhere would assume this one does too.
+    // Accepting is the only way past a secret conflict and there is no undo.
+    #[tokio::test]
+    async fn a_secret_conflict_says_no_copy_is_kept() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "hand-edited credential").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let summary = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                _ => None,
+            })
+            .expect("a conflict must be reported");
+
+        assert!(
+            summary.contains("no copy of the current target is kept"),
+            "got: {summary}"
+        );
+        assert!(
+            !summary.contains("copied aside"),
+            "nothing is copied aside here: {summary}"
+        );
+        test_common::assert_secret_free(summary, SECRET, "the conflict summary");
+    }
+
     #[tokio::test]
     async fn auto_accept_does_not_overwrite_a_secret_target() {
         // `auto_accept` is caller-settable — the MCP server exposes it to an
