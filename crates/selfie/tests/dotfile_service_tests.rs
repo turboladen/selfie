@@ -10810,3 +10810,106 @@ async fn an_already_tracked_entry_reports_the_copy_the_spec_holds() {
         other => panic!("expected an already-tracked success, got: {other:?}"),
     }
 }
+
+// A target selfie cannot write to, already recorded in the spec, was the one
+// track answer nobody heard about. Track reported it as tracked and said nothing;
+// drift said nothing either, because with matching content the drift type is
+// `None` and there is no line to carry a reason. So a user who ran both commands
+// was told nothing by either (selfie-ykfc).
+//
+// Nothing is written on this path, so it is reported rather than refused:
+// refusing an idempotent no-op helps nobody, and the entry genuinely is tracked.
+#[cfg(unix)]
+mod an_already_tracked_target_selfie_cannot_write {
+    use super::*;
+    use std::path::Path;
+
+    // A package tracking `~/.config/bat/config`, with the target in whatever
+    // shape the caller plants, and the repository copy holding the same content.
+    fn tracked(dirs: &TestDirs, home: &Path) -> PathBuf {
+        let target = home.join(".config").join("bat").join("config");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat").join("config"), "--theme=ansi").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat/config", "~/.config/bat/config")],
+        );
+        target
+    }
+
+    async fn track_again(dirs: &TestDirs, home: &Path, target: &Path) -> Vec<PackageEvent> {
+        collect_events(
+            dirs.service_with_home(home)
+                .track_for_package("bat", target.to_str().unwrap())
+                .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_target_is_reported_without_being_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = tracked(&dirs, &home);
+
+        let destination = dirs.state_dir.join("real-config");
+        std::fs::write(&destination, "--theme=ansi").unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let events = track_again(&dirs, &home, &target).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(OperationSuccess::DotfileTracked {
+                    was_already_tracked: true,
+                    ..
+                }))
+            ),
+            "an idempotent track must not be refused, got: {:?}",
+            get_operation_result(&events)
+        );
+
+        let warnings = warning_messages(&events);
+        assert_eq!(warnings.len(), 1, "expected one warning, got: {warnings:?}");
+        assert!(
+            warnings[0].contains("symlink"),
+            "the warning does not say what is wrong: {}",
+            warnings[0]
+        );
+        // Not the refusal's remedy: the entry already exists, so "track the path
+        // it points to" describes something the user cannot now do.
+        assert!(
+            !warnings[0].contains("track the path it points to"),
+            "the warning offers the refusal's remedy: {}",
+            warnings[0]
+        );
+    }
+
+    // The control. Without it the warning could be unconditional and the test
+    // above would still pass.
+    #[tokio::test]
+    async fn a_plain_target_is_reported_in_silence() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = tracked(&dirs, &home);
+        std::fs::write(&target, "--theme=ansi").unwrap();
+
+        let events = track_again(&dirs, &home, &target).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "the idempotent track must succeed"
+        );
+        assert!(
+            warning_messages(&events).is_empty(),
+            "an ordinary already-tracked file warned: {:?}",
+            warning_messages(&events)
+        );
+    }
+}

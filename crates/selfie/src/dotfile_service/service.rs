@@ -679,6 +679,7 @@ where
                         &target_path,
                         dotfiles_repo.as_ref(),
                         &fs,
+                        &sender,
                         &config,
                     )
                     .await
@@ -710,7 +711,15 @@ where
             let result = match refusal {
                 Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
                 None => {
-                    handle_track_for_package(&package_name, &target_path, &repo, &fs, &config).await
+                    handle_track_for_package(
+                        &package_name,
+                        &target_path,
+                        &repo,
+                        &fs,
+                        &sender,
+                        &config,
+                    )
+                    .await
                 }
             };
 
@@ -1290,6 +1299,20 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
          Remove it, or track under a different name.",
         source_path.display()
     )
+}
+
+/// How every command reports an already-tracked target it cannot write to.
+// A target already in the spec that is not a regular file.
+//
+// Not `track_refusal`, whose remedy is about creating an entry: "track the path
+// it points to" describes something the user cannot do once the entry exists.
+//
+// Claims nothing about what a later apply does, because that differs by entry
+// kind: a repository-file entry is refused, while a secret-bearing one is written
+// by `write_file_private`, which replaces a symlink at the final component. This
+// breaks the silence and leaves the verdict to the command that has one.
+pub fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
+    format!("{refusal}. The entry stays as it is, and this command wrote nothing.")
 }
 
 // Where an entry's repository file sits, for the already-tracked answer.
@@ -2496,6 +2519,7 @@ async fn handle_track_standalone<R, F>(
     target_path: &str,
     dotfiles_repo: Option<&R>,
     filesystem: &F,
+    sender: &EventSender,
     config: &SelfieConfig,
 ) -> OperationResult
 where
@@ -2555,6 +2579,7 @@ where
         target_path,
         dotfiles_repo,
         filesystem,
+        sender,
         config,
     )
     .await
@@ -2567,6 +2592,7 @@ async fn handle_track_for_package<R, F>(
     target_path: &str,
     repo: &R,
     filesystem: &F,
+    sender: &EventSender,
     config: &SelfieConfig,
 ) -> OperationResult
 where
@@ -2594,6 +2620,7 @@ where
         target_path,
         repo,
         filesystem,
+        sender,
         config,
     )
     .await
@@ -2610,6 +2637,7 @@ async fn handle_track<R, F>(
     target_path: &str,
     repo: &R,
     filesystem: &F,
+    sender: &EventSender,
     config: &SelfieConfig,
 ) -> OperationResult
 where
@@ -2649,6 +2677,23 @@ where
         .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
 
     if let Some(entry) = already_tracked {
+        // Nothing is written here, so a target selfie cannot write to is reported
+        // rather than refused -- and it has to be reported here, because this is
+        // the one track answer that reaches neither the refusals below nor a
+        // deploy. With matching content drift answers `None` and has no line to
+        // carry a reason either, so both commands were silent about it.
+        // One answer, not both: a symlink to a socket satisfies each check and
+        // would otherwise warn twice with the same sentence. `or_else` also skips
+        // the second stat when the first already answered.
+        if let Some(refusal) = filesystem
+            .symlink_refusal(&expanded_target)
+            .or_else(|| filesystem.irregular_target_refusal(&expanded_target))
+        {
+            sender
+                .send_warning(already_tracked_refusal_warning(&refusal))
+                .await;
+        }
+
         // The entry's own paths, not the argument and not the target: "already
         // tracking X" should name what the spec says, which is what a later apply
         // will use, and `source_path` means the file in the repository in every
