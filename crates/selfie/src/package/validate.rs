@@ -6,8 +6,7 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, TopLevelKeys, UnknownKey, describe_unknown_key,
-    shadows_dotfile_field, unknown_key,
+    DotfileEntry, DotfileField, EnvironmentField, Package, TopLevelKeys, UnknownKey, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -86,10 +85,9 @@ pub fn unreadable_template_issue(
 fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
     keys.iter()
         .map(|unknown| {
-            // A collision needs different advice from a plain misspelling,
-            // for the reason `unknown_dotfile_keys` gives: the key may have
-            // been named deliberately, and which remedy applies depends on
-            // which reading was meant.
+            // A collision needs different advice from a plain misspelling: the
+            // key may have been named deliberately, and which remedy applies
+            // depends on which reading was meant.
             ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &unknown.key,
@@ -153,11 +151,20 @@ fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationI
 
     for (i, entry) in entries.iter().enumerate() {
         for key in entry.unknown_keys() {
+            // `DotfileEntry`'s deserializer records only what
+            // `unknown_key::<DotfileField>` rejects, so this `else` cannot fire.
+            // The call stays because it is what words the key, and because taking
+            // the sentence and the collision fact from one answer is what stops
+            // the two being chosen against different levels.
+            let Some(unknown) = unknown_key::<DotfileField>(key) else {
+                continue;
+            };
+
             // A collision needs different advice from a plain misspelling. The
             // key is not unknown — it may have been named deliberately — and
             // which remedy applies depends on which the user meant, so the
             // suggestion explains the rule rather than prescribing one fix.
-            let suggestion = if shadows_dotfile_field(key) {
+            let suggestion = if unknown.shadows {
                 "Anchors are legal here; only a name matching a field of this entry is refused, \
                  because it cannot be told apart from a misspelling of that field."
             } else {
@@ -167,7 +174,7 @@ fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationI
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{path}[{i}].{key}"),
-                &describe_unknown_key(key),
+                &unknown.message,
                 Some(suggestion),
             ));
         }
@@ -1114,6 +1121,67 @@ mod tests {
             !issue.message().contains("is not set"),
             "the message must hold for both readings of the key, got: {}",
             issue.message()
+        );
+    }
+
+    // `_target` is the key the two levels answer oppositely about, so it is the
+    // one that shows the entry's own field list is in force here. A package's
+    // top-level `_target: &target …` is legal and documented; inside an entry the
+    // same spelling cannot be told from a misspelling of `target`.
+    //
+    // The pair is the assertion. Judging entry keys against the package's field
+    // list would leave this entry unreported, and judging top-level keys against
+    // the entry's list would refuse every file using the documented anchor.
+    #[test]
+    fn validate_refuses_a_target_anchor_inside_an_entry() {
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    _target: ~/elsewhere\n",
+        );
+
+        let issue = package
+            .validate("test")
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles[0]._target")
+            .cloned()
+            .unwrap_or_else(|| panic!("an entry's '_target' must be refused"));
+
+        assert_eq!(issue.level(), ValidationLevel::Error);
+        assert!(
+            issue
+                .message()
+                .contains("misspelling of the 'target' field"),
+            "the message must name the field it collides with, got: {}",
+            issue.message()
+        );
+    }
+
+    // A key that collides with nothing gets different advice from one that does,
+    // and both sentences have to survive. The collision cannot prescribe a fix,
+    // because selfie does not know which reading was meant; a plain misspelling
+    // can, and saying what apply will do with the entry is the useful half.
+    #[test]
+    fn a_plain_unknown_entry_key_is_told_what_apply_will_do() {
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    vrs:\n      k: op read x\n",
+        );
+
+        let issue = package
+            .validate("test")
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles[0].vrs")
+            .cloned()
+            .unwrap_or_else(|| panic!("a misspelled entry key must be refused"));
+
+        assert_eq!(
+            issue.suggestion().map(String::as_str),
+            Some("This entry is skipped by 'selfie apply' until the key is corrected or removed."),
+            "a non-colliding key keeps its own advice"
         );
     }
 
