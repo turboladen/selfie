@@ -426,6 +426,39 @@ impl TestDirs {
     //
     // Injected rather than read from the environment: `$HOME` is process-wide
     // and these tests run in parallel.
+    // A service whose filesystem cancels the token when `cancel_on` is read, so a
+    // cancellation lands inside the run rather than before or after it.
+    fn service_cancelling_on_read(
+        &self,
+        cancel_on: &std::path::Path,
+        token: CancellationToken,
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<CancelOnReadOf>,
+        CancelOnReadOf,
+        FakeCommandRunner,
+        RunningAs,
+    > {
+        let fs = CancelOnReadOf(RealFileSystem, cancel_on.to_path_buf(), token.clone());
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .build();
+        DotfileServiceImpl::new(
+            YamlPackageRepository::new(
+                fs.clone(),
+                config.package_directory().clone(),
+                SpecOrigin::PackageDirectory,
+            ),
+            fs,
+            FakeCommandRunner::new(),
+            config,
+            token,
+            self.sudo_policy,
+        )
+    }
+
     fn service_with_home(
         &self,
         home: &std::path::Path,
@@ -455,6 +488,96 @@ impl TestDirs {
             self.dotfiles_dir.clone(),
             SpecOrigin::DotfilesDirectory,
         ))
+    }
+}
+
+// Cancels a token the moment a named file is read, then behaves exactly like the
+// real filesystem.
+//
+// Drift's event stream buffers, so a consumer cancelling on the first event it sees
+// is already too late — the run has finished. Cancelling from inside the run, on the
+// read that the first entry performs, is what places the cancellation between two
+// entries, which is the position the guard has to hold.
+#[derive(Clone, Debug)]
+struct CancelOnReadOf(RealFileSystem, PathBuf, CancellationToken);
+
+impl selfie::fs::FileSystem for CancelOnReadOf {
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        if path == self.1 {
+            self.2.cancel();
+        }
+        self.0.read_file(path)
+    }
+
+    fn read_file_bytes(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
+        self.0.read_file_bytes(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.write_file_no_follow(path, data)
+    }
+
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.symlink_refusal(path)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.irregular_target_refusal(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.0.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.0.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.0.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.0.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.0.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.0.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.0.config_dir()
     }
 }
 
@@ -2606,6 +2729,137 @@ environments:
     assert!(
         updated_yaml.contains("alacritty/alacritty.toml"),
         "Updated YAML should reference the tracked file with subdirectory"
+    );
+}
+
+// selfie-ir68.15. Two guards, one per loop, and a test each: with one entry per
+// package the outer guard catches the cancel before the inner one is reached, so no
+// single fixture pins both.
+//
+// Cancelled on the read the first entry performs, so the cancellation lands inside
+// the run. Cancelling from the consumer cannot: the event stream buffers, so the run
+// has already finished by the time the first event is read, and drift reaches no
+// command runner for the `cancellation` module's trigger to work through.
+#[tokio::test]
+async fn a_cancelled_drift_check_stops_between_entries_of_one_package() {
+    let dirs = TestDirs::new();
+
+    // Two entries in ONE package, so only the guard inside the entry loop can stop
+    // the run between them.
+    let source_dir = dirs.package_dir.join("both");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    for name in ["first", "second"] {
+        std::fs::write(source_dir.join(format!("{name}.toml")), "from-repo").unwrap();
+        std::fs::write(dirs.target_dir.join(format!("{name}.toml")), "drifted").unwrap();
+    }
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "both",
+        &[
+            (
+                "both/first.toml",
+                dirs.target_dir.join("first.toml").to_str().unwrap(),
+            ),
+            (
+                "both/second.toml",
+                dirs.target_dir.join("second.toml").to_str().unwrap(),
+            ),
+        ],
+    );
+
+    let token = CancellationToken::new();
+    let service = dirs.service_cancelling_on_read(&source_dir.join("first.toml"), token.clone());
+
+    let events = collect_events(service.check_drift().await).await;
+
+    assert_cancelled_without_counts(&events);
+    let examined = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }))
+        .count();
+    assert_eq!(
+        examined, 1,
+        "the run continued to the package's second entry: {events:?}"
+    );
+}
+
+// The third case, and the one neither loop guard can reach: with no packages at all
+// a `for` body's first statement never runs. Such a run used to report
+// DotfileDriftChecked with zero counts and exit 0 — a clean bill of health for a check
+// that examined nothing.
+#[tokio::test]
+async fn a_cancelled_drift_check_over_no_packages_reports_the_cancellation() {
+    let dirs = TestDirs::new();
+
+    // Deliberately no packages, and the token is cancelled before the run so the
+    // cancel cannot depend on anything the run does.
+    let token = CancellationToken::new();
+    token.cancel();
+    let service = dirs.service_with_runner_and_token(FakeCommandRunner::new(), token);
+
+    let events = collect_events(service.check_drift().await).await;
+
+    assert_cancelled_without_counts(&events);
+}
+
+// The other guard. A package with no entries for this environment never enters the
+// inner loop, so only the guard at the top of the package loop can stop a run
+// walking a directory of them.
+#[tokio::test]
+async fn a_cancelled_drift_check_stops_between_packages() {
+    let dirs = TestDirs::new();
+
+    // One package with an entry, to trigger the cancel, then two with none.
+    let source_dir = dirs.package_dir.join("first");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "from-repo").unwrap();
+    std::fs::write(dirs.target_dir.join("first.toml"), "drifted").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "first",
+        &[(
+            "first/config.toml",
+            dirs.target_dir.join("first.toml").to_str().unwrap(),
+        )],
+    );
+    for name in ["second", "third"] {
+        std::fs::write(
+            dirs.package_dir.join(format!("{name}.yml")),
+            format!("name: {name}\nenvironments:\n  test:\n    install: \"echo i\"\n"),
+        )
+        .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let service = dirs.service_cancelling_on_read(&source_dir.join("config.toml"), token.clone());
+
+    let events = collect_events(service.check_drift().await).await;
+
+    // With no guard on the package loop the entry-less packages are walked and the
+    // run completes, reporting counts for a run the user interrupted.
+    assert_cancelled_without_counts(&events);
+}
+
+// Reported as a cancellation, not as a failure carrying prose: that is the event the
+// CLI turns into exit 130, which is what Ctrl+C is supposed to produce. A completion
+// carrying counts must not arrive alongside it.
+fn assert_cancelled_without_counts(events: &[PackageEvent]) {
+    let canceled = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::Canceled { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no cancellation was reported: {events:?}"));
+    assert!(
+        canceled.contains("Drift"),
+        "the cancellation must name the operation the user ran: {canceled}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Completed { .. })),
+        "a cancelled run must not also report counts: {events:?}"
     );
 }
 

@@ -201,6 +201,15 @@ where
                 }
             }
 
+            // A cancelled drift check ends the status run as cancelled. Reporting a
+            // summary and a completion would put a zero-count drift report and
+            // "Sync status complete" in front of someone who pressed Ctrl+C, and the
+            // CLI maps this event to exit 130.
+            if let Some(reason) = summary.cancelled {
+                sender.send_canceled(reason).await;
+                return;
+            }
+
             if let Some(error_msg) = summary.error {
                 sender
                     .send_warning(format!("Drift check failed: {error_msg}"))
@@ -1215,6 +1224,11 @@ struct DriftSummary {
     warned: usize,
     /// The failure message, when the check failed.
     error: Option<String>,
+    /// Why the check was cancelled, when it was.
+    ///
+    /// Distinct from `error`: a cancelled check did not fail, it did not finish, and
+    /// its counts describe only what it reached.
+    cancelled: Option<String>,
     /// Warnings and skipped specs, in the order drift reported them.
     relayed: Vec<RelayedDriftEvent>,
 }
@@ -1261,6 +1275,15 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             } => {
                 summary.error = Some(failure.to_string());
             }
+            // Recorded rather than swallowed. Under the catch-all below, an
+            // interrupted drift check left the summary at its defaults and the
+            // caller went on to report zero drift and a successful completion
+            // (found by Copilot on PR #185).
+            PackageEvent::Canceled { reason, .. } => {
+                summary.cancelled = Some(reason);
+            }
+            // Progress events with nothing to collect. Anything that changes what
+            // the summary says needs an arm of its own above.
             _ => {}
         }
     }
@@ -2038,6 +2061,46 @@ mod tests {
     // and a second warning ahead of its completion, so `status()`'s relay
     // order can be pinned end to end rather than only inside
     // `collect_drift_summary`.
+    // A DotfileService whose drift check reports itself cancelled, the way an
+    // interrupted one does.
+    #[derive(Clone)]
+    struct DriftCancelled;
+
+    impl DotfileService for DriftCancelled {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            // No Completed event: a cancelled run reports the cancellation instead,
+            // which is exactly what the collector used to drop.
+            Box::pin(futures::stream::iter(vec![PackageEvent::Canceled {
+                operation_info: test_operation_info(),
+                reason: "Drift check cancelled".to_string(),
+            }]))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
     #[derive(Clone)]
     struct DriftEmittingWarningsAndSkip;
 
@@ -2108,6 +2171,57 @@ mod tests {
     // that does this in `status()` could be deleted with
     // `collect_drift_summary`'s own order test still green, because that
     // test calls `collect_drift_summary` directly rather than `status()`.
+    // A drift check that reports itself cancelled ends the status run as cancelled.
+    // The collector's catch-all used to drop `Canceled`, so the run went on to emit a
+    // zero-count drift summary and "Sync status complete" to someone who had pressed
+    // Ctrl+C, and the exit code said success (found by Copilot on PR #185).
+    #[tokio::test]
+    async fn status_reports_a_cancelled_drift_check_as_cancelled() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftCancelled,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::Canceled { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("status() must report the cancellation: {events:?}"));
+        assert!(
+            reason.contains("cancelled"),
+            "the reason must say so: {reason}"
+        );
+
+        // Neither of the two things a reader would take for an all-clear.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::SyncDriftSummary { .. })),
+            "a cancelled check must not report a drift summary: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::Completed { .. })),
+            "a cancelled run must not also complete: {events:?}"
+        );
+    }
+
     #[tokio::test]
     async fn status_relays_drift_warnings_and_skipped_specs_in_order_ahead_of_the_summary() {
         use futures::StreamExt;
