@@ -219,9 +219,13 @@ Test egress at the **boundary**, not by listing known paths:
   now state the limit, `is_within` carries the reasoning, and
   `a_symlinked_source_escapes_the_containment_guard` pins it as an executable fact — it asserts the
   escape **succeeds**, so strengthening the guard must delete the test and the prose together.
-- **A symlinked dotfile target is refused, and every command says so the same way.** `apply` refuses
-  the write, `dotfiles drift` reports the refusal wherever `apply` would refuse — gated on
-  `deploy_decision`, the same function `apply` calls, so the parity is structural rather than
-  asserted — and `dotfiles track` refuses to create the entry at all. Track's refusal sits ahead of
-  every write it performs: tracking reads _through_ a link, so accepting one copies the destination
-  into the dotfiles repository, where `sync push` commits it. Do not relax that ordering.
+- **A symlinked dotfile target is refused for repository-file content, and every command says so the
+  same way.** `apply` refuses the write, `dotfiles drift` reports the refusal wherever `apply` would
+  refuse — gated on `deploy_decision`, the same function `apply` calls, so the parity is structural
+  rather than asserted — and `dotfiles track` refuses to create the entry at all. A secret-bearing
+  entry is the exception: its writer replaces the link without following it, because following would
+  send a credential where the link's author pointed and refusing would leave it undeployed. ADR-0005
+  decision 3 records that split and adds the warning that names the link and its destination.
+  Track's refusal sits ahead of every write it performs: tracking reads _through_ a link, so
+  accepting one copies the destination into the dotfiles repository, where `sync push` commits it.
+  Do not relax that ordering.
