@@ -2609,6 +2609,52 @@ environments:
     );
 }
 
+// selfie-ir68.16. Package lookup folds case, so `BAT` resolves `packages/bat.yml`,
+// and the copy has to land beside that spec rather than under the spelling the
+// caller happened to type.
+//
+// Asserted on the recorded `source:` rather than on a directory listing, because
+// `packages/BAT/` and `packages/bat/` are the same directory on a case-insensitive
+// volume: the listing would look right there while the spec still recorded a
+// spelling that disagrees with every other entry in it.
+#[tokio::test]
+async fn a_package_track_spelled_in_another_case_copies_beside_the_spec() {
+    let dirs = TestDirs::new();
+
+    let yaml = r#"name: bat
+environments:
+  test:
+    install: "echo installed"
+"#;
+    std::fs::write(dirs.package_dir.join("bat.yml"), yaml).unwrap();
+
+    let target_file = dirs.target_dir.join("batrc");
+    std::fs::write(&target_file, "--theme=ansi").unwrap();
+
+    let service = dirs.service();
+    let events = collect_events(
+        service
+            .track_for_package("BAT", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked { .. }) => {}
+        other => panic!("expected the track to succeed, got: {other:?}"),
+    }
+
+    let spec = std::fs::read_to_string(dirs.package_dir.join("bat.yml")).unwrap();
+    assert!(
+        spec.contains("source: bat/batrc"),
+        "the entry must record the spec's own name, got:\n{spec}"
+    );
+    assert!(
+        !spec.contains("BAT/"),
+        "the entry records the caller's spelling:\n{spec}"
+    );
+}
+
 // selfie-ir68.16. `spec_name_from_file_name` splits on the last dot, so a spec file
 // named `...yml` is loadable under the name `..`, and a copy directory composed from
 // that name lands outside the package directory. The guard asks about containment,

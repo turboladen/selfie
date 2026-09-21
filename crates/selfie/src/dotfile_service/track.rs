@@ -406,9 +406,26 @@ where
 
     let spec_path = package_blob.file_path().to_path_buf();
 
+    // The spec file's own stem, not the argument. Package lookup folds case, so
+    // `track-dotfile BAT` resolves `packages/bat.yml`, and the copy belongs beside
+    // that spec: composing the directory from the argument puts one package's
+    // copies under two directories on a case-sensitive filesystem, and on a
+    // case-insensitive one leaves the recorded `source:` spelling disagreeing with
+    // the directory it names.
+    //
+    // Lowercased, because that is what `spec_name_of` returns: a spec named
+    // `Bat.yml` puts its copies in `packages/bat/`. The directory and the recorded
+    // `source:` both read this one name, so they agree either way.
+    let Some(name) = crate::package::spec_name_of(&spec_path) else {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot track into '{}': its file name does not name a package",
+            spec_path.display()
+        )));
+    };
+
     handle_track(
         TrackSpec {
-            name: package_name.to_string(),
+            name,
             spec_path,
             package: package_blob.into_package(),
             kind: SpecKind::Existing,
