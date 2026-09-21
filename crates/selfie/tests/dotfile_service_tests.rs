@@ -2493,6 +2493,141 @@ environments:
     );
 }
 
+// selfie-ir68.16. `spec_name_from_file_name` splits on the last dot, so a spec file
+// named `...yml` is loadable under the name `..`, and a copy directory composed from
+// that name lands outside the package directory. The guard asks about containment,
+// not about characters, which is what separates this from the ordinary dotted stem
+// in the control below.
+
+// The wording is asserted, not just the absence of the file. A spec that failed to
+// load would leave nothing written for an unrelated reason, and this test would then
+// pass while the guard did nothing.
+#[tokio::test]
+async fn a_package_track_refuses_a_copy_directory_outside_the_package_directory() {
+    let dirs = TestDirs::new();
+
+    // Loadable, and its name is `..`.
+    let yaml = r#"name: dots
+environments:
+  test:
+    install: "echo installed"
+"#;
+    std::fs::write(dirs.package_dir.join("...yml"), yaml).unwrap();
+
+    let target_file = dirs.target_dir.join("gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let service = dirs.service();
+    let events = collect_events(
+        service
+            .track_for_package("..", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    let result = get_operation_result(&events).expect("Should have a Completed event");
+    match result {
+        OperationResult::Failure(OperationFailure::Generic(message)) => {
+            assert!(
+                message.contains("outside"),
+                "the refusal must say what it prevented: {message}"
+            );
+            assert!(
+                message.contains(".."),
+                "the refusal must name what it refused: {message}"
+            );
+        }
+        other => panic!("expected the track to be refused, got: {other:?}"),
+    }
+
+    // The escape itself: one level above the package directory is where
+    // `packages/..` resolves to.
+    let escaped = dirs.package_dir.parent().unwrap().join("gemrc");
+    assert!(
+        !escaped.exists(),
+        "a copy was written outside the package directory at {}",
+        escaped.display()
+    );
+}
+
+// The other name the split produces: `..yml` yields `.`, which composes the spec's
+// own directory rather than one below it. The copy would land beside the specs and
+// the entry would record a `source:` naming a directory that is not there.
+#[tokio::test]
+async fn a_package_track_refuses_a_copy_directory_that_is_the_package_directory() {
+    let dirs = TestDirs::new();
+
+    let yaml = r#"name: dot
+environments:
+  test:
+    install: "echo installed"
+"#;
+    std::fs::write(dirs.package_dir.join("..yml"), yaml).unwrap();
+
+    let target_file = dirs.target_dir.join("gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let service = dirs.service();
+    let events = collect_events(
+        service
+            .track_for_package(".", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Failure(OperationFailure::Generic(message)) => {
+            assert!(
+                message.contains("rather than a directory of its own"),
+                "the refusal must say what it prevented: {message}"
+            );
+        }
+        other => panic!("expected the track to be refused, got: {other:?}"),
+    }
+    assert!(
+        !dirs.package_dir.join("gemrc").exists(),
+        "a copy was written straight into the package directory"
+    );
+}
+
+// The control for the guard above, and the reason it asks about containment rather
+// than about characters. `python3.11.yml` is an ordinary package that loads and
+// deploys today; a guard on the name's characters would make it untrackable.
+#[tokio::test]
+async fn a_package_track_still_works_for_a_dotted_spec_stem() {
+    let dirs = TestDirs::new();
+
+    let yaml = r#"name: python
+environments:
+  test:
+    install: "echo installed"
+"#;
+    std::fs::write(dirs.package_dir.join("python3.11.yml"), yaml).unwrap();
+
+    let target_file = dirs.target_dir.join("pythonrc");
+    std::fs::write(&target_file, "import sys").unwrap();
+
+    let service = dirs.service();
+    let events = collect_events(
+        service
+            .track_for_package("python3.11", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked { .. }) => {}
+        other => panic!("a dotted spec stem must still track, got: {other:?}"),
+    }
+    assert!(
+        dirs.package_dir
+            .join("python3.11")
+            .join("pythonrc")
+            .exists(),
+        "the copy must land in the package's own directory"
+    );
+}
+
 #[tokio::test]
 async fn test_track_for_package_fails_when_package_not_found() {
     let dirs = TestDirs::new();

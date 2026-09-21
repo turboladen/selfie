@@ -20,6 +20,7 @@ use crate::{
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
         port::{PackageRepoError, PackageRepository},
     },
+    paths::{is_within, normalize_path},
 };
 
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
@@ -33,6 +34,65 @@ fn is_safe_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Why a name cannot be a directory under the repository, or `None` if it can.
+fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
+    if is_safe_name(name) {
+        return None;
+    }
+    Some(OperationFailure::Generic(format!(
+        "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+    )))
+}
+
+/// Why `name` cannot be the copy directory beside `spec_path`, or `None` if it can.
+///
+/// The directory must sit exactly one component below the spec's own, which rules
+/// out both a name that climbs out and one that resolves to the spec's directory
+/// itself.
+// A name reaches the package path from a spec file in the repository, and
+// `spec_name_from_file_name` splits on the last dot: `...yml` yields `..` and
+// `..yml` yields `.`. The first writes the copy outside the package directory and
+// records a `source:` starting `../` that apply's containment guard then refuses
+// forever; the second writes it beside the specs and records a `source:` naming a
+// directory that is not there.
+//
+// Deliberately not the standalone path's name rule, which governs a name the user
+// invents. A spec stem is whatever loads, so `python3.11.yml` is an ordinary
+// package that deploys today. Position separates those from `.` and `..`.
+fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFailure> {
+    let refuse = |why: &str| {
+        Some(OperationFailure::Generic(format!(
+            "Cannot track into '{name}': {why}"
+        )))
+    };
+
+    // A spec with no parent cannot have a directory beside it. `Path::parent` is
+    // `None` only for a root or an empty path, and an empty one also yields `Some`
+    // for a bare file name, so both are refused here rather than defaulted to `.`:
+    // defaulting would compose the copy against the process's working directory.
+    let Some(base_dir) = spec_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return refuse("its spec has no directory to write beside");
+    };
+
+    let composed = base_dir.join(name);
+    if !is_within(&composed, base_dir) {
+        return refuse(&format!(
+            "the copy would be written outside '{}'",
+            base_dir.display()
+        ));
+    }
+    if normalize_path(&composed) == normalize_path(base_dir) {
+        return refuse(&format!(
+            "the copy would be written straight into '{}' rather than a directory of its own",
+            base_dir.display()
+        ));
+    }
+    None
 }
 
 // Both track handlers word a refused track. Same `FileSystemError` apply renders,
@@ -271,10 +331,8 @@ where
     };
 
     // Reject names with path separators or traversal components
-    if !is_safe_name(name) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
-        )));
+    if let Some(failure) = unsafe_name_failure(name) {
+        return OperationResult::Failure(failure);
     }
 
     let dotfiles_dir = config.dotfiles_directory();
@@ -515,15 +573,27 @@ where
         )));
     }
 
+    // Asked here, beside the directory it protects, so both entry points are covered
+    // by one check rather than by one each.
+    if let Some(failure) = unusable_copy_directory(&spec.spec_path, &spec.name) {
+        return OperationResult::Failure(failure);
+    }
+
     // The copy goes in a directory named for the spec, beside the spec itself:
     // `dotfiles/bat/config` for `dotfiles/bat.yml`, `packages/bat/config` for
     // `packages/bat.yml`. One formula, because the two entry points compose the
     // same shape from different roots.
-    let source_dir = spec
-        .spec_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(&spec.name);
+    //
+    // Refused above, so this cannot fire. Written as a refusal rather than a default
+    // because composing the copy against the process's working directory is the one
+    // outcome worth never reaching by accident.
+    let Some(base_dir) = spec.spec_path.parent() else {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot track into '{}': its spec has no directory to write beside",
+            spec.spec_path.display()
+        )));
+    };
+    let source_dir = base_dir.join(&spec.name);
     let source_path = source_dir.join(&filename);
     let relative_source = format!("{}/{filename}", spec.name);
 
