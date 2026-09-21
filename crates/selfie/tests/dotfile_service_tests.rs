@@ -796,6 +796,122 @@ async fn test_apply_all_skips_when_up_to_date() {
     }
 }
 
+// selfie-gr8z.3. A dry run accepts nothing, so `--yes` cannot turn a conflict into
+// a skip. An accept would carry the entry to `perform_deploy`'s dry-run skip and
+// report it as skipped, with no conflict event and no diff, leaving the summary at
+// zero conflicts — and the preview someone runs to see what `--yes` would overwrite
+// is the one place that count has to be right.
+//
+// Both halves are asserted: the conflict that must appear, and the "dry run" skip
+// that must not. The event that must not appear is as much the fix as the one that
+// must.
+#[tokio::test]
+async fn a_dry_run_reports_a_conflict_even_when_yes_would_accept_it() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "from the repository\n").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    std::fs::write(&target_file, "hand edited on this machine\n").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let options = ApplyOptions {
+        dry_run: true,
+        auto_accept: true,
+        ..Default::default()
+    };
+    let events = collect_events(service.apply_all(options).await).await;
+
+    let conflict = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileConflict { diff, .. } => Some(diff.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no conflict was reported: {events:?}"));
+    assert!(
+        !conflict.is_empty(),
+        "the conflict carries no diff, which is what a real run would prompt on"
+    );
+
+    assert!(
+        !events.iter().any(
+            |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+        ),
+        "the entry was reported as a dry-run skip as well as a conflict: {events:?}"
+    );
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
+            conflict_count,
+            skipped_count,
+            deployed_count,
+            ..
+        }) => {
+            assert_eq!(*conflict_count, 1, "the conflict must be counted");
+            assert_eq!(*skipped_count, 0, "it is not also a skip");
+            assert_eq!(*deployed_count, 0, "a dry run deploys nothing");
+        }
+        other => panic!("expected DotfilesApplied, got: {other:?}"),
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&target_file).unwrap(),
+        "hand edited on this machine\n",
+        "a dry run must not write"
+    );
+}
+
+// The control for the commit above: outside a dry run, `--yes` still overwrites.
+// Without this, refusing every auto-accept would pass the test above.
+#[tokio::test]
+async fn yes_still_overwrites_a_conflict_when_it_is_not_a_dry_run() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "from the repository\n").unwrap();
+
+    let target_file = dirs.target_dir.join("config.toml");
+    std::fs::write(&target_file, "hand edited on this machine\n").unwrap();
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/config.toml", target_file.to_str().unwrap())],
+    );
+
+    let service = dirs.service();
+    let options = ApplyOptions {
+        auto_accept: true,
+        ..Default::default()
+    };
+    let events = collect_events(service.apply_all(options).await).await;
+
+    assert_eq!(
+        std::fs::read_to_string(&target_file).unwrap(),
+        "from the repository\n",
+        "--yes must still overwrite outside a dry run"
+    );
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied {
+            deployed_count,
+            conflict_count,
+            ..
+        }) => {
+            assert_eq!(*deployed_count, 1);
+            assert_eq!(*conflict_count, 0);
+        }
+        other => panic!("expected DotfilesApplied, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_apply_dry_run_does_not_write() {
     let dirs = TestDirs::new();
@@ -10317,15 +10433,27 @@ mod backups_before_overwrite {
     // deploy path: the run still resolves a place to put a copy, so the only thing
     // stopping one is the dry-run return, and moving the copy above it would make
     // `--dry-run` write to the state directory.
+    //
+    // The fixture is a TRACKED entry whose source then changed, which is the one
+    // shape that reaches the writer in a dry run with content at the target worth
+    // copying. A conflicting target does not: a dry run accepts nothing, so it is
+    // reported as a conflict and never reaches `perform_deploy` at all, and a test
+    // built on one would pass without exercising the return it is named for.
     #[tokio::test]
     async fn a_dry_run_keeps_no_copy() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
-        one_entry(&dirs, "myapp", "from-repo", &target, Some("hand-edited"));
+        one_entry(&dirs, "myapp", "v1", &target, None);
+
+        // Deploy it for real, so the entry is tracked and the target holds content
+        // an overwrite would otherwise copy aside.
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "v1");
+
+        std::fs::write(dirs.package_dir.join("myapp").join("config.toml"), "v2").unwrap();
 
         let options = ApplyOptions {
             dry_run: true,
-            auto_accept: true,
             ..Default::default()
         };
         let events = collect_events(dirs.service().apply_all(options).await).await;
@@ -10334,15 +10462,19 @@ mod backups_before_overwrite {
             !dirs.state_dir.join("backups").exists(),
             "a dry run must not write into the state directory"
         );
-        // Control: the entry really was considered, so the run did not skip it for
-        // some unrelated reason and pass this test by doing nothing.
+        // Control: the entry reached the writer and returned there, so the run did
+        // not pass this test by skipping the entry for an unrelated reason.
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DotfileSkipped { .. })),
-            "the entry must have been previewed: {events:?}"
+            events.iter().any(
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+            ),
+            "the entry must have reached the dry-run return in the writer: {events:?}"
         );
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hand-edited");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "v1",
+            "a dry run must not write"
+        );
     }
 
     #[tokio::test]

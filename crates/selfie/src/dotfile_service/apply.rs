@@ -453,36 +453,45 @@ where
                     skipped_count += 1;
                 }
                 DeployDecision::Conflict => {
-                    // Build the diff for display/resolution (needed by both
-                    // the resolver and the fallback conflict event).
+                    // Built only where it is read. It renders two whole files, and
+                    // a run that accepts without asking reads it nowhere.
                     //
                     // An absent target decides `Deploy`, so a conflict always has
                     // bytes; the default is never reached. Lossy only for
                     // display: the checksum above compared the raw bytes.
-                    let target_content =
-                        String::from_utf8_lossy(current.as_deref().unwrap_or_default());
-                    let diff = unified_diff(
-                        &target_content,
-                        &source_content,
-                        &target_path.display().to_string(),
-                        &source_path.to_string_lossy(),
-                    );
+                    let render = || {
+                        let target_content =
+                            String::from_utf8_lossy(current.as_deref().unwrap_or_default());
+                        unified_diff(
+                            &target_content,
+                            &source_content,
+                            &target_path.display().to_string(),
+                            &source_path.to_string_lossy(),
+                        )
+                    };
+                    // Rendered at most once. A declined conflict reaches the
+                    // resolver branch and then the reported-conflict branch, and
+                    // both read the diff.
+                    let mut rendered: Option<String> = None;
 
                     // Determine whether to accept: --yes flag, interactive
-                    // resolver, or neither (skip with conflict event).
+                    // resolver, or neither (report the conflict).
                     //
-                    // A dry run never asks: nothing will be written, so the
-                    // question has no answer to honor. It reports the conflict
-                    // with the diff a real run would prompt on. With `--yes` the
-                    // accept still lands in `perform_deploy`'s dry-run skip.
-                    let accept = if options.auto_accept {
+                    // A dry run accepts nothing, whatever else was asked for,
+                    // and is asked first for that reason. It writes nothing, so
+                    // there is no answer to honor, and an accept would carry the
+                    // entry to `perform_deploy`'s dry-run skip and report it as
+                    // skipped -- leaving the summary at zero conflicts. The preview
+                    // someone runs to see what `--yes` would overwrite is the one
+                    // place that count has to be right.
+                    let accept = if options.dry_run {
+                        false
+                    } else if options.auto_accept {
                         true
-                    } else if !options.dry_run
-                        && let Some(resolver) = &options.conflict_resolver
-                    {
+                    } else if let Some(resolver) = &options.conflict_resolver {
                         let src = source_path.display().to_string();
                         let tgt = target_path.display().to_string();
-                        let d = diff.clone();
+                        let d = rendered.get_or_insert_with(&render).clone();
                         let r = Arc::clone(resolver);
                         tokio::task::spawn_blocking(move || {
                             r.resolve(
@@ -540,7 +549,7 @@ where
                             .send_dotfile_conflict(
                                 source_path.display(),
                                 target_path.display(),
-                                &diff,
+                                rendered.get_or_insert_with(&render),
                             )
                             .await;
                         conflict_count += 1;
