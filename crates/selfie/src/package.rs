@@ -20,7 +20,7 @@ pub mod git_adapter {
 }
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
-pub(crate) use self::refusal::SpecRefusal;
+pub(crate) use self::refusal::{SpecRefusal, UnknownEntryKey};
 pub use self::service::{InstallOptions, PackageService, SpecService};
 
 // Core package entity and related types
@@ -176,7 +176,10 @@ impl std::fmt::Display for InvalidEntry<'_> {
                 "set exactly one of 'source' or 'command', with 'vars' only alongside 'source'",
             ),
             Self::UnknownKeys(keys) => {
-                let described: Vec<String> = keys.iter().map(|k| describe_unknown_key(k)).collect();
+                let described: Vec<String> = keys
+                    .iter()
+                    .map(|k| describe_unknown_key_in::<DotfileField>(k))
+                    .collect();
                 f.write_str(&described.join("; "))
             }
             Self::VarName(name) => write!(
@@ -243,15 +246,6 @@ pub(crate) fn spec_name_of(path: &std::path::Path) -> Option<String> {
         .and_then(spec_name_from_file_name)
 }
 
-/// [`shadows_field`] against a dotfile entry's own fields.
-///
-/// Applied only inside a dotfile entry. A package's top-level `_target: &target
-/// …` is an ordinary anchor — `docs/package-files.md` uses exactly that — and is
-/// unaffected by this, because `target` is not a top-level field.
-pub(crate) fn shadows_dotfile_field(key: &str) -> bool {
-    shadows_field::<DotfileField>(key)
-}
-
 /// An unrecognized key, already worded for the level it was found at.
 #[derive(Debug, Clone)]
 pub(crate) struct UnknownKey {
@@ -268,8 +262,8 @@ pub(crate) struct UnknownKey {
 /// Judge one key against level `F`, returning `None` when it is accepted.
 ///
 /// Membership and wording both come from `F`, so a caller cannot test a key
-/// against one level and then explain it in terms of another. That pairing used
-/// to be two independent choices at each call site.
+/// against one level and then explain it in terms of another. Ask this rather
+/// than pairing a membership test with a separately chosen sentence.
 ///
 /// `_`-prefixed keys are YAML anchor definitions and pass, unless the remainder
 /// names a real field of this level — `_check:` cannot be told apart from a
@@ -290,10 +284,10 @@ pub(crate) fn unknown_key<F: KnownFields>(key: &str) -> Option<UnknownKey> {
 
 /// Say what is wrong with one unrecognized key, and what to do about it.
 ///
-/// Shared by [`InvalidEntry`]'s `Display`,
-/// `Package::validate_unknown_dotfile_fields` and
-/// `Package::validate_unknown_fields`, so apply and `selfie spec validate`
-/// cannot describe the same key differently.
+/// The one wording for an unrecognized key at level `F`, so no two surfaces can
+/// describe the same key differently. Prefer [`unknown_key`], which decides
+/// membership and wording together; reach for this directly only where the key is
+/// already known to be unrecognized.
 ///
 /// The collision message must hold for **both** readings of the key, because
 /// selfie cannot tell them apart — that ambiguity is the entire reason the key is
@@ -317,11 +311,6 @@ pub(crate) fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
             F::NAMES.join(", ")
         )
     }
-}
-
-/// [`describe_unknown_key_in`] for a key inside a dotfile entry.
-pub(crate) fn describe_unknown_key(key: &str) -> String {
-    describe_unknown_key_in::<DotfileField>(key)
 }
 
 /// Re-read a package file's top level as a map of keys to opaque values.
@@ -602,16 +591,17 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                         Ok(DotfileField::Target) => once!(target, "target"),
                         Err(_) => {
                             map.next_value::<IgnoredAny>()?;
-                            // `_`-prefixed keys are YAML anchor definitions, not
-                            // data. Allowing them is why this is not
-                            // `deny_unknown_fields`, matching the rule already
-                            // applied to top-level keys.
+                            // `_`-prefixed keys are anchor definitions, not data,
+                            // which is why this is not `deny_unknown_fields`. An
+                            // anchor colliding with a field of this entry is the
+                            // exception: `_vars:` cannot be told from a typo for
+                            // `vars:`, and reading it as an anchor deploys the
+                            // template unrendered.
                             //
-                            // The exception is an anchor colliding with a field of
-                            // this entry: `_vars:` cannot be told apart from a typo
-                            // for `vars:`, and treating it as an anchor deploys the
-                            // template unrendered. See `shadows_dotfile_field`.
-                            if !key.starts_with('_') || shadows_dotfile_field(&key) {
+                            // Asked of `unknown_key`. This arm is reached only when
+                            // the key did not parse, so `accepts` is false and the
+                            // answer turns on the anchor rule alone.
+                            if unknown_key::<DotfileField>(&key).is_some() {
                                 unknown_keys.push(key);
                             }
                         }
@@ -663,8 +653,7 @@ impl DotfileEntry {
     ///
     /// Empty for a programmatically built entry. `_`-prefixed anchor definitions
     /// are not included — they are legal — unless the name collides with a field
-    /// of this entry, which is indistinguishable from a misspelling of it. See
-    /// `shadows_dotfile_field`.
+    /// of this entry, which is indistinguishable from a misspelling of it.
     pub fn unknown_keys(&self) -> &[String] {
         &self.unknown_keys
     }
@@ -1862,11 +1851,11 @@ vars: {}
     // wrong.
     #[test]
     fn the_two_field_levels_answer_differently_for_the_same_key() {
-        assert!(shadows_dotfile_field("_target"));
+        assert!(shadows_field::<DotfileField>("_target"));
         assert!(!shadows_field::<PackageField>("_target"));
 
         assert!(shadows_field::<PackageField>("_dotfiles"));
-        assert!(!shadows_dotfile_field("_dotfiles"));
+        assert!(!shadows_field::<DotfileField>("_dotfiles"));
     }
 
     // A shadowing key gets the ambiguity message; a plain one gets the field

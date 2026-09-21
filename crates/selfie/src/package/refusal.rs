@@ -3,7 +3,8 @@
 use std::fmt;
 
 use super::{
-    EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey, describe_unknown_key_in,
+    DotfileEntry, DotfileField, EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey,
+    describe_unknown_key_in, unknown_key,
 };
 use crate::validation::ValidationIssue;
 
@@ -70,32 +71,89 @@ impl fmt::Display for SpecRefusal {
     }
 }
 
+/// An unrecognized key inside a dotfile entry, and where in the file it sits.
+#[derive(Debug, Clone)]
+pub(crate) struct UnknownEntryKey {
+    /// The path naming the key, such as `dotfiles[0]._target` or
+    /// `environments.work.dotfiles[1].vrs`.
+    pub(crate) field: String,
+    /// The key, judged and worded against a dotfile entry's own fields.
+    pub(crate) unknown: UnknownKey,
+}
+
 impl Package {
-    /// Why this file's top level cannot be trusted, when it cannot.
+    /// Every unrecognized key inside a dotfile entry, at every scope.
     ///
-    /// Asks nothing about any environment, so a caller that rewrites the file
-    /// rather than deploying it can share these two rules without inheriting a
-    /// question about deployment.
-    pub(crate) fn top_level_refusal(&self) -> Option<SpecRefusal> {
-        self.unknown_top_level_keys()
-            .or_else(|| self.unchecked_top_level())
+    /// The shared `dotfiles` list first, then each environment's own in name
+    /// order. Empty for a programmatically built package, whose entries carry no
+    /// keys to judge.
+    ///
+    /// Reads the entries rather than the raw YAML, so it answers for a package
+    /// with no file behind it.
+    pub(crate) fn unknown_entry_keys(&self) -> Vec<UnknownEntryKey> {
+        // Two consumers share this, which is the point: one reports each key as a
+        // diagnostic, and one refuses to rewrite the file. A rewrite serializes
+        // from the struct and so destroys every key here, whichever scope holds
+        // it -- which is why the walk covers all of them rather than one
+        // environment.
+        //
+        // In name order, because `environments` is a `HashMap` whose iteration
+        // order is randomized per process, and both consumers render these in the
+        // order they arrive.
+        let mut keys = Self::entry_keys_in(&self.dotfiles, "dotfiles");
+
+        for (name, env) in self.environments_sorted() {
+            keys.extend(Self::entry_keys_in(
+                env.dotfiles(),
+                &format!("environments.{name}.dotfiles"),
+            ));
+        }
+
+        keys
     }
 
-    /// Why a caller that reads EVERY environment cannot trust this file.
+    fn entry_keys_in(entries: &[DotfileEntry], path: &str) -> Vec<UnknownEntryKey> {
+        entries
+            .iter()
+            .enumerate()
+            .flat_map(|(i, entry)| entry.unknown_keys().iter().map(move |key| (i, key)))
+            // Every recorded key yields an entry. A save refuses on this list being
+            // non-empty, so dropping a key it could not word would let a rewrite
+            // delete that key instead -- the guard turning into a filter.
+            //
+            // `DotfileEntry`'s deserializer records only what
+            // `unknown_key::<DotfileField>` rejects, so the fallback is unreachable
+            // today. It is here because the failure is silent and destroys the
+            // user's text.
+            .map(|(i, key)| UnknownEntryKey {
+                field: format!("{path}[{i}].{key}"),
+                unknown: unknown_key::<DotfileField>(key).unwrap_or_else(|| UnknownKey {
+                    key: key.clone(),
+                    message: format!("unrecognized field '{key}'"),
+                    shadows: false,
+                }),
+            })
+            .collect()
+    }
+
+    /// Why this file cannot be trusted at any scope, when it cannot.
     ///
     /// The top level, plus the unknown keys in any environment rather than one
-    /// named environment. A listing enumerates every scope, so a `_dotfiles:`
-    /// inside one of them empties a list the listing would otherwise show as
-    /// simply absent -- the same harm the top-level rule covers, one level down.
+    /// named environment.
     ///
-    /// Does not ask whether an environment is declared at all, which is a
-    /// question about deploying: a spec with no environments lists whatever its
-    /// shared entries hold.
+    /// Says nothing about the individual entries, which are refused one at a
+    /// time where they are read, and nothing about whether an environment is
+    /// declared at all, which is a question about deploying.
     pub(crate) fn listing_refusal(&self) -> Option<SpecRefusal> {
-        // Composed from the rules in the order `spec_refusal` uses, and for the
-        // reason its own comment gives: delegating to `top_level_refusal` would
-        // put the unread top level ahead of an environment's own key, so a file
-        // carrying both reports the reason a reader cannot act on.
+        // One answer serves a listing and a rewrite because neither knows which
+        // environment matters, so both ask about all of them rather than one.
+        //
+        // It names the first offending environment in name order, not every one. A
+        // file with keys in two environments is refused twice over, once per fix.
+        //
+        // The two top-level rules stay split around the environment. Grouping them
+        // ahead of it reports the unread top level for a file whose environment
+        // names the key to fix.
         self.unknown_top_level_keys()
             .or_else(|| self.any_unknown_environment_keys())
             .or_else(|| self.unchecked_top_level())
@@ -133,10 +191,10 @@ impl Package {
         // answer covers the package rather than a dotfile.
         //
         // Ordered as a command reads a file: the top level, the environment about
-        // to be used, then the top level it could not read back at all. Composed
-        // from the rules rather than from `top_level_refusal`, which would put
-        // the unread top level ahead of the environment and change which reason a
-        // file carrying both reports.
+        // to be used, then the top level it could not read back at all. The two
+        // top-level rules must stay split around the environment. Grouping them
+        // ahead of it puts the unread top level first, which changes the reason a
+        // file carrying both reports to the one a reader cannot act on.
         self.unknown_top_level_keys()
             .or_else(|| self.unknown_environment_keys(environment))
             .or_else(|| self.unchecked_top_level())
@@ -467,9 +525,10 @@ environments: {}
     // The order `spec_refusal` composes by hand, and the only pair that makes
     // the hand-composition observable: the two top-level rules cannot both hold
     // of one file, so an unread top level against an environment's own key is
-    // where delegating to `top_level_refusal` would change the answer.
+    // where grouping the two top-level rules ahead of the environment changes the
+    // answer.
     //
-    // Without this, that delegation compiles, passes, and quietly reports the
+    // Without this, that grouping compiles, passes, and quietly reports the
     // unread top level for a file whose environment names the key to fix.
     #[test]
     fn an_environment_key_is_reported_ahead_of_an_unread_top_level() {
@@ -489,8 +548,10 @@ environments: {}
 
     // The listing asks every environment, and the same ordering holds there: a
     // file whose environment names the key to fix must report that key rather
-    // than the top level nothing could read. Delegating to `top_level_refusal`
-    // compiles and passes everything else while reporting the other one.
+    // than the top level nothing could read. Grouping the two top-level rules
+    // ahead of the environment compiles and passes everything else while
+    // reporting the other one. A save shares this answer, so the same ordering
+    // decides which error a rewrite reports.
     #[test]
     fn a_listing_reports_an_environment_key_ahead_of_an_unread_top_level() {
         let yaml = format!(
@@ -504,6 +565,37 @@ environments: {}
         assert!(
             refusal.to_string().starts_with("in environment 'test':"),
             "the environment's own key must be reported first, got: {refusal}"
+        );
+    }
+
+    // A recorded key the rule cannot classify still refuses. The deserializer only
+    // records keys `unknown_key` rejects, so this drives the fallback directly: the
+    // guard must report every recorded key, because a save reads this list being
+    // non-empty and would otherwise delete the key it could not word.
+    #[test]
+    fn a_recorded_key_the_rule_cannot_word_is_still_reported() {
+        use crate::package::{DotfileField, unknown_key};
+
+        // `target` is a real field, so the rule accepts it and returns `None`.
+        // Nothing else in the crate can put such a key in `unknown_keys`.
+        assert!(
+            unknown_key::<DotfileField>("target").is_none(),
+            "fixture must be a key the rule accepts"
+        );
+
+        let yaml = "name: myapp\ndotfiles:\n  - source: a\n    target: ~/.a\n";
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
+        // Reaching the private field directly: this module is a child of the one
+        // that defines the type, and nothing public can record such a key.
+        package.dotfiles[0].unknown_keys.push("target".to_string());
+
+        let keys = package.unknown_entry_keys();
+        assert_eq!(keys.len(), 1, "the recorded key must still be reported");
+        assert_eq!(keys[0].field, "dotfiles[0].target");
+        assert!(
+            keys[0].unknown.message.contains("target"),
+            "the sentence must name the key it is about, got: {}",
+            keys[0].unknown.message
         );
     }
 

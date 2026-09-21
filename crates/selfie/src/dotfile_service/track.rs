@@ -297,11 +297,11 @@ where
 
     let spec_path = dotfiles_dir.join(format!("{name}.yml"));
 
-    // Deliberately not `set_source`. `top_level_refusal` answers only for a
-    // package carrying stored source text, and a spec built here has none, so
-    // `save_package`'s unknown-key guards stay quiet -- which is what lets a
-    // freshly built spec save at all. Making the two variants symmetric by
-    // storing source here would start refusing every standalone track.
+    // Deliberately not `set_source`, which leaves `top_level_keys` as `NoSource`, so
+    // the two top-level guards have nothing to judge. The other two are quiet for
+    // reasons of their own: this package declares no environments, and the entry
+    // `handle_track` adds below is built rather than parsed, so it records no
+    // unknown keys.
     let package = crate::package::PackageBuilder::default()
         .name(name)
         .path(spec_path.clone())

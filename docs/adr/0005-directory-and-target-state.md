@@ -329,9 +329,14 @@ to.
 - The rule file describing secret handling states what decision 3 does: a symlinked target is
   refused for repository-file content and replaced, without being followed, for secret-bearing
   content, with the warning arriving alongside the classifier.
-- The unknown-key rule keeps the behavior it has, so that decision costs no code. What it settles is
-  that a key left over from an earlier format is removed from the file rather than tolerated, which
-  is work in whichever package repository carries one.
+- The unknown-key rule costs no code in apply and drift. At two other sites it does. Validation
+  reports a top level it could not read back as an error, in the refusal's own words, so the package
+  is invalid wherever it is judged. A save stops walking environments itself and asks the same
+  function the listing asks, which differs from apply's only in taking every environment rather than
+  one named one; entry-level keys come from a third function, shared with validation, that returns
+  each key with the path naming it. The decision also settles that a key left over from an earlier
+  format is removed from the file rather than tolerated, which is work in whichever package
+  repository carries one.
 - One duplicate-target rule in the library serves a cross-entry check in validation and a within-run
   check in apply, asked at the scopes decision 5 sets. Track's short-circuit widens from the shared
   list to every scope.

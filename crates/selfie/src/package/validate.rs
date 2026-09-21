@@ -6,8 +6,8 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, TopLevelKeys, UnknownKey, describe_unknown_key,
-    shadows_dotfile_field, unknown_key,
+    DotfileEntry, EnvironmentField, Package, SpecRefusal, TopLevelKeys, UnknownEntryKey,
+    UnknownKey, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -86,10 +86,9 @@ pub fn unreadable_template_issue(
 fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
     keys.iter()
         .map(|unknown| {
-            // A collision needs different advice from a plain misspelling,
-            // for the reason `unknown_dotfile_keys` gives: the key may have
-            // been named deliberately, and which remedy applies depends on
-            // which reading was meant.
+            // A collision needs different advice from a plain misspelling: the
+            // key may have been named deliberately, and which remedy applies
+            // depends on which reading was meant.
             ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &unknown.key,
@@ -140,40 +139,29 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
     issues
 }
 
-/// Flag unrecognized keys in a `dotfiles` list, naming the entry carrying each.
+/// Report one entry-level unrecognized key, already judged and worded.
 ///
-/// Reads the keys off the entries rather than re-parsing the raw YAML, so this
-/// works for a programmatically built `Package` too — unlike the top-level check
-/// above, which has no source to read for one.
-///
-/// `path` names the list (`dotfiles` or `environments.<env>.dotfiles`), matching
-/// the field paths `validate_dotfiles` already reports.
-fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
+/// Takes the answer rather than re-deriving it, so a save and
+/// `selfie spec validate` cannot judge a key differently or name it at a
+/// different path.
+fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
+    // A collision needs different advice from a plain misspelling. The key is not
+    // unknown -- it may have been named deliberately -- and which remedy applies
+    // depends on which the user meant, so the suggestion explains the rule rather
+    // than prescribing one fix.
+    let suggestion = if entry_key.unknown.shadows {
+        "Anchors are legal here; only a name matching a field of this entry is refused, because \
+         it cannot be told apart from a misspelling of that field."
+    } else {
+        "This entry is skipped by 'selfie apply' until the key is corrected or removed."
+    };
 
-    for (i, entry) in entries.iter().enumerate() {
-        for key in entry.unknown_keys() {
-            // A collision needs different advice from a plain misspelling. The
-            // key is not unknown — it may have been named deliberately — and
-            // which remedy applies depends on which the user meant, so the
-            // suggestion explains the rule rather than prescribing one fix.
-            let suggestion = if shadows_dotfile_field(key) {
-                "Anchors are legal here; only a name matching a field of this entry is refused, \
-                 because it cannot be told apart from a misspelling of that field."
-            } else {
-                "This entry is skipped by 'selfie apply' until the key is corrected or removed."
-            };
-
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{path}[{i}].{key}"),
-                &describe_unknown_key(key),
-                Some(suggestion),
-            ));
-        }
-    }
-
-    issues
+    ValidationIssue::error(
+        ValidationErrorCategory::InvalidValue,
+        &entry_key.field,
+        &entry_key.unknown.message,
+        Some(suggestion),
+    )
 }
 
 /// Format a `Location` as a human-readable string, returning `None` for unknown locations.
@@ -304,20 +292,24 @@ impl Package {
         // holds or about whether it could be read back at all.
         match self.top_level_keys() {
             TopLevelKeys::Checked(keys) => issues.extend(unknown_top_level_keys(keys)),
-            // The package parsed once already, so the re-read failing means the
-            // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
-            // for instance. Say the check did not run; staying quiet here reports
-            // a file as clean when nothing looked at it.
+            // No key of the top level was examined, so an unrecognized one cannot
+            // be ruled out, and an unrecognized one refuses the package. An error
+            // therefore: anything milder calls a file valid that apply, drift and a
+            // rewrite all decline.
             //
-            // `Info`, not a warning: nothing is known to be wrong with the file,
-            // only unchecked, and `sync push` refuses a package carrying any
-            // warning. Blocking a push over a check that did not run would be a
-            // worse outcome than the gap it reports.
-            TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::info(
-                ValidationErrorCategory::Advisory,
+            // Worded by the refusal itself. `sync push` appends apply's refusal
+            // unless the same text is already reported, so two wordings for one
+            // problem arrive as two. The clause must survive the prefix, which is
+            // what the dedup matches on.
+            TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
                 "package",
-                &format!("could not re-read the package file to check its top-level keys: {error}"),
-                Some("The top-level keys were not checked for this package."),
+                &format!(
+                    "package '{}': {}",
+                    self.name(),
+                    SpecRefusal::UncheckedTopLevel(error.clone())
+                ),
+                Some("Edit the file directly, or simplify it until selfie can read it."),
             )),
             // `set_source` derives this from the same string the check above read,
             // so a package carrying YAML is never `NoSource`.
@@ -336,16 +328,10 @@ impl Package {
     /// because the two read from different places: top-level keys come from the
     /// raw YAML, dotfile keys from the entries themselves.
     pub(crate) fn validate_unknown_dotfile_fields(&self) -> Vec<ValidationIssue> {
-        let mut issues = unknown_dotfile_keys(&self.dotfiles, "dotfiles");
-
-        for (env_name, env) in self.environments_sorted() {
-            issues.extend(unknown_dotfile_keys(
-                env.dotfiles(),
-                &format!("environments.{env_name}.dotfiles"),
-            ));
-        }
-
-        issues
+        self.unknown_entry_keys()
+            .into_iter()
+            .map(unknown_dotfile_issue)
+            .collect()
     }
 
     /// Validate the package name format
@@ -1114,6 +1100,67 @@ mod tests {
             !issue.message().contains("is not set"),
             "the message must hold for both readings of the key, got: {}",
             issue.message()
+        );
+    }
+
+    // `_target` is the key the two levels answer oppositely about, so it is the
+    // one that shows the entry's own field list is in force here. A package's
+    // top-level `_target: &target …` is legal and documented; inside an entry the
+    // same spelling cannot be told from a misspelling of `target`.
+    //
+    // The pair is the assertion. Judging entry keys against the package's field
+    // list would leave this entry unreported, and judging top-level keys against
+    // the entry's list would refuse every file using the documented anchor.
+    #[test]
+    fn validate_refuses_a_target_anchor_inside_an_entry() {
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    _target: ~/elsewhere\n",
+        );
+
+        let issue = package
+            .validate("test")
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles[0]._target")
+            .cloned()
+            .unwrap_or_else(|| panic!("an entry's '_target' must be refused"));
+
+        assert_eq!(issue.level(), ValidationLevel::Error);
+        assert!(
+            issue
+                .message()
+                .contains("misspelling of the 'target' field"),
+            "the message must name the field it collides with, got: {}",
+            issue.message()
+        );
+    }
+
+    // A key that collides with nothing gets different advice from one that does,
+    // and both sentences have to survive. The collision cannot prescribe a fix,
+    // because selfie does not know which reading was meant; a plain misspelling
+    // can, and saying what apply will do with the entry is the useful half.
+    #[test]
+    fn a_plain_unknown_entry_key_is_told_what_apply_will_do() {
+        let package = package_from_yaml(
+            "name: creds\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+             - source: creds.tpl\n    target: ~/.creds\n    vrs:\n      k: op read x\n",
+        );
+
+        let issue = package
+            .validate("test")
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles[0].vrs")
+            .cloned()
+            .unwrap_or_else(|| panic!("a misspelled entry key must be refused"));
+
+        assert_eq!(
+            issue.suggestion().map(String::as_str),
+            Some("This entry is skipped by 'selfie apply' until the key is corrected or removed."),
+            "a non-colliding key keeps its own advice"
         );
     }
 
@@ -2009,10 +2056,10 @@ environments:
 
     // The environment check survives a file whose top level cannot be re-read.
     //
-    // `selfie apply` refuses this package -- it reads the key off the parsed
-    // environment, which needs no re-read -- so a validate that reported only the
-    // advisory passed a package apply then declined, and exited 0 doing it
-    // (selfie-5j5j).
+    // It reads the key off the parsed environment, which needs no re-read, so
+    // returning early on a failed re-read would take it down and leave the key
+    // unreported. `selfie apply` reads the same place and refuses, so dropping the
+    // key here is how validate comes to pass a package apply declines (selfie-5j5j).
     #[test]
     fn an_environment_key_is_still_reported_when_the_top_level_cannot_be_re_read() {
         // A mapping keyed by a sequence: parses as a package, and not into the
@@ -2038,18 +2085,18 @@ environments:
         );
         assert!(
             issues.iter().any(|i| i.field == "package"
-                && i.message.contains("could not re-read")
-                && i.level == crate::validation::ValidationLevel::Info),
+                && i.message.contains("could not be checked")
+                && i.level == crate::validation::ValidationLevel::Error),
             "the unread top level must still be reported: {issues:?}"
         );
-        // The advisory says what was skipped, and the environment keys no longer
-        // are. Claiming otherwise reads as a second, invented gap.
+        // The refusal says what was skipped, and the environment keys are not part
+        // of it. Claiming otherwise reads as a second, invented gap.
         assert!(
             !issues.iter().any(|i| i
                 .suggestion
                 .as_deref()
                 .is_some_and(|s| s.contains("environment"))),
-            "the advisory must not claim the environment keys went unchecked: {issues:?}"
+            "the refusal must not claim the environment keys went unchecked: {issues:?}"
         );
     }
 
@@ -2116,14 +2163,30 @@ environments:
 
         let issues = package.validate_unknown_fields();
         assert_eq!(issues.len(), 1, "got: {issues:?}");
+        // An error, not a notice: no key of the top level was examined, so an
+        // unrecognized one cannot be ruled out, and an unrecognized one refuses
+        // the package. A milder level calls the file valid while apply, drift and
+        // a rewrite all decline it.
+        assert_eq!(issues[0].level, ValidationLevel::Error);
+        // Apply's own clause, not a second wording. `sync push` deduplicates by
+        // testing whether an issue's message contains the refusal's text, so the
+        // clause has to survive the subject verbatim.
+        let TopLevelKeys::Unchecked(error) = package.top_level_keys() else {
+            panic!("the fixture's top level must be the unreadable kind");
+        };
+        let clause = SpecRefusal::UncheckedTopLevel(error.clone()).to_string();
         assert!(
-            issues[0].message.contains("could not re-read"),
-            "got: {}",
+            issues[0].message.contains(&clause),
+            "the validator must carry the refusal's clause verbatim, got: {}",
             issues[0].message
         );
-        // Not silence, and not an error either: nothing is known to be wrong
-        // with the file, only unchecked.
-        assert_eq!(issues[0].level, ValidationLevel::Info);
+        // A clause opens with "its", so a table row carrying it alone has a pronoun
+        // and no antecedent. The subject comes first, as apply's warning does.
+        assert!(
+            issues[0].message.starts_with("package 'myapp':"),
+            "the message must name what it is about, got: {}",
+            issues[0].message
+        );
     }
 
     // Every walk over `environments()` reports in name order. A `HashMap`

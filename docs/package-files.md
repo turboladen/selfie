@@ -1425,8 +1425,10 @@ to it, and a decoy `environments:` alongside keeps every check that reads that m
 
 The cost is real and accepted: a package whose YAML is perfectly legal stops deploying because a
 check could not run. Correcting the construct that fails the second read — the mapping used as a
-key, in the example above — restores it. `selfie spec validate` reports the failed read as an
-advisory notice rather than an error: nothing is known to be wrong with the file, only unchecked.
+key, in the example above — restores it. `selfie spec validate` reports the failed read as an error
+and calls the package invalid, carrying the same clause shown above behind the package's name. No
+key of the top level was examined, so an unrecognized one cannot be ruled out, and an unrecognized
+one refuses the package.
 
 The field lists differ by level, and that is deliberate: `target` is a field of a dotfile _entry_
 and not a top-level field, so `_target: &target …` at the top level is an ordinary anchor — the
