@@ -386,20 +386,27 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             });
         }
 
-        // The same refusal at the file's top level: `_dotfiles:` as an anchor, or
-        // a plain `configs:`, is not modeled either, so rewriting drops it and
-        // every entry under it with no diagnostic. A file selfie could not read
-        // back is refused for the same reason -- the key it may hide is one a
-        // rewrite would delete along with whatever it carries (selfie-ebvx).
+        // The same refusal above the entries. `_dotfiles:` takes every entry under
+        // it, `audt:` takes the user's command text, and a top level selfie could
+        // not read back may hide either (selfie-ebvx).
         //
-        // Asked of `top_level_refusal` rather than judged here, so the writer and
-        // apply cannot come to different conclusions about the same two keys.
-        // Reported as field names rather than as the rendered sentence, because
-        // this error names the file and the caller needs the keys to fix it.
-        match package.top_level_refusal() {
+        // Asked of `listing_refusal`, so a writer and apply cannot reach different
+        // conclusions about one key. Field names rather than the rendered sentence,
+        // because this error names the file and the caller needs the keys.
+        match package.listing_refusal() {
             Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
                 let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
                 return Err(PackageRepoError::UnknownTopLevelFields {
+                    path: path.to_path_buf(),
+                    fields: fields.join(", "),
+                });
+            }
+            Some(SpecRefusal::UnknownEnvironmentKeys { environment, keys }) => {
+                let fields: Vec<String> = keys
+                    .iter()
+                    .map(|key| format!("environments.{environment}.{key}"))
+                    .collect();
+                return Err(PackageRepoError::UnknownEnvironmentFields {
                     path: path.to_path_buf(),
                     fields: fields.join(", "),
                 });
@@ -410,45 +417,16 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                     error,
                 });
             }
-            // `top_level_refusal` asks about no environment, and the loop below
-            // asks about every one -- which is what a rewrite needs, since it
-            // drops an unknown key wherever it sits, not only in the environment
-            // some other command happens to be applying.
+            // Unreachable while `listing_refusal` composes only the three rules
+            // above. A missing environment is a deployment rule, not a writing one:
+            // a spec declaring none is still the user's text.
             //
-            // A missing environment is a deployment rule and not a writing one:
-            // a spec that declares none is still the user's text, and refusing
-            // to save it would strand whatever they were editing. `top_level_refusal`
-            // composes only the two rules above, so this arm is not reached.
-            //
-            // Named rather than left to a catch-all, which buys exactly one
-            // thing: a new `SpecRefusal` variant fails to compile here until
-            // someone decides whether a rewrite refuses over it. Widening
-            // `top_level_refusal` to return a variant already named here is not
-            // caught, so that stays a decision to make there.
-            Some(SpecRefusal::UnknownEnvironmentKeys { .. } | SpecRefusal::NoEnvironments(_))
-            | None => {}
-        }
-
-        // The same refusal one level down. An environment's unknown key is not
-        // modeled, so serializing from the struct drops it: `audt:` for `audit:`
-        // takes the user's command text with it, and nothing says so.
-        //
-        // Reported with the environment named, since a package may define
-        // several and only one carries the key.
-        let mut env_names: Vec<&String> = package.environments().keys().collect();
-        env_names.sort();
-        for env_name in env_names {
-            let unknown = package.environments()[env_name].unknown_keys();
-            if !unknown.is_empty() {
-                let fields: Vec<String> = unknown
-                    .iter()
-                    .map(|key| format!("environments.{env_name}.{key}"))
-                    .collect();
-                return Err(PackageRepoError::UnknownEnvironmentFields {
-                    path: path.to_path_buf(),
-                    fields: fields.join(", "),
-                });
-            }
+            // Named rather than left to a catch-all, so a new `SpecRefusal` variant
+            // fails to compile here. Widening `listing_refusal` to return a variant
+            // already named here is NOT caught, and that path is now shared with the
+            // listing, so a change made for the listing's benefit reaches this write
+            // silently.
+            Some(SpecRefusal::NoEnvironments(_)) | None => {}
         }
 
         // Serialize the package to YAML
@@ -1959,26 +1937,12 @@ environments:
     // would already have destroyed the text.
     #[test]
     fn save_package_refuses_an_environment_carrying_an_unrecognized_key() {
-        let package: Package = crate::yaml::parse(
-            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
-        )
-        .expect("fixture must parse -- the typo is a validation error, not a parse error");
-
-        let mut package = package;
-        package.set_source(
-            PathBuf::from("/test/packages/creds.yml"),
-            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew audit myapp\"\n"
-                .to_string(),
-            SpecOrigin::PackageDirectory,
+        let package = loaded(
+            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"brew \
+             audit myapp\"\n",
         );
+        let (repo, package_path) = refusing_repo();
 
-        let mut fs = MockFileSystem::default();
-        let package_dir = PathBuf::from("/test/packages");
-        let package_path = package_dir.join("creds.yml");
-
-        fs.expect_write_file_no_follow().times(0);
-
-        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
             .save_package(&package, &package_path)
             .expect_err("a package with an unrecognized environment key must not be rewritten");
@@ -1998,6 +1962,78 @@ environments:
         assert!(
             err.to_string().contains("environments.work.audt"),
             "the diagnostic must name the environment and the key, got: {err}"
+        );
+    }
+
+    // Build a loaded package, carrying its raw YAML as the repository's own reads
+    // do. A package without stored source has no top-level keys to judge.
+    fn loaded(yaml: &str) -> Package {
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
+        package.set_source(
+            PathBuf::from("/test/packages/creds.yml"),
+            yaml.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+        package
+    }
+
+    fn refusing_repo() -> (YamlPackageRepository<MockFileSystem>, PathBuf) {
+        let mut fs = MockFileSystem::default();
+        let package_dir = PathBuf::from("/test/packages");
+        fs.expect_write_file_no_follow().times(0);
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
+        (repo, package_dir.join("creds.yml"))
+    }
+
+    // The walk covers every environment rather than stopping at the first, so a
+    // truncated walk rewrites the file and destroys the audit command. `alpha` is
+    // clean, so only a walk reaching `work` refuses.
+    //
+    // Name order is pinned separately, by
+    // `a_listing_names_the_offending_environment_in_name_order`, which covers the
+    // walk this path reads.
+    #[test]
+    fn save_package_refuses_a_key_in_an_environment_that_does_not_sort_first() {
+        let package = loaded(
+            "name: creds\nenvironments:\n  alpha:\n    install: \"echo i\"\n  work:\n    \
+             install: \"echo i\"\n    audt: \"brew audit myapp\"\n",
+        );
+        let (repo, package_path) = refusing_repo();
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("a key in any environment must refuse the rewrite");
+
+        assert!(
+            err.to_string().contains("environments.work.audt"),
+            "the diagnostic must name the environment carrying the key, got: {err}"
+        );
+    }
+
+    // A file that is both unreadable at the top level and carrying an
+    // environment's own key reports the key. That is the reason a reader can act
+    // on: renaming `audt:` is a change they can make, while "the top level could
+    // not be read" leaves them guessing which construct to simplify.
+    #[test]
+    fn save_package_reports_an_environment_key_ahead_of_an_unread_top_level() {
+        let package = loaded(
+            "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \"echo \
+             i\"\n    audt: \"brew audit myapp\"\n",
+        );
+        let (repo, package_path) = refusing_repo();
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("both rules refuse the rewrite");
+
+        assert!(
+            matches!(err, PackageRepoError::UnknownEnvironmentFields { .. }),
+            "the environment's own key must be reported first, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("environments.work.audt"),
+            "the diagnostic must name the key to fix, got: {err}"
         );
     }
 
