@@ -6,7 +6,7 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, DotfileField, EnvironmentField, Package, TopLevelKeys, UnknownKey, unknown_key,
+    DotfileEntry, EnvironmentField, Package, TopLevelKeys, UnknownEntryKey, UnknownKey, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -138,49 +138,29 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
     issues
 }
 
-/// Flag unrecognized keys in a `dotfiles` list, naming the entry carrying each.
+/// Report one entry-level unrecognized key, already judged and worded.
 ///
-/// Reads the keys off the entries rather than re-parsing the raw YAML, so this
-/// works for a programmatically built `Package` too — unlike the top-level check
-/// above, which has no source to read for one.
-///
-/// `path` names the list (`dotfiles` or `environments.<env>.dotfiles`), matching
-/// the field paths `validate_dotfiles` already reports.
-fn unknown_dotfile_keys(entries: &[DotfileEntry], path: &str) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
+/// Takes the answer rather than re-deriving it, so a save and
+/// `selfie spec validate` cannot judge a key differently or name it at a
+/// different path.
+fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
+    // A collision needs different advice from a plain misspelling. The key is not
+    // unknown -- it may have been named deliberately -- and which remedy applies
+    // depends on which the user meant, so the suggestion explains the rule rather
+    // than prescribing one fix.
+    let suggestion = if entry_key.unknown.shadows {
+        "Anchors are legal here; only a name matching a field of this entry is refused, because \
+         it cannot be told apart from a misspelling of that field."
+    } else {
+        "This entry is skipped by 'selfie apply' until the key is corrected or removed."
+    };
 
-    for (i, entry) in entries.iter().enumerate() {
-        for key in entry.unknown_keys() {
-            // `DotfileEntry`'s deserializer records only what
-            // `unknown_key::<DotfileField>` rejects, so this `else` cannot fire.
-            // The call stays because it is what words the key, and because taking
-            // the sentence and the collision fact from one answer is what stops
-            // the two being chosen against different levels.
-            let Some(unknown) = unknown_key::<DotfileField>(key) else {
-                continue;
-            };
-
-            // A collision needs different advice from a plain misspelling. The
-            // key is not unknown — it may have been named deliberately — and
-            // which remedy applies depends on which the user meant, so the
-            // suggestion explains the rule rather than prescribing one fix.
-            let suggestion = if unknown.shadows {
-                "Anchors are legal here; only a name matching a field of this entry is refused, \
-                 because it cannot be told apart from a misspelling of that field."
-            } else {
-                "This entry is skipped by 'selfie apply' until the key is corrected or removed."
-            };
-
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::InvalidValue,
-                &format!("{path}[{i}].{key}"),
-                &unknown.message,
-                Some(suggestion),
-            ));
-        }
-    }
-
-    issues
+    ValidationIssue::error(
+        ValidationErrorCategory::InvalidValue,
+        &entry_key.field,
+        &entry_key.unknown.message,
+        Some(suggestion),
+    )
 }
 
 /// Format a `Location` as a human-readable string, returning `None` for unknown locations.
@@ -343,16 +323,10 @@ impl Package {
     /// because the two read from different places: top-level keys come from the
     /// raw YAML, dotfile keys from the entries themselves.
     pub(crate) fn validate_unknown_dotfile_fields(&self) -> Vec<ValidationIssue> {
-        let mut issues = unknown_dotfile_keys(&self.dotfiles, "dotfiles");
-
-        for (env_name, env) in self.environments_sorted() {
-            issues.extend(unknown_dotfile_keys(
-                env.dotfiles(),
-                &format!("environments.{env_name}.dotfiles"),
-            ));
-        }
-
-        issues
+        self.unknown_entry_keys()
+            .into_iter()
+            .map(unknown_dotfile_issue)
+            .collect()
     }
 
     /// Validate the package name format

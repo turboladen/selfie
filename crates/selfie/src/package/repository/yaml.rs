@@ -13,7 +13,6 @@ use crate::{
             PackageParseKind, PackageRepoError, PackageRepository,
         },
     },
-    validation::ValidationIssue,
 };
 
 #[derive(Debug, Clone)]
@@ -367,19 +366,18 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
-        // A save rewrites the file from the struct, dropping every key the struct
-        // does not model. In a dotfile entry that key is what makes
-        // `content_source()` return `Err(InvalidEntry::UnknownKeys(_))`, so writing
-        // the file would launder a refused entry into a deployable one: `var:` for
-        // `vars:` — or an anchor named `_vars:` — would vanish and the next apply
-        // would write the *unrendered* template — literal `{{ api_key }}` — over
-        // the target. Refuse the write instead.
+        // A save rewrites the file from the struct, dropping every key it does not
+        // model. In a dotfile entry that key is what refuses the entry, so writing
+        // would launder a refused entry into a deployable one: `var:` for `vars:`
+        // vanishes and the next apply writes the unrendered template over the
+        // target. The guard sits here because this is where the key is destroyed,
+        // so a new caller cannot forget it (selfie-6lz4).
         //
-        // The guard lives here rather than at the call sites because this is where
-        // the key is destroyed, and a fourth caller cannot forget it. See selfie-6lz4.
-        let unknown = package.validate_unknown_dotfile_fields();
+        // `unknown_entry_keys` walks every scope, so these paths are the ones
+        // `selfie spec validate` reports for the same file.
+        let unknown = package.unknown_entry_keys();
         if !unknown.is_empty() {
-            let fields: Vec<&str> = unknown.iter().map(ValidationIssue::field).collect();
+            let fields: Vec<&str> = unknown.iter().map(|u| u.field.as_str()).collect();
             return Err(PackageRepoError::UnknownDotfileFields {
                 path: path.to_path_buf(),
                 fields: fields.join(", "),

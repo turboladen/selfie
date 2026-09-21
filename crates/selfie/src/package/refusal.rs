@@ -3,7 +3,8 @@
 use std::fmt;
 
 use super::{
-    EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey, describe_unknown_key_in,
+    DotfileEntry, DotfileField, EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey,
+    describe_unknown_key_in, unknown_key,
 };
 use crate::validation::ValidationIssue;
 
@@ -70,7 +71,71 @@ impl fmt::Display for SpecRefusal {
     }
 }
 
+/// An unrecognized key inside a dotfile entry, and where in the file it sits.
+#[derive(Debug, Clone)]
+pub(crate) struct UnknownEntryKey {
+    /// The path naming the key, such as `dotfiles[0]._target` or
+    /// `environments.work.dotfiles[1].vrs`.
+    pub(crate) field: String,
+    /// The key, judged and worded against a dotfile entry's own fields.
+    pub(crate) unknown: UnknownKey,
+}
+
 impl Package {
+    /// Every unrecognized key inside a dotfile entry, at every scope.
+    ///
+    /// The shared `dotfiles` list first, then each environment's own in name
+    /// order. Empty for a programmatically built package, whose entries carry no
+    /// keys to judge.
+    ///
+    /// Reads the entries rather than the raw YAML, so it answers for a package
+    /// with no file behind it.
+    pub(crate) fn unknown_entry_keys(&self) -> Vec<UnknownEntryKey> {
+        // Two consumers share this, which is the point: one reports each key as a
+        // diagnostic, and one refuses to rewrite the file. A rewrite serializes
+        // from the struct and so destroys every key here, whichever scope holds
+        // it -- which is why the walk covers all of them rather than one
+        // environment.
+        //
+        // In name order, because `environments` is a `HashMap` whose iteration
+        // order is randomized per process, and both consumers render these in the
+        // order they arrive.
+        let mut keys = Self::entry_keys_in(&self.dotfiles, "dotfiles");
+
+        for (name, env) in self.environments_sorted() {
+            keys.extend(Self::entry_keys_in(
+                env.dotfiles(),
+                &format!("environments.{name}.dotfiles"),
+            ));
+        }
+
+        keys
+    }
+
+    fn entry_keys_in(entries: &[DotfileEntry], path: &str) -> Vec<UnknownEntryKey> {
+        entries
+            .iter()
+            .enumerate()
+            .flat_map(|(i, entry)| entry.unknown_keys().iter().map(move |key| (i, key)))
+            // Every recorded key yields an entry. A save refuses on this list being
+            // non-empty, so dropping a key it could not word would let a rewrite
+            // delete that key instead -- the guard turning into a filter.
+            //
+            // `DotfileEntry`'s deserializer records only what
+            // `unknown_key::<DotfileField>` rejects, so the fallback is unreachable
+            // today. It is here because the failure is silent and destroys the
+            // user's text.
+            .map(|(i, key)| UnknownEntryKey {
+                field: format!("{path}[{i}].{key}"),
+                unknown: unknown_key::<DotfileField>(key).unwrap_or_else(|| UnknownKey {
+                    key: key.clone(),
+                    message: format!("unrecognized field '{key}'"),
+                    shadows: false,
+                }),
+            })
+            .collect()
+    }
+
     /// Why this file cannot be trusted at any scope, when it cannot.
     ///
     /// The top level, plus the unknown keys in any environment rather than one
@@ -500,6 +565,37 @@ environments: {}
         assert!(
             refusal.to_string().starts_with("in environment 'test':"),
             "the environment's own key must be reported first, got: {refusal}"
+        );
+    }
+
+    // A recorded key the rule cannot classify still refuses. The deserializer only
+    // records keys `unknown_key` rejects, so this drives the fallback directly: the
+    // guard must report every recorded key, because a save reads this list being
+    // non-empty and would otherwise delete the key it could not word.
+    #[test]
+    fn a_recorded_key_the_rule_cannot_word_is_still_reported() {
+        use crate::package::{DotfileField, unknown_key};
+
+        // `target` is a real field, so the rule accepts it and returns `None`.
+        // Nothing else in the crate can put such a key in `unknown_keys`.
+        assert!(
+            unknown_key::<DotfileField>("target").is_none(),
+            "fixture must be a key the rule accepts"
+        );
+
+        let yaml = "name: myapp\ndotfiles:\n  - source: a\n    target: ~/.a\n";
+        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
+        // Reaching the private field directly: this module is a child of the one
+        // that defines the type, and nothing public can record such a key.
+        package.dotfiles[0].unknown_keys.push("target".to_string());
+
+        let keys = package.unknown_entry_keys();
+        assert_eq!(keys.len(), 1, "the recorded key must still be reported");
+        assert_eq!(keys[0].field, "dotfiles[0].target");
+        assert!(
+            keys[0].unknown.message.contains("target"),
+            "the sentence must name the key it is about, got: {}",
+            keys[0].unknown.message
         );
     }
 
