@@ -892,11 +892,9 @@ fn validate_changed_packages(
             .collect();
 
         // The same question apply asks, so a push cannot ship a file the machine
-        // receiving it will refuse. Asked here rather than read off a severity:
-        // a level says how bad a file is, and what push needs to know is whether
-        // it will apply. The advisory level on an unread top level was chosen
-        // deliberately so an unrun check would not block a push, and promoting it
-        // would block every push carrying one.
+        // receiving it will refuse. Asked here rather than read off a severity: a
+        // level says how bad a file is, and what push needs to know is whether it
+        // will apply.
         //
         // Appended only when nothing with the same identity is already reported.
         // Rules that reach push as validation errors arrive twice otherwise --
@@ -3102,22 +3100,55 @@ mod name_collision_tests {
         validate_changed_packages(root.path(), &packages, &changes, "test-env")
     }
 
-    // The file parses, so validation passes it, and its top-level keys could not
-    // be read, so nothing else objects. Apply refuses it. Without this consult
-    // the push ships it and the receiving machine is the one that finds out.
+    // Push asks apply's question, so it cannot ship a file the receiving machine
+    // will refuse. An unknown environment key is the case where that consult is
+    // observable: the validator reports the key per field, apply's refusal names
+    // the environment as well, and the two wordings do not match, so the appended
+    // entry survives the deduplication below.
+    //
+    // The assertion is on that appended entry, not on the push failing: the
+    // validator reports `audt` itself, so this file is refused either way. Weaken
+    // this to `is_err()` and the consult can be deleted with every test green.
     #[test]
     fn a_push_carrying_a_spec_apply_would_refuse_is_refused() {
-        let spec = format!(
-            "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test-env:\n    install: \"true\"\n"
-        );
+        let spec = "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    audt: \
+                    \"echo a\"\n";
 
-        let Err(error) = push_result(&spec) else {
+        let Err(error) = push_result(spec) else {
             panic!("a push carrying a spec apply would refuse must be refused");
         };
         let rendered = format!("{error:?}");
         assert!(
             rendered.contains("ApplyRefusal"),
             "the refusal must reach the push report: {rendered}"
+        );
+    }
+
+    // A top level selfie could not read back is reported once, not twice.
+    // Validation and apply word this one rule identically, so the deduplication
+    // below keeps a single entry; two wordings would arrive as two problems and a
+    // reader could not tell that one fix clears both.
+    //
+    // Scoped to this rule. Other rules still reach push in both wordings, which is
+    // tracked separately.
+    #[test]
+    fn a_push_reports_an_unchecked_top_level_once() {
+        let spec = format!(
+            "name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  test-env:\n    install: \"true\"\n"
+        );
+
+        let Err(super::SyncError::ValidationFailed { failures }) = push_result(&spec) else {
+            panic!("a push carrying a spec apply would refuse must be refused");
+        };
+        let issues: Vec<_> = failures.iter().flat_map(|f| &f.issues).collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "one problem must be reported once, got: {issues:?}"
+        );
+        assert!(
+            issues[0].message.contains("could not be checked"),
+            "the entry must name the unread top level: {issues:?}"
         );
     }
 

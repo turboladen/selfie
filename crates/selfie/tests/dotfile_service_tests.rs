@@ -7526,10 +7526,12 @@ environments:
     // One file, and both surfaces speak about it -- neither may go quiet on a
     // check that never ran.
     //
-    // They speak at different strengths on purpose. Apply refuses, because it
-    // would otherwise deploy content the unread key may have changed. Validate
-    // reports an advisory notice, because `sync push` refuses a package carrying
-    // any warning and an unrun check must not block one.
+    // They speak at the same strength and in the same words. Apply refuses,
+    // because it would otherwise deploy content the unread key may have changed,
+    // and validate calls the file invalid for the same reason: no key of the top
+    // level was examined, so an unrecognized one cannot be ruled out. One
+    // sentence, so `sync push` reports the problem once rather than in two
+    // wordings a reader cannot connect.
     #[tokio::test]
     async fn apply_and_validate_both_report_a_file_that_cannot_be_re_read() {
         let dirs = TestDirs::new();
@@ -7554,13 +7556,15 @@ environments:
         );
         let package = repo.get_package("myapp").expect("fixture must load");
         let result = package.package().validate("test");
+        // The same clause apply's warning carries, asserted on both sides above.
+        // Wording the two separately is what made one problem arrive twice.
         assert!(
             result
                 .issues()
-                .infos()
+                .errors()
                 .iter()
-                .any(|issue| issue.message().contains("could not re-read")),
-            "validate stayed quiet: {:?}",
+                .any(|issue| issue.message().contains("cannot be ruled out")),
+            "validate must report the refusal's own sentence: {:?}",
             result.issues()
         );
     }

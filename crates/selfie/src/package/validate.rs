@@ -6,7 +6,8 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, TopLevelKeys, UnknownEntryKey, UnknownKey, unknown_key,
+    DotfileEntry, EnvironmentField, Package, SpecRefusal, TopLevelKeys, UnknownEntryKey,
+    UnknownKey, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -291,20 +292,24 @@ impl Package {
         // holds or about whether it could be read back at all.
         match self.top_level_keys() {
             TopLevelKeys::Checked(keys) => issues.extend(unknown_top_level_keys(keys)),
-            // The package parsed once already, so the re-read failing means the
-            // two views disagree -- a YAML scalar `serde_json::Value` cannot hold,
-            // for instance. Say the check did not run; staying quiet here reports
-            // a file as clean when nothing looked at it.
+            // No key of the top level was examined, so an unrecognized one cannot
+            // be ruled out, and an unrecognized one refuses the package. An error
+            // therefore: anything milder calls a file valid that apply, drift and a
+            // rewrite all decline.
             //
-            // `Info`, not a warning: nothing is known to be wrong with the file,
-            // only unchecked, and `sync push` refuses a package carrying any
-            // warning. Blocking a push over a check that did not run would be a
-            // worse outcome than the gap it reports.
-            TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::info(
-                ValidationErrorCategory::Advisory,
+            // Worded by the refusal itself. `sync push` appends apply's refusal
+            // unless the same text is already reported, so two wordings for one
+            // problem arrive as two. The clause must survive the prefix, which is
+            // what the dedup matches on.
+            TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::error(
+                ValidationErrorCategory::InvalidValue,
                 "package",
-                &format!("could not re-read the package file to check its top-level keys: {error}"),
-                Some("The top-level keys were not checked for this package."),
+                &format!(
+                    "package '{}': {}",
+                    self.name(),
+                    SpecRefusal::UncheckedTopLevel(error.clone())
+                ),
+                Some("Edit the file directly, or simplify it until selfie can read it."),
             )),
             // `set_source` derives this from the same string the check above read,
             // so a package carrying YAML is never `NoSource`.
@@ -2051,10 +2056,10 @@ environments:
 
     // The environment check survives a file whose top level cannot be re-read.
     //
-    // `selfie apply` refuses this package -- it reads the key off the parsed
-    // environment, which needs no re-read -- so a validate that reported only the
-    // advisory passed a package apply then declined, and exited 0 doing it
-    // (selfie-5j5j).
+    // It reads the key off the parsed environment, which needs no re-read, so
+    // returning early on a failed re-read would take it down and leave the key
+    // unreported. `selfie apply` reads the same place and refuses, so dropping the
+    // key here is how validate comes to pass a package apply declines (selfie-5j5j).
     #[test]
     fn an_environment_key_is_still_reported_when_the_top_level_cannot_be_re_read() {
         // A mapping keyed by a sequence: parses as a package, and not into the
@@ -2080,18 +2085,18 @@ environments:
         );
         assert!(
             issues.iter().any(|i| i.field == "package"
-                && i.message.contains("could not re-read")
-                && i.level == crate::validation::ValidationLevel::Info),
+                && i.message.contains("could not be checked")
+                && i.level == crate::validation::ValidationLevel::Error),
             "the unread top level must still be reported: {issues:?}"
         );
-        // The advisory says what was skipped, and the environment keys no longer
-        // are. Claiming otherwise reads as a second, invented gap.
+        // The refusal says what was skipped, and the environment keys are not part
+        // of it. Claiming otherwise reads as a second, invented gap.
         assert!(
             !issues.iter().any(|i| i
                 .suggestion
                 .as_deref()
                 .is_some_and(|s| s.contains("environment"))),
-            "the advisory must not claim the environment keys went unchecked: {issues:?}"
+            "the refusal must not claim the environment keys went unchecked: {issues:?}"
         );
     }
 
@@ -2158,14 +2163,30 @@ environments:
 
         let issues = package.validate_unknown_fields();
         assert_eq!(issues.len(), 1, "got: {issues:?}");
+        // An error, not a notice: no key of the top level was examined, so an
+        // unrecognized one cannot be ruled out, and an unrecognized one refuses
+        // the package. A milder level calls the file valid while apply, drift and
+        // a rewrite all decline it.
+        assert_eq!(issues[0].level, ValidationLevel::Error);
+        // Apply's own clause, not a second wording. `sync push` deduplicates by
+        // testing whether an issue's message contains the refusal's text, so the
+        // clause has to survive the subject verbatim.
+        let TopLevelKeys::Unchecked(error) = package.top_level_keys() else {
+            panic!("the fixture's top level must be the unreadable kind");
+        };
+        let clause = SpecRefusal::UncheckedTopLevel(error.clone()).to_string();
         assert!(
-            issues[0].message.contains("could not re-read"),
-            "got: {}",
+            issues[0].message.contains(&clause),
+            "the validator must carry the refusal's clause verbatim, got: {}",
             issues[0].message
         );
-        // Not silence, and not an error either: nothing is known to be wrong
-        // with the file, only unchecked.
-        assert_eq!(issues[0].level, ValidationLevel::Info);
+        // A clause opens with "its", so a table row carrying it alone has a pronoun
+        // and no antecedent. The subject comes first, as apply's warning does.
+        assert!(
+            issues[0].message.starts_with("package 'myapp':"),
+            "the message must name what it is about, got: {}",
+            issues[0].message
+        );
     }
 
     // Every walk over `environments()` reports in name order. A `HashMap`
