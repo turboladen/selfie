@@ -174,7 +174,7 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
         .or_else(|| fs.irregular_target_refusal(&expanded))
     {
         display.print_warning(
-            selfie::dotfile_service::service::already_tracked_refusal_warning(&refusal),
+            selfie::dotfile_service::track::already_tracked_refusal_warning(&refusal),
         );
     }
 
