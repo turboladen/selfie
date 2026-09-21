@@ -124,17 +124,39 @@ recoverable, and destroying the link on a routine update is the common path. A s
 replaces the link, because following it would send a credential to a destination its author chose,
 and refusing would leave the credential undeployed with no remedy but deleting the user's own link.
 Replacement is the only outcome that completes the write and keeps the content where the user asked
-for it. The user is told: a secret-bearing entry whose target is a symlink warns, naming the link
-and its destination, before the replacement. The link is classified before any permission question
-is asked, so the outcome does not depend on the destination's mode.
+for it.
+
+After the non-following symlink question finds a link at a secret-bearing entry's target, the link's
+destination is classified with a following stat before any provider command runs or template
+renders. A destination that is a fifo, socket, device node or directory refuses the entry, and
+nothing is executed. This preserves the rule that nothing runs for a target that provably cannot be
+written.
+
+Past that gate, a secret-bearing target that is a link is always replaced with a regular owner-only
+file, whether or not the destination already holds the resolved content. The outcome never depends
+on the destination's mode.
+
+The warning naming the link and its destination is sent after the write succeeds, worded as what
+happened, so it can never precede a refusal or a failed write. A dry run words the same warning in
+the conditional.
+
+A dry run reports the same outcome class a real run would reach: refused for an irregular
+destination, and otherwise that it would replace the link. It counts that outcome the way a real run
+counts a replacement, so a preview's counts and a real run's counts never diverge.
 
 Rejected: unify both writers on refusal, which leaves a credential permanently undeployed. Rejected:
 unify both on replacement, which destroys legitimate links during ordinary updates. Rejected:
 leaving the secret path its own target handling, which is how one function came to answer the same
-question two ways.
+question two ways. Rejected: classify the link but leave the destination unclassified until a
+provider command runs or a template renders. A credential fetch, possibly with a biometric prompt,
+would then run for a target the writer goes on to refuse. Rejected: word a dry run as a skip for a
+symlinked secret target. A preview would then say nothing about a link a real run will replace.
+Rejected: keep the rule that leaves an already-matching destination's link alone. An outcome that
+depends on the destination's mode is what this decision removes.
 
 Reopen when a third content class appears whose writer is neither of these two, or when a write mode
-exists that completes a write without replacing the link.
+exists that completes a write without replacing the link. Reopen also when the secret writer gains a
+way to write through a link safely, or when drift gains a write.
 
 ### 4. Unrecognized top-level keys in a package file
 
@@ -327,8 +349,12 @@ to.
   Two more, in the resolve and state-file modules, do the same. The six symlink decisions in that
   service reduce to the classifier plus the two writers' own refusals.
 - The rule file describing secret handling states what decision 3 does: a symlinked target is
-  refused for repository-file content and replaced, without being followed, for secret-bearing
-  content, with the warning arriving alongside the classifier.
+  refused for repository-file content and always replaced, without being followed, for
+  secret-bearing content. The destination is classified before any provider command runs or template
+  renders, and the warning is sent after the replacement succeeds.
+- docs/package-files.md's "Deploy behavior and permissions" paragraph is corrected to state the
+  always-replace rule, dropping the case where the destination's mode decides whether the link
+  survives.
 - The unknown-key rule costs no code in apply and drift. At two other sites it does. Validation
   reports a top level it could not read back as an error, in the refusal's own words, so the package
   is invalid wherever it is judged. A save stops walking environments itself and asks the same
