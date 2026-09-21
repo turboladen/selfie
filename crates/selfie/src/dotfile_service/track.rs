@@ -12,7 +12,8 @@ use crate::{
     fs::{
         filesystem::{FileSystem, FileSystemError},
         target::{
-            TargetRejection, deploy_target, expand_target_path, portable_target, repository_path,
+            TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
+            repository_path,
         },
     },
     package::{
@@ -134,6 +135,29 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
     )
 }
 
+/// Why an already-tracked target cannot be written to, or `None` if it can.
+///
+/// Asks both stats in the order the answer depends on and renders the sentence for
+/// whichever answers. `None` is the ordinary case and says nothing is wrong with the
+/// target.
+// Ask this rather than composing the two questions at a call site: which one
+// answers first is a rule of this module, and an adapter restating it can drift from
+// it.
+//
+// One answer, not both: a symlink to a socket satisfies each check and would
+// otherwise warn twice with the same sentence. `or_else` also skips the second stat
+// when the first already answered.
+pub fn already_tracked_refusal<F: FileSystem>(
+    filesystem: &F,
+    target: &TargetPath,
+) -> Option<String> {
+    filesystem
+        .symlink_refusal(target)
+        .or_else(|| filesystem.irregular_target_refusal(target))
+        .as_ref()
+        .map(already_tracked_refusal_warning)
+}
+
 /// How every command reports an already-tracked target it cannot write to.
 // A target already in the spec that is not a regular file.
 //
@@ -144,7 +168,7 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
 // kind: a repository-file entry is refused, while a secret-bearing one is written
 // by `write_file_private`, which replaces a symlink at the final component. This
 // breaks the silence and leaves the verdict to the command that has one.
-pub fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
+fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
     format!("{refusal}. The entry stays as it is, and this command wrote nothing.")
 }
 
@@ -495,16 +519,8 @@ where
         // the one track answer that reaches neither the refusals below nor a
         // deploy. With matching content drift answers `None` and has no line to
         // carry a reason either, so both commands were silent about it.
-        // One answer, not both: a symlink to a socket satisfies each check and
-        // would otherwise warn twice with the same sentence. `or_else` also skips
-        // the second stat when the first already answered.
-        if let Some(refusal) = filesystem
-            .symlink_refusal(&expanded_target)
-            .or_else(|| filesystem.irregular_target_refusal(&expanded_target))
-        {
-            sender
-                .send_warning(already_tracked_refusal_warning(&refusal))
-                .await;
+        if let Some(warning) = already_tracked_refusal(filesystem, &expanded_target) {
+            sender.send_warning(warning).await;
         }
 
         // The entry's own paths, not the argument and not the target: "already
@@ -811,6 +827,55 @@ mod tests {
         let removal = remove_own_copy(&fs, copy, "gem: --no-document");
 
         assert!(matches!(removal, CopyRemoval::Unconfirmed));
+    }
+
+    // selfie-ir68.20. Which stat answers first is this module's rule, and the one
+    // function is where it is now decided, so this is where it is pinned. A target
+    // that is both a symlink and, through the link, an irregular file must be
+    // reported as the symlink, because the followed stat would send the user to
+    // inspect the file behind the link instead of the link they planted.
+    #[test]
+    fn an_already_tracked_refusal_reports_the_symlink_before_what_it_points_at() {
+        let target = repository_path(Path::new("/home/u/.config/app/config"));
+
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|path| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: Some(PathBuf::from("/tmp/pipe")),
+            })
+        });
+        // Answers too, and must not be the answer given.
+        fs.expect_irregular_target_refusal().returning(|path| {
+            Some(FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "named pipe (fifo)",
+            })
+        });
+
+        let warning = already_tracked_refusal(&fs, &target).expect("both stats answered");
+        assert!(
+            warning.contains("symlink"),
+            "the symlink must answer first: {warning}"
+        );
+        assert!(
+            !warning.contains("named pipe"),
+            "the followed stat answered instead of the link: {warning}"
+        );
+    }
+
+    // The control: an ordinary file is not refused, so a caller can tell the two
+    // apart. Without it, a function returning `Some` for everything would pass the
+    // test above.
+    #[test]
+    fn an_already_tracked_regular_file_is_not_refused() {
+        let target = repository_path(Path::new("/home/u/.config/app/config"));
+
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|_| None);
+        fs.expect_irregular_target_refusal().returning(|_| None);
+
+        assert!(already_tracked_refusal(&fs, &target).is_none());
     }
 
     // Exactly once, counted rather than checked for presence. The message leaves

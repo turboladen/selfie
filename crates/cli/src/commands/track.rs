@@ -128,8 +128,6 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
         target,
     } = tracked;
 
-    use selfie::fs::filesystem::FileSystem as _;
-
     let fs = RealFileSystem;
 
     // `deploy_target` rather than `TargetRejection::of`: the textual rule cannot
@@ -169,13 +167,8 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
     // that is not a regular file would otherwise be reported here as plainly
     // tracked and mentioned by nothing. Shares the library's wording so the two
     // cannot describe one situation differently.
-    if let Some(refusal) = fs
-        .symlink_refusal(&expanded)
-        .or_else(|| fs.irregular_target_refusal(&expanded))
-    {
-        display.print_warning(
-            selfie::dotfile_service::track::already_tracked_refusal_warning(&refusal),
-        );
+    if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded) {
+        display.print_warning(warning);
     }
 
     display.print_info(format!("Already tracking '{target}' in spec '{spec_name}'"));
