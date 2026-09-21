@@ -9,6 +9,10 @@ Accepted
 Refines [ADR-0001](0001-machine-specific-and-secret-dotfiles.md), which established externally
 sourced dotfile content and left its deploy-state and drift handling to be specified when built.
 
+Refined by [ADR-0005](0005-directory-and-target-state.md), which classifies a secret-bearing entry's
+target through the same rule as every other entry, and records why its writer replaces a symlinked
+target where the ordinary writer refuses one.
+
 ## Context
 
 `selfie apply` records what it deployed in a per-machine deploy state file, storing a checksum of
