@@ -43,13 +43,20 @@ pub(super) fn secret_origin(content: &ContentSource<'_>) -> String {
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
 fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>) -> String {
-    // Counts separators plus one, so a trailing newline reads as an extra line.
-    // Exact line semantics do not matter here; the comparison between the two
-    // sides does.
-    let lines = |b: &[u8]| b.iter().filter(|c| **c == b'\n').count() + 1;
+    // Separators plus one, so a trailing newline reads as an extra line. Exact line
+    // semantics do not matter here; the comparison between the two sides does.
+    //
+    // Both sides count through this one closure, so they cannot pluralize
+    // differently. It is the only information a user gets before deciding whether
+    // to overwrite a credential nothing recorded, so it should not read as though
+    // selfie cannot count.
+    let count = |b: &[u8]| {
+        let n = b.iter().filter(|c| **c == b'\n').count() + 1;
+        format!("{n} {}", crate::pluralize(n, "line", "lines"))
+    };
 
     let current_side = match current {
-        Some(bytes) => format!("{} lines", lines(bytes)),
+        Some(bytes) => count(bytes),
         // Said plainly rather than shown as "0 lines", which would read as an
         // empty file and understate what an overwrite destroys.
         None => "exists but could not be read".to_string(),
@@ -61,10 +68,10 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
     // past a secret conflict.
     format!(
         "  {}\n  target exists and differs from resolved output\n\n  \
-         resolved output : {} lines\n  current target  : {current_side}\n  (content hidden)\n  \
+         resolved output : {}\n  current target  : {current_side}\n  (content hidden)\n  \
          no copy of the current target is kept",
         origin,
-        lines(incoming),
+        count(incoming),
     )
 }
 
@@ -452,5 +459,58 @@ where
         // No deploy state is recorded: a stored checksum of a credential is a
         // confirmation oracle. See ADR-0003.
         SecretOutcome::Deployed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // selfie-ir68.21. Both sides render a line count, on the only line a user gets
+    // before choosing whether to overwrite a credential that nothing recorded and
+    // nothing can recover. Each side is asserted at one line AND at two, by
+    // swapping the arguments, so a fix to one site cannot pass by being checked at
+    // the other.
+
+    // The fixtures are unterminated on purpose. The counter is separators plus one,
+    // so "token\n" reads as two lines and a terminated fixture never produces the
+    // singular. That counting is its own question, filed separately.
+    #[test]
+    fn a_one_line_side_reads_line_and_a_two_line_side_reads_lines() {
+        let one: &[u8] = b"token";
+        let two: &[u8] = b"token\nsecond";
+
+        let summary = secret_conflict_summary("op read x", one, Some(two));
+        // The trailing newline is part of the assertion: "1 line" is a prefix of
+        // "1 lines", so a match without it would hold for the bug.
+        assert!(
+            summary.contains("resolved output : 1 line\n"),
+            "the resolved side is not singular: {summary}"
+        );
+        assert!(
+            summary.contains("current target  : 2 lines\n"),
+            "the current side is not plural: {summary}"
+        );
+
+        let swapped = secret_conflict_summary("op read x", two, Some(one));
+        assert!(
+            swapped.contains("resolved output : 2 lines\n"),
+            "the resolved side is not plural: {swapped}"
+        );
+        assert!(
+            swapped.contains("current target  : 1 line\n"),
+            "the current side is not singular: {swapped}"
+        );
+    }
+
+    // An unreadable target says so rather than counting, and pluralizing must not
+    // have disturbed that arm.
+    #[test]
+    fn an_unreadable_current_target_is_still_said_plainly() {
+        let summary = secret_conflict_summary("op read x", b"token", None);
+        assert!(
+            summary.contains("current target  : exists but could not be read"),
+            "got: {summary}"
+        );
     }
 }
