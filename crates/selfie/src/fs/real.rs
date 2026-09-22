@@ -41,6 +41,8 @@ fn symlink_refusal(path: &Path) -> Option<FileSystemError> {
 ///
 /// `stat` never blocks, including on a fifo. Only `open` does, which is what makes
 /// it safe to ask this question about the very targets that would hang.
+// Every read of a path that selfie does not control asks this first: opening a fifo to
+// read blocks, and nothing else on a read path checks.
 fn irregular_kind(path: &Path) -> Option<&'static str> {
     use std::os::unix::fs::FileTypeExt as _;
 
@@ -275,6 +277,18 @@ impl FileSystem for RealFileSystem {
     // hang on the read path.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         irregular_refusal(path.path())
+    }
+
+    fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
+        // A following stat, like `irregular_target_refusal`'s, so it answers for what
+        // a write would land on rather than for a link in the way.
+        match fs::metadata(path.path()) {
+            Ok(metadata) => Ok(metadata.is_dir()),
+            // Nothing there is not an error: an absent target is the ordinary case
+            // for a first deploy, and a write creates it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(FileSystemError::IoError(Arc::new(e))),
+        }
     }
 
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {

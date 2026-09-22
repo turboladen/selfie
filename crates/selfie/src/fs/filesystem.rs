@@ -166,20 +166,35 @@ pub trait FileSystem: Send + Sync {
     /// [`FileSystemError::IrregularTarget`] if `path` resolves to something that
     /// is neither absent nor a regular file
     ///
-    /// A fifo, socket, device node or directory. `None` for a regular file, for a
-    /// path that does not exist, and for a symlink to a regular file, which is
+    /// A fifo, socket or device node. **Not a directory:** opening one never blocks
+    /// and writing to one fails without touching anything, so a directory is left to
+    /// the read that precedes a deploy. `None` also for a regular file, for a path
+    /// that does not exist, and for a symlink to a regular file, which is
     /// [`symlink_refusal`](FileSystem::symlink_refusal)'s question.
     ///
     /// Answers for what an `open` of `path` would land on, so a symlink to a fifo
     /// is a fifo.
     ///
-    /// **Call this before every read of a path selfie does not control.** Opening
-    /// a fifo to read blocks, and nothing else on a read path checks.
-    ///
     /// Advisory for writes: the writer checks again immediately before writing,
     /// and a fifo planted after that check is replaced by the rename, never
     /// opened.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
+
+    /// Whether a directory is at `path`.
+    ///
+    /// Symlinks are followed, so it reports on what the path resolves to. `false`
+    /// when nothing is there, so an absent target is not an error.
+    ///
+    /// Answered with a stat rather than a listing, and a directory never blocks the
+    /// way a fifo does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`] when the stat fails for any reason other than
+    /// the path not existing — a parent that cannot be traversed, most often. A
+    /// caller cannot treat that as "no directory": nothing is known about the
+    /// path, and a write there may still land on one.
+    fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
 
     /// Whether a file is readable only by its owner
     ///
@@ -284,8 +299,8 @@ pub enum FileSystemError {
         points_to: Option<PathBuf>,
     },
 
-    /// A target that is neither absent nor a regular file: a fifo, socket, device
-    /// node or directory.
+    /// A target that is neither absent nor a regular file: a fifo, socket or device
+    /// node. A directory is not one of these.
     ///
     /// Refused rather than written to, and refused before it is *read* — opening
     /// a fifo blocks until the other end is opened, and `command_timeout` does not

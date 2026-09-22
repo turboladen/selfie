@@ -744,8 +744,10 @@ what that directory discloses and where not to put it.
 ### Symlinked targets
 
 This section covers repository-file entries — a `source` with no `vars`. Provider-sourced and
-templated entries never write through a link either, but their link is
-[replaced rather than refused](#deploy-behavior-and-permissions).
+templated entries never write through a link either. Their link is replaced rather than refused,
+except when a fifo, socket or device node sits behind it, which refuses before any command runs; and
+a link selfie sees at either of its two checks is not read through. See
+[Deploy behavior and permissions](#deploy-behavior-and-permissions).
 
 selfie deploys by copying, so a symlink at a target is not a supported setup. When one is there and
 selfie would otherwise write, it **refuses and skips that entry** with a warning naming the target
@@ -791,9 +793,12 @@ by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
 ```
 
 A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
-reason. A **directory** at the target is not in this group; it is reported as an ordinary error.
-Provider-sourced and templated entries refuse these targets too, and so does the deploy-state file:
-selfie renames nothing over a pipe, socket or device that is there when it checks.
+reason. A **directory** at the target is not in this group. For a repository-file entry it is
+reported as an ordinary error; for a secret-bearing entry it is refused before any command runs,
+because a file cannot replace a directory and nothing should be fetched for a target that cannot
+receive it. Provider-sourced and templated entries refuse these targets too, and so does the
+deploy-state file: selfie renames nothing over a pipe, socket or device that is there when it
+checks.
 
 #### `selfie dotfiles track` refuses a symlinked target
 
@@ -1111,23 +1116,36 @@ truncated credential.
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
 
-For a secret-bearing entry, a target that exists but cannot be read is a conflict as well,
+For a secret-bearing entry, an existing regular file whose read fails is a conflict as well,
 summarized as "exists but could not be read", and is never treated as absent: an interactive prompt
 can still accept the overwrite, since replacing a file needs only write permission on its directory,
-and without one the entry is skipped.
+and without one the entry is skipped. A directory and a symlink do not reach that case — the first
+is refused before any command runs, and a symlink selfie has seen is replaced without being read.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the
 costs differ: a skipped repository file is still in the repository, whereas a skipped credential
 leaves you without the file and with nothing recorded about it.
 
-There is one case where whether the link is replaced depends on something other than the deploy
-itself. When the content already matches, selfie only rewrites the target if its permissions need
-tightening, and the permission check follows the link — so it reports on the file the link points
-at. A symlinked target whose destination is already owner-only is left completely alone and the link
-survives; one whose destination is group- or world-readable is tightened, which replaces the link
-with a regular file. Both outcomes are consistent with the rule above, but which one you get depends
-on the destination's mode rather than on anything about the link.
+The link is replaced whatever it points at — a file, a directory, or nothing — and whether or not
+the destination already holds the same content, and whatever its permissions are. The one exception
+is a fifo, socket or device node behind it, which is refused before any command runs. The
+replacement lands on the link itself, so what it pointed at is left alone. selfie does not read
+through a link it has seen: doing so would show you a file the link's author chose rather than one
+you deployed. It looks twice, once before running the commands and again immediately before the
+read, so a link present at either look is never read through; a link planted between that second
+look and the read is still followed, and closing that needs a non-following read selfie does not yet
+have. After the replacement succeeds selfie warns, naming the link and where it pointed, so a link
+you created deliberately is not removed silently.
+
+Two things refuse before any command runs, because the write could never succeed and a provider
+command can raise a biometric prompt. A fifo, socket or device node is refused, whether it is at the
+target or behind a link, because the writer refuses one either way. A **directory at the target
+itself** is refused too, because a file cannot replace a directory — but a directory _behind a link_
+is not, since the replacement lands on the link. A plain target selfie cannot classify at all — one
+it has no permission to look at — is refused rather than written over.
+
+`stop_on_error` is on by default, so any of these refusals stops the rest of the run.
 
 #### What is shown, and what is not
 
@@ -1161,11 +1179,17 @@ overwritten wrongly can be recovered from the repository, whereas a credential c
 selfie recorded nothing about it. This matters most for non-interactive callers such as the MCP
 server, which can set the flag but has no human behind it.
 
-`--dry-run` does not run any provider or `vars` command. That means it cannot tell you whether a
-secret-bearing entry would change — knowing that needs the content, and the content needs the
-commands. It reports the entry and how many commands it is declining to run. The alternative, a
-preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
-executing operation.
+`--dry-run` does not run any provider or `vars` command. That means it usually cannot tell you
+whether a secret-bearing entry would change — knowing that needs the content, and the content needs
+the commands — so it reports the entry and how many commands it is declining to run. The
+alternative, a preview that reaches your secret store and raises a biometric prompt, would make
+`--dry-run` an executing operation.
+
+A symlinked target is the exception, because its outcome does not depend on the content: the preview
+says it would replace the link, and a destination that cannot receive the credential is refused in a
+preview exactly as in a real run. A preview counts a replacement it would make the way it counts any
+deploy it would make, as a skip, so `--dry-run` never reports a deployment for a run that wrote
+nothing.
 
 A dry run does still apply every check that can be made without running anything — a target selfie
 will not deploy to, whether it is not absolute or names another user's home with `~user/`; a
