@@ -43,7 +43,18 @@ pub(crate) async fn handle_track(
         &selfie::fs::RealFileSystem,
         &config.selfie_config().dotfiles_directory(),
     ) {
-        display.print_error(format!("Cannot use name '{name}': {e}"));
+        // The prefix blames the name, so it belongs only where the name is the
+        // problem. A dotfiles directory that would not read says nothing about the
+        // name the user chose, and telling them they cannot use it sends them off to
+        // pick another one — which will fail in exactly the same way.
+        let message = match &e {
+            namespace::NamespaceValidationError::DotfilesDirectoryUnreadable(_) => e.to_string(),
+            namespace::NamespaceValidationError::Conflict(_)
+            | namespace::NamespaceValidationError::LookupFailed(_) => {
+                format!("Cannot use name '{name}': {e}")
+            }
+        };
+        display.print_error(message);
         return 1;
     }
 

@@ -478,3 +478,67 @@ fn track_offers_mkdir_for_a_dotfiles_directory_that_is_merely_absent() {
         "an absent path is the one case the remedy works for, got:\n{combined}"
     );
 }
+
+// `selfie dotfiles track` against an unreadable dotfiles directory reports the
+// directory, and does not tell the user their name is unusable. The name may be
+// perfectly good; nothing could check it.
+//
+// Skipped for a user who can read a 0o000 directory, since the fixture cannot be
+// built for root and a pass would mean nothing.
+#[test]
+fn dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read_dir(&dotfiles).is_ok() {
+        eprintln!("SKIP dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read");
+        return;
+    }
+
+    let tracked = temp.path().join("starship.toml");
+    std::fs::write(&tracked, "format = \"$all\"").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "track", "starship", tracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    // Restored before the assertions, so a failure does not leave an unreadable
+    // directory behind for the temp dir's own cleanup to trip over.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "got:\n{combined}");
+    assert!(
+        combined.contains("cannot tell whether the name is already taken"),
+        "the refusal must say the answer is unknown, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Cannot use name"),
+        "the name is not what failed, got:\n{combined}"
+    );
+}
