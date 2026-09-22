@@ -259,6 +259,7 @@ mod tests {
         let mut mock_fs = MockFileSystem::default();
         let package_dir = PathBuf::from("/test/packages");
 
+        mock_fs.mock_directories_exist();
         mock_fs.mock_path_exists(&package_dir, true);
         mock_fs.mock_list_directory(&package_dir, &[]);
 
@@ -296,6 +297,7 @@ environments:
       - target-package
 "#;
 
+        mock_fs.mock_directories_exist();
         mock_fs.mock_path_exists(&package_dir, true);
         mock_fs.mock_list_directory(&package_dir, &[&target_path, &dependent_path]);
         mock_fs.mock_read_file(&target_path, target_yaml);

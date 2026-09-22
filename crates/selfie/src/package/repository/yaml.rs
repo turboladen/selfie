@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     dotfile_service::refusal::repository_read_refusal,
-    fs::{FileSystem, filesystem::FileSystemError, target::repository_path},
+    fs::{DirectoryState, FileSystem, filesystem::FileSystemError, target::repository_path},
     package::{
         GetPackage, Package, SpecOrigin, SpecRefusal,
         port::{
@@ -22,6 +22,21 @@ pub struct YamlPackageRepository<F: FileSystem> {
     origin: SpecOrigin,
 }
 
+/// A [`FileSystemError`] as an [`io::Error`] with its kind intact.
+///
+/// The kind is the signal, not decoration: `PermissionDenied` is what tells a consumer
+/// the directory is there and hiding entries rather than absent, and it is the only way
+/// [`DirectoryState::Unlistable`](crate::fs::DirectoryState::Unlistable) is ever
+/// reached. `io::Error::other` makes every kind `Other`, which sends an unreadable
+/// directory down the "classify the path instead" route and back out as a plain
+/// directory, so every listing failure in this file converts through here.
+fn preserving_kind(error: FileSystemError) -> std::io::Error {
+    match &error {
+        FileSystemError::IoError(io) => std::io::Error::new(io.kind(), error.to_string()),
+        _ => std::io::Error::other(error.to_string()),
+    }
+}
+
 impl<F: FileSystem> YamlPackageRepository<F> {
     /// A repository over `package_dir`, whose specs are of kind `origin`.
     ///
@@ -36,32 +51,37 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         }
     }
 
-    /// The error for a package directory that could not be found:
-    /// `PackageDirectoryNotFound` when it does not exist, `IoError` when it
-    /// exists and cannot be reached.
-    fn absent_directory_error(&self) -> PackageListError {
-        // `path_exists` answers false for any failed stat, including a
-        // directory behind a parent that denies access. Calling that "not found"
-        // tells the user to create a directory that is there, and lets a caller
-        // skip a repository that may be hiding specs, so the listing is asked
-        // why. A listing that fails with `NotFound` means absent, and so does
-        // `NotADirectory`: a path running through a file cannot exist.
-        match self.fs.list_directory(&self.package_dir) {
-            // The error from the listing names no path, and the user has two
-            // configured directories to choose between, so it is rebuilt with
-            // this one's path and the same kind.
-            Err(FileSystemError::IoError(error))
-                if !matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                PackageListError::IoError(Arc::new(std::io::Error::new(
+    /// The error for a package directory that cannot be listed, or `None` when it
+    /// can be.
+    ///
+    /// One probe, not two, and `path_exists` is not it: that answers false for a
+    /// dangling symlink, a symlink loop and a directory behind a parent that denies
+    /// access alike, so a caller acting on it cannot tell an empty path from one it was
+    /// not allowed to look at. This asks the shared classification instead, once.
+    fn unlistable_directory_error(&self) -> Option<PackageListError> {
+        match self.fs.directory_state(&self.package_dir) {
+            DirectoryState::Directory => None,
+            // Nothing that can hold a spec is at the path, whatever is there. The
+            // reason is not flattened away: a caller asks the error for it through
+            // `PackageListError::directory_state`.
+            DirectoryState::Absent(_) => Some(PackageListError::PackageDirectoryNotFound(
+                self.package_dir.clone(),
+            )),
+            // The path is not answering. The user has two configured directories to
+            // choose between and the classification's error names neither, so the
+            // message is rebuilt with this one's path and the same kind.
+            //
+            // `Unlistable` is grouped in to keep the match total, not because this call
+            // can produce it: only a listing discovers that a directory will not open
+            // its entries, and `directory_state` stats the path. A `0o000` package
+            // directory is a `Directory` here and fails at the listing instead, which
+            // is where `from_listing` turns its `PermissionDenied` into `Unlistable`.
+            DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
+                Some(PackageListError::IoError(Arc::new(std::io::Error::new(
                     error.kind(),
                     format!("{}: {error}", self.package_dir.display()),
-                )))
+                ))))
             }
-            _ => PackageListError::PackageDirectoryNotFound(self.package_dir.clone()),
         }
     }
 
@@ -80,10 +100,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
     /// `validate --all`, and `audit --all` report in a stable order, and makes
     /// the "multiple files match this name" error name them predictably.
     fn list_yaml_files(&self, dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-        let entries = self
-            .fs
-            .list_directory(dir)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let entries = self.fs.list_directory(dir).map_err(preserving_kind)?;
 
         // The same question `filter_matching_packages` and the sync guard ask,
         // so enumeration cannot admit a file name resolution rejects or skip
@@ -150,7 +167,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         let entries = self
             .fs
             .list_directory(&self.package_dir)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(preserving_kind)?;
 
         *files_examined = entries.len();
 
@@ -268,10 +285,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
         // Check if package directory exists first
-        if !self.fs.path_exists(&self.package_dir) {
-            return Err(PackageRepoError::PackageListError(
-                self.absent_directory_error(),
-            ));
+        if let Some(error) = self.unlistable_directory_error() {
+            return Err(PackageRepoError::PackageListError(error));
         }
 
         let search_patterns = vec![format!("{}.yml", name), format!("{}.yaml", name)];
@@ -334,8 +349,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError> {
-        if !self.fs.path_exists(&self.package_dir) {
-            return Err(self.absent_directory_error());
+        if let Some(error) = self.unlistable_directory_error() {
+            return Err(error);
         }
 
         // Get all YAML files in the directory
@@ -352,14 +367,14 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError> {
-        if !self.fs.path_exists(&self.package_dir) {
-            return Err(self.absent_directory_error());
+        if let Some(error) = self.unlistable_directory_error() {
+            return Err(error);
         }
 
         let entries = self
             .fs
             .list_directory(&self.package_dir)
-            .map_err(|e| std::io::Error::other(e.to_string()))
+            .map_err(preserving_kind)
             .map_err(|e| PackageListError::from(Arc::new(e)))?;
 
         Ok(Self::filter_matching_packages(name, entries))
@@ -610,6 +625,7 @@ mod tests {
     #[test]
     fn test_get_package_success() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
@@ -646,6 +662,7 @@ mod tests {
     #[test]
     fn test_get_package_not_found() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         // Mock filesystem to simulate package not found
         let package_dir = PathBuf::from("/test/packages");
 
@@ -672,20 +689,9 @@ mod tests {
     #[test]
     fn test_get_package_directory_not_found() {
         let mut fs = MockFileSystem::default();
-        // Mock filesystem error
         let package_dir = PathBuf::from("/test/nonexistent");
 
-        // Mock path_exists to return false for the directory
-        fs.expect_path_exists()
-            .with(predicate::eq(package_dir.clone()))
-            .returning(|_| false);
-        fs.expect_list_directory()
-            .with(predicate::eq(package_dir.clone()))
-            .returning(|_| {
-                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
-                )))
-            });
+        fs.mock_directory_state(DirectoryState::Absent(crate::fs::AbsentReason::Empty));
 
         let repo =
             YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
@@ -702,6 +708,7 @@ mod tests {
     #[test]
     fn test_get_package_multiple_found() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
 
         // Create multiple mock package files with the same name
@@ -739,6 +746,7 @@ mod tests {
     #[test]
     fn test_find_package_files() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
 
         let yaml_path = package_dir.join("ripgrep.yaml");
@@ -777,6 +785,7 @@ mod tests {
     #[test]
     fn test_list_packages() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
@@ -849,6 +858,7 @@ mod tests {
         // enumeration inheriting it. Returned here deliberately unsorted, the
         // way a real filesystem may.
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let dir = PathBuf::from("/test/dir");
         let cloned = dir.clone();
 
@@ -881,6 +891,7 @@ mod tests {
     #[test]
     fn test_list_yaml_files() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let dir = PathBuf::from("/test/dir");
         let cloned = dir.clone();
 
@@ -922,6 +933,7 @@ mod tests {
     #[test]
     fn test_list_packages_reports_both_the_parsed_and_the_unparsable() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
 
@@ -976,6 +988,7 @@ mod tests {
     #[test]
     fn test_package_parse_error_handling() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("invalid.yaml");
@@ -1030,16 +1043,7 @@ mod tests {
         let mut fs = MockFileSystem::default();
         let nonexistent_dir = PathBuf::from("/nonexistent");
 
-        fs.expect_path_exists()
-            .with(predicate::eq(nonexistent_dir.clone()))
-            .returning(|_| false);
-        fs.expect_list_directory()
-            .with(predicate::eq(nonexistent_dir.clone()))
-            .returning(|_| {
-                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
-                )))
-            });
+        fs.mock_directory_state(DirectoryState::Absent(crate::fs::AbsentReason::Empty));
 
         let repo =
             YamlPackageRepository::new(fs, nonexistent_dir.clone(), SpecOrigin::PackageDirectory);
@@ -1054,24 +1058,118 @@ mod tests {
         }
     }
 
-    // A failed stat is not proof of absence. A directory behind a parent that
-    // denies access fails `path_exists` too, and calling it "not found" would
-    // tell the user to create a directory that is already there.
+    // An unreadable directory must arrive as `Unlistable`, not as `Directory`.
+    //
+    // The route was broken: the listing error was rebuilt with `io::Error::other`,
+    // which makes every kind `Other`, so `from_listing` recognized nothing, fell
+    // through to classifying the path, and answered "a directory" — the state meaning
+    // "it lists fine". Every consumer reached the right answer by accident through
+    // that arm, and `Unlistable` was unreachable in production while its tests passed.
+    // Driven through the repository, because the flattening sat between it and the
+    // port and a port-level test cannot see it.
+    #[test]
+    fn an_unreadable_directory_arrives_as_unlistable_through_the_repository() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use crate::fs::RealFileSystem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads a 0o000 directory, so the fixture cannot be built for a
+        // privileged user and the case is skipped rather than passing vacuously.
+        if std::fs::read_dir(&locked).is_ok() {
+            eprintln!("SKIP: this user can list a 0o000 directory");
+            return;
+        }
+
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            locked.clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let error = repo.list_packages().unwrap_err();
+        let state = error.directory_state(&RealFileSystem, &locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            matches!(state, DirectoryState::Unlistable(_)),
+            "an unreadable directory must be unlistable, got {state:?}"
+        );
+    }
+
+    // The reason an absent directory is absent survives the trip out through
+    // `PackageListError` and back, which is what lets a caller word a remedy. Before
+    // this, every absence arrived as "not found" and a caller could only guess.
+    //
+    // Driven against the real file system, because the claim is about what two
+    // syscalls say for a shape on disk and a mock would restate the expectation.
+    #[test]
+    fn every_absent_reason_survives_the_listing_error() {
+        use crate::fs::{AbsentReason, RealFileSystem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("a-file");
+        std::fs::write(&occupied, "x").unwrap();
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+
+        // Named rather than matched, so a failure says which reason came back.
+        fn name(reason: &AbsentReason) -> &'static str {
+            match reason {
+                AbsentReason::Empty => "empty",
+                AbsentReason::Occupied { .. } => "occupied",
+                AbsentReason::DanglingSymlink { .. } => "dangling",
+                AbsentReason::ParentNotADirectory { .. } => "parent-not-a-directory",
+            }
+        }
+
+        let cases = [
+            (dir.path().join("nothing"), "empty"),
+            (occupied.clone(), "occupied"),
+            (dangling, "dangling"),
+            (
+                occupied.join("under").join("deep"),
+                "parent-not-a-directory",
+            ),
+        ];
+
+        for (path, expected) in cases {
+            let repo = YamlPackageRepository::new(
+                RealFileSystem,
+                path.clone(),
+                SpecOrigin::PackageDirectory,
+            );
+            let error = repo.list_packages().unwrap_err();
+            match error.directory_state(&RealFileSystem, &path) {
+                DirectoryState::Absent(reason) => assert_eq!(
+                    name(&reason),
+                    expected,
+                    "{} came back with the wrong reason",
+                    path.display()
+                ),
+                other => panic!("{} came back as {other:?}", path.display()),
+            }
+        }
+    }
+
+    // A directory selfie cannot read is not an absent one. Calling it "not found"
+    // would tell the user to create a directory that is already there, and would
+    // let a caller skip a repository that may be hiding specs.
+    //
+    // The fixture is `Unknown`, which is what the port returns for a path it could not
+    // stat: a symlink loop, or a directory behind a parent that denies traversal.
+    // `Unlistable` would be a state no real file system hands this call, and a test
+    // resting on one proves only that the mock was set up.
     #[test]
     fn a_directory_that_cannot_be_reached_is_an_io_error_not_absent() {
         let mut fs = MockFileSystem::default();
         let unreachable_dir = PathBuf::from("/locked/packages");
 
-        fs.expect_path_exists()
-            .with(predicate::eq(unreachable_dir.clone()))
-            .returning(|_| false);
-        fs.expect_list_directory()
-            .with(predicate::eq(unreachable_dir.clone()))
-            .returning(|_| {
-                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-                )))
-            });
+        fs.mock_directory_state(DirectoryState::Unknown(Arc::new(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))));
 
         let repo = YamlPackageRepository::new(fs, unreachable_dir, SpecOrigin::PackageDirectory);
 
@@ -1086,6 +1184,7 @@ mod tests {
     #[test]
     fn test_multiple_packages_found_error() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
 
         fs.expect_path_exists()
@@ -1188,6 +1287,7 @@ mod tests {
         kind: &'static str,
     ) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_path_exists(package_dir, true);
         fs.mock_list_directory(package_dir, &[good, irregular]);
         fs.mock_read_file(
@@ -1293,6 +1393,8 @@ mod tests {
         let ghost = package_dir.join("ghost.yml");
 
         let mut fs = MockFileSystem::default();
+
+        fs.mock_directories_exist();
         fs.mock_path_exists(&package_dir, true);
         fs.mock_list_directory(&package_dir, &[&ghost]);
         fs.mock_read_file(
@@ -1382,6 +1484,8 @@ mod tests {
         let ghost = package_dir.join("ghost.yml");
 
         let mut fs = MockFileSystem::default();
+
+        fs.mock_directories_exist();
         fs.mock_path_exists(&package_dir, true);
         fs.mock_list_directory(&package_dir, &[&ghost]);
         fs.expect_irregular_target_refusal().returning(|_| None);
@@ -1798,6 +1902,7 @@ environments:
     #[test]
     fn test_save_package_success() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = PathBuf::from("/test/packages/test-package.yml");
 
@@ -1856,6 +1961,8 @@ environments:
         );
 
         let mut fs = MockFileSystem::default();
+
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         fs.expect_write_file_no_follow().times(0);
 
@@ -1904,6 +2011,8 @@ environments:
         );
 
         let mut fs = MockFileSystem::default();
+
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
 
         fs.expect_write_file_no_follow().times(0);
@@ -1977,6 +2086,7 @@ environments:
 
     fn refusing_repo() -> (YamlPackageRepository<MockFileSystem>, PathBuf) {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         fs.expect_write_file_no_follow().times(0);
         let repo =
@@ -2043,6 +2153,7 @@ environments:
         // happen at all. `times(0)` is the assertion that matters: refusing after
         // writing would already have destroyed the key.
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
@@ -2071,6 +2182,7 @@ environments:
         // cover it, or the fix for selfie-kj5y is undone by the first `selfie
         // spec edit`.
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
@@ -2100,6 +2212,7 @@ environments:
         // `validate_unknown_dotfile_fields` leaves that one green — someone
         // deleting the loop would otherwise see every save test still pass.
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
@@ -2128,6 +2241,7 @@ environments:
         // Control for the test above: the guard must refuse the typo, not every
         // package that happens to declare dotfiles.
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("creds.yml");
 
@@ -2146,6 +2260,7 @@ environments:
     #[test]
     fn test_save_package_filesystem_error() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = PathBuf::from("/test/packages/test-package.yml");
 
@@ -2185,6 +2300,7 @@ environments:
     // rendered error from `save_package`.
     fn save_package_refused_with(refusal: FileSystemError) -> String {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("test-package.yml");
 
@@ -2254,6 +2370,7 @@ environments:
     #[test]
     fn test_remove_package_success() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_name = "test-package";
@@ -2297,6 +2414,7 @@ environments:
     #[test]
     fn test_remove_package_not_found() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_name = "nonexistent-package";
 
@@ -2323,6 +2441,7 @@ environments:
     #[test]
     fn test_remove_package_filesystem_error() {
         let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
         fs.mock_no_irregular_files();
         let package_dir = PathBuf::from("/test/packages");
         let package_name = "test-package";
