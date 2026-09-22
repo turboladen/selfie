@@ -20,6 +20,7 @@ fn failure_json(failure: &OperationFailure) -> Value {
         payload["reason"] = Value::from(match reason {
             NoSuchPackageReason::NotFound => "not_found",
             NoSuchPackageReason::MaybeInUnlistableDirectory => "maybe_in_unlistable_directory",
+            NoSuchPackageReason::MaybeInUncheckableDirectory => "maybe_in_uncheckable_directory",
             NoSuchPackageReason::NotLoaded => "not_loaded",
         });
     }

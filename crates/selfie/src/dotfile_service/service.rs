@@ -214,12 +214,16 @@ where
                     super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
                         warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
                     }
-                    // A directory selfie could not read and a path it could not
-                    // classify are both unknown quantities, so both refuse the run
-                    // rather than letting it report a completeness it cannot claim.
-                    super::directory::UnlistedDotfilesDirectory::Unlistable(error)
-                    | super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
+                    // Both refuse the run, because neither can claim the collection
+                    // is complete. They are pushed as different warnings so the
+                    // sentence a user reads says which one happened: one asserts a
+                    // directory is there and unreadable, the other cannot say even
+                    // that.
+                    super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
                         warnings.push(ApplyWarning::UnreadableRepository(error));
+                    }
+                    super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
+                        warnings.push(ApplyWarning::UncheckableRepository(error));
                     }
                 },
             }

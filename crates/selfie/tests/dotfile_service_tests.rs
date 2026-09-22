@@ -1986,6 +1986,33 @@ async fn apply_by_name_says_an_unlistable_directory_may_hold_the_package() {
     );
 }
 
+// A symlink loop at the dotfiles directory is not a directory that could not be
+// listed, and the reason says so. "Could not be listed" asserts a directory is there
+// holding entries selfie cannot see, which sends the user to look inside something
+// that may not exist.
+//
+// The pair with the test above is the point: two states, two reasons. A single test
+// asserting "some unreadable reason" would pass with both collapsed into one.
+#[tokio::test]
+async fn apply_by_name_says_an_unchecked_directory_is_unknown_rather_than_unlistable() {
+    let dirs = TestDirs::new();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    std::os::unix::fs::symlink(&dirs.dotfiles_dir, &dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("standalone", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_no_such_package(
+        &events,
+        "standalone",
+        selfie::package::event::NoSuchPackageReason::MaybeInUncheckableDirectory,
+    );
+}
+
 // A spec that failed to parse is dropped before the name is looked for, so "no
 // package named" would send the user looking for a file that is there.
 #[tokio::test]

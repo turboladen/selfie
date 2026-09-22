@@ -879,6 +879,15 @@ pub enum NoSuchPackageReason {
     /// No spec file that could be listed has the name, and a dotfiles directory
     /// could not be listed, so the package may be in it.
     MaybeInUnlistableDirectory,
+    /// No spec file that could be listed has the name, and a dotfiles directory
+    /// could not be classified at all, so nothing is known about what is at its
+    /// path.
+    ///
+    /// Separate from [`MaybeInUnlistableDirectory`](Self::MaybeInUnlistableDirectory)
+    /// because that one asserts a directory is there holding entries selfie cannot
+    /// see. A symlink loop establishes no such thing, and saying so sends the user
+    /// to look inside a directory that may not exist.
+    MaybeInUncheckableDirectory,
     /// A spec file has the name and could not be loaded.
     NotLoaded,
 }
@@ -966,6 +975,11 @@ impl std::fmt::Display for OperationFailure {
                     f,
                     "No package named '{name}' was found. A dotfiles directory could not be \
                      listed, so it may be there."
+                ),
+                NoSuchPackageReason::MaybeInUncheckableDirectory => write!(
+                    f,
+                    "No package named '{name}' was found. A dotfiles directory could not be \
+                     checked, so whether it is there is unknown."
                 ),
                 NoSuchPackageReason::NotLoaded => write!(
                     f,
