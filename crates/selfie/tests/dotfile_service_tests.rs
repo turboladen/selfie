@@ -306,6 +306,38 @@ impl TestDirs {
         DotfileServiceImpl::new(repo, fs, runner, config, token, self.sudo_policy)
     }
 
+    // As [`service_with_runner`](Self::service_with_runner), but with a caller-supplied
+    // file system, so a test can stage what the port answers.
+    fn service_with_fs<F, CR>(
+        &self,
+        fs: F,
+        runner: CR,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, F, CR, RunningAs>
+    where
+        F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+        CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    {
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .build();
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            config.package_directory().clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        DotfileServiceImpl::new(
+            repo,
+            fs,
+            runner,
+            config,
+            CancellationToken::new(),
+            self.sudo_policy,
+        )
+    }
+
     // A packages-only service whose `stop_on_error` is set explicitly.
     //
     // The flag decides whether a refused entry ends the run, so a test about
@@ -654,6 +686,192 @@ impl selfie::fs::FileSystem for HomeAt {
     }
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.config_dir()
+    }
+}
+
+// `RealFileSystem` that reports no symlink at a path the first time it is asked and
+// the truth afterwards, so a test can stage a link appearing between two checks.
+//
+// This is the window the deploy path's second `symlink_refusal` exists to narrow: the
+// first answer is taken before the resolve runs, and a link planted during the resolve
+// would otherwise be read through.
+#[derive(Clone, Debug)]
+struct SymlinkAppearsAfterFirstLook {
+    inner: RealFileSystem,
+    looks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.looks.fetch_add(1, SeqCst) == 0 {
+            return None;
+        }
+        self.inner.symlink_refusal(path)
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+
+    fn read_file_bytes(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
+        self.inner.read_file_bytes(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.irregular_target_refusal(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
+    }
+}
+
+// `RealFileSystem` that answers the second symlink question with a refusal this code
+// does not interpret, so a test can check the re-ask fails closed rather than falling
+// back to the answer taken before the resolve.
+#[derive(Clone, Debug)]
+struct SecondLookIsAnUnknownRefusal {
+    inner: RealFileSystem,
+    looks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.looks.fetch_add(1, SeqCst) == 0 {
+            return None;
+        }
+        Some(selfie::fs::FileSystemError::IrregularTarget {
+            path: path.path().to_path_buf(),
+            kind: "character device",
+        })
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+
+    fn read_file_bytes(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
+        self.inner.read_file_bytes(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.irregular_target_refusal(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
     }
 }
 
@@ -3741,6 +3959,260 @@ mod secret_bearing {
             "the link itself must be replaced"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    // A link that appears while the provider command is running.
+    //
+    // The check in `usable_target` runs before the resolve, so its answer is stale by
+    // the time the target is read. Without the second check immediately before that
+    // read, the classifier reads *through* the newly planted link and the destination's
+    // bytes reach the conflict resolver.
+    //
+    // The file system double reports no link the first time it is asked and the truth
+    // afterwards, which is the only way to stage this: a real link is either there for
+    // both checks or neither.
+    #[tokio::test]
+    async fn a_link_appearing_during_the_resolve_is_still_not_read_through() {
+        const ELSEWHERE: &str = "PRIVATE-KEY-MATERIAL-9d41b7e2-not-ours";
+
+        let dirs = TestDirs::new();
+        let elsewhere = dirs.target_dir.join("id_ed25519");
+        std::fs::write(&elsewhere, ELSEWHERE).unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let looks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fs = SymlinkAppearsAfterFirstLook {
+            inner: RealFileSystem,
+            looks: looks.clone(),
+        };
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_fs(fs, runner);
+
+        let resolver = Arc::new(RecordingResolver::default());
+        let options = ApplyOptions {
+            conflict_resolver: Some(resolver.clone()),
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        let seen = resolver.seen.lock().unwrap().clone();
+        for value in &seen {
+            test_common::assert_secret_free(value, ELSEWHERE.as_bytes(), "the resolver");
+        }
+        assert_no_event_mentions(&events, ELSEWHERE);
+
+        // The double has to have been exercised, or this test cannot tell a staged
+        // race from an ordinary link: both end in a replacement the resolver never
+        // sees. Two looks means the first answered "plain" and the second the truth,
+        // which is the window itself.
+        assert!(
+            looks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the target must have been asked about twice, once before the resolve and \
+             once before the read"
+        );
+
+        // The control: the run really did deploy, so the absence above is not the
+        // absence of any work at all.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert_eq!(
+            std::fs::read_to_string(&elsewhere).unwrap(),
+            ELSEWHERE,
+            "the destination must be left exactly as it was"
+        );
+    }
+
+    // The re-ask fails closed, as the first ask does. Falling back to the answer taken
+    // before the resolve would swallow a refusal this code cannot interpret, at the one
+    // point where the next statement reads the target.
+    #[tokio::test]
+    async fn an_unknown_refusal_at_the_second_ask_refuses_the_entry() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "previous").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let fs = SecondLookIsAnUnknownRefusal {
+            inner: RealFileSystem,
+            looks: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_fs(fs, runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping '") && w.contains("character device")),
+            "the entry must be refused on a refusal it cannot interpret: {:?}",
+            warning_messages(&events)
+        );
+        // The control: nothing was written, so the refusal really stopped the deploy
+        // rather than merely adding a line beside it.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "previous",
+            "a refused entry must leave the target alone"
+        );
+    }
+
+    // The security case. A link at a secret target must not be read *through*: the
+    // classifier would return the destination's bytes, the conflict summary would
+    // count its lines, and the resolver would receive them as `current`, so an
+    // interactive reveal would print someone else's file.
+    // `~/.config/app/creds -> ~/.ssh/id_ed25519` is the shape that matters.
+    //
+    // Asserted on what the resolver received, because no event ever carries those
+    // bytes: an event scan cannot observe this leak and passes on the unfixed code.
+    #[tokio::test]
+    async fn a_symlinked_secret_target_is_never_read_through_to_the_resolver() {
+        const ELSEWHERE: &str = "PRIVATE-KEY-MATERIAL-e3f9a1c7-not-ours";
+
+        let dirs = TestDirs::new();
+        let elsewhere = dirs.target_dir.join("id_ed25519");
+        std::fs::write(&elsewhere, ELSEWHERE).unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let resolver = Arc::new(RecordingResolver::default());
+        let options = ApplyOptions {
+            conflict_resolver: Some(resolver.clone()),
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        // Both scans go through the shared helper, which matches the value as text
+        // *and* as a byte array. A credential renders both ways and the two share no
+        // characters, so a `contains` on the literal alone passes a leak of the whole
+        // value.
+        let seen = resolver.seen.lock().unwrap().clone();
+        for value in &seen {
+            test_common::assert_secret_free(value, ELSEWHERE.as_bytes(), "the resolver");
+        }
+        assert_no_event_mentions(&events, ELSEWHERE);
+
+        // The positive control: without it this passes when nothing was deployed.
+        // A plain `contains`, because it asserts the secret IS there.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert_eq!(
+            std::fs::read_to_string(&elsewhere).unwrap(),
+            ELSEWHERE,
+            "the destination must be left exactly as it was"
+        );
+    }
+
+    // The link is replaced even when the destination already holds the resolved
+    // content, and even when it is already owner-only.
+    //
+    // Mode `0600` is the whole fixture. `settle_in_sync` skips only when
+    // `is_owner_only` answers true, and that call follows the link -- so a `0644`
+    // destination is replaced by the tightening path whether or not a link is
+    // handled correctly, and the fixture could not tell the two apart.
+    #[tokio::test]
+    async fn a_symlinked_secret_target_is_replaced_even_when_the_destination_matches() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let elsewhere = dirs.target_dir.join("already-right");
+        std::fs::write(&elsewhere, SECRET).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must be replaced whatever the destination already held"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    // A link selfie could not read still deploys, and the warning names the link
+    // alone. Printing "unknown" for the destination would state a fact about
+    // selfie rather than about the user's file.
+    #[tokio::test]
+    async fn a_replaced_link_whose_destination_is_unreadable_is_still_named() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(dirs.target_dir.join("nowhere"), &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("was a symlink") && w.contains("Replaced")),
+            "the replacement must be reported as what happened: {warnings:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+    }
+
+    // The warning follows the write, so a failed write never reports a replacement
+    // that did not happen.
+    //
+    // The write is made to fail by taking write permission off the target's own
+    // directory: `write_file_private` creates its temporary file there, so it
+    // cannot even begin. A warning sent before the write would appear here.
+    #[tokio::test]
+    async fn a_failed_write_to_a_symlinked_target_reports_no_replacement() {
+        let dirs = TestDirs::new();
+        let holding = dirs.target_dir.join("locked");
+        std::fs::create_dir_all(&holding).unwrap();
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        let target = holding.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+
+        let Some(_restore) = made_unwritable(&holding) else {
+            eprintln!(
+                "SKIP a_failed_write_to_a_symlinked_target_reports_no_replacement: mode bits do \
+                 not bite here"
+            );
+            return;
+        };
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("Failed to write")),
+            "the write must be reported as failed: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("Replaced")),
+            "a failed write must not claim the link was replaced: {warnings:?}"
+        );
+        // The control: the link survived because nothing was written, which is what
+        // makes the absence above meaningful rather than vacuous.
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must still be there, since the write never happened"
+        );
     }
 
     #[tokio::test]

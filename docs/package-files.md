@@ -744,8 +744,10 @@ what that directory discloses and where not to put it.
 ### Symlinked targets
 
 This section covers repository-file entries — a `source` with no `vars`. Provider-sourced and
-templated entries never write through a link either, but their link is
-[replaced rather than refused](#deploy-behavior-and-permissions).
+templated entries never write through a link either. Their link is replaced rather than refused,
+except when a fifo, socket or device node sits behind it, which refuses before any command runs; and
+a link selfie sees at either of its two checks is not read through. See
+[Deploy behavior and permissions](#deploy-behavior-and-permissions).
 
 selfie deploys by copying, so a symlink at a target is not a supported setup. When one is there and
 selfie would otherwise write, it **refuses and skips that entry** with a warning naming the target
@@ -1111,23 +1113,33 @@ truncated credential.
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
 
-For a secret-bearing entry, a target that exists but cannot be read is a conflict as well,
+For a secret-bearing entry, an existing regular file whose read fails is a conflict as well,
 summarized as "exists but could not be read", and is never treated as absent: an interactive prompt
 can still accept the overwrite, since replacing a file needs only write permission on its directory,
-and without one the entry is skipped.
+and without one the entry is skipped. A directory and a symlink do not reach that case — the first
+is refused before any command runs, and a symlink selfie has seen is replaced without being read.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the
 costs differ: a skipped repository file is still in the repository, whereas a skipped credential
 leaves you without the file and with nothing recorded about it.
 
-There is one case where whether the link is replaced depends on something other than the deploy
-itself. When the content already matches, selfie only rewrites the target if its permissions need
-tightening, and the permission check follows the link — so it reports on the file the link points
-at. A symlinked target whose destination is already owner-only is left completely alone and the link
-survives; one whose destination is group- or world-readable is tightened, which replaces the link
-with a regular file. Both outcomes are consistent with the rule above, but which one you get depends
-on the destination's mode rather than on anything about the link.
+The link is replaced whatever it points at — a file, a directory, or nothing — and whether or not
+the destination already holds the same content, and whatever its permissions are. The one exception
+is a fifo, socket or device node behind it, which is refused before any command runs. The
+replacement lands on the link itself, so what it pointed at is left alone. selfie does not read
+through a link it has seen: doing so would show you a file the link's author chose rather than one
+you deployed. It looks twice, once before running the commands and again immediately before the
+read, so a link present at either look is never read through; a link planted between that second
+look and the read is still followed, and closing that needs a non-following read selfie does not yet
+have. After the replacement succeeds selfie warns, naming the link and where it pointed, so a link
+you created deliberately is not removed silently.
+
+Two things refuse before any command runs, because the write could never succeed and a provider
+command can raise a biometric prompt. A link to a fifo, socket or device node is refused as it would
+be without the link. A **directory at the target itself** is refused too, because a file cannot
+replace a directory. And a target selfie cannot classify at all — one it has no permission to look
+at — is refused rather than written over.
 
 #### What is shown, and what is not
 
