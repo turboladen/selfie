@@ -82,7 +82,7 @@ package_directory: ~/.config/selfie/packages
 dotfiles_directory: ~/.config/selfie/dotfiles
 
 # Directory for deploy state tracking (default: ~/.local/state/selfie).
-# A directory named here must already exist; only the default is created for you.
+# selfie creates it on its first write, whether you name it here or take the default.
 state_directory: ~/.local/state/selfie
 
 # Command timeout in seconds (default: 60)
@@ -208,10 +208,26 @@ never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` h
 state_directory: ~/.local/state/selfie
 ```
 
-A directory you name must already exist, be a directory, and be an absolute path, as
-`package_directory` must: with the line above in the file, `selfie apply` refuses until
-`~/.local/state/selfie` is created. Leave the setting out and selfie creates that same default on
-its first write. `selfie config validate` reports the directory in effect either way.
+A directory you name must be an absolute path, as `package_directory` must. It does not have to
+exist: selfie creates it on the first write that needs it, whether you name the path here or leave
+the setting out and take the default. `selfie config validate` reports the directory in effect
+either way.
+
+What selfie will not do is put its state where something else already is. A path occupied by a file,
+or by a symlink whose destination is gone, is refused before any dotfile is deployed, naming what is
+there — creating the directory is the remedy for nothing being there and no remedy at all for a file
+in the way.
+
+A directory selfie cannot open is refused too, because a deploy state it cannot see is one it must
+not overwrite. That refusal names the **state file**, not the directory: selfie stats the path,
+finds a directory, and the read that follows fails with a permission error.
+
+If you name a directory that is not there, selfie creates it and says so. The two ways to reach that
+are a first run and a typo in the setting, and they look identical in the output otherwise: a
+mistyped `state_directory` reports every dotfile you have deployed as untracked, and
+`selfie apply -y` would then overwrite an edited target instead of reporting a conflict. The warning
+names the path and the setting. Leaving the setting out and taking the default is silent, since a
+first run is the default's ordinary state and nothing was typed to get it wrong.
 
 The state file (`deploy-state.yml`) is per-machine — it tracks what was deployed on _this_ machine
 and is not meant to be shared or version-controlled.
@@ -411,9 +427,12 @@ absolute path. `selfie config validate` reads only the file, so it checks no fla
 
 `--package-directory` and `--state-directory` fail loudly; `--dotfiles-directory` does not:
 
-- `--state-directory='~/state'` is refused as not absolute, and a directory that is absolute but
-  does not exist is refused by name, so `selfie --state-directory='~/state' apply -y` exits 1 and
-  creates nothing.
+- `--state-directory='~/state'` is refused as not absolute, so
+  `selfie --state-directory='~/state' apply -y` exits 1 and creates nothing. An absolute path that
+  does not exist is **not** refused: selfie creates the directory on the first write that needs it,
+  by flag exactly as by config file. What it will not do is put its state where something else
+  already is, so an absolute path occupied by a file, or one selfie cannot read, is refused before
+  anything is deployed.
 - `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
   dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
   `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,

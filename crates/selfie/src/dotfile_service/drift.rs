@@ -57,7 +57,12 @@ where
     // against an empty one: every entry then shows as untracked, which is the
     // honest answer while the file cannot be read.
     let deploy_state = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => loaded.into_state(),
+        StateLoad::Usable(loaded) => {
+            if let Some(warning) = loaded.directory_warning() {
+                sender.send_warning(warning.to_string()).await;
+            }
+            loaded.into_state()
+        }
         StateLoad::Unusable(failure) => {
             sender.send_warning(read_only_state_warning(&failure)).await;
             DeployState::empty()

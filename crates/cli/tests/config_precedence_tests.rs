@@ -348,11 +348,10 @@ fn the_state_directory_flag_beats_the_config_file() {
     );
 }
 
-// A configured state directory must exist, as the package directory must. A
-// flag naming one that does not is refused with the setting and the path
-// named, and nothing is created for it.
+// A state directory selfie is told to use is selfie's to create, by flag exactly as
+// by config file. The run creates it and records the deploy in it.
 #[test]
-fn a_state_directory_flag_naming_a_missing_directory_is_refused() {
+fn a_state_directory_flag_naming_a_missing_directory_creates_it() {
     let temp = fixture();
     let missing = temp.path().join("no-such-state");
 
@@ -361,15 +360,29 @@ fn a_state_directory_flag_naming_a_missing_directory_is_refused() {
         .arg(&missing)
         .args(["apply", "-y"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("state_directory"))
-        .stderr(predicate::str::contains(missing.to_str().unwrap()))
-        .stderr(predicate::str::contains("does not exist"));
+        .success();
 
-    assert!(
-        !missing.exists(),
-        "the missing state directory was created rather than required"
-    );
+    assert_state_records_the_fixture(&missing.join("deploy-state.yml"), temp.path());
+}
+
+// What a flag cannot make selfie do: put its state where a file already is. Named
+// in the refusal, and the deploy does not happen, because a run that cannot record
+// what it did must not do it.
+#[test]
+fn a_state_directory_flag_naming_a_file_is_refused() {
+    let temp = fixture();
+    let occupied = temp.path().join("a-file-not-a-directory");
+    std::fs::write(&occupied, "not a directory").unwrap();
+
+    sandboxed_command(&temp)
+        .arg("--state-directory")
+        .arg(&occupied)
+        .args(["apply", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(occupied.to_str().unwrap()))
+        .stderr(predicate::str::contains("is a regular file"));
+
     assert!(
         !temp.path().join("sentinel-target").exists(),
         "a dotfile was deployed by a run that could not record it"

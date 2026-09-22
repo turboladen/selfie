@@ -584,7 +584,12 @@ where
     // state file it could not load is one it must not write over, so the copy
     // and the spec are not created for a record that cannot be kept.
     let mut loaded = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => loaded,
+        StateLoad::Usable(loaded) => {
+            if let Some(warning) = loaded.directory_warning() {
+                sender.send_warning(warning.to_string()).await;
+            }
+            loaded
+        }
         StateLoad::Unusable(failure) => {
             return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
         }

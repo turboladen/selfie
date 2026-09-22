@@ -434,6 +434,21 @@ pub enum FileSystemError {
 /// ```
 #[cfg(feature = "with_mocks")]
 impl MockFileSystem {
+    /// Answer `state` for every directory classified.
+    ///
+    /// Most tests are not about the directory, and this is what keeps the
+    /// classification out of their way. A test whose subject *is* the directory
+    /// sets its own expectation per path instead.
+    pub fn mock_directory_state(&mut self, state: DirectoryState) {
+        self.expect_directory_state()
+            .returning(move |_| state.clone());
+    }
+
+    /// Answer "a directory" for every directory classified.
+    pub fn mock_directories_exist(&mut self) {
+        self.mock_directory_state(DirectoryState::Directory);
+    }
+
     /// Return `content` whenever `path` is read.
     pub fn mock_read_file<P, S>(&mut self, path: P, content: S)
     where

@@ -8159,39 +8159,64 @@ mod deploy_state_diagnostics {
         );
     }
 
-    // A configured state directory that does not exist is refused by apply and
-    // warned about by drift, naming the setting. The default under the home
-    // directory is created on first write; a directory the user named is not.
+    // A configured state directory that is not there is created by the run that
+    // needs it, and the deploy is recorded in it. It is selfie's own directory
+    // whether the user named the path or took the default, which is what ADR-0005
+    // decision 8.2 settles.
+    //
+    // Refusing here cost a working apply: a user who set `state_directory` had
+    // every dotfile command refuse until they created the directory by hand, and
+    // the refusal named a setting rather than saying what to do with it.
     #[tokio::test]
-    async fn a_missing_configured_state_directory_refuses_apply_and_warns_drift() {
+    async fn a_configured_state_directory_that_is_not_there_is_created_by_the_run() {
         let dirs = TestDirs::new();
         a_package_with_one_dotfile(&dirs);
         std::fs::remove_dir(&dirs.state_dir).unwrap();
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "events: {events:?}");
+        assert!(
+            dirs.target_dir.join("config.toml").exists(),
+            "the dotfile must be deployed"
+        );
+        assert!(
+            state_file(&dirs).exists(),
+            "the deploy must be recorded, which is what the directory is for"
+        );
+
+        // The second run reads what the first wrote. A directory created but not
+        // recorded into would leave drift reporting a first run forever.
+        let events = collect_events(dirs.service().check_drift().await).await;
+        let warnings = warning_messages(&events);
+        assert!(
+            !warnings.iter().any(|w| w.contains("state_directory")),
+            "nothing is wrong with the state directory now: {warnings:?}"
+        );
+    }
+
+    // What still refuses, and why the change above is a narrowing rather than a
+    // removal: creating the directory is the remedy for nothing being there and no
+    // remedy at all for a file in the way. Refused before the deploy, so the run
+    // does not write dotfiles it cannot record.
+    #[tokio::test]
+    async fn a_file_where_the_state_directory_belongs_refuses_apply() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+        std::fs::write(&dirs.state_dir, "not a directory").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
         let message = failure_message(&events);
         assert!(
-            message.contains("state_directory")
-                && message.contains(dirs.state_dir.to_str().unwrap())
-                && message.contains("does not exist"),
-            "apply must refuse and name the missing directory: {message}"
+            message.contains(dirs.state_dir.to_str().unwrap())
+                && message.contains("is a regular file"),
+            "the refusal must name the path and what is there: {message}"
         );
         assert!(
             !dirs.target_dir.join("config.toml").exists(),
             "a dotfile was deployed by a run that could not record it"
-        );
-        assert!(
-            !dirs.state_dir.exists(),
-            "the configured state directory was created rather than required"
-        );
-
-        let events = collect_events(dirs.service().check_drift().await).await;
-        let warnings = warning_messages(&events);
-        assert!(
-            warnings.iter().any(|w| w.contains("state_directory")
-                && w.contains("does not exist")
-                && w.contains("continuing as though nothing had been deployed")),
-            "drift must warn and carry on: {warnings:?}"
         );
     }
 
