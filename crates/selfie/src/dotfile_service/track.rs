@@ -366,14 +366,14 @@ where
     // directory that is not there would otherwise create it, turning a
     // mistyped `dotfiles_directory` into a new directory holding one spec.
     //
-    // Asks the repository rather than `filesystem.path_exists`, which reads
-    // false for a symlink loop exactly as it does for a missing path and
-    // would send this refusal down the "does not exist" branch with a
-    // `mkdir -p` hint that cannot work. Listing for `name` is the cheapest
-    // repository call that still classifies the directory.
+    // The listing answers whether the directory can be read; the port answers
+    // what is at the path. Both are needed, because a listing failure alone
+    // cannot tell an empty path from a dangling symlink from a loop, and those
+    // take three different sentences and two different remedies.
     if let Err(error) = dotfiles_repo.find_package_files(name) {
+        let state = filesystem.directory_state(&dotfiles_dir);
         return OperationResult::Failure(OperationFailure::Generic(
-            super::directory::track_listing_refusal(&dotfiles_dir, error),
+            super::directory::track_listing_refusal(&dotfiles_dir, &state, &error),
         ));
     }
 

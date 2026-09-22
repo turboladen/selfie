@@ -140,12 +140,16 @@ where
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
+        filesystem: &F,
+        dotfiles_directory: &std::path::Path,
         dotfiles_directory_configured: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         Self::collect_packages(
             package_repo,
             dotfiles_repo,
             NameCollision::PackagesWin,
+            filesystem,
+            dotfiles_directory,
             dotfiles_directory_configured,
         )
     }
@@ -163,6 +167,8 @@ where
         package_repo: &R,
         dotfiles_repo: Option<&R>,
         collision: NameCollision,
+        filesystem: &F,
+        dotfiles_directory: &std::path::Path,
         dotfiles_directory_configured: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
@@ -198,18 +204,24 @@ where
                     note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
                 }
-                Err(error) => match super::directory::UnlistedDotfilesDirectory::from_list_error(
+                Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
+                    filesystem,
+                    dotfiles_directory,
                     error,
                     dotfiles_directory_configured,
                 ) {
-                    super::directory::UnlistedDotfilesDirectory::UnsetAndMissing => {}
-                    super::directory::UnlistedDotfilesDirectory::ConfiguredAndMissing(path) => {
-                        warnings.push(ApplyWarning::MissingDotfilesDirectory(path));
+                    super::directory::UnlistedDotfilesDirectory::UnsetAndAbsent => {}
+                    super::directory::UnlistedDotfilesDirectory::ConfiguredAndAbsent {
+                        path,
+                        reason,
+                    } => {
+                        warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
                     }
-                    // Only a directory that exists and cannot be listed may be
-                    // hiding dotfiles, so only this one refuses the run or fails
-                    // the listing.
-                    super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
+                    // A directory selfie could not read and a path it could not
+                    // classify are both unknown quantities, so both refuse the run
+                    // rather than letting it report a completeness it cannot claim.
+                    super::directory::UnlistedDotfilesDirectory::Unlistable(error)
+                    | super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
                         warnings.push(ApplyWarning::UnreadableRepository(error));
                     }
                 },
@@ -289,6 +301,8 @@ where
             None => Self::collect_all_packages(
                 &self.package_repository,
                 self.dotfiles_repository.as_ref(),
+                &self.filesystem,
+                &self.config.dotfiles_directory(),
                 self.config.configured_dotfiles_directory().is_some(),
             )
             .map_err(OperationFailure::PackageList),
@@ -381,6 +395,8 @@ where
         let collected = Self::collect_all_packages(
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
+            &self.filesystem,
+            &self.config.dotfiles_directory(),
             self.config.configured_dotfiles_directory().is_some(),
         );
         let fs = self.filesystem.clone();
@@ -451,6 +467,8 @@ where
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
             NameCollision::KeepBoth,
+            &self.filesystem,
+            &self.config.dotfiles_directory(),
             self.config.configured_dotfiles_directory().is_some(),
         );
         let config = self.config.clone();

@@ -167,16 +167,26 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
 
-If you **set** this and the directory does not exist, selfie says so and carries on without your
-standalone dotfiles — they are simply absent from `apply`, `dotfiles drift`, `dotfiles list` and
-`sync status`, in the CLI and the MCP server alike. If you do **not** set it and the default sibling
-does not exist, selfie says nothing: that is the ordinary state of a setup with no standalone
-dotfiles.
+If you **set** this and no directory is at the path, selfie says what is there instead and carries
+on without your standalone dotfiles — they are simply absent from `apply`, `dotfiles drift`,
+`dotfiles list` and `sync status`, in the CLI and the MCP server alike. Nothing at the path, a plain
+file, a symlink whose destination is gone, and a path running through a non-directory are all this
+case: none of them can hold a standalone dotfile, so nothing is missing from the run and it
+succeeds. Only the first of them is fixed by creating the directory, so only the first is offered
+`mkdir -p`.
 
-A directory that exists but cannot be listed is different, because selfie knows standalone dotfiles
-may be in it. `dotfiles list` fails. `apply` with no package name, and `dotfiles drift`, carry on
-with the package dotfiles and count one refusal, so they exit non-zero. See
+If you do **not** set it and the default sibling is not there, selfie says nothing: that is the
+ordinary state of a setup with no standalone dotfiles.
+
+Two states refuse instead, because in both of them selfie cannot say what the directory holds. A
+directory that **exists and cannot be listed** may have standalone dotfiles in it. A path selfie
+**cannot classify at all** — a symlink loop is the ordinary way to get one — may be anything.
+`dotfiles list` fails. `apply` with no package name, and `dotfiles drift`, carry on with the package
+dotfiles and count one refusal, so they exit non-zero. See
 [A refusal is not a success](../README.md#a-refusal-is-not-a-success).
+
+Whether the path was configured decides only whether an **absence** is worth mentioning. It never
+decides a refusal: a directory selfie cannot read is refused whether or not you named it.
 
 `dotfiles track` is the exception. It copies the file _into_ that directory, so it refuses rather
 than warning.

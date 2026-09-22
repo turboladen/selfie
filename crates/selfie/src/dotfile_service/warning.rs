@@ -20,8 +20,15 @@ pub(super) enum ApplyWarning {
     /// A repository that exists and could not be listed, so the collection is
     /// missing whatever it holds.
     UnreadableRepository(crate::package::port::PackageListError),
-    /// A dotfiles directory the user configured that does not exist.
-    MissingDotfilesDirectory(PathBuf),
+    /// A dotfiles directory the user configured that is not a directory, and why
+    /// not. The reason is carried because it decides both the sentence and
+    /// whether any remedy is offered.
+    AbsentDotfilesDirectory {
+        /// The configured path.
+        path: PathBuf,
+        /// What is there instead of a directory.
+        reason: crate::fs::AbsentReason,
+    },
     /// Anything else worth saying, already worded.
     Other(String),
 }
@@ -59,9 +66,9 @@ impl ApplyWarning {
                     .send_warning(format!("Failed to load standalone dotfiles: {e}"))
                     .await;
             }
-            Self::MissingDotfilesDirectory(path) => {
+            Self::AbsentDotfilesDirectory { path, reason } => {
                 sender
-                    .send_warning(super::directory::missing_warning(&path))
+                    .send_warning(super::directory::absent_warning(&path, &reason))
                     .await;
             }
             Self::Other(message) => sender.send_warning(message).await,

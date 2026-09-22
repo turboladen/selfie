@@ -2924,12 +2924,16 @@ async fn track_standalone_refuses_a_missing_dotfiles_directory_and_does_not_crea
     );
 }
 
-// A directory that exists and cannot be listed is a refusal, not an absence.
-// `filesystem.path_exists` reads false for a symlink loop exactly as it does
-// for a missing path, and the "does not exist" sentence carries a `mkdir -p`
-// hint that cannot work on a path that is already there.
+// A symlink loop is a path nothing is known about, and it refuses. Two sentences
+// it must not get: "does not exist", which carries a `mkdir -p` hint that cannot
+// work on a path already there, and "could not be listed", which claims a
+// directory is there hiding entries when no such thing has been established.
+//
+// The wording is asserted, not only the refusal. Every state refuses, so a test
+// checking that a refusal happened cannot tell the states apart, and this one
+// could not before: it named a classification its assertions never reached.
 #[tokio::test]
-async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistable() {
+async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unknown() {
     let dirs = TestDirs::new();
     let target_file = dirs.target_dir.join("starship.toml");
     std::fs::write(&target_file, "format = \"$all\"").unwrap();
@@ -2950,12 +2954,20 @@ async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistabl
         "got: {message}"
     );
     assert!(
+        message.contains("could not be checked"),
+        "a loop is a path nothing is known about, got: {message}"
+    );
+    assert!(
+        !message.contains("could not be listed"),
+        "nothing established that a directory is there, got: {message}"
+    );
+    assert!(
         !message.contains("mkdir -p"),
-        "an unlistable directory offers no hint that cannot work, got: {message}"
+        "a path that is already there offers no hint that cannot work, got: {message}"
     );
     assert!(
         !dirs.dotfiles_dir.join("starship.yml").exists(),
-        "nothing must be written when the directory cannot be listed"
+        "nothing must be written when the directory cannot be checked"
     );
     assert!(
         !dirs.dotfiles_dir.join("starship").exists(),
@@ -10814,6 +10826,88 @@ async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
 
     assert_eq!(refused_count(&events), 0, "events: {events:?}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A dangling symlink at the configured dotfiles directory. The user-visible half of
+// the same defect: apply reported "does not exist" and offered `mkdir -p`, which
+// fails with "No such file or directory" against a path where a link already sits.
+//
+// Asserts the sentence and the hint's absence rather than the warning's presence,
+// because the merge-base binary also warns here and also carries on.
+#[tokio::test]
+async fn apply_all_names_a_dangling_symlink_at_the_dotfiles_directory() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    let destination = dirs.dotfiles_dir.parent().unwrap().join("moved-away");
+    std::os::unix::fs::symlink(&destination, &dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
+    assert!(
+        warnings[0].contains("is a symlink to nothing"),
+        "got: {}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains(&destination.display().to_string()),
+        "the destination the user has to fix must be named, got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("mkdir"),
+        "mkdir -p cannot create a path a link already occupies, got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("does not exist"),
+        "the path exists; its destination does not, got: {}",
+        warnings[0]
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A plain file at the configured dotfiles directory. `mkdir -p` fails with "File
+// exists" here, so the sentence names what is there instead of offering it.
+#[tokio::test]
+async fn apply_all_names_a_plain_file_at_the_dotfiles_directory() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    std::fs::write(&dirs.dotfiles_dir, "not a directory").unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
+    assert!(
+        warnings[0].contains("is not a directory, it is a regular file"),
+        "got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("mkdir"),
+        "mkdir -p fails with \"File exists\" here, got: {}",
+        warnings[0]
+    );
 }
 
 // A configured dotfiles directory that is not there is reported and carries on:
