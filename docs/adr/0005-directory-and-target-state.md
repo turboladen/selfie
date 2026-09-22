@@ -128,9 +128,14 @@ for it.
 
 After the non-following symlink question finds a link at a secret-bearing entry's target, the link's
 destination is classified with a following stat before any provider command runs or template
-renders. A destination that is a fifo, socket, device node or directory refuses the entry, and
-nothing is executed. This preserves the rule that nothing runs for a target that provably cannot be
-written.
+renders. A destination that is a fifo, socket or device node refuses the entry, and nothing is
+executed. A directory destination does not: the replacement lands on the link rather than on what it
+points at, so it proceeds like any other link.
+
+A directory at the target itself, with no link involved, refuses before any command runs, because a
+rename cannot replace a directory with a file. A plain target that selfie cannot classify is refused
+as well, since that is where the write lands. Both preserve the rule that nothing runs for a target
+that provably cannot be written.
 
 Past that gate, a secret-bearing target that is a link is always replaced with a regular owner-only
 file, whether or not the destination already holds the resolved content. The outcome never depends
@@ -141,8 +146,9 @@ happened, so it can never precede a refusal or a failed write. A dry run words t
 the conditional.
 
 A dry run reports the same outcome class a real run would reach: refused for an irregular
-destination, and otherwise that it would replace the link. It counts that outcome the way a real run
-counts a replacement, so a preview's counts and a real run's counts never diverge.
+destination, and otherwise that it would replace the link. It counts a replacement it would make the
+way a dry run counts a repository-file deploy it would make, as a skip, so no preview prints a
+deployed count. A refused destination is counted as a refusal, as a real run counts it.
 
 Rejected: unify both writers on refusal, which leaves a credential permanently undeployed. Rejected:
 unify both on replacement, which destroys legitimate links during ordinary updates. Rejected:
