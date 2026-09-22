@@ -1179,11 +1179,17 @@ overwritten wrongly can be recovered from the repository, whereas a credential c
 selfie recorded nothing about it. This matters most for non-interactive callers such as the MCP
 server, which can set the flag but has no human behind it.
 
-`--dry-run` does not run any provider or `vars` command. That means it cannot tell you whether a
-secret-bearing entry would change — knowing that needs the content, and the content needs the
-commands. It reports the entry and how many commands it is declining to run. The alternative, a
-preview that reaches your secret store and raises a biometric prompt, would make `--dry-run` an
-executing operation.
+`--dry-run` does not run any provider or `vars` command. That means it usually cannot tell you
+whether a secret-bearing entry would change — knowing that needs the content, and the content needs
+the commands — so it reports the entry and how many commands it is declining to run. The
+alternative, a preview that reaches your secret store and raises a biometric prompt, would make
+`--dry-run` an executing operation.
+
+A symlinked target is the exception, because its outcome does not depend on the content: the preview
+says it would replace the link, and a destination that cannot receive the credential is refused in a
+preview exactly as in a real run. A preview counts a replacement it would make the way it counts any
+deploy it would make, as a skip, so `--dry-run` never reports a deployment for a run that wrote
+nothing.
 
 A dry run does still apply every check that can be made without running anything — a target selfie
 will not deploy to, whether it is not absolute or names another user's home with `~user/`; a

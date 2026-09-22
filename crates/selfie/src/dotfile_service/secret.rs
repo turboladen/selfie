@@ -114,6 +114,9 @@ struct SecretTarget<'a> {
     origin: String,
     // Absolute, checked below. Unresolved is the type's job, not a caller's.
     path: TargetPath,
+    /// Whether the target is a symlink, as of the check in `usable_target`. The
+    /// deploy path re-asks before reading, because a resolve runs in between.
+    link: TargetLink,
 }
 
 /// Read the non-following symlink question's answer.
@@ -348,6 +351,7 @@ where
             entry,
             origin,
             path,
+            link,
         })
     }
 
@@ -406,25 +410,43 @@ where
     /// that: it reaches a secret store and can raise a biometric or password
     /// prompt, which would make `--dry-run` an executing operation.
     ///
-    /// The cost is that a dry run cannot say whether this entry would change —
-    /// that needs the content, and the content needs the commands. It reports
-    /// what it is declining to do instead.
+    /// The cost is that a dry run usually cannot say whether this entry would
+    /// change — that needs the content, and the content needs the commands. It
+    /// reports what it is declining to do instead.
+    ///
+    /// A symlinked target is the exception: it is replaced whatever the content
+    /// turns out to be, so the outcome is known without resolving anything.
     async fn short_circuit_dry_run(&self, target: &SecretTarget<'_>) -> Phase {
-        if self.options.dry_run {
-            self.sender
-                .send_dotfile_skipped(
-                    &target.origin,
-                    target.path.display(),
-                    format!(
-                        "dry run: would run {} command(s); content not resolved, so no \
-                         comparison is possible",
-                        target.entry.command_count()
-                    ),
-                )
-                .await;
-            return Err(SecretOutcome::Skipped);
+        if !self.options.dry_run {
+            return Ok(());
         }
-        Ok(())
+
+        // Reported as the outcome class a real run would reach, which for a link is
+        // a replacement. It still says commands will run: a preview must not imply
+        // the credential is already known.
+        //
+        // Counted as a skip, because that is how a preview counts every deploy it
+        // would make -- the repository-file path does the same -- so a dry run never
+        // reports a deployment for a run that wrote nothing.
+        let commands = target.entry.command_count();
+        let reason = match &target.link {
+            TargetLink::Link { destination } => {
+                let dest = match destination {
+                    Some(dest) => format!(" to '{}'", dest.display()),
+                    None => String::new(),
+                };
+                format!(
+                    "dry run: would run {commands} command(s), then replace the symlink{dest} with a regular file readable only by you"
+                )
+            }
+            TargetLink::Plain => format!(
+                "dry run: would run {commands} command(s); content not resolved, so no comparison is possible"
+            ),
+        };
+        self.sender
+            .send_dotfile_skipped(&target.origin, target.path.display(), reason)
+            .await;
+        Err(SecretOutcome::Skipped)
     }
 
     /// Run the entry's commands and produce its content.
@@ -729,5 +751,54 @@ mod tests {
         // The raw link text, relative as the user wrote it. It is for the warning's
         // wording and is never resolved.
         assert_eq!(destination, Some(PathBuf::from("../shared/dir")));
+    }
+
+    // A link selfie could not read still names the link, with no destination clause.
+    //
+    // Driven here rather than through a real link: `read_link` succeeds on a dangling
+    // link, so a file-system fixture always reaches the `Some` arm and this one is
+    // unreachable from an integration test.
+    #[test]
+    fn a_replacement_warning_omits_a_destination_it_could_not_read() {
+        let entry = DotfileEntry::new("creds.tpl", "~/.config/app/creds");
+        let target = SecretTarget {
+            entry: &entry,
+            origin: "command: op read x".to_string(),
+            path: crate::fs::target::repository_path(std::path::Path::new(
+                "/home/u/.config/app/creds",
+            )),
+            // Deliberately `Plain`, and not what either call below reads. The warning
+            // takes its link as the second argument, because the deploy path hands it
+            // the answer from the ask before the read rather than this one, which is
+            // older than the resolve. A warning reading the field instead would name no
+            // destination here, and the first assertion below would fail.
+            link: TargetLink::Plain,
+        };
+
+        // One target, two links: the calls differ only in the argument, so the
+        // difference between the messages isolates the destination clause.
+        let with_destination = replaced_link_warning(
+            &target,
+            &TargetLink::Link {
+                destination: Some(std::path::PathBuf::from("/home/u/.ssh/id_ed25519")),
+            },
+        );
+        let without = replaced_link_warning(&target, &TargetLink::Link { destination: None });
+
+        assert!(
+            with_destination.contains("symlink to '/home/u/.ssh/id_ed25519'"),
+            "got: {with_destination}"
+        );
+        // The pair is the assertion: the same call without a destination keeps the
+        // link and drops only the clause naming where it pointed.
+        assert!(without.contains("which was a symlink,"), "got: {without}");
+        assert!(
+            !without.contains("symlink to"),
+            "no destination clause when the link could not be read: {without}"
+        );
+        assert!(
+            without.contains("/home/u/.config/app/creds"),
+            "the link itself is still named: {without}"
+        );
     }
 }

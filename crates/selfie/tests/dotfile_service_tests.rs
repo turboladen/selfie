@@ -4434,6 +4434,123 @@ mod secret_bearing {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
     }
 
+    // A preview over a symlinked target says what a real run would do, because the
+    // outcome does not depend on content it must not fetch: the link is replaced
+    // whatever the credential turns out to be.
+    //
+    // The rendered summary is asserted, not just the counts. That line is what a
+    // user reads, and it has no dry-run wording of its own -- so counting a preview
+    // as a deployment would print "1 deployed" for a run that wrote nothing. A
+    // preview counts a deploy it would make as a skip, which is what the
+    // repository-file path already does.
+    #[tokio::test]
+    async fn a_dry_run_over_a_symlinked_secret_target_previews_the_replacement() {
+        let dirs = TestDirs::new();
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
+        let service = dirs.service_with_runner(runner);
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(counted.call_count(), 0, "a preview must run no command");
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a preview must not replace anything"
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. }
+                    if reason.contains("would run 1 command(s)")
+                        && reason.contains("then replace the symlink")
+            )),
+            "the preview must name the outcome a real run would reach: {:?}",
+            events
+                .iter()
+                .filter(|e| matches!(e, PackageEvent::DotfileSkipped { .. }))
+                .collect::<Vec<_>>()
+        );
+
+        let result = get_operation_result(&events).expect("the run must complete");
+        let rendered = format!("{result:?}");
+        match result {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                skipped_count,
+                refused_count,
+                ..
+            }) => {
+                assert_eq!(
+                    *deployed_count, 0,
+                    "a preview wrote nothing, so nothing was deployed: {rendered}"
+                );
+                assert_eq!(*skipped_count, 1, "counted as a skip: {rendered}");
+                assert_eq!(*refused_count, 0, "nothing was refused: {rendered}");
+            }
+            other => panic!("expected DotfilesApplied, got: {other:?}"),
+        }
+    }
+
+    // The refusal is the same in a preview as in a real run, and still runs nothing.
+    // A bare directory is what exercises it: a link to one is replaced now, and a link
+    // to a fifo is refused by the guard ahead of this on both paths already.
+    #[tokio::test]
+    async fn a_dry_run_over_a_bare_directory_at_a_secret_target_refuses() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir_all(&target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
+        // `stop_on_error` is on by default and a refusal would abort the run before
+        // the summary, leaving nothing to read the counts off. The counts are what
+        // this test is about.
+        let service = dirs.service_with_runner_and_stop_on_error(runner, false);
+
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(counted.call_count(), 0, "a preview must run no command");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("a file cannot replace a directory")),
+            "a preview must refuse what a real run refuses: {warnings:?}"
+        );
+
+        let result = get_operation_result(&events).expect("the run must complete");
+        match result {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count,
+                skipped_count,
+                ..
+            }) => {
+                assert_eq!(*refused_count, 1, "counted as a refusal");
+                assert_eq!(*skipped_count, 0, "not counted as a skip as well");
+            }
+            other => panic!("expected DotfilesApplied, got: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn non_utf8_provider_output_survives_byte_exact() {
         let dirs = TestDirs::new();
