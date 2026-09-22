@@ -1160,8 +1160,8 @@ mod tests {
             .collect();
         assert_eq!(warnings.len(), 1, "got: {json}");
         assert!(
-            warnings[0].starts_with("Dotfiles directory does not exist: ")
-                && warnings[0].contains(&dotfiles.display().to_string()),
+            warnings[0].starts_with("Dotfiles directory ")
+                && warnings[0].contains(&format!("{} does not exist", dotfiles.display())),
             "got: {}",
             warnings[0]
         );

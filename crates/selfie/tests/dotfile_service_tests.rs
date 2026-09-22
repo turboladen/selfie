@@ -11072,8 +11072,8 @@ async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: ")
-            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+        warnings[0].starts_with("Dotfiles directory ")
+            && warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display()))
             && warnings[0].contains("standalone dotfiles will not be read"),
         "got: {}",
         warnings[0]
@@ -11147,8 +11147,8 @@ async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: ")
-            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+        warnings[0].starts_with("Dotfiles directory ")
+            && warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display()))
             && warnings[0].contains("standalone dotfiles will not be read"),
         "got: {}",
         warnings[0]
@@ -11173,7 +11173,7 @@ async fn drift_reports_a_configured_dotfiles_directory_that_is_gone_without_refu
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: "),
+        warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display())),
         "got: {}",
         warnings[0]
     );

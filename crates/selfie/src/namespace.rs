@@ -139,12 +139,17 @@ pub fn validate_unique_name(
                     // Nothing is at the path, so it holds no names and the name is
                     // free. The one state that answers the question.
                     DirectoryState::Absent(_) => Ok(()),
-                    DirectoryState::Unlistable(_) => {
+                    // A directory that classified cleanly and still would not list
+                    // could not be *listed*, which is the same answer as an
+                    // unlistable one. Only a path selfie could not classify is
+                    // unchecked, and saying so about a real directory claims less
+                    // than is known.
+                    DirectoryState::Unlistable(_) | DirectoryState::Directory => {
                         Err(NamespaceValidationError::DotfilesDirectoryUnreadable(
                             format!("could not be listed: {error}"),
                         ))
                     }
-                    DirectoryState::Unknown(_) | DirectoryState::Directory => {
+                    DirectoryState::Unknown(_) => {
                         Err(NamespaceValidationError::DotfilesDirectoryUnreadable(
                             format!("could not be checked: {error}"),
                         ))
@@ -368,6 +373,46 @@ mod tests {
             panic!("expected a refusal, got {result:?}");
         };
         assert!(message.contains("could not be listed"), "{message}");
+    }
+
+    // The case a binary diff caught and no unit test did: a real directory whose
+    // listing fails arrives as a `DirectoryState::Directory`, because the path
+    // classifies perfectly well. It could not be *listed*, and saying it could not be
+    // *checked* claims less than selfie knows.
+    //
+    // A 0o000 directory reaches this through the repository, whose own error kind is
+    // not preserved by the time it arrives, so the classification answers "directory"
+    // rather than "unlistable".
+    #[test]
+    fn a_directory_whose_listing_failed_says_it_could_not_be_listed() {
+        let dir = tempdir().unwrap();
+
+        let mut package_repo = MockPackageRepository::new();
+        package_repo
+            .expect_find_package_files()
+            .returning(|_| Ok(vec![]));
+        let mut dotfiles_repo = MockPackageRepository::new();
+        // `Other` rather than `PermissionDenied`, which is what a wrapped repository
+        // error looks like by the time the name check sees it.
+        dotfiles_repo.expect_find_package_files().returning(|_| {
+            Err(PackageListError::IoError(Arc::new(std::io::Error::other(
+                "Permission denied (os error 13)",
+            ))))
+        });
+
+        let result = validate_unique_name(
+            "foo",
+            &package_repo,
+            Some(&dotfiles_repo),
+            &RealFileSystem,
+            dir.path(),
+        );
+
+        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(message)) = result else {
+            panic!("expected a refusal, got {result:?}");
+        };
+        assert!(message.contains("could not be listed"), "{message}");
+        assert!(!message.contains("could not be checked"), "{message}");
     }
 
     // A symlink loop is no better known than an unreadable directory, so it refuses

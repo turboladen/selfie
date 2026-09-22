@@ -65,9 +65,9 @@ impl UnlistedDotfilesDirectory {
 /// the configured directory at `path`, where `reason` says what is there instead.
 pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
     format!(
-        "Dotfiles directory {}: {} — standalone dotfiles will not be read.{}",
-        reason.clause(),
+        "Dotfiles directory {} {} — standalone dotfiles will not be read.{}",
         path.display(),
+        reason.clause(),
         match reason.remedy(path) {
             Some(command) => format!(" {command}"),
             None => String::new(),
@@ -79,9 +79,9 @@ pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
 /// `path`, where `reason` says what is there instead.
 pub(crate) fn absent_track_refusal(path: &Path, reason: &AbsentReason) -> String {
     format!(
-        "Cannot track a standalone dotfile: the dotfiles directory {}: {}{}",
-        reason.clause(),
+        "Cannot track a standalone dotfile: the dotfiles directory {} {}{}",
         path.display(),
+        reason.clause(),
         match reason.remedy(path) {
             Some(command) => format!(" {command}"),
             None => String::new(),
@@ -102,12 +102,14 @@ pub(crate) fn track_listing_refusal(
 ) -> String {
     match state {
         DirectoryState::Absent(reason) => absent_track_refusal(path, reason),
-        DirectoryState::Unlistable(_) => format!(
-            "Cannot track a standalone dotfile: the dotfiles directory could not be listed, so it may already hold this name: {} — {error}",
+        // A directory that classified cleanly and still would not list could not be
+        // listed. Only an unclassifiable path is unchecked.
+        DirectoryState::Unlistable(_) | DirectoryState::Directory => format!(
+            "Cannot track a standalone dotfile: the dotfiles directory at {} could not be listed, so it may already hold this name — {error}",
             path.display()
         ),
-        DirectoryState::Unknown(_) | DirectoryState::Directory => format!(
-            "Cannot track a standalone dotfile: the dotfiles directory could not be checked: {} — {error}",
+        DirectoryState::Unknown(_) => format!(
+            "Cannot track a standalone dotfile: the dotfiles directory at {} could not be checked — {error}",
             path.display()
         ),
     }
