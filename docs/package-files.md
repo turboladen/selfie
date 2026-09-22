@@ -793,9 +793,12 @@ by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
 ```
 
 A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
-reason. A **directory** at the target is not in this group; it is reported as an ordinary error.
-Provider-sourced and templated entries refuse these targets too, and so does the deploy-state file:
-selfie renames nothing over a pipe, socket or device that is there when it checks.
+reason. A **directory** at the target is not in this group. For a repository-file entry it is
+reported as an ordinary error; for a secret-bearing entry it is refused before any command runs,
+because a file cannot replace a directory and nothing should be fetched for a target that cannot
+receive it. Provider-sourced and templated entries refuse these targets too, and so does the
+deploy-state file: selfie renames nothing over a pipe, socket or device that is there when it
+checks.
 
 #### `selfie dotfiles track` refuses a symlinked target
 
@@ -1136,10 +1139,13 @@ have. After the replacement succeeds selfie warns, naming the link and where it 
 you created deliberately is not removed silently.
 
 Two things refuse before any command runs, because the write could never succeed and a provider
-command can raise a biometric prompt. A link to a fifo, socket or device node is refused as it would
-be without the link. A **directory at the target itself** is refused too, because a file cannot
-replace a directory. And a target selfie cannot classify at all — one it has no permission to look
-at — is refused rather than written over.
+command can raise a biometric prompt. A fifo, socket or device node is refused, whether it is at the
+target or behind a link, because the writer refuses one either way. A **directory at the target
+itself** is refused too, because a file cannot replace a directory — but a directory _behind a link_
+is not, since the replacement lands on the link. A plain target selfie cannot classify at all — one
+it has no permission to look at — is refused rather than written over.
+
+`stop_on_error` is on by default, so any of these refusals stops the rest of the run.
 
 #### What is shown, and what is not
 

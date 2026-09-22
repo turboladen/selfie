@@ -304,12 +304,15 @@ where
         // refuses to follow.
         //
         // Any refusal this does not understand ends the entry.
-        if let Err(refusal) = classify_link(self.filesystem.symlink_refusal(&path)) {
-            self.sender
-                .send_warning(refusal_warning(entry.target(), &refusal))
-                .await;
-            return Err(SecretOutcome::Failed);
-        }
+        let link = match classify_link(self.filesystem.symlink_refusal(&path)) {
+            Ok(link) => link,
+            Err(refusal) => {
+                self.sender
+                    .send_warning(refusal_warning(entry.target(), &refusal))
+                    .await;
+                return Err(SecretOutcome::Failed);
+            }
+        };
 
         // Same guard the repository-file path applies, in the same position:
         // before anything reads the target. `read_target` below opens it, and a
@@ -326,11 +329,57 @@ where
             return Err(SecretOutcome::Failed);
         }
 
+        // The case the guard above does not cover: it excludes directories, because
+        // opening one never blocks. Nothing may run for a target that provably cannot
+        // be written, and a credential fetch can raise a biometric prompt, so this
+        // sits ahead of every command.
+        //
+        // Only for a plain target. A link is replaced whatever it points at, so the
+        // guard above -- which stats following the link -- is the whole of what
+        // refuses one.
+        if matches!(link, TargetLink::Plain)
+            && let Some(refusal) = self.unwritable_target_refusal(entry.target(), &path)
+        {
+            self.sender.send_warning(refusal).await;
+            return Err(SecretOutcome::Failed);
+        }
+
         Ok(SecretTarget {
             entry,
             origin,
             path,
         })
+    }
+
+    /// Why a write to this target could never land, when that is the case.
+    ///
+    /// `source` is the target as the package file spells it, so the refusal names
+    /// what the user wrote rather than the expanded path.
+    ///
+    /// Asked only of a target that is not a symlink. A link is replaced whatever it
+    /// points at, because the rename lands on the link and never on the destination,
+    /// so the only thing that refuses a link is what the writer itself refuses: a
+    /// fifo, socket or device node, which
+    /// [`FileSystem::irregular_target_refusal`] has already answered for.
+    // Fails closed: an unclassifiable target refuses. Here the write really does land
+    // on the target, so "nothing is known about it" is not a license to write a
+    // credential over it.
+    //
+    // Framed like `refusal_warning` rather than by calling it: that takes a
+    // `FileSystemError`, and every variant's `Display` embeds the path, so routing
+    // this through it prints the path twice.
+    fn unwritable_target_refusal(&self, source: &str, path: &TargetPath) -> Option<String> {
+        let reason = match self.filesystem.is_directory(path) {
+            Ok(false) => return None,
+            Ok(true) => String::from(
+                "a directory is at the target, and a file cannot replace a directory. No command was run. Remove it or point the entry somewhere else.",
+            ),
+            Err(e) => format!(
+                "selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
+            ),
+        };
+
+        Some(format!("Skipping '{source}': {reason}"))
     }
 
     /// Refuse anything decidable without running a command or reading a file.

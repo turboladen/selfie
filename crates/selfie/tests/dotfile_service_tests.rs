@@ -578,6 +578,13 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.irregular_target_refusal(path)
     }
 
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.0.is_directory(path)
+    }
+
     fn is_owner_only(
         &self,
         path: &selfie::fs::TargetPath,
@@ -618,6 +625,13 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
 struct HomeAt(RealFileSystem, PathBuf);
 
 impl selfie::fs::FileSystem for HomeAt {
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.0.is_directory(path)
+    }
+
     fn irregular_target_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -699,9 +713,19 @@ impl selfie::fs::FileSystem for HomeAt {
 struct SymlinkAppearsAfterFirstLook {
     inner: RealFileSystem,
     looks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dir_checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.dir_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.is_directory(path)
+    }
+
     fn symlink_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -806,6 +830,13 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         })
     }
 
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_directory(path)
+    }
+
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
     }
@@ -886,6 +917,13 @@ struct StateWritesFailAfter {
 }
 
 impl selfie::fs::FileSystem for StateWritesFailAfter {
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_directory(path)
+    }
+
     fn write_file_private(
         &self,
         path: &selfie::fs::TargetPath,
@@ -3983,9 +4021,11 @@ mod secret_bearing {
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let looks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dir_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fs = SymlinkAppearsAfterFirstLook {
             inner: RealFileSystem,
             looks: looks.clone(),
+            dir_checks: dir_checks.clone(),
         };
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_fs(fs, runner);
@@ -4011,6 +4051,14 @@ mod secret_bearing {
             looks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
             "the target must have been asked about twice, once before the resolve and \
              once before the read"
+        );
+        // A witness that the first answer really was "plain": the directory question is
+        // asked only of a plain target, so a link seen on the first pass would never
+        // reach it. Without this, a double that reported the link both times would
+        // still satisfy the count above.
+        assert!(
+            dir_checks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the first pass must have classified the target as plain"
         );
 
         // The control: the run really did deploy, so the absence above is not the
@@ -4213,6 +4261,177 @@ mod secret_bearing {
                 .is_symlink(),
             "the link must still be there, since the write never happened"
         );
+    }
+
+    // Make `dir` impossible to look inside, so a stat of anything under it fails
+    // with a permission error rather than a verdict.
+    //
+    // `None` when the mode does not bite -- running as root, or a file system that
+    // ignores it -- so a caller skips rather than asserting about a check that
+    // succeeded. The returned guard restores the mode on unwind, so a failing
+    // assertion does not leave a directory the harness cannot clean up.
+    //
+    // Not `made_unwritable`: that sets `0o500`, which still allows the traversal
+    // this needs to fail.
+    fn made_unstattable(dir: &std::path::Path) -> Option<RestoreMode> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let original = std::fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = RestoreMode(dir.to_path_buf(), original);
+        if std::fs::read_dir(dir.join("inner")).is_ok() {
+            return None;
+        }
+        Some(restore)
+    }
+
+    // Build a package whose target is `link`, run it, and report what the runner was
+    // asked to do. Zero calls is the assertion these share: nothing may run for a
+    // target that provably cannot be written.
+    //
+    // `FakeCommandRunner::call_count` rather than a mock's `times(0)`: the harness
+    // here is built around the fake and a real file system, which is what makes the
+    // link on disk a real link rather than a mocked answer.
+    async fn calls_for_target(dirs: &TestDirs, link: &std::path::Path) -> (usize, Vec<String>) {
+        provider_package(&dirs.package_dir, link.to_str().unwrap(), "op read x");
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        (counted.call_count(), warning_messages(&events))
+    }
+
+    // A link to a directory is replaced like any other link: the rename lands on the
+    // link itself and never on the directory behind it, so the credential goes where
+    // the entry asked and the directory is untouched.
+    //
+    // The command count is the assertion that separates this from a refusal, and it
+    // matches the plain-link case rather than being asserted on its own.
+    #[tokio::test]
+    async fn a_secret_target_linked_to_a_directory_is_replaced() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("a-directory");
+        std::fs::create_dir_all(destination.join("kept")).unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(
+            calls, 1,
+            "a link is replaced, so its command runs: {warnings:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert!(
+            !std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must be replaced"
+        );
+        assert!(
+            destination.join("kept").exists(),
+            "the directory behind the link must be untouched"
+        );
+    }
+
+    // A directory *at* the target, with no link involved. A rename cannot replace a
+    // directory with a file, so the write can never succeed and nothing may run for
+    // it -- a credential fetch can raise a biometric prompt, and it would be raised
+    // for a deploy that then fails.
+    #[tokio::test]
+    async fn a_bare_directory_at_a_secret_target_refuses_before_running_anything() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(calls, 0, "no command may run: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.starts_with("Skipping '")
+                && w.contains("a file cannot replace a directory")
+                && w.contains("No command was run")),
+            "the refusal must say what is there and that nothing ran: {warnings:?}"
+        );
+        assert!(
+            target.join("inner").exists(),
+            "the directory must be left alone"
+        );
+    }
+
+    // A target selfie cannot classify is not one it writes a credential over. The
+    // directory holding it has no execute bit, so the stat cannot reach it and answers
+    // with a permission error rather than a verdict.
+    //
+    // A plain target, because this is where the write really lands. A link is replaced
+    // whatever is behind it, so nothing about its destination refuses it.
+    #[tokio::test]
+    async fn a_plain_secret_target_that_cannot_be_classified_refuses() {
+        let dirs = TestDirs::new();
+        let closed = dirs.target_dir.join("closed");
+        std::fs::create_dir_all(closed.join("inner")).unwrap();
+        let target = closed.join("inner").join("credentials");
+
+        let Some(_restore) = made_unstattable(&closed) else {
+            eprintln!(
+                "SKIP a_plain_secret_target_that_cannot_be_classified_refuses: mode bits do not \
+                 bite here"
+            );
+            return;
+        };
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(
+            calls, 0,
+            "an unclassifiable target must refuse before running: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.starts_with("Skipping '")
+                && w.contains("could not determine what is at the target")),
+            "got: {warnings:?}"
+        );
+    }
+
+    // A fifo behind a *relative* link, which is what the destination check's argument
+    // turns on. The check stats the target path, following the link, so it sees the
+    // fifo. A check that resolved the link's own text instead would resolve
+    // "pipe" against the process's working directory, find nothing, and let the
+    // credential fetch run for a target the writer then refuses.
+    #[tokio::test]
+    async fn a_secret_target_relatively_linked_to_a_fifo_refuses_before_running_anything() {
+        let dirs = TestDirs::new();
+        let pipe = dirs.target_dir.join("pipe");
+        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink("pipe", &target).unwrap();
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(
+            calls, 0,
+            "a fifo behind a relative link must refuse before running: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("fifo")),
+            "the refusal must name what is there: {warnings:?}"
+        );
+    }
+
+    // The control on the fail-closed arm above, in the other direction. A dangling
+    // link's destination is absent, which is provably not a directory, so it must
+    // still deploy -- folding that error into the refusing arm would refuse every
+    // dangling link, which decision 3 replaces.
+    #[tokio::test]
+    async fn a_dangling_secret_target_link_still_deploys() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(dirs.target_dir.join("not-there"), &target).unwrap();
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(calls, 1, "the command must run: {warnings:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
     }
 
     #[tokio::test]
@@ -6531,6 +6750,10 @@ mod symlinked_targets {
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
         impl FileSystem for BlindToSymlinks {
+            fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
+                self.0.is_directory(path)
+            }
+
             fn symlink_refusal(&self, _path: &TargetPath) -> Option<FileSystemError> {
                 None
             }
