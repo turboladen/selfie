@@ -175,8 +175,11 @@ case: none of them can hold a standalone dotfile, so nothing is missing from the
 succeeds. Only the first of them is fixed by creating the directory, so only the first is offered
 `mkdir -p`.
 
-If you do **not** set it and the default sibling is not there, selfie says nothing: that is the
-ordinary state of a setup with no standalone dotfiles.
+If you do **not** set it and nothing at all is at the default sibling, selfie says nothing: that is
+the ordinary state of a setup with no standalone dotfiles. It stays quiet only for an empty path. A
+plain file, a dangling symlink or a path running through a non-directory is reported at the default
+just as it is at a path you named, because none of those can be there by your having left the
+setting out.
 
 Two states refuse instead, because in both of them selfie cannot say what the directory holds. A
 directory that **exists and cannot be listed** may have standalone dotfiles in it. A path selfie

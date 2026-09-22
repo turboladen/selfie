@@ -10808,6 +10808,95 @@ fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDir
     Some((dirs, target))
 }
 
+// The regression guard for ADR-0005 decision 2: a directory selfie could not read is
+// refused whether or not the user configured the path. Configuredness decides whether
+// an **absence** is worth a word, and nothing else.
+//
+// The guard exists because the refusal and the absence warning are decided a few
+// lines apart from the same fact. A change routing the refusal through the
+// configured-or-not rule would make an unconfigured unlistable directory report
+// success having read nothing, and nothing else in the suite would notice. Both
+// halves are asserted in one test on purpose: what has to hold is that the two
+// answers are the same.
+#[tokio::test]
+async fn an_unlistable_dotfiles_directory_is_refused_whether_or_not_it_is_configured() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!(
+            "SKIP an_unlistable_dotfiles_directory_is_refused_whether_or_not_it_is_configured"
+        );
+        return;
+    };
+
+    let configured = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+    let unconfigured = collect_events(
+        dirs.service_with_default_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        refused_count(&configured),
+        1,
+        "a configured unlistable directory must refuse: {configured:?}"
+    );
+    assert_eq!(
+        refused_count(&unconfigured),
+        refused_count(&configured),
+        "the refusal must not depend on whether the path was configured: {unconfigured:?}"
+    );
+}
+
+// The other half of the rule, and the reason it is not simply "always warn": an
+// absent default is the ordinary state of anyone who keeps no standalone dotfiles,
+// so it is silent, while an absent configured path is a mistake and is named.
+#[tokio::test]
+async fn an_absent_dotfiles_directory_is_reported_only_when_it_was_configured() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let configured = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+    let unconfigured = collect_events(
+        dirs.service_with_default_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        dotfiles_directory_warnings(&configured).len(),
+        1,
+        "a configured path that is not there is a mistake worth naming: {configured:?}"
+    );
+    assert!(
+        dotfiles_directory_warnings(&unconfigured).is_empty(),
+        "an absent default is the ordinary case and must stay silent: {unconfigured:?}"
+    );
+    assert_eq!(
+        refused_count(&configured),
+        0,
+        "an absence holds nothing, so there is nothing to refuse: {configured:?}"
+    );
+    assert_eq!(refused_count(&unconfigured), 0, "events: {unconfigured:?}");
+}
+
 // Every standalone dotfile in an unlistable directory was asked for and none can
 // deploy, so the run carries a refusal. The package dotfile still deploys, which
 // is what keeps this a refusal rather than a failure.

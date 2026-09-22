@@ -9,11 +9,13 @@ use crate::{
 
 /// What a failed listing of the standalone dotfiles directory means.
 pub(crate) enum UnlistedDotfilesDirectory {
-    /// No directory is at the default path, and `dotfiles_directory` is not set.
-    UnsetAndAbsent,
-    /// No directory is at the path the user set, and why not.
-    ConfiguredAndAbsent {
-        /// The path the user set.
+    /// Nothing at all is at the unset default path, which is the ordinary state of
+    /// a setup that keeps no standalone dotfiles and is worth no word.
+    OrdinarilyAbsent,
+    /// No directory is at the path, and why not. Worth saying whatever the user
+    /// configured, unless it is the unset default with nothing at it.
+    Absent {
+        /// The path selfie looked at.
         path: PathBuf,
         /// Why nothing is there, which decides the remedy.
         reason: AbsentReason,
@@ -39,11 +41,17 @@ impl UnlistedDotfilesDirectory {
         // listing is not taken at face value: a dangling symlink and an empty path
         // both produce it, and they take different remedies.
         match error.directory_state(filesystem, path) {
-            DirectoryState::Absent(reason) if configured => Self::ConfiguredAndAbsent {
+            // Being configured governs an **empty** path and nothing else. An absent
+            // default is the ordinary condition of anyone who keeps no standalone
+            // dotfiles, and a word about it on every run is noise. Anything else at
+            // the path is a mistake: a plain file, or a link whose destination is
+            // gone, did not get there by the setting being left out, and staying
+            // silent about it hides the reason the directory is not being read.
+            DirectoryState::Absent(AbsentReason::Empty) if !configured => Self::OrdinarilyAbsent,
+            DirectoryState::Absent(reason) => Self::Absent {
                 path: path.to_path_buf(),
                 reason,
             },
-            DirectoryState::Absent(_) => Self::UnsetAndAbsent,
             DirectoryState::Unlistable(_) => Self::Unlistable(error),
             DirectoryState::Unknown(_) => Self::Unknown(error),
             // A directory that classified cleanly and would not list. The listing
@@ -182,7 +190,7 @@ mod tests {
             not_found(&absent),
             true,
         ) {
-            UnlistedDotfilesDirectory::ConfiguredAndAbsent { path, reason } => {
+            UnlistedDotfilesDirectory::Absent { path, reason } => {
                 assert_eq!(path, absent);
                 assert!(matches!(reason, AbsentReason::Empty));
             }
@@ -203,8 +211,51 @@ mod tests {
                 not_found(&absent),
                 false
             ),
-            UnlistedDotfilesDirectory::UnsetAndAbsent
+            UnlistedDotfilesDirectory::OrdinarilyAbsent
         ));
+    }
+
+    // Being unset buys silence for an empty path and for nothing else. A plain file
+    // at the default path is a mistake whoever made it wants to hear about, and it
+    // cannot have been made by leaving the setting out.
+    #[test]
+    fn a_plain_file_at_the_unset_default_is_still_worth_saying() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("dotfiles");
+        std::fs::write(&file, "x").unwrap();
+
+        let UnlistedDotfilesDirectory::Absent { reason, .. } =
+            UnlistedDotfilesDirectory::classify(&RealFileSystem, &file, not_found(&file), false)
+        else {
+            panic!("a file in the way is not the ordinary absent default");
+        };
+
+        assert!(
+            absent_warning(&file, &reason).contains("is not a directory, it is a regular file"),
+            "the sentence must name what is there"
+        );
+    }
+
+    // The same for a link whose destination is gone, which is the other shape a user
+    // reaches by accident rather than by not configuring anything.
+    #[test]
+    fn a_dangling_symlink_at_the_unset_default_is_still_worth_saying() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("dotfiles");
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link).unwrap();
+
+        let UnlistedDotfilesDirectory::Absent { reason, .. } =
+            UnlistedDotfilesDirectory::classify(&RealFileSystem, &link, not_found(&link), false)
+        else {
+            panic!("a dangling link is not the ordinary absent default");
+        };
+
+        let sentence = absent_warning(&link, &reason);
+        assert!(sentence.contains("is a symlink to nothing"), "{sentence}");
+        assert!(
+            !sentence.contains("mkdir"),
+            "mkdir -p cannot create a path a link occupies: {sentence}"
+        );
     }
 
     // The case that reached the user as "does not exist" with a `mkdir -p` that
@@ -215,7 +266,7 @@ mod tests {
         let link = dir.path().join("dotfiles");
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link).unwrap();
 
-        let UnlistedDotfilesDirectory::ConfiguredAndAbsent { reason, .. } =
+        let UnlistedDotfilesDirectory::Absent { reason, .. } =
             UnlistedDotfilesDirectory::classify(&RealFileSystem, &link, not_found(&link), true)
         else {
             panic!("expected a configured, absent directory");
@@ -242,7 +293,7 @@ mod tests {
         let file = dir.path().join("dotfiles");
         std::fs::write(&file, "x").unwrap();
 
-        let UnlistedDotfilesDirectory::ConfiguredAndAbsent { reason, .. } =
+        let UnlistedDotfilesDirectory::Absent { reason, .. } =
             UnlistedDotfilesDirectory::classify(&RealFileSystem, &file, not_found(&file), true)
         else {
             panic!("expected a configured, absent directory");
@@ -292,7 +343,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let below = file.join("under").join("dotfiles");
 
-        let UnlistedDotfilesDirectory::ConfiguredAndAbsent { reason, .. } =
+        let UnlistedDotfilesDirectory::Absent { reason, .. } =
             UnlistedDotfilesDirectory::classify(&RealFileSystem, &below, not_found(&below), true)
         else {
             panic!("expected a configured, absent directory");
@@ -433,8 +484,8 @@ mod tests {
                 DirectoryState::Unknown(_) => "unknown",
             };
             let service_name = match classified {
-                UnlistedDotfilesDirectory::ConfiguredAndAbsent { .. }
-                | UnlistedDotfilesDirectory::UnsetAndAbsent => "absent",
+                UnlistedDotfilesDirectory::Absent { .. }
+                | UnlistedDotfilesDirectory::OrdinarilyAbsent => "absent",
                 UnlistedDotfilesDirectory::Unlistable(_) => "unlistable",
                 UnlistedDotfilesDirectory::Unknown(_) => "unknown",
             };

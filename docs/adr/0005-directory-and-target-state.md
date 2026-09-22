@@ -72,7 +72,14 @@ directory's state, and every adapter asks it.
 Expectedness decides only whether an absent directory is mentioned. It does not decide refusals. A
 directory that is unlistable or unknown refuses any command that would otherwise claim to have seen
 every dotfile, whether or not the user configured it, because either state may be hiding entries. An
-absent directory refuses nothing: it warns when configured and is silent when not.
+absent directory refuses nothing.
+
+Within absence it governs an **empty path** and nothing else. An empty default is the ordinary
+condition of a setup that keeps no standalone dotfiles, so it warns when configured and is silent
+when not. Every other reason a path holds no directory — a plain file, a dangling symlink, a
+component that is not a directory — warns whether or not the path was configured, because none of
+them can be reached by leaving the setting out. Staying silent about them hides the reason the
+directory is not being read from the only user who did not ask for it to be read.
 
 The `PackageRepository` port exposes the directory it reads, so the sentence naming a directory and
 the listing that failed come from one value rather than from the configuration on one side and the

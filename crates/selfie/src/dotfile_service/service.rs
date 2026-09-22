@@ -142,7 +142,7 @@ where
         dotfiles_repo: Option<&R>,
         filesystem: &F,
         dotfiles_directory: &std::path::Path,
-        dotfiles_directory_configured: bool,
+        dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         Self::collect_packages(
             package_repo,
@@ -150,7 +150,7 @@ where
             NameCollision::PackagesWin,
             filesystem,
             dotfiles_directory,
-            dotfiles_directory_configured,
+            dotfiles_directory_is_expected,
         )
     }
 
@@ -160,16 +160,16 @@ where
     /// Listing must not: both files exist, and a caller asking what is on disk is
     /// asking about the files rather than about what would win.
     ///
-    /// `dotfiles_directory_configured` says whether the user set
-    /// `dotfiles_directory`, which decides whether a dotfiles directory that is
-    /// not there is worth a warning.
+    /// `dotfiles_directory_is_expected` decides whether a dotfiles directory that is
+    /// **not there** is worth a warning, and nothing else. A directory that could not
+    /// be read or classified is refused either way.
     fn collect_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
         collision: NameCollision,
         filesystem: &F,
         dotfiles_directory: &std::path::Path,
-        dotfiles_directory_configured: bool,
+        dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
@@ -208,13 +208,10 @@ where
                     filesystem,
                     dotfiles_directory,
                     error,
-                    dotfiles_directory_configured,
+                    dotfiles_directory_is_expected,
                 ) {
-                    super::directory::UnlistedDotfilesDirectory::UnsetAndAbsent => {}
-                    super::directory::UnlistedDotfilesDirectory::ConfiguredAndAbsent {
-                        path,
-                        reason,
-                    } => {
+                    super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
+                    super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
                         warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
                     }
                     // A directory selfie could not read and a path it could not
@@ -303,7 +300,7 @@ where
                 self.dotfiles_repository.as_ref(),
                 &self.filesystem,
                 &self.config.dotfiles_directory(),
-                self.config.configured_dotfiles_directory().is_some(),
+                self.config.dotfiles_directory_is_expected(),
             )
             .map_err(OperationFailure::PackageList),
         };
@@ -397,7 +394,7 @@ where
             self.dotfiles_repository.as_ref(),
             &self.filesystem,
             &self.config.dotfiles_directory(),
-            self.config.configured_dotfiles_directory().is_some(),
+            self.config.dotfiles_directory_is_expected(),
         );
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -469,7 +466,7 @@ where
             NameCollision::KeepBoth,
             &self.filesystem,
             &self.config.dotfiles_directory(),
-            self.config.configured_dotfiles_directory().is_some(),
+            self.config.dotfiles_directory_is_expected(),
         );
         let config = self.config.clone();
 
