@@ -1,7 +1,7 @@
 // Real file system adapter implementation
 
 use std::{
-    fs,
+    fs, io,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,7 +9,7 @@ use std::{
 
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
-use super::filesystem::{FileSystem, FileSystemError};
+use super::filesystem::{AbsentReason, DirectoryState, FileSystem, FileSystemError};
 use super::target::TargetPath;
 
 /// Real file system implementation
@@ -245,6 +245,111 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     Ok(())
 }
 
+/// The shallowest component of `path` that is not a directory.
+///
+/// `ENOTDIR` says some component is not a directory and never which, so the sentence
+/// would otherwise name the path's parent whether or not that is the problem.
+///
+/// `None` when no component answers, which a caller must not render as a parent:
+/// naming the path as its own would read as "<path> is below <path>". Reachable,
+/// because a component may stop resolving between the failed stat and this walk.
+fn first_non_directory_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        let Ok(metadata) = fs::symlink_metadata(ancestor) else {
+            continue;
+        };
+        // A symlink ancestor is followed, because what makes the path fail is what
+        // the link resolves to. `d/link -> d/file` produces `ENOTDIR` for anything
+        // beneath it, and skipping it names nothing, which sent the sentence back to
+        // the whole path and read as "<path> is below <path>".
+        let is_directory = if metadata.file_type().is_symlink() {
+            // An unresolvable link is not the non-directory component `ENOTDIR` is
+            // about, so it is passed over rather than named.
+            match fs::metadata(ancestor) {
+                Ok(followed) => followed.is_dir(),
+                Err(_) => continue,
+            }
+        } else {
+            metadata.is_dir()
+        };
+
+        if !is_directory {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// The shallowest ancestor of `path` that is a symlink whose destination is not
+/// there, or `None` when nothing above the path is one.
+///
+/// A path below a dangling link fails its stat with `ENOENT`, the same errno as a
+/// path with nothing at it, and only the ancestors tell the two apart.
+fn dangling_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        // A relative path's shallowest ancestor is the empty path, which stats as
+        // missing. It names the working directory, so it is passed over rather than
+        // read as a missing ancestor that ends the walk.
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        // A missing ancestor means nothing below it exists either, and no link
+        // stands in the way, so the path is simply not there.
+        let Ok(metadata) = fs::symlink_metadata(ancestor) else {
+            return None;
+        };
+        if metadata.file_type().is_symlink() && fs::metadata(ancestor).is_err() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// The state an `ENOTDIR` implies, given what the ancestor walk found.
+///
+/// `None` from the walk is not an absence: `ENOTDIR` is then the only fact in hand, and
+/// naming the path as its own parent produces "<path> is below <path>, which is not a
+/// directory". Its own function because that arm cannot be reached through
+/// [`RealFileSystem::directory_state`] without a component ceasing to resolve between
+/// the stat and the walk, which no test can race, and an arm no test can reach is how
+/// that sentence shipped.
+fn not_a_directory_state(ancestor: Option<PathBuf>, error: io::Error) -> DirectoryState {
+    match ancestor {
+        Some(parent) => DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }),
+        None => DirectoryState::Unknown(Arc::new(error)),
+    }
+}
+
+/// What a stat says is there, in the words the refusals already use.
+///
+/// Reads the metadata already in hand rather than calling `irregular_kind`, which
+/// takes a path and stats again — and would follow a link the caller has deliberately
+/// not followed. A symlink is not among the answers: the two callers pass either an
+/// `lstat` that has already been tested for one, or a followed stat, which cannot be
+/// one.
+fn file_kind(metadata: &fs::Metadata) -> &'static str {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let file_type = metadata.file_type();
+    if file_type.is_file() {
+        "regular file"
+    } else if file_type.is_fifo() {
+        "named pipe (fifo)"
+    } else if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_char_device() {
+        "character device"
+    } else if file_type.is_block_device() {
+        "block device"
+    } else {
+        "not a directory"
+    }
+}
+
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
@@ -301,6 +406,61 @@ impl FileSystem for RealFileSystem {
 
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         fs::remove_file(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
+    fn directory_state(&self, path: &Path) -> DirectoryState {
+        // Two stats, and the order matters. Measured on darwin, because the reason
+        // field only earns its place if these differ:
+        //   self-referential link  lstat ok+link,  stat ELOOP
+        //   dangling link         lstat ok+link,  stat ENOENT
+        //   plain file            lstat ok,       stat ok, not a directory
+        //   two levels under one  lstat ENOTDIR
+        //   below a dangling link lstat ENOENT
+        //   nothing               lstat ENOENT
+        // The last two share an errno, so `ENOENT` alone is not an empty path: a
+        // dangling link above it holds the path, and `mkdir -p` fails against it.
+        let lstat = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return match dangling_ancestor(path) {
+                    Some(parent) => {
+                        DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent })
+                    }
+                    None => DirectoryState::Absent(AbsentReason::Empty),
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
+                return not_a_directory_state(first_non_directory_ancestor(path), e);
+            }
+            Err(e) => return DirectoryState::Unknown(Arc::new(e)),
+        };
+
+        if lstat.is_dir() {
+            return DirectoryState::Directory;
+        }
+
+        if !lstat.file_type().is_symlink() {
+            return DirectoryState::Absent(AbsentReason::Occupied {
+                kind: file_kind(&lstat),
+            });
+        }
+
+        // A link. Follow it: `lstat` cannot tell a dangling one from a loop from one
+        // pointing at a real directory.
+        match fs::metadata(path) {
+            Ok(followed) if followed.is_dir() => DirectoryState::Directory,
+            Ok(followed) => DirectoryState::Absent(AbsentReason::Occupied {
+                kind: file_kind(&followed),
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                DirectoryState::Absent(AbsentReason::DanglingSymlink {
+                    points_to: fs::read_link(path).ok(),
+                })
+            }
+            // A loop is not evidence about the directory's contents; it is a check
+            // that could not be made.
+            Err(e) => DirectoryState::Unknown(Arc::new(e)),
+        }
     }
 
     fn path_exists(&self, path: &Path) -> bool {
@@ -1570,6 +1730,364 @@ mod irregular_targets {
                 assert_eq!(kind, "character device");
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod directory_state_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // Against the real file system rather than a mock: every one of these is a
+    // statement about what two syscalls return for a shape on disk, and a mock would
+    // only restate the expectation.
+    //
+    // The errnos are the ones darwin returns, measured rather than assumed: reading a
+    // reason off the wrong errno reports a dangling link as "nothing there".
+
+    #[test]
+    fn a_directory_is_a_directory() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            RealFileSystem.directory_state(dir.path()),
+            DirectoryState::Directory
+        ));
+    }
+
+    #[test]
+    fn nothing_at_the_path_is_absent_and_empty() {
+        let dir = tempdir().unwrap();
+        match RealFileSystem.directory_state(&dir.path().join("nowhere")) {
+            DirectoryState::Absent(AbsentReason::Empty) => {}
+            other => panic!("expected an empty path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_file_is_absent_and_occupied() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("plain");
+        std::fs::write(&file, "x").unwrap();
+        match RealFileSystem.directory_state(&file) {
+            DirectoryState::Absent(AbsentReason::Occupied { kind }) => {
+                assert_eq!(kind, "regular file");
+            }
+            other => panic!("expected an occupied path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fifo_is_absent_and_occupied_by_name() {
+        let dir = tempdir().unwrap();
+        let pipe = dir.path().join("pipe");
+        nix::unistd::mkfifo(pipe.as_path(), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        match RealFileSystem.directory_state(&pipe) {
+            DirectoryState::Absent(AbsentReason::Occupied { kind }) => {
+                assert_eq!(kind, "named pipe (fifo)");
+            }
+            other => panic!("expected a fifo, got {other:?}"),
+        }
+    }
+
+    // The case `selfie-l600` is about. A following stat answers `NotFound` here, so a
+    // classifier that followed first would call this empty and offer a `mkdir -p` that
+    // fails with "No such file or directory".
+    #[test]
+    fn a_dangling_symlink_is_absent_as_a_link_and_names_its_destination() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+        match RealFileSystem.directory_state(&link) {
+            DirectoryState::Absent(AbsentReason::DanglingSymlink { points_to }) => {
+                assert!(
+                    points_to.is_some_and(|p| p.ends_with("nowhere")),
+                    "the destination must be named"
+                );
+            }
+            other => panic!("expected a dangling link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_symlink_to_a_directory_is_a_directory() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(
+            RealFileSystem.directory_state(&link),
+            DirectoryState::Directory
+        ));
+    }
+
+    // A loop is a check that could not be made, not evidence about contents. Calling
+    // it unlistable would claim a directory is there.
+    #[test]
+    fn a_symlink_loop_is_unknown() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("loop");
+        std::os::unix::fs::symlink(&link, &link).unwrap();
+        match RealFileSystem.directory_state(&link) {
+            DirectoryState::Unknown(_) => {}
+            other => panic!("expected unknown, got {other:?}"),
+        }
+    }
+
+    // A dangling link above the path answers `ENOENT`, as an empty path does, and
+    // `mkdir -p` cannot create through it. The link is named as the component in the
+    // way, which is not the empty reason a creation command answers.
+    #[test]
+    fn a_path_below_a_dangling_symlink_names_the_link_rather_than_being_empty() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("dangling-link");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+
+        // Relative as well as absolute: a relative path's shallowest ancestor is the
+        // empty path, which must not end the walk before the link is reached.
+        let relative_link = relative_to_working_directory(&link);
+        for (path, named) in [
+            (link.join("child"), link.clone()),
+            (relative_link.join("child"), relative_link.clone()),
+        ] {
+            match RealFileSystem.directory_state(&path) {
+                DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                    assert_eq!(
+                        parent,
+                        named,
+                        "the link must be named for {}",
+                        path.display()
+                    );
+                }
+                other => panic!(
+                    "{} is below a dangling link, not empty, got {other:?}",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    // `path` spelled relative to the process's working directory, by climbing to the
+    // root with `..` and descending again, so a test can drive a relative path
+    // without changing the working directory every other test shares.
+    fn relative_to_working_directory(path: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.join(path.strip_prefix("/").unwrap())
+    }
+
+    // The control: a path genuinely missing below a real directory, below a live
+    // symlink to one, and below a parent that is missing too, stays empty and keeps
+    // the creation command. The live link is what fails if the walk stops following
+    // symlinks and calls every one of them dangling.
+    #[test]
+    fn a_missing_path_below_a_real_directory_stays_empty() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real-dir");
+        std::fs::create_dir(&real).unwrap();
+        let live = dir.path().join("live-link");
+        std::os::unix::fs::symlink(&real, &live).unwrap();
+
+        for path in [
+            real.join("child"),
+            live.join("child"),
+            dir.path().join("missing-dir").join("child"),
+        ] {
+            assert!(
+                matches!(
+                    RealFileSystem.directory_state(&path),
+                    DirectoryState::Absent(AbsentReason::Empty)
+                ),
+                "{} must be empty",
+                path.display()
+            );
+        }
+    }
+
+    // Two levels below the offending file on purpose: an implementation that returned
+    // `path.parent()` would name `plain/under`, which is a directory nobody created
+    // and not the problem.
+    #[test]
+    fn a_path_under_a_plain_file_names_the_file_not_its_parent() {
+        let dir = tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        match RealFileSystem.directory_state(&plain.join("under").join("deep")) {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                assert_eq!(parent, plain, "the sentence must name the file in the way");
+            }
+            other => panic!("expected a non-directory component, got {other:?}"),
+        }
+    }
+
+    // The fallback, in two halves, because the file system cannot be made to produce it:
+    // reaching it through `directory_state` needs a component to stop resolving between
+    // its stat and the walk, which no test can race. The walk's half is that a path whose
+    // every component is a directory gives it nothing to name.
+    #[test]
+    fn a_walk_that_finds_no_non_directory_component_names_nothing() {
+        let dir = tempdir().unwrap();
+
+        assert_eq!(first_non_directory_ancestor(dir.path()), None);
+    }
+
+    // The mapping's half, which is the one that decides what a user reads. Nothing to
+    // name is a check that could not be completed, not a path below itself.
+    #[test]
+    fn a_nameless_ancestor_is_unknown_rather_than_its_own_parent() {
+        let error = io::Error::from(io::ErrorKind::NotADirectory);
+
+        match not_a_directory_state(None, error) {
+            DirectoryState::Unknown(_) => {}
+            other => panic!("nothing to name is not an absence, got {other:?}"),
+        }
+    }
+
+    // The control: when the walk does name a component, that component is the answer.
+    #[test]
+    fn a_named_ancestor_is_the_absent_reason() {
+        let error = io::Error::from(io::ErrorKind::NotADirectory);
+
+        match not_a_directory_state(Some(PathBuf::from("/blocker")), error) {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                assert_eq!(parent, PathBuf::from("/blocker"));
+            }
+            other => panic!("a named component is an absence, got {other:?}"),
+        }
+    }
+
+    // A symlink to a regular file is a non-directory component like any other, and the
+    // easiest one for the walk to skip: `lstat` says "symlink", a walk that passes over
+    // symlinks finds no deeper ancestor, and the sentence then names the whole path as
+    // being below itself.
+    #[test]
+    fn a_symlinked_file_in_the_path_is_named_rather_than_skipped() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        match RealFileSystem.directory_state(&link.join("under").join("deep")) {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                assert_eq!(
+                    parent, link,
+                    "the link in the way must be named, not the path"
+                );
+            }
+            other => panic!("expected a non-directory component, got {other:?}"),
+        }
+    }
+
+    // A symlink to a real directory is not in the way, so the walk passes it and
+    // names what actually is. Without this, returning the first symlink of any kind
+    // would pass the test above.
+    #[test]
+    fn a_symlinked_directory_in_the_path_is_passed_over() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let file = real.join("file");
+        std::fs::write(&file, "x").unwrap();
+
+        match RealFileSystem.directory_state(&link.join("file").join("deep")) {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                assert_eq!(
+                    parent,
+                    link.join("file"),
+                    "the file below the link is what is in the way"
+                );
+            }
+            other => panic!("expected a non-directory component, got {other:?}"),
+        }
+    }
+
+    // What makes "one classifier" checkable rather than a promise in a comment. The
+    // two entry points must agree for every shape that is not a listing failure.
+    #[test]
+    fn the_two_constructors_agree() {
+        let dir = tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+
+        let loop_link = dir.path().join("loop");
+        std::os::unix::fs::symlink(&loop_link, &loop_link).unwrap();
+
+        for path in [
+            plain.clone(),
+            dangling.join("child"),
+            dangling,
+            dir.path().join("absent"),
+            plain.join("under").join("deep"),
+            // A loop is the shape a caller is most likely to see classified two ways,
+            // because it is the one that reaches both routes as an error rather than
+            // as an absence.
+            loop_link,
+        ] {
+            let classified = RealFileSystem.directory_state(&path);
+            // The error a listing would have reported for this shape.
+            let listing_error = std::fs::read_dir(&path).unwrap_err();
+            let mapped = DirectoryState::from_listing(&RealFileSystem, &path, &listing_error);
+            assert_eq!(
+                discriminant(&classified),
+                discriminant(&mapped),
+                "the two constructors disagree about {}: {classified:?} against {mapped:?}",
+                path.display()
+            );
+        }
+    }
+
+    // The one shape the two constructors are *meant* to answer differently, asserted
+    // rather than left out, so the exception is visible beside the agreement.
+    //
+    // Only a listing can discover that a directory will not open its entries. The
+    // port stats the path, finds a directory, and says so; the listing already
+    // failed, and says unlistable. A change making the port guess at this would show
+    // up here as the two answers converging.
+    #[test]
+    fn an_unlistable_directory_is_the_one_disagreement() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads a 0o000 directory, so the fixture cannot be built for a
+        // privileged user and the case is skipped rather than passing vacuously.
+        let Err(listing_error) = std::fs::read_dir(&locked) else {
+            eprintln!("SKIP: this user can list a 0o000 directory");
+            return;
+        };
+
+        let from_port = RealFileSystem.directory_state(&locked);
+        let from_listing = DirectoryState::from_listing(&RealFileSystem, &locked, &listing_error);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(discriminant(&from_port), "directory");
+        assert_eq!(discriminant(&from_listing), "unlistable");
+    }
+
+    // Compared by state rather than by `Debug`, because two `io::Error`s with the same
+    // kind do not format identically.
+    fn discriminant(state: &DirectoryState) -> String {
+        match state {
+            DirectoryState::Directory => "directory".to_string(),
+            DirectoryState::Absent(AbsentReason::Empty) => "empty".to_string(),
+            DirectoryState::Absent(AbsentReason::Occupied { kind }) => format!("occupied:{kind}"),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink { .. }) => "dangling".to_string(),
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                format!("parent:{}", parent.display())
+            }
+            DirectoryState::Unlistable(_) => "unlistable".to_string(),
+            DirectoryState::Unknown(_) => "unknown".to_string(),
         }
     }
 }

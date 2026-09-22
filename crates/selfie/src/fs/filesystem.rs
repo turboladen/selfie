@@ -10,6 +10,89 @@ use thiserror::Error;
 
 use crate::fs::target::TargetPath;
 
+/// What is at a directory path.
+///
+/// One type for the question selfie asks of every directory it reads — the package
+/// directory, the dotfiles directory, the state directory — so no two consumers can
+/// answer it differently. See ADR-0005 decision 1.
+///
+/// [`Unlistable`](DirectoryState::Unlistable) and [`Unknown`](DirectoryState::Unknown)
+/// stay separate variants rather than one error a caller inspects, because they mean
+/// different things: the first is a directory that may be hiding entries, the second
+/// is a path nothing is known about. Conflating them is what let "could not look" read
+/// as "nothing there".
+#[derive(Debug, Clone)]
+pub enum DirectoryState {
+    /// A directory. Its entries may still fail to read; that is
+    /// [`Unlistable`](DirectoryState::Unlistable).
+    Directory,
+    /// No directory is at the path, and why not.
+    Absent(AbsentReason),
+    /// A directory whose entries could not be read, so it may be hiding entries.
+    Unlistable(Arc<io::Error>),
+    /// The check itself failed. Nothing is known about the path.
+    Unknown(Arc<io::Error>),
+}
+
+/// Why no directory is at a path.
+///
+/// Carried because the remedy is not shared: only [`Empty`](AbsentReason::Empty) is
+/// fixed by creating the directory. `mkdir -p` fails with "File exists" against a
+/// plain file and "No such file or directory" against a dangling link, so a sentence
+/// offering it for those is worse than no sentence.
+#[derive(Debug, Clone)]
+pub enum AbsentReason {
+    /// Nothing is at the path. The one reason `mkdir -p` answers.
+    Empty,
+    /// Something that is not a directory is at the path.
+    Occupied {
+        /// What is there, for the sentence: `regular file`, `named pipe (fifo)`.
+        kind: &'static str,
+    },
+    /// The final component is a symlink whose destination is not there.
+    DanglingSymlink {
+        /// Where the link points, when the link itself could be read.
+        points_to: Option<PathBuf>,
+    },
+    /// A component of the path is not a directory: a file, or a symlink whose
+    /// destination is not there.
+    ParentNotADirectory {
+        /// The first such component, found by walking the path's ancestors. The
+        /// errno says only that some component is not a directory, never which.
+        parent: PathBuf,
+    },
+}
+
+impl DirectoryState {
+    /// The state a failed listing implies, for a caller that has already listed.
+    ///
+    /// The repositories list to read their specs, so asking them to classify first
+    /// would read the directory twice. This turns the listing they already did into
+    /// the same states [`FileSystem::directory_state`] returns.
+    ///
+    /// One classifier, not two: anything that is not a listing failure is handed to
+    /// [`FileSystem::directory_state`], so the two entry points cannot disagree
+    /// about one path.
+    pub fn from_listing<F: FileSystem + ?Sized>(
+        filesystem: &F,
+        path: &Path,
+        error: &io::Error,
+    ) -> Self {
+        match error.kind() {
+            // A directory that is there and will not open its entries. The one state
+            // only a listing can discover.
+            io::ErrorKind::PermissionDenied => Self::Unlistable(Arc::new(clone_io_error(error))),
+            _ => filesystem.directory_state(path),
+        }
+    }
+}
+
+// `io::Error` is not `Clone`, and both carrying variants need to be. Keeps the kind
+// and the message, which is all any sentence renders.
+fn clone_io_error(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
+}
+
 /// Port for file system operations. Every file system interaction in the selfie
 /// library goes through it.
 ///
@@ -221,6 +304,17 @@ pub trait FileSystem: Send + Sync {
 
     /// Whether `path` exists, as either a file or a directory.
     fn path_exists(&self, path: &Path) -> bool;
+
+    /// What is at a directory path: a directory, absent with a reason, unlistable, or
+    /// unknown.
+    ///
+    /// A dangling symlink is absent with a reason of its own rather than as an empty
+    /// path, and a symlink loop is unknown.
+    ///
+    /// Never returns [`Unlistable`](DirectoryState::Unlistable): discovering that needs
+    /// a listing, and a caller that has listed gets there through
+    /// [`DirectoryState::from_listing`].
+    fn directory_state(&self, path: &Path) -> DirectoryState;
 
     /// Expand `~` and environment variables in a path, for user-provided paths
     /// out of configuration files.

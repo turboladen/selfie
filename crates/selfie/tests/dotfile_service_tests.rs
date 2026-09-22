@@ -534,6 +534,12 @@ impl TestDirs {
 struct CancelOnReadOf(RealFileSystem, PathBuf, CancellationToken);
 
 impl selfie::fs::FileSystem for CancelOnReadOf {
+    // Delegated: this decorator's subject is when the token is canceled, not what is
+    // at a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.0.directory_state(path)
+    }
+
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         if path == self.1 {
             self.2.cancel();
@@ -632,6 +638,11 @@ impl selfie::fs::FileSystem for HomeAt {
         self.0.is_directory(path)
     }
 
+    // Delegated: this decorator's subject is the home directory, not directory state.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.0.directory_state(path)
+    }
+
     fn irregular_target_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -717,6 +728,12 @@ struct SymlinkAppearsAfterFirstLook {
 }
 
 impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
+    // Delegated: this decorator's subject is the symlink question's second answer, not
+    // what is at a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
     fn is_directory(
         &self,
         path: &selfie::fs::TargetPath,
@@ -816,6 +833,12 @@ struct SecondLookIsAnUnknownRefusal {
 }
 
 impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
+    // Delegated: this decorator's subject is the second symlink answer, not what is at
+    // a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
     fn symlink_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -922,6 +945,11 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         path: &selfie::fs::TargetPath,
     ) -> Result<bool, selfie::fs::FileSystemError> {
         self.inner.is_directory(path)
+    }
+
+    // Delegated: this decorator's subject is a failing write, not directory state.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
     }
 
     fn write_file_private(
@@ -6869,6 +6897,11 @@ mod symlinked_targets {
         impl FileSystem for BlindToSymlinks {
             fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
                 self.0.is_directory(path)
+            }
+
+            // Delegated: this decorator blinds the symlink check only.
+            fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+                self.0.directory_state(path)
             }
 
             fn symlink_refusal(&self, _path: &TargetPath) -> Option<FileSystemError> {
