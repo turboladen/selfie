@@ -1,8 +1,12 @@
 //! Reporting how far every tracked target has drifted from its source.
 //!
 //! Reads and compares; writes nothing, records nothing and resolves no conflict.
+//! A cancelled run stops between entries and says so to its caller, so a partial
+//! count is never read as a clean result.
 
 use std::path::Path;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::SelfieConfig,
@@ -28,7 +32,12 @@ use super::refusal::{
 use super::secret::secret_origin;
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
-/// Core logic for checking drift
+/// Core logic for checking drift, or `None` if the run was cancelled part way.
+///
+/// `None` says the loops were left early and the counts are partial. Only the
+/// caller can report that, and it must not infer it from the token: a run whose
+/// last entry completed is a whole answer even if the token was cancelled after it,
+/// and a collection failure is not a cancellation whatever the token says.
 ///
 /// `unreadable_repository` says a dotfiles repository could not be listed, so
 /// `packages` is missing whatever it holds.
@@ -37,9 +46,10 @@ pub(super) async fn handle_check_drift<F>(
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
+    token: &CancellationToken,
     unreadable_repository: bool,
     unloaded_specs: usize,
-) -> OperationResult
+) -> Option<OperationResult>
 where
     F: FileSystem,
 {
@@ -60,7 +70,21 @@ where
     // report missing every standalone dotfile must not read as all clear.
     let mut refused_count = usize::from(unreadable_repository);
 
+    // Three guards, one per case, because a `for` body's first statement never runs
+    // over an empty set: this one covers no packages at all, and a cancel arriving
+    // before or during the state load above. Without it such a run reported
+    // `DotfileDriftChecked` with zero counts and exit 0 — a clean bill of health for
+    // a check that examined nothing (found by Copilot on PR #185).
+    if token.is_cancelled() {
+        return None;
+    }
+
     for package in packages {
+        // Between packages, for a run whose entries are few or absent.
+        if token.is_cancelled() {
+            return None;
+        }
+
         // The same question apply asks, in the same place, so the two commands
         // cannot answer differently about one file. Drift reporting a package
         // clean while apply refuses it is worse than either answer alone: it
@@ -85,6 +109,13 @@ where
             .to_path_buf();
 
         for entry in &package.dotfiles_for_environment(config.environment()) {
+            // Between entries. Drift reads and checksums every tracked file, so
+            // over a large repository an unchecked run goes on long after the
+            // receiver is gone.
+            if token.is_cancelled() {
+                return None;
+            }
+
             total_count += 1;
 
             let source = match entry.content_source() {
@@ -244,12 +275,14 @@ where
         }
     }
 
-    OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-        drift_count,
-        total_count,
-        refused_count,
-        unloaded_specs,
-        environment: config.environment().to_string(),
-        steps_completed: StepCount::new(total_count, total_count),
-    })
+    Some(OperationResult::Success(
+        OperationSuccess::DotfileDriftChecked {
+            drift_count,
+            total_count,
+            refused_count,
+            unloaded_specs,
+            environment: config.environment().to_string(),
+            steps_completed: StepCount::new(total_count, total_count),
+        },
+    ))
 }

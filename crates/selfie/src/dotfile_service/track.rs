@@ -12,7 +12,8 @@ use crate::{
     fs::{
         filesystem::{FileSystem, FileSystemError},
         target::{
-            TargetRejection, deploy_target, expand_target_path, portable_target, repository_path,
+            TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
+            repository_path,
         },
     },
     package::{
@@ -20,6 +21,7 @@ use crate::{
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
         port::{PackageRepoError, PackageRepository},
     },
+    paths::{is_within, normalize_path},
 };
 
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
@@ -33,6 +35,65 @@ fn is_safe_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Why a name cannot be a directory under the repository, or `None` if it can.
+fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
+    if is_safe_name(name) {
+        return None;
+    }
+    Some(OperationFailure::Generic(format!(
+        "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+    )))
+}
+
+/// Why `name` cannot be the copy directory beside `spec_path`, or `None` if it can.
+///
+/// The directory must sit exactly one component below the spec's own, which rules
+/// out both a name that climbs out and one that resolves to the spec's directory
+/// itself.
+// A name reaches the package path from a spec file in the repository, and
+// `spec_name_from_file_name` splits on the last dot: `...yml` yields `..` and
+// `..yml` yields `.`. The first writes the copy outside the package directory and
+// records a `source:` starting `../` that apply's containment guard then refuses
+// forever; the second writes it beside the specs and records a `source:` naming a
+// directory that is not there.
+//
+// Deliberately not the standalone path's name rule, which governs a name the user
+// invents. A spec stem is whatever loads, so `python3.11.yml` is an ordinary
+// package that deploys today. Position separates those from `.` and `..`.
+fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFailure> {
+    let refuse = |why: &str| {
+        Some(OperationFailure::Generic(format!(
+            "Cannot track into '{name}': {why}"
+        )))
+    };
+
+    // A spec with no parent cannot have a directory beside it. `Path::parent` is
+    // `None` only for a root or an empty path, and an empty one also yields `Some`
+    // for a bare file name, so both are refused here rather than defaulted to `.`:
+    // defaulting would compose the copy against the process's working directory.
+    let Some(base_dir) = spec_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return refuse("its spec has no directory to write beside");
+    };
+
+    let composed = base_dir.join(name);
+    if !is_within(&composed, base_dir) {
+        return refuse(&format!(
+            "the copy would be written outside '{}'",
+            base_dir.display()
+        ));
+    }
+    if normalize_path(&composed) == normalize_path(base_dir) {
+        return refuse(&format!(
+            "the copy would be written straight into '{}' rather than a directory of its own",
+            base_dir.display()
+        ));
+    }
+    None
 }
 
 // Both track handlers word a refused track. Same `FileSystemError` apply renders,
@@ -74,6 +135,29 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
     )
 }
 
+/// Why an already-tracked target cannot be written to, or `None` if it can.
+///
+/// Asks both stats in the order the answer depends on and renders the sentence for
+/// whichever answers. `None` is the ordinary case and says nothing is wrong with the
+/// target.
+// Ask this rather than composing the two questions at a call site: which one
+// answers first is a rule of this module, and an adapter restating it can drift from
+// it.
+//
+// One answer, not both: a symlink to a socket satisfies each check and would
+// otherwise warn twice with the same sentence. `or_else` also skips the second stat
+// when the first already answered.
+pub fn already_tracked_refusal<F: FileSystem>(
+    filesystem: &F,
+    target: &TargetPath,
+) -> Option<String> {
+    filesystem
+        .symlink_refusal(target)
+        .or_else(|| filesystem.irregular_target_refusal(target))
+        .as_ref()
+        .map(already_tracked_refusal_warning)
+}
+
 /// How every command reports an already-tracked target it cannot write to.
 // A target already in the spec that is not a regular file.
 //
@@ -84,7 +168,7 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
 // kind: a repository-file entry is refused, while a secret-bearing one is written
 // by `write_file_private`, which replaces a symlink at the final component. This
 // breaks the silence and leaves the verdict to the command that has one.
-pub fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
+fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
     format!("{refusal}. The entry stays as it is, and this command wrote nothing.")
 }
 
@@ -271,10 +355,8 @@ where
     };
 
     // Reject names with path separators or traversal components
-    if !is_safe_name(name) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
-        )));
+    if let Some(failure) = unsafe_name_failure(name) {
+        return OperationResult::Failure(failure);
     }
 
     let dotfiles_dir = config.dotfiles_directory();
@@ -348,9 +430,26 @@ where
 
     let spec_path = package_blob.file_path().to_path_buf();
 
+    // The spec file's own stem, not the argument. Package lookup folds case, so
+    // `track-dotfile BAT` resolves `packages/bat.yml`, and the copy belongs beside
+    // that spec: composing the directory from the argument puts one package's
+    // copies under two directories on a case-sensitive filesystem, and on a
+    // case-insensitive one leaves the recorded `source:` spelling disagreeing with
+    // the directory it names.
+    //
+    // Lowercased, because that is what `spec_name_of` returns: a spec named
+    // `Bat.yml` puts its copies in `packages/bat/`. The directory and the recorded
+    // `source:` both read this one name, so they agree either way.
+    let Some(name) = crate::package::spec_name_of(&spec_path) else {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot track into '{}': its file name does not name a package",
+            spec_path.display()
+        )));
+    };
+
     handle_track(
         TrackSpec {
-            name: package_name.to_string(),
+            name,
             spec_path,
             package: package_blob.into_package(),
             kind: SpecKind::Existing,
@@ -420,16 +519,8 @@ where
         // the one track answer that reaches neither the refusals below nor a
         // deploy. With matching content drift answers `None` and has no line to
         // carry a reason either, so both commands were silent about it.
-        // One answer, not both: a symlink to a socket satisfies each check and
-        // would otherwise warn twice with the same sentence. `or_else` also skips
-        // the second stat when the first already answered.
-        if let Some(refusal) = filesystem
-            .symlink_refusal(&expanded_target)
-            .or_else(|| filesystem.irregular_target_refusal(&expanded_target))
-        {
-            sender
-                .send_warning(already_tracked_refusal_warning(&refusal))
-                .await;
+        if let Some(warning) = already_tracked_refusal(filesystem, &expanded_target) {
+            sender.send_warning(warning).await;
         }
 
         // The entry's own paths, not the argument and not the target: "already
@@ -515,15 +606,27 @@ where
         )));
     }
 
+    // Asked here, beside the directory it protects, so both entry points are covered
+    // by one check rather than by one each.
+    if let Some(failure) = unusable_copy_directory(&spec.spec_path, &spec.name) {
+        return OperationResult::Failure(failure);
+    }
+
     // The copy goes in a directory named for the spec, beside the spec itself:
     // `dotfiles/bat/config` for `dotfiles/bat.yml`, `packages/bat/config` for
     // `packages/bat.yml`. One formula, because the two entry points compose the
     // same shape from different roots.
-    let source_dir = spec
-        .spec_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(&spec.name);
+    //
+    // Refused above, so this cannot fire. Written as a refusal rather than a default
+    // because composing the copy against the process's working directory is the one
+    // outcome worth never reaching by accident.
+    let Some(base_dir) = spec.spec_path.parent() else {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Cannot track into '{}': its spec has no directory to write beside",
+            spec.spec_path.display()
+        )));
+    };
+    let source_dir = base_dir.join(&spec.name);
     let source_path = source_dir.join(&filename);
     let relative_source = format!("{}/{filename}", spec.name);
 
@@ -724,6 +827,55 @@ mod tests {
         let removal = remove_own_copy(&fs, copy, "gem: --no-document");
 
         assert!(matches!(removal, CopyRemoval::Unconfirmed));
+    }
+
+    // selfie-ir68.20. Which stat answers first is this module's rule, and the one
+    // function is where it is now decided, so this is where it is pinned. A target
+    // that is both a symlink and, through the link, an irregular file must be
+    // reported as the symlink, because the followed stat would send the user to
+    // inspect the file behind the link instead of the link they planted.
+    #[test]
+    fn an_already_tracked_refusal_reports_the_symlink_before_what_it_points_at() {
+        let target = repository_path(Path::new("/home/u/.config/app/config"));
+
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|path| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: Some(PathBuf::from("/tmp/pipe")),
+            })
+        });
+        // Answers too, and must not be the answer given.
+        fs.expect_irregular_target_refusal().returning(|path| {
+            Some(FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "named pipe (fifo)",
+            })
+        });
+
+        let warning = already_tracked_refusal(&fs, &target).expect("both stats answered");
+        assert!(
+            warning.contains("symlink"),
+            "the symlink must answer first: {warning}"
+        );
+        assert!(
+            !warning.contains("named pipe"),
+            "the followed stat answered instead of the link: {warning}"
+        );
+    }
+
+    // The control: an ordinary file is not refused, so a caller can tell the two
+    // apart. Without it, a function returning `Some` for everything would pass the
+    // test above.
+    #[test]
+    fn an_already_tracked_regular_file_is_not_refused() {
+        let target = repository_path(Path::new("/home/u/.config/app/config"));
+
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|_| None);
+        fs.expect_irregular_target_refusal().returning(|_| None);
+
+        assert!(already_tracked_refusal(&fs, &target).is_none());
     }
 
     // Exactly once, counted rather than checked for presence. The message leaves

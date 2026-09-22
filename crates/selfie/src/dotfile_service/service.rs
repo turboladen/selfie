@@ -385,6 +385,9 @@ where
         );
         let fs = self.filesystem.clone();
         let config = self.config.clone();
+        // The caller's live token, cloned as `apply_matching` clones it. A fresh
+        // one here would leave Ctrl+C with nothing to reach.
+        let token = self.cancellation_token.clone();
 
         Self::create_event_stream(move |tx| async move {
             let sender = EventSender::new_with_context(
@@ -397,7 +400,7 @@ where
 
             sender.send_started().await;
 
-            let result = match collected {
+            let outcome = match collected {
                 Ok((packages, warnings)) => {
                     // Carries on with the package dotfiles, and
                     // `handle_check_drift` counts the unlistable directory as a
@@ -418,17 +421,25 @@ where
                         &fs,
                         &config,
                         &sender,
+                        &token,
                         unreadable_repository,
                         unloaded_specs,
                     )
                     .await
                 }
-                Err(e) => OperationResult::Failure(
+                Err(e) => Some(OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
-                ),
+                )),
             };
 
-            sender.send_completed(result).await;
+            // The handler says whether it stopped part way; the token is not asked
+            // again here. A run whose last entry completed is a whole answer even if
+            // the token was cancelled after it, and a collection failure is a
+            // failure however the token stands.
+            match outcome {
+                Some(result) => sender.send_completed(result).await,
+                None => sender.send_canceled("Drift check cancelled").await,
+            }
         })
     }
 

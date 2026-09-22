@@ -1072,6 +1072,11 @@ Ctrl+C during `selfie apply` cancels a provider command that is still running, a
 without waiting out `command_timeout`. The run stops there and reports itself as cancelled; whatever
 had already been deployed stays deployed and stays recorded.
 
+Ctrl+C during `selfie dotfiles drift` stops the check between entries. Drift reads and checksums
+every tracked file, so on a large repository this is the difference between stopping and waiting out
+the whole tree. No drift counts are reported for a run stopped this way: a partial count would read
+as a clean bill of health for the entries it never reached.
+
 #### No deploy state, and what follows from it
 
 Ordinary dotfiles record a checksum of what was deployed, which is how selfie later distinguishes a

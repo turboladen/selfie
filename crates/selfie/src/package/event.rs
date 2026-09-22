@@ -1632,11 +1632,12 @@ impl OperationSuccess {
     /// MCP server's result envelope cannot disagree about it. An operation that
     /// completed while declining part of its work is still a completed
     /// operation — which is why this is a property of a success rather than a
-    /// failure — but a caller checking only the exit code has to be told
+    /// failure — so a caller that reads only the completion has to ask this to
+    /// learn that part of the work did not happen.
     ///
-    /// False for every other variant: no other operation counts refusals yet.
-    /// Add a variant here when one does, rather than teaching an adapter to
-    /// look for it.
+    /// True only for the variants [`refused_count`](Self::refused_count) answers for;
+    /// every other variant is false. Give a variant a refusal count when it gains
+    /// refusals, rather than teaching an adapter to look for them.
     #[must_use]
     pub fn had_refusals(&self) -> bool {
         self.refused_count().is_some_and(|count| count > 0)
@@ -1644,9 +1645,11 @@ impl OperationSuccess {
 
     /// How many refusals this success carries, for operations that count them.
     ///
-    /// `None` where the question does not apply, which is every variant but
-    /// [`DotfilesApplied`](Self::DotfilesApplied) — distinct from `Some(0)`, a
-    /// run that could have refused something and did not.
+    /// `None` where the question does not apply. Two variants answer it,
+    /// [`DotfilesApplied`](Self::DotfilesApplied) and
+    /// [`DotfileDriftChecked`](Self::DotfileDriftChecked) — and `Some(0)` is
+    /// distinct from `None`, being a run that could have refused something and
+    /// did not.
     ///
     /// Exists so an adapter can report the number rather than the fact. The MCP
     /// server puts it in its own JSON field: an assistant told only that
@@ -1654,10 +1657,30 @@ impl OperationSuccess {
     /// which is the failure mode structured output exists to avoid.
     #[must_use]
     pub fn refused_count(&self) -> Option<usize> {
+        // Every variant listed, with no catch-all: a variant added later is then a
+        // compile error here rather than a silent `None`, which is how an operation
+        // that counts refusals would otherwise reach an adapter reporting none.
         match self {
             OperationSuccess::DotfilesApplied { refused_count, .. }
             | OperationSuccess::DotfileDriftChecked { refused_count, .. } => Some(*refused_count),
-            _ => None,
+            OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => None,
         }
     }
 
