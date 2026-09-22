@@ -376,9 +376,10 @@ mod tests {
 
         let mut mock_repo = MockPackageRepository::new();
         mock_repo.expect_list_packages().returning(|| {
-            Err(PackageListError::PackageDirectoryNotFound(PathBuf::from(
-                "/nonexistent",
-            )))
+            Err(PackageListError::new(
+                PathBuf::from("/nonexistent"),
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Empty),
+            ))
         });
 
         let (sender, _rx) = test_sender();

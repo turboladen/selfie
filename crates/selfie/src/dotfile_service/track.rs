@@ -365,15 +365,9 @@ where
     // check precedes every target check and every write: tracking into a
     // directory that is not there would otherwise create it, turning a
     // mistyped `dotfiles_directory` into a new directory holding one spec.
-    //
-    // The listing answers whether the directory can be read; the port answers
-    // what is at the path. Both are needed, because a listing failure alone
-    // cannot tell an empty path from a dangling symlink from a loop, and those
-    // take three different sentences and two different remedies.
     if let Err(error) = dotfiles_repo.find_package_files(name) {
-        let state = filesystem.directory_state(&dotfiles_dir);
         return OperationResult::Failure(OperationFailure::Generic(
-            super::directory::track_listing_refusal(&dotfiles_dir, &state, &error),
+            super::directory::track_listing_refusal(&error),
         ));
     }
 

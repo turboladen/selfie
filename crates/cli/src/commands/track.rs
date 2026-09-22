@@ -127,13 +127,7 @@ pub(crate) async fn handle_track(
         }
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
-            if let Err(e) = namespace::validate_unique_name(
-                name,
-                &repo,
-                Some(&dotfiles_repo),
-                &selfie::fs::RealFileSystem,
-                &config.selfie_config().dotfiles_directory(),
-            ) {
+            if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
                 // The prefix blames the name, so it belongs only where the name is
                 // the problem. A dotfiles directory that would not read says nothing
                 // about the name, and telling the user they cannot use it sends them
@@ -316,18 +310,12 @@ struct ExistingTracker {
 /// entry is written into the dotfiles directory, and every state but a readable
 /// directory refuses that write. Saying it before the prompt is what keeps the user
 /// from choosing a name selfie cannot use.
-fn dotfiles_absence_warning(
-    filesystem: &RealFileSystem,
-    config: &CliConfig,
-    error: &PackageListError,
-) -> Option<String> {
-    let path = config.selfie_config().dotfiles_directory();
-    let state = error.directory_state(filesystem, &path);
-    Some(match state {
+fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Option<String> {
+    let path = error.path();
+    Some(match error.state().clone() {
         // A directory that classified cleanly and still would not list
         // could not be *listed*, which is the same answer an unlistable
-        // one gets. The path is named here as in every sibling arm: the
-        // listing error carries none of its own.
+        // one gets.
         DirectoryState::Directory => format!(
             "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {error}",
             path.display()
@@ -354,7 +342,7 @@ fn dotfiles_absence_warning(
                 path.display(),
                 reason.clause()
             );
-            if let Some(command) = reason.remedy(&path) {
+            if let Some(command) = reason.remedy(path) {
                 sentence.push(' ');
                 sentence.push_str(&command);
             }
@@ -417,7 +405,7 @@ fn find_existing_tracker(
             Ok(output) => output,
             Err(error) => {
                 if warn_when_unlisted
-                    && let Some(warning) = dotfiles_absence_warning(&fs, config, &error)
+                    && let Some(warning) = dotfiles_absence_warning(config, &error)
                 {
                     skipped.push(warning);
                 }

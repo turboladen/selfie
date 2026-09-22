@@ -44,8 +44,8 @@ fn the_deploying_commands_name_the_missing_directory_and_how_to_fix_it() {
         let output = output_of(&temp_dir, args);
 
         assert!(
-            output.contains("Package directory not found:"),
-            "{args:?} must name the condition, got: {output}"
+            output.contains("Package directory at") && output.contains("does not exist"),
+            "{args:?} must name the directory and what is there, got: {output}"
         );
         // All three remedies, because which one applies depends on why it is
         // missing and the command cannot know that.
@@ -119,7 +119,63 @@ fn a_listing_command_still_gives_the_same_guidance() {
     let output = output_of(&temp_dir, &["spec", "list"]);
 
     assert!(
-        output.contains("Package directory not found:") && output.contains("mkdir -p"),
+        output.contains("does not exist") && output.contains("mkdir -p"),
         "got: {output}"
+    );
+}
+
+// A package directory given as a relative path whose first component is a dangling
+// symlink. `mkdir -p` cannot create through the link, so the sentence names the link
+// as the component in the way and offers no creation command. The relative spelling
+// matters: its shallowest ancestor is the empty path, which must not read as missing.
+#[test]
+fn a_relative_package_directory_below_a_dangling_symlink_names_the_link() {
+    let temp_dir = setup_default_test_config();
+    std::os::unix::fs::symlink(temp_dir.path().join("nowhere"), temp_dir.path().join("dl"))
+        .unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .current_dir(temp_dir.path())
+        .args(["-p", "dl/pkgs", "spec", "list"])
+        .assert()
+        .get_output()
+        .clone();
+    let mut both = String::from_utf8(output.stderr).unwrap();
+    both.push_str(&String::from_utf8(output.stdout).unwrap());
+
+    assert!(
+        both.contains("dl/pkgs is below dl, which is not a directory"),
+        "the link must be named as the component in the way, got: {both}"
+    );
+    assert!(
+        !both.contains("mkdir -p"),
+        "mkdir -p cannot create through a dangling link, got: {both}"
+    );
+}
+
+// `spec remove` against a package directory that a file occupies says what is at the
+// directory. Blaming a spec that failed to load would send the user looking for a
+// file that is not there.
+#[test]
+fn spec_remove_names_a_file_at_the_package_directory() {
+    let temp_dir = sandbox_without_a_package_directory();
+    let packages = temp_dir.path().join("packages");
+    std::fs::write(&packages, "not a directory\n").unwrap();
+
+    let output = output_of(&temp_dir, &["spec", "remove", "vim"]);
+
+    // The configured path is canonicalized when the configuration loads, so the
+    // sentence names the resolved spelling.
+    let named = std::fs::canonicalize(&packages).unwrap();
+    assert!(
+        output.contains(&format!(
+            "Cannot remove 'vim': {} is not a directory, it is a regular file",
+            named.display()
+        )),
+        "the directory and what is there must be named, got: {output}"
+    );
+    assert!(
+        !output.contains("could not load that spec"),
+        "no spec failed to load, got: {output}"
     );
 }

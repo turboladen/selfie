@@ -21,6 +21,12 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
     let existing_package = match repo.get_package(package_name) {
         Ok(pkg) => Some(pkg),
         Err(e) if e.means_no_such_package() => None,
+        // Not about a file at this name, so "a file is already there" would be
+        // false. The error names the directory and what is at it.
+        Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
+            display.print_error(format!("Cannot edit '{package_name}': {e}"));
+            return 1;
+        }
         Err(e) => {
             display.print_error(format!(
                 "Cannot edit '{package_name}': a file is already there and selfie could not use \

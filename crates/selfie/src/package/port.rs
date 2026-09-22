@@ -248,8 +248,8 @@ pub enum PackageRepoError {
 impl PackageRepoError {
     /// Whether this means no package file exists at that name.
     ///
-    /// Two answers do: the name matched nothing, and the package directory is
-    /// not there at all. Every other error means selfie found something and
+    /// Two answers do: the name matched nothing, and nothing at all is at the
+    /// package directory's path. Every other error means selfie found something and
     /// could not use it -- a file that will not parse, one it refused to read,
     /// two files claiming the same name -- and each is a file that creating or
     /// templating over would destroy.
@@ -261,8 +261,10 @@ impl PackageRepoError {
         match self {
             Self::PackageError(e) => matches!(**e, PackageError::PackageNotFound { .. }),
             // A missing package directory holds no file to lose, and the write
-            // creates it -- `write_file_no_follow` runs `create_dir_all` first.
-            Self::PackageListError(PackageListError::PackageDirectoryNotFound(_)) => true,
+            // creates it -- `write_file_no_follow` runs `create_dir_all` first. A
+            // file or a dangling link at the path holds none either, but that
+            // `create_dir_all` fails against it, so it is not "no such package".
+            Self::PackageListError(listing) => listing.may_be_created(),
             _ => false,
         }
     }
@@ -304,32 +306,92 @@ impl From<PackageError> for PackageRepoError {
     }
 }
 
-/// Errors that can occur when listing packages
+/// A package directory that would not give up its specs, with what is at its path.
 ///
-/// Represents failures specific to package discovery and directory
-/// operations during package listing.
+/// One shape, not a set of variants, because every consumer needs the same two facts
+/// and the classification is made once, by the repository that did the listing. A
+/// consumer that re-derived it from an error kind reached a different answer for the
+/// same path: that is how an unreadable directory came out as "not found" and was
+/// offered a `mkdir -p` that cannot work.
 #[derive(Error, Debug, Clone)]
-pub enum PackageListError {
-    /// IO error occurred while reading the package directory
-    #[error("IO error reading package list: {0}")]
-    IoError(#[from] Arc<std::io::Error>),
-
-    /// The configured package directory does not exist
-    #[error("Directory does not exist: {}", _0.display())]
-    PackageDirectoryNotFound(PathBuf),
+#[error("{} {}", self.path.display(), self.clause())]
+pub struct PackageListError {
+    path: PathBuf,
+    state: DirectoryState,
 }
 
 impl PackageListError {
-    /// The state of the directory at `path`, which this error came from listing.
+    /// The error for `path`, whose state the caller has already determined.
+    #[must_use]
+    pub fn new(path: PathBuf, state: DirectoryState) -> Self {
+        Self { path, state }
+    }
+
+    /// The error for `path` after a listing of it failed with `error`.
     ///
-    /// Every consumer of a failed listing needs the same thing: what is actually at
-    /// the path. Taking the error's own wording instead is what let "not found"
-    /// stand for an empty path, a dangling symlink and a path below a file alike.
-    pub fn directory_state<F: FileSystem>(&self, filesystem: &F, path: &Path) -> DirectoryState {
-        match self {
-            Self::IoError(io) => DirectoryState::from_listing(filesystem, path, io),
-            // No error to interpret. The port answers from the path itself.
-            Self::PackageDirectoryNotFound(_) => filesystem.directory_state(path),
+    /// Classifies once, here, so the state travels with the error instead of every
+    /// consumer stating the path again and risking a different answer.
+    #[must_use]
+    pub fn from_listing<F: FileSystem + ?Sized>(
+        filesystem: &F,
+        path: PathBuf,
+        error: &std::io::Error,
+    ) -> Self {
+        let state = DirectoryState::from_listing(filesystem, &path, error);
+        Self { path, state }
+    }
+
+    /// The directory this error is about.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// What is at that path, as the repository classified it.
+    #[must_use]
+    pub fn state(&self) -> &DirectoryState {
+        &self.state
+    }
+
+    /// Whether nothing that can hold a spec is at the path.
+    ///
+    /// The question a caller asks to mean "this directory holds no names". An
+    /// unlistable or unclassifiable path is not absent: it may be hiding specs, so a
+    /// name check that treated it as empty would answer without looking. Whether the
+    /// directory may be created is [`may_be_created`](Self::may_be_created).
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        matches!(self.state, DirectoryState::Absent(_))
+    }
+
+    /// Whether nothing at all is at the path, so the directory may be created there.
+    ///
+    /// Narrower than [`is_absent`](Self::is_absent). A file, a dangling symlink or a
+    /// path below something that is not a directory also holds no specs, but a write
+    /// that creates the directory fails against each of them, so a caller about to
+    /// create must refuse those.
+    #[must_use]
+    pub fn may_be_created(&self) -> bool {
+        matches!(
+            self.state,
+            DirectoryState::Absent(crate::fs::AbsentReason::Empty)
+        )
+    }
+
+    /// Why the listing produced nothing, as a clause that follows the path.
+    ///
+    /// The absent reasons come from
+    /// [`AbsentReason::clause`](crate::fs::AbsentReason::clause), so a listing failure
+    /// and a directory warning about one path describe it in the same words.
+    #[must_use]
+    pub fn clause(&self) -> String {
+        match &self.state {
+            DirectoryState::Absent(reason) => reason.clause(),
+            DirectoryState::Unlistable(error) => format!("could not be listed: {error}"),
+            DirectoryState::Unknown(error) => format!("could not be checked: {error}"),
+            // A path the port calls a directory whose listing still failed. The
+            // listing is the more recent answer, so it may be hiding entries.
+            DirectoryState::Directory => "could not be listed".to_string(),
         }
     }
 }
@@ -782,20 +844,55 @@ mod tests {
             .with(eq("error-package"))
             .times(1)
             .returning(|_| {
-                Err(PackageRepoError::PackageListError(
-                    PackageListError::PackageDirectoryNotFound(PathBuf::from("/nonexistent")),
-                ))
+                Err(PackageRepoError::PackageListError(PackageListError::new(
+                    PathBuf::from("/nonexistent"),
+                    DirectoryState::Absent(crate::fs::AbsentReason::Empty),
+                )))
             });
 
         let result = mock_repo.find_dependent_packages("error-package");
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            PackageRepoError::PackageListError(PackageListError::PackageDirectoryNotFound(_)) => {
+            PackageRepoError::PackageListError(listing) if listing.is_absent() => {
                 // Expected error type
             }
-            _ => panic!("Expected PackageDirectoryNotFound error"),
+            other => panic!("expected an absent package directory, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod may_be_created_tests {
+    use super::*;
+    use crate::fs::AbsentReason;
+
+    // Only an empty path may be created. The other absent reasons hold no specs,
+    // which `is_absent` still answers, but a directory cannot be created through
+    // any of them.
+    #[test]
+    fn only_an_empty_path_may_be_created() {
+        let error = |state| PackageListError::new(PathBuf::from("/packages"), state);
+
+        assert!(error(DirectoryState::Absent(AbsentReason::Empty)).may_be_created());
+        for reason in [
+            AbsentReason::Occupied {
+                kind: "regular file",
+            },
+            AbsentReason::DanglingSymlink { points_to: None },
+            AbsentReason::ParentNotADirectory {
+                parent: PathBuf::from("/file"),
+            },
+        ] {
+            let listing = error(DirectoryState::Absent(reason));
+            assert!(listing.is_absent(), "{listing:?}");
+            assert!(!listing.may_be_created(), "{listing:?}");
+            assert!(
+                !PackageRepoError::PackageListError(listing).means_no_such_package(),
+                "a path that cannot be created is not \"no such package\""
+            );
+        }
+        assert!(!error(DirectoryState::Directory).may_be_created());
     }
 }
 

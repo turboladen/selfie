@@ -36,13 +36,7 @@ pub(crate) async fn handle_track(
     // the name is free, so the check refuses rather than answering.
     let repo = create_package_repository(config);
     let dotfiles_repo = create_dotfiles_repository(config);
-    if let Err(e) = namespace::validate_unique_name(
-        name,
-        &repo,
-        Some(&dotfiles_repo),
-        &selfie::fs::RealFileSystem,
-        &config.selfie_config().dotfiles_directory(),
-    ) {
+    if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
         // The prefix blames the name, so it belongs only where the name is the
         // problem. A dotfiles directory that would not read says nothing about the
         // name the user chose, and telling them they cannot use it sends them off to

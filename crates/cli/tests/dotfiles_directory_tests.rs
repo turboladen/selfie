@@ -542,3 +542,67 @@ fn dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read() {
         "the name is not what failed, got:\n{combined}"
     );
 }
+
+// `selfie spec create` against an unreadable dotfiles directory prints the name
+// check's own sentence, which leads with the directory's path. A noun in front of
+// that path reads as two subjects.
+//
+// Skipped for a user who can read a 0o000 directory, since the fixture cannot be
+// built for root and a pass would mean nothing.
+#[test]
+fn spec_create_names_an_unreadable_dotfiles_directory_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read_dir(&dotfiles).is_ok() {
+        eprintln!("SKIP spec_create_names_an_unreadable_dotfiles_directory_once");
+        return;
+    }
+
+    let output = sandboxed_command(&temp)
+        .args(["spec", "create", "vim"])
+        .output()
+        .unwrap();
+
+    // Restored before the assertions, so a failure does not leave an unreadable
+    // directory behind for the temp dir's own cleanup to trip over.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "got:\n{combined}");
+    assert!(
+        combined.contains(&format!(
+            "Cannot create 'vim': cannot tell whether the name is already taken: {}",
+            dotfiles.display()
+        )),
+        "the refusal must lead with the directory's path, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains(&format!("dotfiles directory {}", dotfiles.display())),
+        "a noun in front of the path reads as two subjects, got:\n{combined}"
+    );
+}

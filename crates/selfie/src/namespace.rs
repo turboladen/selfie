@@ -7,12 +7,7 @@
 
 use std::fmt;
 
-use std::path::Path;
-
-use crate::{
-    fs::{DirectoryState, FileSystem},
-    package::port::PackageRepository,
-};
+use crate::package::port::{PackageListError, PackageRepository};
 
 /// Location where a name was found during namespace validation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +56,9 @@ pub enum NamespaceValidationError {
     /// Failed to look up names in the required package repository
     LookupFailed(String),
     /// The dotfiles directory could not be read, so whether the name is already
-    /// taken is unknown.
-    DotfilesDirectoryUnreadable(String),
+    /// taken is unknown. The listing error names the directory and says what is at
+    /// it.
+    DotfilesDirectoryUnreadable(PackageListError),
 }
 
 impl fmt::Display for NamespaceValidationError {
@@ -70,10 +66,12 @@ impl fmt::Display for NamespaceValidationError {
         match self {
             Self::Conflict(c) => write!(f, "{c}"),
             Self::LookupFailed(msg) => write!(f, "namespace lookup failed: {msg}"),
-            Self::DotfilesDirectoryUnreadable(msg) => write!(
-                f,
-                "cannot tell whether the name is already taken: the dotfiles directory {msg}"
-            ),
+            // `error` leads with the directory's own path, so no noun goes in front
+            // of it: "the dotfiles directory /home/me/dots could not be listed" reads
+            // as two subjects.
+            Self::DotfilesDirectoryUnreadable(error) => {
+                write!(f, "cannot tell whether the name is already taken: {error}")
+            }
         }
     }
 }
@@ -88,16 +86,16 @@ impl From<NamespaceConflict> for NamespaceValidationError {
 
 /// Validate that a name is unique across both the package and dotfiles repositories.
 ///
-/// `dotfiles_directory` is where `dotfiles_repo` reads from, classified through
-/// `filesystem` when a listing fails.
+/// A failed dotfiles listing is judged by the state its error carries.
 ///
 /// # Errors
 ///
 /// [`NamespaceValidationError::Conflict`] if the name is taken in either
 /// directory. [`NamespaceValidationError::LookupFailed`] if the package
 /// directory could not be read. [`NamespaceValidationError::DotfilesDirectoryUnreadable`]
-/// if the dotfiles directory could not be read or classified, because a name in a
-/// directory selfie cannot read is a name it cannot report as free.
+/// if the dotfiles directory's listing failed and its error does not report the
+/// directory absent, because a name in a directory selfie cannot read is a name it
+/// cannot report as free.
 ///
 /// A dotfiles directory that is genuinely not there holds no names, so it is not
 /// an error: `Ok(())` says the name is free, and the caller may create it.
@@ -105,8 +103,6 @@ pub fn validate_unique_name(
     name: &str,
     package_repo: &impl PackageRepository,
     dotfiles_repo: Option<&impl PackageRepository>,
-    filesystem: &impl FileSystem,
-    dotfiles_directory: &Path,
 ) -> Result<(), NamespaceValidationError> {
     // Check packages directory — errors propagate (required repo)
     let files = package_repo
@@ -134,27 +130,14 @@ pub fn validate_unique_name(
             }
             Ok(_) => {}
             Err(error) => {
-                let state = error.directory_state(filesystem, dotfiles_directory);
-                return match state {
-                    // Nothing is at the path, so it holds no names and the name is
-                    // free. The one state that answers the question.
-                    DirectoryState::Absent(_) => Ok(()),
-                    // A directory that classified cleanly and still would not list
-                    // could not be *listed*, which is the same answer as an
-                    // unlistable one. Only a path selfie could not classify is
-                    // unchecked, and saying so about a real directory claims less
-                    // than is known.
-                    DirectoryState::Unlistable(_) | DirectoryState::Directory => {
-                        Err(NamespaceValidationError::DotfilesDirectoryUnreadable(
-                            format!("could not be listed: {error}"),
-                        ))
-                    }
-                    DirectoryState::Unknown(_) => {
-                        Err(NamespaceValidationError::DotfilesDirectoryUnreadable(
-                            format!("could not be checked: {error}"),
-                        ))
-                    }
-                };
+                // Nothing that can hold a spec is at the path, so it holds no names
+                // and this one is free. Every other state may be hiding a spec that
+                // already carries it, and the error words which and names the
+                // directory, so nothing is re-derived here.
+                if error.is_absent() {
+                    return Ok(());
+                }
+                return Err(NamespaceValidationError::DotfilesDirectoryUnreadable(error));
             }
         }
     }
@@ -166,22 +149,13 @@ pub fn validate_unique_name(
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use tempfile::{TempDir, tempdir};
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
-        fs::RealFileSystem,
+        fs::{AbsentReason, DirectoryState, RealFileSystem},
         package::port::{MockPackageRepository, PackageListError},
     };
-
-    // A path with nothing at it. Every test whose subject is the name rather than
-    // the directory uses this, so the directory classifies as absent and the
-    // dotfiles half answers from the repository alone.
-    fn absent_dotfiles() -> (TempDir, PathBuf) {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("dotfiles");
-        (dir, path)
-    }
 
     #[test]
     fn test_unique_name_passes_when_not_found() {
@@ -195,14 +169,7 @@ mod tests {
             .expect_find_package_files()
             .returning(|_| Ok(vec![]));
 
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "new-pkg",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &path,
-        );
+        let result = validate_unique_name("new-pkg", &package_repo, Some(&dotfiles_repo));
         assert!(result.is_ok());
     }
 
@@ -213,14 +180,8 @@ mod tests {
             .expect_find_package_files()
             .returning(|_| Ok(vec![PathBuf::from("/packages/existing.yaml")]));
 
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "existing",
-            &package_repo,
-            None::<&MockPackageRepository>,
-            &RealFileSystem,
-            &path,
-        );
+        let result =
+            validate_unique_name("existing", &package_repo, None::<&MockPackageRepository>);
         assert!(matches!(
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
@@ -242,14 +203,7 @@ mod tests {
             .expect_find_package_files()
             .returning(|_| Ok(vec![PathBuf::from("/dotfiles/existing.yaml")]));
 
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "existing",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &path,
-        );
+        let result = validate_unique_name("existing", &package_repo, Some(&dotfiles_repo));
         assert!(matches!(
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
@@ -267,14 +221,7 @@ mod tests {
             .returning(|_| Ok(vec![]));
 
         let no_dotfiles: Option<&MockPackageRepository> = None;
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "new-pkg",
-            &package_repo,
-            no_dotfiles,
-            &RealFileSystem,
-            &path,
-        );
+        let result = validate_unique_name("new-pkg", &package_repo, no_dotfiles);
         assert!(result.is_ok());
     }
 
@@ -282,19 +229,13 @@ mod tests {
     fn test_package_repo_error_propagates() {
         let mut package_repo = MockPackageRepository::new();
         package_repo.expect_find_package_files().returning(|_| {
-            Err(PackageListError::PackageDirectoryNotFound(
+            Err(PackageListError::new(
                 "/packages".into(),
+                DirectoryState::Absent(AbsentReason::Empty),
             ))
         });
 
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "foo",
-            &package_repo,
-            None::<&MockPackageRepository>,
-            &RealFileSystem,
-            &path,
-        );
+        let result = validate_unique_name("foo", &package_repo, None::<&MockPackageRepository>);
         assert!(matches!(
             result,
             Err(NamespaceValidationError::LookupFailed(_))
@@ -313,19 +254,13 @@ mod tests {
 
         let mut dotfiles_repo = MockPackageRepository::new();
         dotfiles_repo.expect_find_package_files().returning(|_| {
-            Err(PackageListError::PackageDirectoryNotFound(
+            Err(PackageListError::new(
                 "/dotfiles".into(),
+                DirectoryState::Absent(AbsentReason::Empty),
             ))
         });
 
-        let (_guard, path) = absent_dotfiles();
-        let result = validate_unique_name(
-            "foo",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &path,
-        );
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
         assert!(result.is_ok());
     }
 
@@ -335,54 +270,33 @@ mod tests {
     // the name expecting a different answer.
     #[test]
     fn a_dotfiles_directory_that_cannot_be_listed_refuses_rather_than_reporting_the_name_free() {
-        let dir = tempdir().unwrap();
-        let unreadable = dir.path().join("dotfiles");
-        std::fs::create_dir(&unreadable).unwrap();
-        std::fs::set_permissions(
-            &unreadable,
-            std::os::unix::fs::PermissionsExt::from_mode(0o000),
-        )
-        .unwrap();
-        // Root reads a 0o000 directory, so the fixture cannot be built for a
-        // privileged user and the case is skipped rather than passing vacuously.
-        if std::fs::read_dir(&unreadable).is_ok() {
-            eprintln!("SKIP: this user can list a 0o000 directory");
-            return;
-        }
-
         let mut package_repo = MockPackageRepository::new();
         package_repo
             .expect_find_package_files()
             .returning(|_| Ok(vec![]));
         let mut dotfiles_repo = MockPackageRepository::new();
         dotfiles_repo.expect_find_package_files().returning(|_| {
-            Err(PackageListError::IoError(Arc::new(std::io::Error::from(
-                std::io::ErrorKind::PermissionDenied,
-            ))))
+            Err(PackageListError::new(
+                "/dotfiles".into(),
+                DirectoryState::Unlistable(Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ))
         });
 
-        let result = validate_unique_name(
-            "foo",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &unreadable,
-        );
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
 
-        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(message)) = result else {
+        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(error)) = result else {
             panic!("expected a refusal, got {result:?}");
         };
+        let message = error.to_string();
         assert!(message.contains("could not be listed"), "{message}");
     }
 
-    // The case a binary diff caught and no unit test did: a real directory whose
-    // listing fails arrives as a `DirectoryState::Directory`, because the path
-    // classifies perfectly well. It could not be *listed*, and saying it could not be
-    // *checked* claims less than selfie knows.
-    //
-    // A 0o000 directory reaches this through the repository, whose own error kind is
-    // not preserved by the time it arrives, so the classification answers "directory"
-    // rather than "unlistable".
+    // A real directory whose listing fails with anything but a permission error
+    // arrives as `DirectoryState::Directory`, because the path classifies perfectly
+    // well. It could not be *listed*, and saying it could not be *checked* claims
+    // less than selfie knows.
     #[test]
     fn a_directory_whose_listing_failed_says_it_could_not_be_listed() {
         let dir = tempdir().unwrap();
@@ -392,25 +306,24 @@ mod tests {
             .expect_find_package_files()
             .returning(|_| Ok(vec![]));
         let mut dotfiles_repo = MockPackageRepository::new();
-        // `Other` rather than `PermissionDenied`, which is what a wrapped repository
-        // error looks like by the time the name check sees it.
-        dotfiles_repo.expect_find_package_files().returning(|_| {
-            Err(PackageListError::IoError(Arc::new(std::io::Error::other(
-                "Permission denied (os error 13)",
-            ))))
-        });
+        // `Directory` is what the repository records for a path that classified cleanly
+        // and whose listing still failed, and it is the arm this test is about.
+        let listed = dir.path().to_path_buf();
+        dotfiles_repo
+            .expect_find_package_files()
+            .returning(move |_| {
+                Err(PackageListError::new(
+                    listed.clone(),
+                    DirectoryState::Directory,
+                ))
+            });
 
-        let result = validate_unique_name(
-            "foo",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            dir.path(),
-        );
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
 
-        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(message)) = result else {
+        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(error)) = result else {
             panic!("expected a refusal, got {result:?}");
         };
+        let message = error.to_string();
         assert!(message.contains("could not be listed"), "{message}");
         assert!(!message.contains("could not be checked"), "{message}");
     }
@@ -431,22 +344,23 @@ mod tests {
         // The error a real listing gives this shape, rather than a chosen kind: a
         // hand-picked `PermissionDenied` classifies as unlistable and would test
         // the arm above instead of this one.
-        let listing_error = Arc::new(std::fs::read_dir(&link).unwrap_err());
+        let looped = link.clone();
         dotfiles_repo
             .expect_find_package_files()
-            .returning(move |_| Err(PackageListError::IoError(listing_error.clone())));
+            .returning(move |_| {
+                Err(PackageListError::from_listing(
+                    &RealFileSystem,
+                    looped.clone(),
+                    &std::fs::read_dir(&looped).unwrap_err(),
+                ))
+            });
 
-        let result = validate_unique_name(
-            "foo",
-            &package_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &link,
-        );
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
 
-        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(message)) = result else {
+        let Err(NamespaceValidationError::DotfilesDirectoryUnreadable(error)) = result else {
             panic!("expected a refusal, got {result:?}");
         };
+        let message = error.to_string();
         assert!(message.contains("could not be checked"), "{message}");
     }
 
@@ -454,10 +368,14 @@ mod tests {
     // name is already taken" is the whole point: the name may be fine.
     #[test]
     fn the_unreadable_refusal_says_the_answer_is_unknown_not_that_the_name_is_taken() {
-        let rendered = NamespaceValidationError::DotfilesDirectoryUnreadable(
-            "could not be listed: denied".to_string(),
-        )
-        .to_string();
+        let rendered =
+            NamespaceValidationError::DotfilesDirectoryUnreadable(PackageListError::new(
+                "/dotfiles".into(),
+                DirectoryState::Unlistable(Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ))
+            .to_string();
 
         assert!(
             rendered.contains("cannot tell whether the name is already taken"),

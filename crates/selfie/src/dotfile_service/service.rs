@@ -140,16 +140,12 @@ where
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
-        filesystem: &F,
-        dotfiles_directory: &std::path::Path,
         dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         Self::collect_packages(
             package_repo,
             dotfiles_repo,
             NameCollision::PackagesWin,
-            filesystem,
-            dotfiles_directory,
             dotfiles_directory_is_expected,
         )
     }
@@ -167,8 +163,6 @@ where
         package_repo: &R,
         dotfiles_repo: Option<&R>,
         collision: NameCollision,
-        filesystem: &F,
-        dotfiles_directory: &std::path::Path,
         dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
@@ -205,8 +199,6 @@ where
                     packages.extend(output.valid_packages().cloned());
                 }
                 Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
-                    filesystem,
-                    dotfiles_directory,
                     error,
                     dotfiles_directory_is_expected,
                 ) {
@@ -302,8 +294,6 @@ where
             None => Self::collect_all_packages(
                 &self.package_repository,
                 self.dotfiles_repository.as_ref(),
-                &self.filesystem,
-                &self.config.dotfiles_directory(),
                 self.config.dotfiles_directory_is_expected(),
             )
             .map_err(OperationFailure::PackageList),
@@ -396,8 +386,6 @@ where
         let collected = Self::collect_all_packages(
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
-            &self.filesystem,
-            &self.config.dotfiles_directory(),
             self.config.dotfiles_directory_is_expected(),
         );
         let fs = self.filesystem.clone();
@@ -468,8 +456,6 @@ where
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
             NameCollision::KeepBoth,
-            &self.filesystem,
-            &self.config.dotfiles_directory(),
             self.config.dotfiles_directory_is_expected(),
         );
         let config = self.config.clone();

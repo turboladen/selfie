@@ -61,27 +61,11 @@ impl<F: FileSystem> YamlPackageRepository<F> {
     fn unlistable_directory_error(&self) -> Option<PackageListError> {
         match self.fs.directory_state(&self.package_dir) {
             DirectoryState::Directory => None,
-            // Nothing that can hold a spec is at the path, whatever is there. The
-            // reason is not flattened away: a caller asks the error for it through
-            // `PackageListError::directory_state`.
-            DirectoryState::Absent(_) => Some(PackageListError::PackageDirectoryNotFound(
-                self.package_dir.clone(),
-            )),
-            // The path is not answering. The user has two configured directories to
-            // choose between and the classification's error names neither, so the
-            // message is rebuilt with this one's path and the same kind.
-            //
-            // `Unlistable` is grouped in to keep the match total, not because this call
-            // can produce it: only a listing discovers that a directory will not open
-            // its entries, and `directory_state` stats the path. A `0o000` package
-            // directory is a `Directory` here and fails at the listing instead, which
-            // is where `from_listing` turns its `PermissionDenied` into `Unlistable`.
-            DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
-                Some(PackageListError::IoError(Arc::new(std::io::Error::new(
-                    error.kind(),
-                    format!("{}: {error}", self.package_dir.display()),
-                ))))
-            }
+            // Every other state travels whole. The error carries this directory's path
+            // and the classification made here, so no consumer stats the path again:
+            // that is how one of them came to call an unreadable directory "not found"
+            // and offer a `mkdir -p` that cannot work.
+            state => Some(PackageListError::new(self.package_dir.clone(), state)),
         }
     }
 
@@ -354,7 +338,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         }
 
         // Get all YAML files in the directory
-        let yaml_files = self.list_yaml_files(&self.package_dir).map_err(Arc::new)?;
+        let yaml_files = self
+            .list_yaml_files(&self.package_dir)
+            .map_err(|e| PackageListError::from_listing(&self.fs, self.package_dir.clone(), &e))?;
 
         // Parse each file into a Package
         let mut packages: Vec<Result<Package, PackageParseError>> = Vec::new();
@@ -375,7 +361,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             .fs
             .list_directory(&self.package_dir)
             .map_err(preserving_kind)
-            .map_err(|e| PackageListError::from(Arc::new(e)))?;
+            .map_err(|e| PackageListError::from_listing(&self.fs, self.package_dir.clone(), &e))?;
 
         Ok(Self::filter_matching_packages(name, entries))
     }
@@ -697,12 +683,10 @@ mod tests {
             YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
         let result = repo.get_package("ripgrep");
 
-        assert!(matches!(
-            result,
-            Err(PackageRepoError::PackageListError(
-                PackageListError::PackageDirectoryNotFound(_)
-            ))
-        ));
+        assert!(
+            matches!(&result, Err(PackageRepoError::PackageListError(listing)) if listing.is_absent()),
+            "expected an absent package directory, got {result:?}"
+        );
     }
 
     #[test]
@@ -1050,12 +1034,9 @@ mod tests {
         let result = repo.list_packages();
 
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PackageListError::PackageDirectoryNotFound(path) => {
-                assert_eq!(path, nonexistent_dir);
-            }
-            PackageListError::IoError(_) => panic!("Expected PackageDirectoryNotFound error"),
-        }
+        let error = result.unwrap_err();
+        assert!(error.is_absent(), "expected an absence, got {error:?}");
+        assert_eq!(error.path(), nonexistent_dir);
     }
 
     // An unreadable directory must arrive as `Unlistable`, not as `Directory`.
@@ -1090,7 +1071,7 @@ mod tests {
             SpecOrigin::PackageDirectory,
         );
         let error = repo.list_packages().unwrap_err();
-        let state = error.directory_state(&RealFileSystem, &locked);
+        let state = error.state().clone();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(
@@ -1142,7 +1123,7 @@ mod tests {
                 SpecOrigin::PackageDirectory,
             );
             let error = repo.list_packages().unwrap_err();
-            match error.directory_state(&RealFileSystem, &path) {
+            match error.state().clone() {
                 DirectoryState::Absent(reason) => assert_eq!(
                     name(&reason),
                     expected,
@@ -1173,12 +1154,15 @@ mod tests {
 
         let repo = YamlPackageRepository::new(fs, unreachable_dir, SpecOrigin::PackageDirectory);
 
-        match repo.list_packages() {
-            Err(PackageListError::IoError(error)) => {
-                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-            }
-            other => panic!("an unreachable directory must be an IO error, got: {other:?}"),
-        }
+        let error = repo.list_packages().unwrap_err();
+        assert!(
+            !error.is_absent(),
+            "a path selfie could not stat is not an absence: {error:?}"
+        );
+        assert!(
+            matches!(error.state(), DirectoryState::Unknown(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+            "the kind must survive: {error:?}"
+        );
     }
 
     #[test]
@@ -1893,8 +1877,11 @@ environments:
                 .contains("Multiple packages found")
         );
 
-        // Test PackageDirectoryNotFound error
-        let dir_error = PackageListError::PackageDirectoryNotFound(package_dir.clone());
+        // An absent package directory names its path and what is there instead.
+        let dir_error = PackageListError::new(
+            package_dir.clone(),
+            DirectoryState::Absent(crate::fs::AbsentReason::Empty),
+        );
         assert!(dir_error.to_string().contains("/packages"));
         assert!(dir_error.to_string().contains("does not exist"));
     }

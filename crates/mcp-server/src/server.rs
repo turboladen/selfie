@@ -334,10 +334,8 @@ impl SelfieServer {
             &params.package,
             &pkg_repo,
             Some(&dotfiles_repo),
-            &RealFileSystem,
-            &self.config.dotfiles_directory(),
         ) {
-            return namespace_refusal(e, &self.config.dotfiles_directory());
+            return namespace_refusal(e);
         }
 
         let file_path = self
@@ -719,14 +717,10 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
             SpecOrigin::PackageDirectory,
         );
         let dotfiles_repo = dotfiles_repository(&self.config);
-        if let Err(e) = selfie::namespace::validate_unique_name(
-            &params.name,
-            &pkg_repo,
-            Some(&dotfiles_repo),
-            &RealFileSystem,
-            &self.config.dotfiles_directory(),
-        ) {
-            return namespace_refusal(e, &self.config.dotfiles_directory());
+        if let Err(e) =
+            selfie::namespace::validate_unique_name(&params.name, &pkg_repo, Some(&dotfiles_repo))
+        {
+            return namespace_refusal(e);
         }
 
         let stream = self
@@ -866,17 +860,16 @@ impl ServerHandler for SelfieServer {
 /// sends an agent round a loop of names that all fail identically.
 fn namespace_refusal(
     error: selfie::namespace::NamespaceValidationError,
-    dotfiles_directory: &std::path::Path,
 ) -> Result<CallToolResult, McpError> {
     use selfie::namespace::NamespaceValidationError as Invalid;
 
-    match error {
-        Invalid::DotfilesDirectoryUnreadable(_) => {
+    match &error {
+        Invalid::DotfilesDirectoryUnreadable(listing) => {
             let payload = serde_json::json!({
                 "result": {
                     "status": "refused",
                     "reason": error.to_string(),
-                    "dotfiles_directory": dotfiles_directory.display().to_string(),
+                    "dotfiles_directory": listing.path().display().to_string(),
                 },
                 "data": [],
             });

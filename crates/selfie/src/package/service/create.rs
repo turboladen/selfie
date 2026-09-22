@@ -7,7 +7,7 @@ use crate::{
     package::{
         Package,
         event::{EventSender, OperationResult, OperationSuccess},
-        port::PackageRepository,
+        port::{PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
 };
@@ -47,6 +47,15 @@ where
             return OperationResult::Failure(error.into());
         }
         Err(e) if e.means_no_such_package() => {}
+        // Not about a file at this name: the package directory cannot be listed, or
+        // something that is not a directory holds its path. The error's own sentence
+        // names the directory and what is there.
+        Err(e @ PackageRepoError::PackageListError(_)) => {
+            sender
+                .send_warning(format!("Refusing to create '{package_name}': {e}"))
+                .await;
+            return OperationResult::Failure(e.into());
+        }
         Err(e) => {
             sender
                 .send_warning(format!(
@@ -281,9 +290,10 @@ mod tests {
         let mut repo = MockPackageRepository::new();
         repo.expect_path_is_occupied().returning(|_| false);
         repo.expect_get_package().returning(|_| {
-            Err(PackageRepoError::PackageListError(
-                PackageListError::PackageDirectoryNotFound(PathBuf::from("/packages")),
-            ))
+            Err(PackageRepoError::PackageListError(PackageListError::new(
+                PathBuf::from("/packages"),
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Empty),
+            )))
         });
         repo.expect_save_package().times(1).returning(|_, _| Ok(()));
 
@@ -292,6 +302,41 @@ mod tests {
         assert!(
             matches!(result, OperationResult::Success(_)),
             "a missing package directory is not a file to overwrite, got: {result:?}"
+        );
+    }
+
+    // A file at the package directory's path holds no spec, but the save's
+    // `create_dir_all` fails against it, so the create refuses before writing and
+    // says what is there.
+    #[tokio::test]
+    async fn create_refuses_when_a_file_holds_the_package_directory() {
+        let (_temp, config, package) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|_| {
+            Err(PackageRepoError::PackageListError(PackageListError::new(
+                PathBuf::from("/packages"),
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            )))
+        });
+        repo.expect_path_is_occupied().times(0);
+        // The assertion that matters: the write that would reach `create_dir_all`
+        // never happens.
+        repo.expect_save_package().times(0);
+
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        let OperationResult::Failure(failure) = result else {
+            panic!("a file at the package directory must refuse, got: {result:?}");
+        };
+        let rendered = failure.to_string();
+        assert!(
+            rendered.contains("/packages is not a directory, it is a regular file"),
+            "the refusal must name the directory and what is there, got: {rendered}"
         );
     }
 }

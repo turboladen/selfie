@@ -38,6 +38,12 @@ pub(crate) async fn handle_remove(
             display.print_error(format!("Package '{package_name}' not found."));
             return 1;
         }
+        // Not about a file at this name, so "could not load that spec" would be false:
+        // there may be no spec at all. The error names the directory and what is at it.
+        Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
+            display.print_error(format!("Cannot remove '{package_name}': {e}"));
+            return 1;
+        }
         // Everything else the repository can answer here: a file that will not
         // parse, one selfie declined to open, several files claiming the name,
         // a directory it could not list. The sentence must fit all of them, so

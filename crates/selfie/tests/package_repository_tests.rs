@@ -111,7 +111,6 @@ environments:
 // is an IO error rather than a directory the user should create.
 #[test]
 fn a_package_directory_behind_an_unreadable_parent_is_not_reported_missing() {
-    use selfie::package::port::PackageListError;
     use std::os::unix::fs::PermissionsExt as _;
 
     // Restores the parent's mode when dropped, so a panic before the end of the
@@ -147,16 +146,17 @@ fn a_package_directory_behind_an_unreadable_parent_is_not_reported_missing() {
     );
 
     match repo.list_packages() {
-        // The listing's own error names no path, and there are two configured
-        // directories it could be about.
-        Err(error @ PackageListError::IoError(_)) => {
+        // A parent that denies traversal leaves the path unclassifiable, which is
+        // unknown rather than absent. The error names the directory it read, because
+        // there are two configured directories a listing failure could be about.
+        Err(error) if matches!(error.state(), selfie::fs::DirectoryState::Unknown(_)) => {
             let rendered = error.to_string();
             assert!(
                 rendered.contains(&package_dir.display().to_string()),
                 "the error must name the directory, got: {rendered}"
             );
         }
-        Err(other) => panic!("an unreachable directory must be an IO error, got: {other}"),
+        Err(other) => panic!("an unreachable directory must be unknown, got: {other:?}"),
         Ok(_) => panic!("an unreachable directory must not list"),
     }
 }

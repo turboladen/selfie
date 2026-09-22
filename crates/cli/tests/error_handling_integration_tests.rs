@@ -96,9 +96,12 @@ fn test_package_directory_not_found_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
+    // Nothing at the path is the one case `mkdir -p` answers, so it is the one case
+    // offered the command.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains("does not exist"))
+        .stdout(predicate::str::contains("mkdir -p --"));
 }
 
 #[test]
@@ -117,9 +120,16 @@ command_timeout: 30
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
+    // A path running through a non-directory names the component in the way, and gets
+    // no `mkdir -p`: that command fails with "Not a directory" here. The second
+    // assertion is the one that fails if every state is described as "not found"
+    // again, since the first would still pass on a sentence carrying the path.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"));
+        .stderr(predicate::str::contains(
+            "is below /dev/null, which is not a directory",
+        ))
+        .stdout(predicate::str::contains("mkdir").not());
 }
 
 // =============================================================================
@@ -346,7 +356,9 @@ fn test_invalid_package_directory_override_error() {
     // takes a subcommand, so it cannot set the directory.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Package directory not found"))
+        .stderr(predicate::str::contains(
+            "is below /dev/null, which is not a directory",
+        ))
         .stdout(predicate::str::contains(
             "selfie --package-directory <path>",
         ))

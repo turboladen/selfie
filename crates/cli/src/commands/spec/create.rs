@@ -4,7 +4,7 @@ use selfie::{
     package::{
         EnvironmentConfig, SpecService,
         event::{OperationResult, OperationSuccess, PackageEvent},
-        port::{PackageListError, PackageRepository},
+        port::PackageRepository,
     },
 };
 use std::{collections::HashMap, path::PathBuf};
@@ -141,13 +141,7 @@ fn get_valid_package_name(
 
     loop {
         // Check namespace conflict (packages + dotfiles directories)
-        match namespace::validate_unique_name(
-            &current_name,
-            repo,
-            Some(&dotfiles_repo),
-            &selfie::fs::RealFileSystem,
-            &config.selfie_config().dotfiles_directory(),
-        ) {
+        match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
             Err(NamespaceValidationError::LookupFailed(msg)) => {
                 display.print_error(format!("Failed to check namespace: {msg}"));
                 return Err(1);
@@ -155,10 +149,8 @@ fn get_valid_package_name(
             // Not a retry with a different name: the directory is the problem, not
             // the name, so prompting again would ask the user to guess their way
             // past an unreadable directory.
-            Err(NamespaceValidationError::DotfilesDirectoryUnreadable(msg)) => {
-                display.print_error(format!(
-                    "Cannot create '{current_name}': the dotfiles directory {msg}"
-                ));
+            Err(error @ NamespaceValidationError::DotfilesDirectoryUnreadable(_)) => {
+                display.print_error(format!("Cannot create '{current_name}': {error}"));
                 return Err(1);
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
@@ -432,9 +424,9 @@ fn available_dependency_names(
         Ok(loaded) => Ok(loaded),
         // The first package anyone writes has no directory to list yet, and
         // having nothing to depend on is the right answer for it. Any other
-        // failure is selfie unable to look, which is a different answer from
-        // "there is nothing there" and must not be offered as one.
-        Err(PackageListError::PackageDirectoryNotFound(_)) => Ok((Vec::new(), Vec::new())),
+        // failure is selfie unable to look, or a path the spec cannot be written
+        // under, and neither may be offered as "there is nothing there".
+        Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
         Err(e) => Err(format!("Failed to list packages: {e}")),
     }
 }
@@ -497,6 +489,8 @@ fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
+    use selfie::package::port::PackageListError;
+
     use super::*;
     use futures::StreamExt;
     use selfie::package::SpecService;
@@ -815,9 +809,10 @@ mod tests {
     fn available_dependency_names_treats_a_missing_directory_as_no_candidates() {
         let mut repo = selfie::package::port::MockPackageRepository::new();
         repo.expect_list_packages().returning(|| {
-            Err(PackageListError::PackageDirectoryNotFound(PathBuf::from(
-                "/nowhere",
-            )))
+            Err(PackageListError::new(
+                PathBuf::from("/nowhere"),
+                selfie::fs::DirectoryState::Absent(selfie::fs::AbsentReason::Empty),
+            ))
         });
 
         let (names, skipped) = available_dependency_names(&repo).unwrap();
@@ -826,15 +821,41 @@ mod tests {
         assert!(skipped.is_empty());
     }
 
+    // A file at the package directory holds no candidates, but the spec about to be
+    // created cannot be written under it, so it is not offered as an empty list.
+    #[test]
+    fn available_dependency_names_refuses_a_file_at_the_package_directory() {
+        let mut repo = selfie::package::port::MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::new(
+                PathBuf::from("/packages"),
+                selfie::fs::DirectoryState::Absent(selfie::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            ))
+        });
+
+        let message = available_dependency_names(&repo).unwrap_err();
+
+        assert!(
+            message.contains("/packages is not a directory, it is a regular file"),
+            "got: {message}"
+        );
+    }
+
     // Every other listing failure means selfie could not look, which must not be
     // offered to the user as an empty list of candidates.
     #[test]
     fn available_dependency_names_reports_a_listing_it_could_not_perform() {
         let mut repo = selfie::package::port::MockPackageRepository::new();
         repo.expect_list_packages().returning(|| {
-            Err(PackageListError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
-            )))
+            Err(PackageListError::new(
+                PathBuf::from("/locked"),
+                selfie::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))),
+            ))
         });
 
         let message = available_dependency_names(&repo).unwrap_err();

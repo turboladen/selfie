@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    fs::{AbsentReason, DirectoryState, FileSystem},
+    fs::{AbsentReason, DirectoryState},
     package::port::PackageListError,
 };
 
@@ -28,19 +28,17 @@ pub(crate) enum UnlistedDotfilesDirectory {
 }
 
 impl UnlistedDotfilesDirectory {
-    /// Classify the dotfiles directory at `path` after listing it returned
-    /// `error`, where `configured` says whether the user set
-    /// `dotfiles_directory`.
-    pub(crate) fn classify<F: FileSystem>(
-        filesystem: &F,
-        path: &Path,
-        error: PackageListError,
-        configured: bool,
-    ) -> Self {
-        // The shared classification decides what is there. "Not found" from the
-        // listing is not taken at face value: a dangling symlink and an empty path
-        // both produce it, and they take different remedies.
-        match error.directory_state(filesystem, path) {
+    /// Classify the dotfiles directory the failed listing in `error` was reading,
+    /// where `configured` says whether the user set `dotfiles_directory`.
+    ///
+    /// Takes neither a file system nor a path: the error carries the directory it read
+    /// and the state the repository found there, and asking again is what let one
+    /// command say two things about one directory.
+    pub(crate) fn classify(error: PackageListError, configured: bool) -> Self {
+        // The state the repository classified, not a second look at the path. Two
+        // looks can disagree, and the sentence a user reads then contradicts the
+        // refusal that follows it.
+        match error.state().clone() {
             // Being configured governs an **empty** path and nothing else. An absent
             // default is the ordinary condition of anyone who keeps no standalone
             // dotfiles, and a word about it on every run is noise. Anything else at
@@ -49,7 +47,7 @@ impl UnlistedDotfilesDirectory {
             // silent about it hides the reason the directory is not being read.
             DirectoryState::Absent(AbsentReason::Empty) if !configured => Self::OrdinarilyAbsent,
             DirectoryState::Absent(reason) => Self::Absent {
-                path: path.to_path_buf(),
+                path: error.path().to_path_buf(),
                 reason,
             },
             DirectoryState::Unlistable(_) => Self::Unlistable(error),
@@ -89,18 +87,15 @@ pub(crate) fn absent_track_refusal(path: &Path, reason: &AbsentReason) -> String
     )
 }
 
-/// The refusal for `track_standalone`, given `state` for the dotfiles directory
-/// at `path` and the `error` a listing reported.
+/// The refusal for `track_standalone`, given the `error` a listing of the dotfiles
+/// directory reported.
 ///
 /// Every state refuses. A directory selfie could not read may hold the name
 /// about to be tracked, and one it could not classify is no better known, so
 /// neither can answer whether the name is free.
-pub(crate) fn track_listing_refusal(
-    path: &Path,
-    state: &DirectoryState,
-    error: &PackageListError,
-) -> String {
-    match state {
+pub(crate) fn track_listing_refusal(error: &PackageListError) -> String {
+    let path = error.path();
+    match error.state() {
         DirectoryState::Absent(reason) => absent_track_refusal(path, reason),
         // A directory that classified cleanly and still would not list could not be
         // listed. Only an unclassifiable path is unchecked.
@@ -122,16 +117,21 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::fs::RealFileSystem;
+    use crate::fs::{FileSystem as _, RealFileSystem};
 
-    fn not_found(path: &Path) -> PackageListError {
-        PackageListError::PackageDirectoryNotFound(path.to_path_buf())
+    // The listing error a real repository builds for `path`: it classifies the path
+    // itself, so a fixture cannot claim a state the file system would not produce.
+    fn listing_error(path: &Path) -> PackageListError {
+        PackageListError::new(path.to_path_buf(), RealFileSystem.directory_state(path))
     }
 
-    fn unlistable_error() -> PackageListError {
-        PackageListError::IoError(Arc::new(std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied,
-        )))
+    fn unlistable_error(path: &Path) -> PackageListError {
+        PackageListError::new(
+            path.to_path_buf(),
+            DirectoryState::Unlistable(Arc::new(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+        )
     }
 
     #[test]
@@ -139,12 +139,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let absent = dir.path().join("dotfiles");
 
-        match UnlistedDotfilesDirectory::classify(
-            &RealFileSystem,
-            &absent,
-            not_found(&absent),
-            true,
-        ) {
+        match UnlistedDotfilesDirectory::classify(listing_error(&absent), true) {
             UnlistedDotfilesDirectory::Absent { path, reason } => {
                 assert_eq!(path, absent);
                 assert!(matches!(reason, AbsentReason::Empty));
@@ -160,12 +155,7 @@ mod tests {
         let absent = dir.path().join("dotfiles");
 
         assert!(matches!(
-            UnlistedDotfilesDirectory::classify(
-                &RealFileSystem,
-                &absent,
-                not_found(&absent),
-                false
-            ),
+            UnlistedDotfilesDirectory::classify(listing_error(&absent), false),
             UnlistedDotfilesDirectory::OrdinarilyAbsent
         ));
     }
@@ -180,7 +170,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
 
         let UnlistedDotfilesDirectory::Absent { reason, .. } =
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &file, not_found(&file), false)
+            UnlistedDotfilesDirectory::classify(listing_error(&file), false)
         else {
             panic!("a file in the way is not the ordinary absent default");
         };
@@ -200,7 +190,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link).unwrap();
 
         let UnlistedDotfilesDirectory::Absent { reason, .. } =
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &link, not_found(&link), false)
+            UnlistedDotfilesDirectory::classify(listing_error(&link), false)
         else {
             panic!("a dangling link is not the ordinary absent default");
         };
@@ -222,7 +212,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link).unwrap();
 
         let UnlistedDotfilesDirectory::Absent { reason, .. } =
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &link, not_found(&link), true)
+            UnlistedDotfilesDirectory::classify(listing_error(&link), true)
         else {
             panic!("expected a configured, absent directory");
         };
@@ -249,7 +239,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
 
         let UnlistedDotfilesDirectory::Absent { reason, .. } =
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &file, not_found(&file), true)
+            UnlistedDotfilesDirectory::classify(listing_error(&file), true)
         else {
             panic!("expected a configured, absent directory");
         };
@@ -331,7 +321,7 @@ mod tests {
         let below = file.join("under").join("dotfiles");
 
         let UnlistedDotfilesDirectory::Absent { reason, .. } =
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &below, not_found(&below), true)
+            UnlistedDotfilesDirectory::classify(listing_error(&below), true)
         else {
             panic!("expected a configured, absent directory");
         };
@@ -356,12 +346,7 @@ mod tests {
         for configured in [true, false] {
             assert!(
                 matches!(
-                    UnlistedDotfilesDirectory::classify(
-                        &RealFileSystem,
-                        dir.path(),
-                        unlistable_error(),
-                        configured
-                    ),
+                    UnlistedDotfilesDirectory::classify(unlistable_error(dir.path()), configured),
                     UnlistedDotfilesDirectory::Unlistable(_)
                 ),
                 "configured: {configured}"
@@ -380,14 +365,17 @@ mod tests {
         // The error a real listing reports for this shape, not a hand-picked one.
         // `read_dir` answers `ELOOP` here, and a fixture using `PermissionDenied`
         // would classify as unlistable and prove nothing about a loop.
-        let error = PackageListError::IoError(Arc::new(std::fs::read_dir(&link).unwrap_err()));
+        let error = PackageListError::from_listing(
+            &RealFileSystem,
+            link.clone(),
+            &std::fs::read_dir(&link).unwrap_err(),
+        );
         assert!(matches!(
-            UnlistedDotfilesDirectory::classify(&RealFileSystem, &link, error.clone(), true),
+            UnlistedDotfilesDirectory::classify(error.clone(), true),
             UnlistedDotfilesDirectory::Unknown(_)
         ));
 
-        let state = RealFileSystem.directory_state(&link);
-        let refusal = track_listing_refusal(&link, &state, &error);
+        let refusal = track_listing_refusal(&error);
         assert!(refusal.contains("could not be checked"), "{refusal}");
         assert!(!refusal.contains("mkdir"), "{refusal}");
     }
@@ -397,7 +385,6 @@ mod tests {
     #[test]
     fn every_state_refuses_a_track() {
         let dir = tempdir().unwrap();
-        let error = unlistable_error();
 
         for state in [
             DirectoryState::Absent(AbsentReason::Empty),
@@ -413,10 +400,12 @@ mod tests {
             ))),
             DirectoryState::Directory,
         ] {
-            let refusal = track_listing_refusal(dir.path(), &state, &error);
+            let label = format!("{state:?}");
+            let refusal =
+                track_listing_refusal(&PackageListError::new(dir.path().to_path_buf(), state));
             assert!(
                 refusal.starts_with("Cannot track a standalone dotfile:"),
-                "{state:?}: {refusal}"
+                "{label}: {refusal}"
             );
         }
     }
@@ -426,26 +415,18 @@ mod tests {
     #[test]
     fn an_unlistable_directory_says_it_may_already_hold_the_name() {
         let dir = tempdir().unwrap();
-        let state = DirectoryState::Unlistable(Arc::new(std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied,
-        )));
 
-        let refusal = track_listing_refusal(dir.path(), &state, &unlistable_error());
+        let refusal = track_listing_refusal(&unlistable_error(dir.path()));
 
         assert!(refusal.contains("may already hold this name"), "{refusal}");
         assert!(!refusal.contains("mkdir"), "{refusal}");
     }
 
-    // The agreement decision 1 actually needs, one layer above the port's own.
-    //
-    // Two routes reach a directory's state. Track asks the port directly and hands
-    // the answer to its refusal; apply, drift and list go through the classification
-    // here. Nothing made them agree, and a mutation that mapped a loop to unlistable
-    // in this function left the port's own agreement test green, because that test
-    // compares the port's two constructors and never calls this one.
-    //
-    // So this asserts across the layer: for every shape, what this function decides
-    // and what the port says must be the same fact.
+    // The agreement decision 1 actually needs, one layer above the port's own: for
+    // every shape, what this function decides from a listing error and what the port
+    // says about the same path must be the same fact. A mutation that mapped a loop
+    // to unlistable in this function leaves the port's own agreement test green,
+    // because that test compares the port's two constructors and never calls this one.
     #[test]
     fn the_service_classification_agrees_with_the_port() {
         let dir = tempdir().unwrap();
@@ -459,10 +440,13 @@ mod tests {
         for path in [plain, dangling, loop_link, dir.path().join("absent")] {
             // The error a real listing gives this shape, so the fixture cannot drift
             // from what production passes in.
-            let error = PackageListError::IoError(Arc::new(std::fs::read_dir(&path).unwrap_err()));
+            let error = PackageListError::from_listing(
+                &RealFileSystem,
+                path.clone(),
+                &std::fs::read_dir(&path).unwrap_err(),
+            );
             let from_port = RealFileSystem.directory_state(&path);
-            let classified =
-                UnlistedDotfilesDirectory::classify(&RealFileSystem, &path, error, true);
+            let classified = UnlistedDotfilesDirectory::classify(error, true);
 
             let port_name = match from_port {
                 DirectoryState::Directory => "directory",
