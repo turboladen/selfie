@@ -63,6 +63,67 @@ pub enum AbsentReason {
     },
 }
 
+impl AbsentReason {
+    /// What is at the path instead of a directory, as a clause that follows the
+    /// directory's name: "does not exist", "is a regular file".
+    ///
+    /// Shared so a refusal and a warning about the same directory describe it the
+    /// same way, and so no caller has to match on the variants to word one.
+    #[must_use]
+    pub fn clause(&self) -> String {
+        match self {
+            Self::Empty => "does not exist".to_string(),
+            Self::Occupied { kind } => format!("is not a directory, it is a {kind}"),
+            Self::DanglingSymlink { points_to } => match points_to {
+                Some(destination) => {
+                    format!(
+                        "is a symlink to nothing: it points at {}",
+                        destination.display()
+                    )
+                }
+                // The link read once and would not read again, so the sentence names
+                // what is known rather than guessing a destination.
+                None => "is a symlink to nothing".to_string(),
+            },
+            Self::ParentNotADirectory { parent } => {
+                format!("is below {}, which is not a directory", parent.display())
+            }
+        }
+    }
+
+    /// The command that would create the directory at `path`, or `None` when no
+    /// single command is the remedy.
+    ///
+    /// Only [`Empty`](Self::Empty) has one. `mkdir -p` fails with "File exists"
+    /// against a plain file and "No such file or directory" against a dangling
+    /// symlink, so offering it for those sends the user to a command that cannot
+    /// work. The path is shell-quoted, because the sentence exists to be pasted.
+    #[must_use]
+    pub fn remedy(&self, path: &Path) -> Option<String> {
+        match self {
+            Self::Empty => Some(format!("Create it with: mkdir -p {}", shell_quote(path))),
+            Self::Occupied { .. }
+            | Self::DanglingSymlink { .. }
+            | Self::ParentNotADirectory { .. } => None,
+        }
+    }
+}
+
+/// `path` as a single shell word.
+///
+/// Single quotes with the shell's own escape for an embedded single quote, which is
+/// the one character single quotes do not cover.
+fn shell_quote(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    if rendered
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        return rendered;
+    }
+    format!("'{}'", rendered.replace('\'', r"'\''"))
+}
+
 impl DirectoryState {
     /// The state a failed listing implies, for a caller that has already listed.
     ///

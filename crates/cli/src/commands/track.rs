@@ -9,7 +9,7 @@ use std::{collections::HashSet, io::IsTerminal as _};
 
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
-    fs::real::RealFileSystem,
+    fs::{DirectoryState, real::RealFileSystem},
     namespace,
     package::{
         SpecOrigin,
@@ -294,16 +294,84 @@ struct ExistingTracker {
     target: String,
 }
 
+/// What to tell the user when the dotfiles directory would not list, or `None` when
+/// there is nothing worth saying.
+///
+/// The scan's question is "does a spec here already track this file", and a directory
+/// with no specs in it answers no. So an absence is not a warning on its own. What
+/// earns one is an absence the user is about to be asked questions about: a standalone
+/// entry is written into the dotfiles directory, and every state but a readable
+/// directory refuses that write. Saying it before the prompt is what keeps the user
+/// from choosing a name selfie cannot use.
+fn dotfiles_absence_warning(
+    filesystem: &RealFileSystem,
+    config: &CliConfig,
+    error: &PackageListError,
+) -> Option<String> {
+    let path = config.selfie_config().dotfiles_directory();
+    let state = error.directory_state(filesystem, &path);
+    Some(match state {
+        // A directory that classified cleanly and still would not list
+        // could not be *listed*, which is the same answer an unlistable
+        // one gets. The path is named here as in every sibling arm: the
+        // listing error carries none of its own.
+        DirectoryState::Directory => format!(
+            "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {error}",
+            path.display()
+        ),
+        // An empty path is silent unless the user named it, which is the rule
+        // `dotfiles_directory_is_expected` states: an empty default is the
+        // ordinary condition of anyone who keeps no standalone dotfiles, and
+        // a word about it on every `selfie track` is noise. Every other state
+        // warns either way. A plain file or a dangling link cannot come from
+        // leaving the setting out, and what is behind an unreadable directory
+        // is unknown whether or not the user named the path.
+        DirectoryState::Absent(selfie::fs::AbsentReason::Empty)
+            if !config.selfie_config().dotfiles_directory_is_expected() =>
+        {
+            return None;
+        }
+        DirectoryState::Absent(reason) => {
+            // The path leads and the clause follows, because a clause may
+            // carry a colon of its own — the dangling-symlink one names a
+            // destination — and two colons in one sentence read as one
+            // path followed by another.
+            let mut sentence = format!(
+                "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until that is fixed.",
+                path.display(),
+                reason.clause()
+            );
+            if let Some(command) = reason.remedy(&path) {
+                sentence.push(' ');
+                sentence.push_str(&command);
+            }
+            sentence
+        }
+        DirectoryState::Unlistable(_) => format!(
+            "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {} — {error}",
+            path.display()
+        ),
+        DirectoryState::Unknown(_) => format!(
+            "The dotfiles directory could not be checked: {} — {error}",
+            path.display()
+        ),
+    })
+}
+
 /// Check if a file is already tracked by any package or standalone dotfile.
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
 /// entry whose target matches the given file path. Returns the name of the
 /// package that tracks it and the entry's own target, or `None`, paired with a
-/// warning for every spec and every directory it could not read.
+/// warning for every spec it could not read and for a dotfiles directory it could
+/// not read or write a new entry into.
 ///
 /// A caller that ignores the second list is treating "nothing selfie could read
 /// tracks this file" as "nothing tracks it", and a spec it could not read may
 /// already carry the entry.
+///
+/// The package directory is not among those warnings: it is read again immediately
+/// afterwards, and that read's failure ends the run with an error naming it.
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
@@ -321,23 +389,25 @@ fn find_existing_tracker(
         config.selfie_config().package_directory().to_path_buf(),
         SpecOrigin::PackageDirectory,
     );
-    // Each repository is carried with the name of the directory it reads, so a
-    // run told one of them could not be listed knows which one to go and look
-    // at. The path is left to the error, which already carries it.
-    let repos = [
-        (&package_repo, "package directory"),
-        (dotfiles_repo, "dotfiles directory"),
-    ];
+    // Each repository is carried with the directory it reads, so a run told one of
+    // them could not be listed knows which one to go and look at. The path is left
+    // to the error, which already carries it.
+    // Only the dotfiles directory earns a warning when it will not list. The package
+    // directory is read again immediately after this scan, and that read's failure ends
+    // the run with an error naming it, so a warning here would be a quieter duplicate.
+    let repos = [(&package_repo, false), (dotfiles_repo, true)];
 
-    for (repo, directory) in repos {
+    for (repo, warn_when_unlisted) in repos {
         // A spec selfie could not read may already track this file, and so may
         // every spec in a directory it could not list, so both are reported.
-        // A directory that is not there holds no spec that could track it.
         let output = match repo.list_packages() {
             Ok(output) => output,
-            Err(PackageListError::PackageDirectoryNotFound(_)) => continue,
-            Err(e) => {
-                skipped.push(format!("Could not check the {directory}: {e}"));
+            Err(error) => {
+                if warn_when_unlisted
+                    && let Some(warning) = dotfiles_absence_warning(&fs, config, &error)
+                {
+                    skipped.push(warning);
+                }
                 continue;
             }
         };

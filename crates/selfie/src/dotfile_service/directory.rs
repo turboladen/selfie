@@ -66,9 +66,12 @@ impl UnlistedDotfilesDirectory {
 pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
     format!(
         "Dotfiles directory {}: {} — standalone dotfiles will not be read.{}",
-        absent_clause(reason),
+        reason.clause(),
         path.display(),
-        remedy(path, reason)
+        match reason.remedy(path) {
+            Some(command) => format!(" {command}"),
+            None => String::new(),
+        }
     )
 }
 
@@ -77,9 +80,12 @@ pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
 pub(crate) fn absent_track_refusal(path: &Path, reason: &AbsentReason) -> String {
     format!(
         "Cannot track a standalone dotfile: the dotfiles directory {}: {}{}",
-        absent_clause(reason),
+        reason.clause(),
         path.display(),
-        remedy(path, reason)
+        match reason.remedy(path) {
+            Some(command) => format!(" {command}"),
+            None => String::new(),
+        }
     )
 }
 
@@ -105,59 +111,6 @@ pub(crate) fn track_listing_refusal(
             path.display()
         ),
     }
-}
-
-/// The clause naming what is at the path instead of a directory.
-fn absent_clause(reason: &AbsentReason) -> String {
-    match reason {
-        AbsentReason::Empty => "does not exist".to_string(),
-        AbsentReason::Occupied { kind } => format!("is not a directory, it is a {kind}"),
-        AbsentReason::DanglingSymlink { points_to } => match points_to {
-            Some(destination) => {
-                format!(
-                    "is a symlink to nothing: it points at {}",
-                    destination.display()
-                )
-            }
-            // The link was read once and would not read again, so the sentence
-            // names what is known rather than guessing a destination.
-            None => "is a symlink to nothing".to_string(),
-        },
-        AbsentReason::ParentNotADirectory { parent } => {
-            format!("is below {}, which is not a directory", parent.display())
-        }
-    }
-}
-
-/// The remedy for `reason`, or nothing when no single command is the remedy.
-///
-/// `mkdir -p` answers only an empty path. Against a plain file it fails with
-/// "File exists" and against a dangling symlink with "No such file or
-/// directory", so offering it for those sends the user to a command that cannot
-/// work.
-fn remedy(path: &Path, reason: &AbsentReason) -> String {
-    match reason {
-        AbsentReason::Empty => format!(" Create it with: mkdir -p {}", shell_quote(path)),
-        AbsentReason::Occupied { .. }
-        | AbsentReason::DanglingSymlink { .. }
-        | AbsentReason::ParentNotADirectory { .. } => String::new(),
-    }
-}
-
-/// `path` as a single shell word.
-///
-/// The sentence offers a command to paste, so a path holding a space or a quote
-/// has to survive the paste. Single quotes with the shell's own escape for an
-/// embedded single quote, which is the only character single quotes do not cover.
-fn shell_quote(path: &Path) -> String {
-    let rendered = path.display().to_string();
-    if rendered
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
-    {
-        return rendered;
-    }
-    format!("'{}'", rendered.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]

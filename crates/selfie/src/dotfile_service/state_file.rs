@@ -195,7 +195,7 @@ fn deploy_state_path<F: FileSystem>(
         // fails here, and it would fail after the run had already deployed.
         DirectoryState::Absent(reason) => Err(StateLoadFailure::StateDirectoryOccupied {
             path: directory.to_path_buf(),
-            what: occupied_clause(&reason),
+            what: reason.clause(),
         }),
         // A path selfie cannot classify may hold a state it must not overwrite, so it
         // refuses rather than starting from an empty one and writing over whatever is
@@ -211,24 +211,6 @@ fn deploy_state_path<F: FileSystem>(
                 path: directory.to_path_buf(),
                 why: format!("could not be checked: {error}"),
             })
-        }
-    }
-}
-
-/// What is at the state directory's path instead of a directory.
-fn occupied_clause(reason: &AbsentReason) -> String {
-    match reason {
-        AbsentReason::Empty => "is not there".to_string(),
-        AbsentReason::Occupied { kind } => format!("is a {kind}"),
-        AbsentReason::DanglingSymlink { points_to } => match points_to {
-            Some(destination) => format!(
-                "is a symlink to nothing: it points at {}",
-                destination.display()
-            ),
-            None => "is a symlink to nothing".to_string(),
-        },
-        AbsentReason::ParentNotADirectory { parent } => {
-            format!("is below {}, which is not a directory", parent.display())
         }
     }
 }
