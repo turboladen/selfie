@@ -239,8 +239,17 @@ impl EventProcessor {
                             // The global flag is per-run and the file is the
                             // durable fix, so both are named.
                             self.display.print_suggestion(format!(
-                                "Create the directory with 'mkdir -p {}', edit 'package_directory' in your config file, or name another for this run with the global flag: 'selfie --package-directory <path> …'",
-                                path.display()
+                                // The command ends the sentence, and nothing may follow
+                                // it. A shell word ends at whitespace, so a comma or a
+                                // period touching the closing quote is inside the word,
+                                // and the pasted command creates a directory whose name
+                                // carries it.
+                                "Edit 'package_directory' in your config file, name another for this run with the global flag 'selfie --package-directory <path> …', or create the directory with: mkdir -p -- {}",
+                                // Same quoter and same `--` as the dotfiles directory's
+                                // remedy, because this sentence is pasted too: a path
+                                // holding a space breaks the command, and one beginning
+                                // with a dash is read by mkdir as options.
+                                selfie::fs::shell_quote(path.as_path())
                             ));
                         }
                         OperationFailure::Privilege(refusal) => {

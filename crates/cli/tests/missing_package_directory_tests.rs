@@ -64,6 +64,53 @@ fn the_deploying_commands_name_the_missing_directory_and_how_to_fix_it() {
     }
 }
 
+// The remedy is pasted, so the path in it has to survive a shell. Both halves are
+// asserted: the separator that stops a leading dash being read as options, and the
+// quoting that holds a space together. Without `--` the first fails; without the
+// quoting the second does.
+#[test]
+fn a_package_directory_holding_a_space_is_quoted_in_the_remedy() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("my packages");
+    let config = temp_dir
+        .path()
+        .join(".config")
+        .join("selfie")
+        .join("config.yaml");
+    let existing = std::fs::read_to_string(&config).unwrap();
+    let rewritten: String = existing
+        .lines()
+        .map(|line| {
+            if line.starts_with("package_directory:") {
+                format!("package_directory: {}", packages_dir.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&config, format!("{rewritten}\n")).unwrap();
+
+    let output = output_of(&temp_dir, &["spec", "list"]);
+
+    let command = format!("mkdir -p -- '{}'", packages_dir.display());
+    let line = output
+        .lines()
+        .find(|line| line.contains(&command))
+        .unwrap_or_else(|| {
+            panic!("the remedy must name the path as one quoted word, got: {output}")
+        });
+
+    // A shell word ends at whitespace, so anything touching the closing quote is part
+    // of it: a trailing comma makes the pasted command create a directory whose name
+    // ends in a comma, and the `contains` above passes either way. Nothing may follow
+    // the command on its line.
+    assert!(
+        line.trim_end().ends_with(&command),
+        "the command must end its line, or what follows joins the shell word: {line}"
+    );
+}
+
 // A listing command gives the same guidance, so a regression in the shared arm
 // cannot pass by breaking only the commands that deploy.
 #[test]

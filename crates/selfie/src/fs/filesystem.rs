@@ -100,8 +100,11 @@ impl AbsentReason {
     /// work. The path is shell-quoted, because the sentence exists to be pasted.
     #[must_use]
     pub fn remedy(&self, path: &Path) -> Option<String> {
+        // `--` ends the option list. Without it a dotfiles directory named `-p` or
+        // `-foo` is read by mkdir as options, so the command fails or creates
+        // something the user did not ask for.
         match self {
-            Self::Empty => Some(format!("Create it with: mkdir -p {}", shell_quote(path))),
+            Self::Empty => Some(format!("Create it with: mkdir -p -- {}", shell_quote(path))),
             Self::Occupied { .. }
             | Self::DanglingSymlink { .. }
             | Self::ParentNotADirectory { .. } => None,
@@ -109,19 +112,42 @@ impl AbsentReason {
     }
 }
 
-/// `path` as a single shell word.
+/// `path` as shell words that expand to it, for a remedy the user will paste.
 ///
-/// Single quotes with the shell's own escape for an embedded single quote, which is
-/// the one character single quotes do not cover.
-fn shell_quote(path: &Path) -> String {
+/// A leading `~/` is left outside the quotes, so the shell still expands it. Pair it
+/// with a `--` before the path, which this does not add: a leading dash is not a
+/// character quoting protects, so only the option separator ends it.
+#[must_use]
+pub fn shell_quote(path: &Path) -> String {
     let rendered = path.display().to_string();
-    if rendered
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
-    {
+    // A tilde arrives here only when the config loader could not expand it, which
+    // needs a home directory selfie cannot determine. Quoting it whole offers a
+    // command that creates a directory named `~` in the working directory. Only a
+    // bare `~` and a leading `~/` are held out, because those are the two the loader
+    // expands; `~user` stays quoted, since a command reaching further than selfie
+    // does would name a directory selfie will not then use.
+    if rendered == "~" {
         return rendered;
     }
-    format!("'{}'", rendered.replace('\'', r"'\''"))
+    match rendered.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", quote_word(rest)),
+        None => quote_word(&rendered),
+    }
+}
+
+/// One shell word, quoted unless every character is one the shell leaves alone.
+///
+/// Single quotes, with the shell's own escape for an embedded single quote, which is
+/// the one character single quotes do not cover.
+fn quote_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 impl DirectoryState {

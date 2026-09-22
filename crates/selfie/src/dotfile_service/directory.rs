@@ -275,7 +275,7 @@ mod tests {
         let sentence = absent_warning(&absent, &AbsentReason::Empty);
         assert!(sentence.contains("does not exist"), "{sentence}");
         assert!(
-            sentence.contains(&format!("mkdir -p {}", absent.display())),
+            sentence.contains(&format!("mkdir -p -- {}", absent.display())),
             "{sentence}"
         );
     }
@@ -286,8 +286,40 @@ mod tests {
         let sentence = absent_warning(Path::new("/home/me/my dotfiles"), &AbsentReason::Empty);
 
         assert!(
-            sentence.contains("mkdir -p '/home/me/my dotfiles'"),
+            sentence.contains("mkdir -p -- '/home/me/my dotfiles'"),
             "{sentence}"
+        );
+    }
+
+    // Quoting alone does not save a path that begins with a dash: mkdir reads it as
+    // options. The second assertion is the one that fails without `--`, since the
+    // first still matches a command that has the path but not the separator.
+    #[test]
+    fn a_path_beginning_with_a_dash_is_not_read_as_options() {
+        let sentence = absent_warning(Path::new("-foo"), &AbsentReason::Empty);
+
+        assert!(sentence.contains("-foo"), "{sentence}");
+        assert!(
+            sentence.contains("mkdir -p -- -foo"),
+            "the option list must be ended before the path: {sentence}"
+        );
+    }
+
+    // A tilde survives only outside the quotes. Quoted, the pasted command creates a
+    // directory named `~` in the working directory rather than one under the home
+    // directory. The path reaches here unexpanded only when selfie could not find a
+    // home directory, which is when the user has to run the command themselves.
+    #[test]
+    fn a_leading_tilde_stays_outside_the_quotes() {
+        let sentence = absent_warning(Path::new("~/my dotfiles"), &AbsentReason::Empty);
+
+        assert!(
+            sentence.contains("mkdir -p -- ~/'my dotfiles'"),
+            "{sentence}"
+        );
+        assert!(
+            !sentence.contains("'~/"),
+            "a quoted tilde is not expanded: {sentence}"
         );
     }
 
@@ -468,7 +500,7 @@ mod tests {
         for sentence in [&warning, &refusal] {
             assert!(sentence.contains("/nonexistent/dotfiles"), "{sentence}");
             assert!(
-                sentence.contains("mkdir -p /nonexistent/dotfiles"),
+                sentence.contains("mkdir -p -- /nonexistent/dotfiles"),
                 "{sentence}"
             );
         }

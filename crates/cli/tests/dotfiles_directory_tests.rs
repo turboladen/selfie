@@ -474,7 +474,7 @@ fn track_offers_mkdir_for_a_dotfiles_directory_that_is_merely_absent() {
     );
     assert!(combined.contains("does not exist"), "got:\n{combined}");
     assert!(
-        combined.contains(&format!("mkdir -p {}", dotfiles.display())),
+        combined.contains(&format!("mkdir -p -- {}", dotfiles.display())),
         "an absent path is the one case the remedy works for, got:\n{combined}"
     );
 }
