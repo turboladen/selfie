@@ -134,15 +134,31 @@ fn get_valid_package_name(
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
 
-    // A dotfiles directory that is not there holds no names, so the check below
-    // is complete without it.
+    // A dotfiles directory that is genuinely not there holds no names. One that
+    // will not read cannot answer, and the check refuses on it rather than letting
+    // a spec be created beside a name that may already exist.
     let dotfiles_repo = common::create_dotfiles_repository(config);
 
     loop {
         // Check namespace conflict (packages + dotfiles directories)
-        match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
+        match namespace::validate_unique_name(
+            &current_name,
+            repo,
+            Some(&dotfiles_repo),
+            &selfie::fs::RealFileSystem,
+            &config.selfie_config().dotfiles_directory(),
+        ) {
             Err(NamespaceValidationError::LookupFailed(msg)) => {
                 display.print_error(format!("Failed to check namespace: {msg}"));
+                return Err(1);
+            }
+            // Not a retry with a different name: the directory is the problem, not
+            // the name, so prompting again would ask the user to guess their way
+            // past an unreadable directory.
+            Err(NamespaceValidationError::DotfilesDirectoryUnreadable(msg)) => {
+                display.print_error(format!(
+                    "Cannot create '{current_name}': the dotfiles directory {msg}"
+                ));
                 return Err(1);
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {

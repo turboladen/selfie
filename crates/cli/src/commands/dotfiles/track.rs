@@ -31,11 +31,18 @@ pub(crate) async fn handle_track(
         return code;
     }
 
-    // A dotfiles directory that is not there holds no names, so the check is
-    // complete, and the service refuses the track itself.
+    // A dotfiles directory that is genuinely not there holds no names, and the
+    // service refuses the track itself. One that will not read cannot say whether
+    // the name is free, so the check refuses rather than answering.
     let repo = create_package_repository(config);
     let dotfiles_repo = create_dotfiles_repository(config);
-    if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
+    if let Err(e) = namespace::validate_unique_name(
+        name,
+        &repo,
+        Some(&dotfiles_repo),
+        &selfie::fs::RealFileSystem,
+        &config.selfie_config().dotfiles_directory(),
+    ) {
         display.print_error(format!("Cannot use name '{name}': {e}"));
         return 1;
     }

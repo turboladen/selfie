@@ -12,7 +12,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    fs::filesystem::FileSystemError,
+    fs::{DirectoryState, FileSystem, filesystem::FileSystemError},
     package::{GetPackage, Package},
 };
 
@@ -317,6 +317,21 @@ pub enum PackageListError {
     /// The configured package directory does not exist
     #[error("Directory does not exist: {}", _0.display())]
     PackageDirectoryNotFound(PathBuf),
+}
+
+impl PackageListError {
+    /// The state of the directory at `path`, which this error came from listing.
+    ///
+    /// Every consumer of a failed listing needs the same thing: what is actually at
+    /// the path. Taking the error's own wording instead is what let "not found"
+    /// stand for an empty path, a dangling symlink and a path below a file alike.
+    pub fn directory_state<F: FileSystem>(&self, filesystem: &F, path: &Path) -> DirectoryState {
+        match self {
+            Self::IoError(io) => DirectoryState::from_listing(filesystem, path, io),
+            // No error to interpret. The port answers from the path itself.
+            Self::PackageDirectoryNotFound(_) => filesystem.directory_state(path),
+        }
+    }
 }
 
 // File names alone -- the directory is already named earlier in the message, so

@@ -105,7 +105,13 @@ pub(crate) async fn handle_track(
         }
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
-            if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
+            if let Err(e) = namespace::validate_unique_name(
+                name,
+                &repo,
+                Some(&dotfiles_repo),
+                &selfie::fs::RealFileSystem,
+                &config.selfie_config().dotfiles_directory(),
+            ) {
                 display.print_error(format!("Cannot use name '{name}': {e}"));
                 return 1;
             }

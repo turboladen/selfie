@@ -38,12 +38,7 @@ impl UnlistedDotfilesDirectory {
         // The shared classification decides what is there. "Not found" from the
         // listing is not taken at face value: a dangling symlink and an empty path
         // both produce it, and they take different remedies.
-        let state = match &error {
-            PackageListError::IoError(io) => DirectoryState::from_listing(filesystem, path, io),
-            PackageListError::PackageDirectoryNotFound(_) => filesystem.directory_state(path),
-        };
-
-        match state {
+        match error.directory_state(filesystem, path) {
             DirectoryState::Absent(reason) if configured => Self::ConfiguredAndAbsent {
                 path: path.to_path_buf(),
                 reason,

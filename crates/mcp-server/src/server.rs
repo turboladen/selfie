@@ -290,7 +290,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment."
+        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. When the dotfiles directory cannot be read the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path. The name may be free and nothing could check it, so retrying with another name fails the same way."
     )]
     async fn spec_create(
         &self,
@@ -326,18 +326,18 @@ impl SelfieServer {
             self.config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
-        // A dotfiles directory that is not there holds no names, so the check
-        // below is complete without it.
+        // A dotfiles directory that is genuinely not there holds no names. One that
+        // will not read is a different answer, and the check refuses on it rather
+        // than reporting the name free.
         let dotfiles_repo = dotfiles_repository(&self.config);
         if let Err(e) = selfie::namespace::validate_unique_name(
             &params.package,
             &pkg_repo,
             Some(&dotfiles_repo),
+            &RealFileSystem,
+            &self.config.dotfiles_directory(),
         ) {
-            return Err(McpError::invalid_params(
-                format!("Namespace conflict: {e}"),
-                None,
-            ));
+            return namespace_refusal(e, &self.config.dotfiles_directory());
         }
 
         let file_path = self
@@ -719,13 +719,14 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
             SpecOrigin::PackageDirectory,
         );
         let dotfiles_repo = dotfiles_repository(&self.config);
-        if let Err(e) =
-            selfie::namespace::validate_unique_name(&params.name, &pkg_repo, Some(&dotfiles_repo))
-        {
-            return Err(McpError::invalid_params(
-                format!("Namespace conflict: {e}"),
-                None,
-            ));
+        if let Err(e) = selfie::namespace::validate_unique_name(
+            &params.name,
+            &pkg_repo,
+            Some(&dotfiles_repo),
+            &RealFileSystem,
+            &self.config.dotfiles_directory(),
+        ) {
+            return namespace_refusal(e, &self.config.dotfiles_directory());
         }
 
         let stream = self
@@ -851,6 +852,42 @@ impl ServerHandler for SelfieServer {
         capabilities.tools = Some(ToolsCapability::default());
         ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("selfie-mcp", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+/// The MCP answer to a refused name check.
+///
+/// A conflict, and a package directory that would not answer, are about the name the
+/// caller sent: those are `invalid_params`, where retrying with another name is the
+/// right move. A dotfiles directory selfie could not read is not about the name at all,
+/// since the name may be free and nothing could check it, so it comes back as a
+/// refusal in the shape the apply and drift tools use, carrying `status` and `reason`
+/// fields an agent branches on instead of prose. Reporting it as invalid input is what
+/// sends an agent round a loop of names that all fail identically.
+fn namespace_refusal(
+    error: selfie::namespace::NamespaceValidationError,
+    dotfiles_directory: &std::path::Path,
+) -> Result<CallToolResult, McpError> {
+    use selfie::namespace::NamespaceValidationError as Invalid;
+
+    match error {
+        Invalid::DotfilesDirectoryUnreadable(_) => {
+            let payload = serde_json::json!({
+                "result": {
+                    "status": "refused",
+                    "reason": error.to_string(),
+                    "dotfiles_directory": dotfiles_directory.display().to_string(),
+                },
+                "data": [],
+            });
+            Ok(CallToolResult::error(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )]))
+        }
+        Invalid::Conflict(_) | Invalid::LookupFailed(_) => Err(McpError::invalid_params(
+            format!("Namespace conflict: {error}"),
+            None,
+        )),
     }
 }
 
