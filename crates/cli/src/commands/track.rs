@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, io::IsTerminal as _};
 
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
@@ -95,6 +95,28 @@ pub(crate) async fn handle_track(
         if reported.insert(warning.clone()) {
             display.print_warning(warning);
         }
+    }
+
+    // Refused rather than attempted: `FuzzySelect` reads keys in a loop of its own,
+    // and with no terminal that loop never ends, re-rendering the menu until it
+    // floods the output and pins a core. `interact_opt` returns no `Err` to handle.
+    //
+    // **stderr**, not stdin. `FuzzySelect::interact_opt` prompts on `Term::stderr`,
+    // and console's `read_key` answers `Key::Unknown` at once when that terminal is
+    // not attended, while console reads input from `/dev/tty` when stdin is not one.
+    // So `selfie track x 2>log` from a terminal spins with a tty on stdin, and
+    // `selfie track x </dev/null` from a terminal would have worked. A guard on
+    // stdin gets both backwards.
+    if !std::io::stderr().is_terminal() {
+        display.print_error(
+            "Choosing where to track a file needs a terminal. Name the destination instead: \
+             `selfie package track-dotfile <package> <file>` to add it to an existing package, or \
+             `selfie dotfiles track <name> <file>` to make it a standalone dotfile."
+                .to_string(),
+        );
+        // Non-zero, and not treated as a cancellation: nothing was tracked, and
+        // exiting 0 would tell a script the file is handled.
+        return 1;
     }
 
     let choice = prompt_track_choice(&package_names, file);

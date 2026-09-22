@@ -312,3 +312,126 @@ fn track_commands_refuse_under_sudo_before_the_service_starts() {
         );
     }
 }
+
+// **stderr** is not a terminal and stdin is left alone. `FuzzySelect` prompts on
+// `Term::stderr`, so `selfie track x 2>log` from a real terminal is the commonest way
+// to hit the spin, and a guard testing stdin lets it through: stdin is a tty there.
+//
+// What this proves depends on where it runs. Attached to a terminal it discriminates:
+// a guard testing stdin passes, the prompt spins, and the deadline fails the test.
+// Under a runner that already gives the suite no terminal on stdin, both guards
+// refuse and it proves only that the command ends and says why. Kept rather than left
+// out, because the case it covers is the one a user meets.
+#[test]
+fn track_without_a_terminal_on_stderr_refuses_rather_than_prompting_forever() {
+    use std::io::Read as _;
+
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    let untracked = home.join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let mut child = common::sandboxed_std_command(&temp)
+        .env("HOME", &home)
+        .args(["track", untracked.to_str().unwrap()])
+        // Inherited deliberately: the subject is stderr.
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+
+    let status = status.expect("the command must end rather than prompt with no terminal");
+    assert!(
+        !status.success(),
+        "nothing was tracked, so exiting 0 would mislead a script"
+    );
+    assert!(
+        stderr.contains("needs a terminal"),
+        "the refusal must say what is missing, got:\n{stderr}"
+    );
+}
+
+// The companion case, with both streams redirected, which is what a script or a CI
+// job looks like. Without the guard this does not fail, it never returns:
+// `FuzzySelect` re-renders its menu forever with no terminal, flooding the output and
+// pinning a core. A probe against the unguarded binary produced more than 64MB in 25
+// seconds.
+//
+// So the assertion that matters is that the process ends at all, and the deadline is
+// what makes it one. `assert_cmd`'s own runner would hang the suite, which is why
+// this drives the child directly and kills it rather than waiting.
+#[test]
+fn track_without_a_terminal_refuses_rather_than_prompting_forever() {
+    use std::io::Read as _;
+
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    let untracked = home.join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let mut child = common::sandboxed_std_command(&temp)
+        .env("HOME", &home)
+        .args(["track", untracked.to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+
+    let status = status.expect("the command must end rather than prompt with no terminal");
+    assert!(
+        !status.success(),
+        "nothing was tracked, so exiting 0 would tell a script the file is handled"
+    );
+    assert!(
+        stderr.contains("needs a terminal"),
+        "the refusal must say what is missing, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("selfie dotfiles track"),
+        "the refusal must name a command that works instead, got:\n{stderr}"
+    );
+}

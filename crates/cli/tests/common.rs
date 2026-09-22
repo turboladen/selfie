@@ -97,7 +97,25 @@ pub fn add_package(base_dir: &TempDir, package: &Package) {
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn sandboxed_command(temp_dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin(SELFIE_BIN_NAME).unwrap();
+    // Wraps the other builder rather than repeating it. Two copies of the same five
+    // variables can drift, and a fixture that then passes under one and fails under
+    // the other says nothing about the code.
+    Command::from_std(sandboxed_std_command(temp_dir))
+}
+
+/// The same sandbox as [`sandboxed_command`], as a [`std::process::Command`].
+///
+/// For a test that has to spawn the child and watch it rather than wait on it:
+/// `assert_cmd`'s runner waits for completion, which hangs the suite when the point
+/// of the test is that the command might never end.
+///
+/// # Panics
+///
+/// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
+#[must_use]
+pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
+    let binary = Command::cargo_bin(SELFIE_BIN_NAME).unwrap();
+    let mut cmd = std::process::Command::new(binary.get_program());
 
     cmd.env("HOME", temp_dir.path());
     cmd.env("XDG_CONFIG_HOME", temp_dir.path().join(".config"));
