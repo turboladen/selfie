@@ -5,7 +5,7 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig,
         ToolsCapability,
     },
     tool, tool_handler, tool_router,
@@ -846,10 +846,10 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
 #[tool_handler]
 impl ServerHandler for SelfieServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("selfie-mcp", env!("CARGO_PKG_VERSION")))
     }
 }
