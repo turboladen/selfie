@@ -231,12 +231,15 @@ Test egress at the **boundary**, not by listing known paths:
   device node, at the target or behind a link alike; a directory **at** the target, since a file
   cannot replace one; and a plain target selfie could not classify, since that is where the write
   goes. A link present at either check is never read through, not for a comparison and not for the
-  owner-only check, which follows and was the second route to the destination's contents. The
-  non-following question is asked **twice**, once before the provider command and once immediately
-  before the read, because the first answer is stale by the time the target is read. The read itself
-  is still by pathname, so a link planted between the last check and the read is a remaining window;
-  only a non-following read on the port closes it. The warning naming the link and its destination
-  is sent **after** the write succeeds, worded as what happened, so it can never precede a refusal
-  or a failed write. ADR-0005 decision 3 records all of it. Track's refusal sits ahead of every
-  write it performs: tracking reads _through_ a link, so accepting one copies the destination into
-  the dotfiles repository, where `sync push` commits it. Do not relax that ordering.
+  owner-only check, which does not follow either: a link put at the target after the read is
+  replaced, never reported in sync on its destination's mode. Both questions are asked **twice**,
+  once before the provider command and once immediately before the read, because the first answers
+  are stale by the time the target is read. The read itself is `read_file_no_follow`, which opens
+  with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
+  after the last check is refused by the read rather than followed or waited on; a link it finds is
+  replaced like one a check found. The checks stay: opening a device node can have side effects, and
+  they word the refusal. The warning naming the link and its destination is sent **after** the write
+  succeeds, worded as what happened, so it can never precede a refusal or a failed write. ADR-0005
+  decision 3 records all of it. Track's refusal sits ahead of every write it performs, so nothing is
+  copied, written or recorded for a link: accepting one would copy the link's destination into the
+  dotfiles repository, where `sync push` commits it. Do not relax that ordering.

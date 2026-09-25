@@ -34,6 +34,31 @@ pub enum DirectoryState {
     Unknown(Arc<io::Error>),
 }
 
+/// What a read of a deploy target found there.
+///
+/// Returned by [`FileSystem::read_file_no_follow`], so no caller classifies a
+/// target by decoding an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRead {
+    /// A regular file, and its bytes.
+    Bytes(Vec<u8>),
+    /// Nothing is at the path: it does not exist, or a component of it is not a
+    /// directory, where nothing can be.
+    Absent,
+    /// A directory, whether or not selfie may open it.
+    Directory,
+    /// A symlink at the final component, dangling or not. Not followed.
+    Link {
+        /// Where the link points, when the link itself could be read.
+        points_to: Option<PathBuf>,
+    },
+    /// A fifo, socket or device node, never read from.
+    Irregular {
+        /// What is there, for the sentence: `named pipe (fifo)`, `socket`.
+        kind: &'static str,
+    },
+}
+
 /// Why no directory is at a path.
 ///
 /// Carried because the remedy is not shared: only [`Empty`](AbsentReason::Empty) is
@@ -207,18 +232,22 @@ pub trait FileSystem: Send + Sync {
     /// content is not valid UTF-8, or any other IO error occurs.
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
-    /// Read a file's raw bytes, imposing no encoding requirement.
+    /// Read a target without following a symlink at its final component and
+    /// without blocking on a fifo. The reader for deploy targets.
     ///
-    /// Use this wherever the content is compared or written rather than
-    /// displayed. Secret-bearing dotfile content is not guaranteed to be UTF-8,
-    /// and decoding it lossily before a comparison would report two different
-    /// files as identical.
+    /// Imposes no encoding requirement: secret-bearing content is not guaranteed
+    /// to be UTF-8, and decoding it lossily before a comparison would report two
+    /// different files as identical. Symlinked **parent** directories are still
+    /// followed, as they are by both writers.
+    ///
+    /// What is at the path is decided when it is opened, so a link or fifo planted
+    /// after any earlier check is reported as one rather than read.
     ///
     /// # Errors
     ///
-    /// [`FileSystemError`] if the file does not exist, permission is denied, or
-    /// any other IO error occurs.
-    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
+    /// [`FileSystemError::IoError`] when what is there is unknown: a regular file
+    /// or a parent selfie may not open, a loop above the target.
+    fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError>;
 
     /// Write a file readable only by its owner, replacing it atomically. The
     /// writer for secret-bearing content.
@@ -373,12 +402,14 @@ pub trait FileSystem: Send + Sync {
     /// permissions are independent: a target whose bytes already match may still
     /// be world-readable.
     ///
-    /// True when no group or other permission bit is set. Symlinks are
-    /// followed, so it reports on the file the path resolves to.
+    /// True when no group or other permission bit is set. Answers for what is at
+    /// the path itself: a symlink there is refused, never judged by its
+    /// destination's mode.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if the file's metadata cannot be read.
+    /// [`FileSystemError::SymlinkedTarget`] if the final component is a symlink.
+    /// [`FileSystemError`] if the metadata cannot be read.
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
 
     /// Remove a file. Irreversible.

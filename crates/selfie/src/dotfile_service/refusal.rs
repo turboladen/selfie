@@ -4,13 +4,10 @@
 //! and classify a target through here and refuse it in the same words, so none of
 //! them can describe one refusal differently from the others.
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crate::fs::{
-    filesystem::{FileSystem, FileSystemError},
+    filesystem::{FileSystem, FileSystemError, TargetRead},
     target::{TargetPath, TargetRejection},
 };
 
@@ -143,6 +140,11 @@ pub(super) enum TargetState {
     Readable(Vec<u8>),
     /// A directory, which a file cannot replace.
     Directory,
+    /// A symlink, found by the read after every look missed it.
+    Link(Link),
+    /// A fifo, socket or device node, found by the read after every look missed it.
+    /// Carries the refusal a writer gives for it.
+    Irregular(FileSystemError),
     /// Something is there, or may be, and it could not be read.
     Unreadable(FileSystemError),
 }
@@ -150,29 +152,52 @@ pub(super) enum TargetState {
 /// What is at `target`, from one read of it.
 ///
 /// Read as raw bytes, so two different files are never reported identical after
-/// a lossy decode. Ask [`guard_target`] first: this reads, and a read follows what
-/// the guard refuses.
+/// a lossy decode. The read never follows a link at the target or waits on a fifo,
+/// but ask the guard first all the same, which keeps a device node from being
+/// opened at all: [`guard_refusal`] on a path that refuses every link, and
+/// [`guard_target`] on the secret path, which replaces one.
 // One read rather than an existence probe and then a read, so a file deleted
 // between the two deploys instead of refusing, and a directory is named rather than
-// reported as a read failure. Only the two errnos that prove nothing is at the path
-// are absent. Anything else -- a parent that denies access, a loop above the
-// target -- leaves what is there unknown, and an unknown target is never written
-// over: the secret path would put it to a resolver, and the repository-file path and
-// drift refuse it outright.
+// reported as a read failure. The port says what is there; an error leaves it
+// unknown -- a parent that denies access, a loop above the target -- and an unknown
+// target is never written over: the secret path would put it to a resolver, and the
+// repository-file path and drift refuse it outright.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
-    let error = match filesystem.read_file_bytes(target.path()) {
-        Ok(bytes) => return TargetState::Readable(bytes),
-        Err(error) => error,
-    };
+    match filesystem.read_file_no_follow(target) {
+        Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
+        Ok(TargetRead::Absent) => TargetState::Absent,
+        Ok(TargetRead::Directory) => TargetState::Directory,
+        Ok(TargetRead::Link { points_to }) => TargetState::Link(Link {
+            path: target.path().to_path_buf(),
+            points_to,
+        }),
+        Ok(TargetRead::Irregular { kind }) => {
+            TargetState::Irregular(FileSystemError::IrregularTarget {
+                path: target.path().to_path_buf(),
+                kind,
+            })
+        }
+        Err(error) => TargetState::Unreadable(error),
+    }
+}
 
-    let kind = match &error {
-        FileSystemError::IoError(io) => Some(io.kind()),
-        _ => None,
-    };
-    match kind {
-        Some(io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => TargetState::Absent,
-        Some(io::ErrorKind::IsADirectory) => TargetState::Directory,
-        _ => TargetState::Unreadable(error),
+/// The bytes at a target an entry may go on to compare (`None` for nothing there),
+/// or the warning refusing the entry for what the read found instead.
+///
+/// A link or fifo the read found is worded as the guard words one, since the
+/// user's remedy is the same whichever check found it.
+pub(super) fn readable_or_refusal(
+    source: &str,
+    target: &TargetPath,
+    state: TargetState,
+) -> Result<Option<Vec<u8>>, String> {
+    match state {
+        TargetState::Absent => Ok(None),
+        TargetState::Readable(bytes) => Ok(Some(bytes)),
+        TargetState::Directory => Err(directory_target_refusal(source, target)),
+        TargetState::Link(link) => Err(refusal_warning(source, &link.refusal())),
+        TargetState::Irregular(refusal) => Err(refusal_warning(source, &refusal)),
+        TargetState::Unreadable(error) => Err(unreadable_target_refusal(source, target, &error)),
     }
 }
 
@@ -204,42 +229,28 @@ pub(super) fn refusal_warning(source: &str, refusal: &FileSystemError) -> String
     format!("Skipping '{source}': {refusal}")
 }
 
-// Why an entry whose target could not be read is refused, worded the
-// same by apply and drift. A symlink whose destination cannot be read is a
-// symlinked target first, which is the refusal every command already shares;
-// only a plain file gets the read failure.
-pub(super) fn unreadable_target_refusal<F: FileSystem>(
-    filesystem: &F,
+// Why an entry whose target could not be read is refused, worded the same by apply
+// and drift.
+pub(super) fn unreadable_target_refusal(
     source: &str,
     target: &TargetPath,
     error: &FileSystemError,
 ) -> String {
-    match filesystem.symlink_refusal(target) {
-        Some(refusal) => refusal_warning(source, &refusal),
-        None => format!(
-            "Skipping '{source}': target '{}' could not be read: {error}",
-            target.display()
-        ),
-    }
+    format!(
+        "Skipping '{source}': target '{}' could not be read: {error}",
+        target.display()
+    )
 }
 
 // The target's bytes if the entry can go on to a decision: `None` for an absent
-// target, `Err(warning)` for a directory or for one that could not be read. Apply
-// and drift both classify through here, so they cannot answer differently about
-// one file.
+// target, `Err(warning)` for anything else. Apply and drift both classify through
+// here, so they cannot answer differently about one file.
 pub(super) fn readable_target<F: FileSystem>(
     filesystem: &F,
     source: &str,
     target: &TargetPath,
 ) -> Result<Option<Vec<u8>>, String> {
-    match read_target_state(filesystem, target) {
-        TargetState::Absent => Ok(None),
-        TargetState::Readable(bytes) => Ok(Some(bytes)),
-        TargetState::Directory => Err(directory_target_refusal(source, target)),
-        TargetState::Unreadable(e) => {
-            Err(unreadable_target_refusal(filesystem, source, target, &e))
-        }
-    }
+    readable_or_refusal(source, target, read_target_state(filesystem, target))
 }
 
 // The three deploy-side sites that refuse a target by the rule: apply's

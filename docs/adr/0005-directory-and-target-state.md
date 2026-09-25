@@ -108,7 +108,7 @@ appears that reads the directory without claiming to have seen all of it.
 ### 3. What is at a dotfile's target
 
 Apply, drift and track classify a target through one function whose states are **absent**,
-**readable**, **directory** and **unreadable**.
+**readable**, **directory**, **link**, **irregular** and **unreadable**.
 
 The classifier is a single read. A read that fails because nothing is there is absent, so a file
 deleted between a probe and the read deploys instead of being reported as unreadable. A directory is
@@ -116,10 +116,14 @@ its own state with its own sentence. The port's irregular-target question keeps 
 directories, because it exists to stop a read that would block and opening a directory never blocks;
 the port's documentation is corrected to say so.
 
-These states carry no symlink fact, and a single read of a dangling link reports that nothing is
-there. The non-following symlink question therefore stays a separate call, ordered ahead of the
-classifier on every path reaching a target, and it is what the warning below reads the link's
-destination from. The two questions take different stats and are not merged.
+The read never follows a link at the final component or waits on a fifo: a link, dangling or not,
+and a fifo, socket or device node are states of their own, which back up the questions ahead of the
+read rather than replacing them. A link or fifo the read finds appeared after those questions and is
+handled as they would handle it: refused on the repository-file paths, and on the secret path
+replaced only once a further look confirms the link is still there. The non-following symlink
+question therefore stays a separate call, ordered ahead of the classifier on every path reaching a
+target, and it is what the warning below reads the link's destination from. The two questions take
+different stats and are not merged.
 
 The secret-bearing path uses the same classifier and the same refusal. The conflict detail handed to
 a resolver carries the target's state rather than a byte slice, so a revealed conflict cannot render

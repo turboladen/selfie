@@ -1122,10 +1122,10 @@ is a fifo, socket or device node behind it, which is refused before any command 
 replacement lands on the link itself, so what it pointed at is left alone. selfie does not read
 through a link it has seen: doing so would show you a file the link's author chose rather than one
 you deployed. It looks twice, once before running the commands and again immediately before the
-read, so a link present at either look is never read through; a link planted between that second
-look and the read is still followed, and closing that needs a non-following read selfie does not yet
-have. After the replacement succeeds selfie warns, naming the link and where it pointed, so a link
-you created deliberately is not removed silently.
+read, and the read itself refuses to follow a link, so a link is never read through whenever it
+appeared; one that appears after the second look is replaced the same way. After the replacement
+succeeds selfie warns, naming the link and where it pointed, so a link you created deliberately is
+not removed silently.
 
 Two things refuse before any command runs, because the write could never succeed and a provider
 command can raise a biometric prompt. A fifo, socket or device node is refused, whether it is at the

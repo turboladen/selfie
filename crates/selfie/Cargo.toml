@@ -13,8 +13,10 @@ gix.workspace = true
 mockall = { workspace = true, optional = true }
 # "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
 # has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
-# `unsafe` for the same reason the dev entry below did.
-nix = { version = "0.31", features = ["user"] }
+# `unsafe` for the same reason the dev entry below did. "fs" is for the `OFlag`
+# constants `RealFileSystem::read_file_no_follow` opens with, which `std` does not
+# name.
+nix = { version = "0.31", features = ["fs", "user"] }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true

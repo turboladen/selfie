@@ -31,7 +31,7 @@ use crate::{
     paths::is_within,
 };
 
-use super::deploy_entry::{DeployUnit, Recorded, perform_deploy, record_and_save};
+use super::deploy_entry::{Decided, DeployUnit, Recorded, perform_deploy, record_and_save};
 use super::port::ApplyOptions;
 use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
 use super::secret::{SecretApply, SecretOutcome, secret_origin};
@@ -365,9 +365,16 @@ where
 
             match decision {
                 DeployDecision::Deploy => {
-                    if perform_deploy(filesystem, sender, &unit, options.dry_run, &mut backed_up)
-                        .await
-                        .is_ok()
+                    if perform_deploy(
+                        filesystem,
+                        sender,
+                        &unit,
+                        Decided::Now(current.as_deref()),
+                        options.dry_run,
+                        &mut backed_up,
+                    )
+                    .await
+                    .is_ok()
                     {
                         if options.dry_run {
                             skipped_count += 1;
@@ -449,11 +456,15 @@ where
                     // skipped -- leaving the summary at zero conflicts. The preview
                     // someone runs to see what `--yes` would overwrite is the one
                     // place that count has to be right.
+                    let mut decided = Decided::Now(current.as_deref());
                     let accept = if options.dry_run {
                         false
                     } else if options.auto_accept {
                         true
                     } else if let Some(resolver) = &options.conflict_resolver {
+                        // The prompt waits on the user, so what the decision read
+                        // may no longer be at the target when the write comes.
+                        decided = Decided::BeforePrompt;
                         let src = source_path.display().to_string();
                         let tgt = target_path.display().to_string();
                         let d = rendered.get_or_insert_with(&render).clone();
@@ -479,6 +490,7 @@ where
                             filesystem,
                             sender,
                             &unit,
+                            decided,
                             options.dry_run,
                             &mut backed_up,
                         )

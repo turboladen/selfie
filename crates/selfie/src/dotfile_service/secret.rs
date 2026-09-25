@@ -17,7 +17,7 @@ use crate::{
         resolve::{ResolvedContent, check_resolvable, resolve_content},
     },
     fs::{
-        filesystem::FileSystem,
+        filesystem::{FileSystem, FileSystemError},
         target::{TargetPath, deploy_target},
     },
     package::{ContentSource, DotfileEntry, event::EventSender},
@@ -93,6 +93,15 @@ pub(super) enum SecretOutcome {
 /// `?` then reads as "stop here if this phase decided the entry's fate", which
 /// is what every one of these steps does.
 type Phase<T = ()> = Result<T, SecretOutcome>;
+
+/// What the looks and the read found at a secret target just before the write.
+enum Found {
+    /// A symlink, which is replaced whatever it points at.
+    Link(Link),
+    /// Anything a write may land on after a comparison: nothing there, a readable
+    /// file, or one that could not be read.
+    State(TargetState),
+}
 
 /// One secret-bearing entry, with its target resolved and classified.
 struct SecretTarget<'a> {
@@ -180,63 +189,75 @@ where
             self.sender.send_warning(warning).await;
         }
 
-        // Asked again here, immediately before the read, because the answer taken in
-        // `usable_target` is older than the resolve that ran in between.
-        //
-        // Advisory, not binding: the read below opens the target by pathname and
-        // resolves it again, so a link planted between this stat and that open is
-        // still followed and its destination still reaches a conflict resolver. What
-        // this buys is that a link present at either ask is never read through. The
-        // remaining window closes only with a non-following read on the port, which
-        // selfie does not have. The write is safe either way, because the owner-only
-        // writer refuses to follow.
-        let link = match classify_link(self.filesystem.symlink_refusal(&target.path)) {
-            Ok(link) => link,
-            // Fails closed here as it does at the first ask. Falling back to the
-            // earlier answer would swallow a refusal this code cannot interpret, at
-            // the one point where the next statement reads the target.
-            Err(refusal) => {
-                self.sender
-                    .send_warning(refusal_warning(target.entry.target(), &refusal))
-                    .await;
-                return Err(SecretOutcome::Failed);
-            }
+        // Both questions again, immediately before the read, because the answers
+        // taken in `usable_target` are older than the resolve that ran in between. A
+        // link that appeared meanwhile is replaced like any other; a fifo, socket or
+        // device node that appeared, at the target or behind a new link, refuses,
+        // since the read would meet it and the writer refuse it.
+        let found = match self.look(target.entry.target(), &target.path).await? {
+            Some(link) => Found::Link(link),
+            None => self.read_before_write(&target).await?,
         };
 
         // A link is replaced whatever is behind it, so there is nothing to compare and
-        // nothing to put to a resolver. Skipping all three is the fix: every one of
-        // them reads or stats *through* the link.
+        // nothing to put to a resolver, and both are skipped.
         //
-        // `settle_in_sync` matters as much as the read does. It asks `is_owner_only`,
-        // which follows, so a link whose destination is already owner-only would be
-        // left alone -- making the outcome depend on the destination's mode, which
-        // ADR-0005 decision 3 removes.
-        if let Some(link) = link {
-            let outcome = self.write(&target, &resolved).await;
-            if matches!(outcome, SecretOutcome::Deployed) {
-                self.sender
-                    .send_warning(replaced_link_warning(&target, &link))
-                    .await;
+        // Skipping `settle_in_sync` matters as much as skipping the read: the mode of a
+        // link's destination says nothing about the file that replaces the link, and
+        // the outcome must not depend on it (ADR-0005 decision 3).
+        let current = match found {
+            Found::Link(link) => {
+                let outcome = self.write(&target, &resolved).await;
+                if matches!(outcome, SecretOutcome::Deployed) {
+                    self.sender
+                        .send_warning(replaced_link_warning(&target, &link))
+                        .await;
+                }
+                return Ok(outcome);
             }
-            return Ok(outcome);
-        }
-        let current = self.read_target(&target);
-        // A directory put there during the resolve. The pre-command check refused
-        // one already present, so this is the same refusal, arriving late; it never
-        // reaches the resolver, which could only be asked to overwrite a directory.
-        if matches!(current, TargetState::Directory) {
-            self.sender
-                .send_warning(directory_target_refusal(
-                    target.entry.target(),
-                    &target.path,
-                ))
-                .await;
-            return Ok(SecretOutcome::Failed);
-        }
+            Found::State(current) => current,
+        };
         self.settle_in_sync(&target, &resolved, &current).await?;
         self.settle_conflict(&target, &resolved, &current).await?;
 
         Ok(self.write(&target, &resolved).await)
+    }
+
+    /// Read the target immediately before the write, and settle what the read found:
+    /// a link to replace, a target to compare, or a refusal.
+    ///
+    /// Never replaces a link the read found without a look confirming it is still
+    /// one, so whatever took its place is compared, not written over.
+    async fn read_before_write(&self, target: &SecretTarget<'_>) -> Phase<Found> {
+        let source = target.entry.target();
+        let state = match self.read_target(target) {
+            // Planted after the last look. Looked at once more, which refuses a link
+            // to a fifo in the looks' own words at any timing.
+            TargetState::Link(_) => match self.look(source, &target.path).await? {
+                Some(link) => return Ok(Found::Link(link)),
+                // No link any more: something else took its place since the read,
+                // perhaps the user's own file. Read again and settle that instead;
+                // replacing the link the read saw would overwrite it unasked.
+                None => self.read_target(target),
+            },
+            state => state,
+        };
+
+        let refusal = match state {
+            TargetState::Absent | TargetState::Readable(_) | TargetState::Unreadable(_) => {
+                return Ok(Found::State(state));
+            }
+            // A link again, where the look just found none: a target changing under
+            // every look is refused rather than chased.
+            TargetState::Link(link) => refusal_warning(source, &link.refusal()),
+            TargetState::Irregular(refusal) => refusal_warning(source, &refusal),
+            // A directory put there during the resolve. The pre-command check refused
+            // one already present, so this is the same refusal, arriving late; the
+            // resolver could only be asked to overwrite a directory.
+            TargetState::Directory => directory_target_refusal(source, &target.path),
+        };
+        self.sender.send_warning(refusal).await;
+        Err(SecretOutcome::Failed)
     }
 
     /// Expand the target, or refuse the entry naming the form that was refused.
@@ -266,10 +287,9 @@ where
             }
         };
 
-        // Both questions, ahead of the classifier, because `read_target` reads
-        // *through* a link and would hand the destination's bytes to a conflict
-        // resolver -- someone else's file, revealed at a prompt -- and opening a fifo
-        // blocks indefinitely.
+        // Both questions, before any command runs: what a link or a fifo at the
+        // target means is decided here, not by the read after the fetch, which could
+        // only refuse either.
         //
         // A link is replaced whatever it points at, unless it resolves to a fifo,
         // socket or device node, which the writer refuses. `Failed` rather than
@@ -444,7 +464,8 @@ where
         }
     }
 
-    /// What is at the target: absent, readable, a directory, or unreadable.
+    /// What is at the target: absent, readable, a directory, a link, a fifo, socket or
+    /// device node, or unreadable.
     ///
     /// Conflating any two of those loses a credential.
     fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
@@ -478,11 +499,27 @@ where
             return Ok(());
         }
 
-        if self.filesystem.is_owner_only(&target.path).unwrap_or(true) {
-            self.sender
-                .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
-                .await;
-            return Err(SecretOutcome::Skipped);
+        match self.filesystem.is_owner_only(&target.path) {
+            // A link put there since the read: replaced like any link, never
+            // reported in sync on the strength of a file it no longer is.
+            Err(refusal @ FileSystemError::SymlinkedTarget { .. }) => {
+                if let Ok(Some(link)) = classify_link(Some(refusal)) {
+                    let outcome = self.write(target, resolved).await;
+                    if matches!(outcome, SecretOutcome::Deployed) {
+                        self.sender
+                            .send_warning(replaced_link_warning(target, &link))
+                            .await;
+                    }
+                    return Err(outcome);
+                }
+            }
+            Ok(true) | Err(_) => {
+                self.sender
+                    .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
+                    .await;
+                return Err(SecretOutcome::Skipped);
+            }
+            Ok(false) => {}
         }
 
         // Same content, written the one way that establishes the mode atomically.

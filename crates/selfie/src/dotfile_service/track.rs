@@ -476,11 +476,11 @@ where
 {
     // Expand the target, or refuse it if selfie could never deploy to it.
     //
-    // First of the three refusals, and ahead of `symlink_refusal` for a reason of
-    // its own: this one touches no filesystem at all, while `symlink_refusal` and
-    // `path_exists` both stat a relative path against the *process working
-    // directory* -- which is what made track record entries every later apply
-    // refuses (selfie-q9t3). It therefore also sits ahead of all three writes.
+    // First of the three refusals, and ahead of the guard for a reason of its own:
+    // this one touches no filesystem at all, while the guard's stats and the read
+    // would each resolve a relative path against the *process working directory*
+    // -- which is what made track record entries every later apply refuses
+    // (selfie-q9t3). It therefore also sits ahead of all three writes.
     //
     // Ahead of the already-tracked answer below as well: an entry recording a
     // target that can never deploy is not a reason to report it as tracked.
@@ -530,11 +530,11 @@ where
         });
     }
 
-    // Ahead of the existence check and every write. Tracking reads *through* a link,
-    // so accepting one copies the destination into the dotfiles directory, where
-    // `sync push` commits it; and the read follows the link, so a dangling one
-    // would read as a missing file. A fifo would block the read. After the
-    // already-tracked answer above, because refusing an idempotent no-op helps nobody.
+    // Ahead of the read and every write, so a link or a fifo gets its own sentence
+    // and remedy: accepting a link would copy its destination into the dotfiles
+    // directory, where `sync push` commits it, and the read would refuse one only as
+    // unreadable. After the already-tracked answer above, because refusing an
+    // idempotent no-op helps nobody.
     //
     // A fifo is not given `track_refusal`: its "replace the symlink with a regular
     // file, or track the path it points to" fits neither half, since a fifo points at
@@ -575,6 +575,17 @@ where
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Cannot track the target: {}",
                 directory_at_target(&expanded_target)
+            )));
+        }
+        // A link or fifo put there after the guard, refused in the guard's words.
+        TargetState::Link(link) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_refusal(
+                &link.refusal(),
+            )));
+        }
+        TargetState::Irregular(refusal) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "{refusal}. Point the entry at a regular file instead."
             )));
         }
         TargetState::Unreadable(e) => {
