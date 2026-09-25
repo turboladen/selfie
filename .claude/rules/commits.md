@@ -54,6 +54,10 @@ pushing — the rewrite's existence is the trigger, not a judgment about its siz
 what failed on #157: the same check ran after #155's fold and was skipped after #157's because the
 fold felt smaller, and two commits reached `main` uncertified.
 
+The per-commit check is `just clippy` on every commit below the tip, each in its own archive and
+target directory (below). It type-checks every crate and test target, which is what a bisect needs.
+The tests, the docs gate and the rest of `just check` run once, at the tip.
+
 A green tip cannot stand in for it. A commit that fails to build is invisible at the tip whenever a
 later commit fixes it, which is the ordinary shape of a fold.
 

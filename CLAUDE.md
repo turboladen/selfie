@@ -38,7 +38,9 @@ catch:
 - **Any cargo command in this repo waits on `target/`'s lock.** A `cargo-watch` the maintainer is
   running, or another agent's build, holds it — and `just check` then stalls silently rather than
   failing, so a ten-minute wait is indistinguishable from a slow compile. Point `CARGO_TARGET_DIR`
-  at a path outside the repo to take a lock of your own.
+  at a path outside the repo to take a lock of your own, and reuse it for every run in that
+  worktree: a fresh directory is a cold build each time. Only a `git archive` copy needs a fresh
+  one, for the reason `.claude/rules/commits.md` gives.
 
   That trades one hazard for another, and the second one lies. A target directory reused across runs
   makes `cargo doc` exit 101 complaining that it could not remove `doc/selfie` because the directory

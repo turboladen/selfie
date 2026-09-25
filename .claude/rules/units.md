@@ -33,7 +33,8 @@ start naming findings about which layer a check lives in.
 
 `/code-review` runs at most twice on a PR. A third round is the design trigger above, not a third
 fix pass. Run mutation checks before requesting review, not after: a PR that ran them first has gone
-through review with zero findings, and one that ran them after took six rounds.
+through review with zero findings, and one that ran them after took six rounds. After a fold, re-run
+only the mutations the fold touched (`testing.md`).
 
 ## Priority order is fixed
 

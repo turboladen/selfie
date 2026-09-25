@@ -39,6 +39,17 @@ invariant and confirm the named test fails.** Then revert. Record the result.
   path cannot be written. A build failure cannot be skipped, ignored, or deleted by someone who does
   not understand what it was for.
 
+## Run each mutation once, against the test that should catch it
+
+Scope the run to the target holding the named test: `cargo test -p selfie --test <file> <test>`, or
+`--lib` for a unit test. A workspace-wide run per mutation adds minutes and no information. Assert
+the named test ran, because a filter that matches nothing passes.
+
+A mutation runs when its test is written. After a later change, re-run only the mutations whose
+mutated lines or named test that change touched. A review fold elsewhere on the branch does not
+invalidate them, and re-running the whole set after every fold costs more than the rest of a unit's
+verification put together.
+
 ## The harness is an instrument and needs verifying too
 
 A batched mutation runner that writes a file and invokes `cargo` within the same second can hit
