@@ -251,6 +251,10 @@ user with two broken entries fixes one, runs again, and only then learns of the 
 does not let a failure pass unnoticed, since the exit code and the summary both carry it. So
 continuing costs nothing and gains the whole list.
 
+Continuing is not free for provider commands, whose failure is usually shared by the same program's
+later commands and costs a prompt or a timeout each, so once one fails, later entries running that
+program are refused without running, while other programs' entries still run.
+
 This is the only decision here that changes a setting's documented default, and the only one a user
 notices without editing their configuration.
 

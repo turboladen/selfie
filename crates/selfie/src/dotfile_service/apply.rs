@@ -2,10 +2,10 @@
 //!
 //! Walks the packages an operation covers and sends each entry down the path its
 //! content source calls for. Three things stop the run before the end: the caller
-//! cancelling, the deploy state failing to write, and a secret-bearing entry
-//! failing to resolve while `stop_on_error` is on.
+//! cancelling, the deploy state failing to write, and any refusal or failure while
+//! `stop_on_error` is on.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,15 +36,105 @@ use super::deploy_entry::{
 };
 use super::port::ApplyOptions;
 use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
-use super::secret::{SecretApply, SecretOutcome, secret_origin};
+use super::secret::{SecretApply, SecretOutcome, programs_of, secret_origin};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
 
-/// How a cancelled apply is reported.
+/// Why an apply stopped before its last entry.
 ///
-/// One constant so the two sites that stop a run — between entries, and after a
-/// provider command was killed mid-flight — cannot describe the same event two
-/// different ways.
-const APPLY_CANCELLED: &str = "Apply cancelled";
+/// Each cause is worded once, in `Display`, so no two sites that stop a run can
+/// describe the same stop differently.
+enum Stop {
+    /// The caller cancelled the run.
+    Cancelled,
+    /// An entry was refused or failed while `stop_on_error` is on. Carries the
+    /// entry's target as the package file spells it.
+    Entry(String),
+    /// A package was refused whole while `stop_on_error` is on. Carries its name.
+    Package(String),
+    /// The standalone dotfiles directory could not be read while `stop_on_error`
+    /// is on.
+    UnreadableDotfilesDirectory,
+    /// The deploy state could not record a write. Carries the reason, already
+    /// worded. Stops the run whatever `stop_on_error` says.
+    Unrecorded(String),
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Apply cancelled"),
+            Self::Entry(target) => write!(
+                f,
+                "Stopped after failing to apply dotfile '{target}' (stop_on_error is enabled)"
+            ),
+            Self::Package(name) => write!(
+                f,
+                "Stopped after refusing package '{name}' (stop_on_error is enabled)"
+            ),
+            Self::UnreadableDotfilesDirectory => f.write_str(
+                "Stopped before applying anything: the standalone dotfiles directory could not \
+                 be read (stop_on_error is enabled)",
+            ),
+            Self::Unrecorded(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// What an apply did with each entry, counted as it goes.
+#[derive(Default)]
+struct ApplyTally {
+    deployed: usize,
+    /// Entries there was correctly nothing to do for, or that a dry run only
+    /// previewed.
+    skipped: usize,
+    conflicts: usize,
+    /// Entries, packages and directories this run was asked to deploy and did
+    /// not.
+    refused: usize,
+}
+
+impl ApplyTally {
+    /// Count one refusal, and return the stop it calls for, if any: a cancelled
+    /// run stops, and otherwise `stop_on_error` decides.
+    // Cancellation is asked first. Ctrl+C kills a provider command, which then
+    // fails, and blaming `stop_on_error` for that sends the user looking for a
+    // problem in the package file that is not there.
+    fn refuse(
+        &mut self,
+        config: &SelfieConfig,
+        token: &CancellationToken,
+        cause: Stop,
+    ) -> Option<Stop> {
+        self.refused += 1;
+        if token.is_cancelled() {
+            Some(Stop::Cancelled)
+        } else if config.stop_on_error() {
+            Some(cause)
+        } else {
+            None
+        }
+    }
+
+    fn into_success(self, environment: &str) -> OperationSuccess {
+        // `refused` belongs in the total: leaving it out would shrink the step
+        // count by exactly the number of refusals, so a run that refused two of
+        // three entries would report (1/1) and the two refusals would vanish from
+        // the summary as well as from the counters.
+        //
+        // That makes this "outcomes recorded" rather than "entries seen": a package
+        // refused whole for a top-level unknown key contributes one outcome and no
+        // entries.
+        let total = self.deployed + self.skipped + self.conflicts + self.refused;
+        OperationSuccess::DotfilesApplied {
+            deployed_count: self.deployed,
+            skipped_count: self.skipped,
+            conflict_count: self.conflicts,
+            refused_count: self.refused,
+            environment: environment.to_string(),
+            steps_completed: StepCount::new(total, total),
+        }
+    }
+}
 
 /// Everything an apply needs that does not vary from package to package.
 ///
@@ -121,28 +211,35 @@ where
     // Targets this run has settled, and where each one's former content went.
     let mut backed_up: HashMap<String, Option<PathBuf>> = HashMap::new();
 
-    let mut deployed_count: usize = 0;
-    let mut skipped_count: usize = 0;
-    let mut conflict_count: usize = 0;
-    // Entries this run was asked to deploy and did not. Kept apart from
-    // `skipped_count` because a caller cannot act on a number that means both
-    // "nothing to do" and "selfie declined": that conflation is what let `selfie
-    // apply` exit 0 having deployed nothing (selfie-c28).
-    //
-    // The split is the one the secret-bearing path already draws between
-    // `SecretOutcome::Failed` and `SecretOutcome::Skipped` — see
-    // `SecretApply::usable_target`, whose "a refused entry is not a skipped one"
-    // never reached the repository-file path until now.
-    let mut refused_count = usize::from(refused_repository);
+    // Refusals are counted apart from skips because a caller cannot act on a
+    // number that means both "nothing to do" and "selfie declined": that
+    // conflation is what let `selfie apply` exit 0 having deployed nothing
+    // (selfie-c28).
+    let mut tally = ApplyTally::default();
 
     // Set when the run stops early. Held rather than returned so every stop
     // reports through the one failure below.
     //
-    // `stop_on_error` governs secret-resolution failures only: a repository-file
-    // refusal or write failure is counted and the loop continues. A failed state
-    // record stops the run whatever `stop_on_error` says, because the next entry
-    // would fail the same way.
-    let mut stopped: Option<String> = None;
+    // Every refusal goes through `ApplyTally::refuse`, which decides whether it
+    // stops the run. A failed state record stops the run whatever
+    // `stop_on_error` says, because the next entry would fail the same way.
+    let mut stopped: Option<Stop> = None;
+
+    // The directory is known unreadable before any package is looked at, so under
+    // `stop_on_error` the run stops before it deploys anything: no package is
+    // walked once `stopped` is set here.
+    if refused_repository {
+        stopped = tally.refuse(config, token, Stop::UnreadableDotfilesDirectory);
+    }
+    let packages = if stopped.is_some() { &[][..] } else { packages };
+
+    // The programs whose commands have failed in this run. A failure is usually
+    // shared by that program's later commands: a locked vault or a dismissed
+    // biometric prompt fails every later `op read` the same way, each after its own
+    // prompt or `command_timeout`. So a later entry running one of these programs
+    // is refused without running anything, while other programs' entries and
+    // repository files still deploy. A dry run runs no command, so never adds one.
+    let mut failed_programs: BTreeSet<String> = BTreeSet::new();
 
     'packages: for package in packages {
         // Refuse the whole package before asking what dotfiles it has, through
@@ -157,7 +254,12 @@ where
             sender
                 .send_warning(format!("Skipping package '{}': {reason}", package.name()))
                 .await;
-            refused_count += 1;
+            if let Some(stop) =
+                tally.refuse(config, token, Stop::Package(package.name().to_string()))
+            {
+                stopped = Some(stop);
+                break 'packages;
+            }
             continue;
         }
 
@@ -188,12 +290,15 @@ where
         for entry in &dotfiles {
             // Between entries: refuse to start another entry's commands once the
             // user has asked to stop. The *mid-command* case cannot be caught
-            // here — it surfaces as a resolve failure and is handled in the
-            // `Failed` arm below.
+            // here: a killed command fails, and `ApplyTally::refuse` reports the
+            // cancellation when that failure is counted.
             if token.is_cancelled() {
-                stopped = Some(APPLY_CANCELLED.to_string());
+                stopped = Some(Stop::Cancelled);
                 break 'packages;
             }
+            // The stop any refusal of this entry calls for, when `stop_on_error`
+            // is on.
+            let failed = || Stop::Entry(entry.target().to_string());
 
             let source = match entry.content_source() {
                 Ok(ContentSource::RepoFile(source)) => source,
@@ -201,32 +306,33 @@ where
                 // Secret-bearing entries resolve their content by running
                 // commands, compare it in memory, and record nothing.
                 Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
+                    if let Some(program) = programs_of(entry)
+                        .into_iter()
+                        .find(|program| failed_programs.contains(*program))
+                    {
+                        sender
+                            .send_warning(format!(
+                                "Skipping '{}': an earlier `{program}` command failed; no \
+                                 command was run",
+                                entry.target()
+                            ))
+                            .await;
+                        if let Some(stop) = tally.refuse(config, token, failed()) {
+                            stopped = Some(stop);
+                            break 'packages;
+                        }
+                        continue;
+                    }
                     match secret_apply.apply(entry, secret_origin(&content)).await {
-                        SecretOutcome::Deployed => deployed_count += 1,
-                        SecretOutcome::Skipped => skipped_count += 1,
-                        SecretOutcome::Conflicted => conflict_count += 1,
-                        SecretOutcome::Failed => {
-                            refused_count += 1;
-                            // Cancellation is decided before `stop_on_error` gets
-                            // to explain the failure, and outside its branch,
-                            // because a cancelled run stops either way.
-                            //
-                            // Ctrl+C kills the provider command, which fails, and
-                            // `stop_on_error` defaults to true — so without this
-                            // the run blames the package file for the user's own
-                            // interrupt ("Stopped after failing to apply dotfile
-                            // 'X' (stop_on_error is enabled)"). That reads as a
-                            // spec bug and sends the user looking for one.
-                            if token.is_cancelled() {
-                                stopped = Some(APPLY_CANCELLED.to_string());
-                                break 'packages;
+                        SecretOutcome::Deployed => tally.deployed += 1,
+                        SecretOutcome::Skipped => tally.skipped += 1,
+                        SecretOutcome::Conflicted => tally.conflicts += 1,
+                        outcome @ (SecretOutcome::Failed | SecretOutcome::CommandFailed(_)) => {
+                            if let SecretOutcome::CommandFailed(program) = outcome {
+                                failed_programs.insert(program);
                             }
-                            if config.stop_on_error() {
-                                stopped = Some(format!(
-                                    "Stopped after failing to apply dotfile '{}' \
-                                     (stop_on_error is enabled)",
-                                    entry.target()
-                                ));
+                            if let Some(stop) = tally.refuse(config, token, failed()) {
+                                stopped = Some(stop);
                                 break 'packages;
                             }
                         }
@@ -242,7 +348,10 @@ where
                     sender
                         .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
-                    refused_count += 1;
+                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
                     continue;
                 }
             };
@@ -253,18 +362,16 @@ where
             // which is surprising and potentially dangerous; a `~user/…` one names
             // a home directory selfie does not resolve.
             //
-            // Still a skip rather than a failure, unlike the secret-bearing path
-            // above: every repository-file refusal in this loop continues, and
-            // `stop_on_error` governs secret-resolution failures only (see the
-            // comment on `stopped`). Changing that is a behavior change beyond
-            // this rule.
             let target_path = match deploy_target(filesystem, entry.target()) {
                 Ok(path) => path,
                 Err(rejection) => {
                     sender
                         .send_warning(target_refusal(entry.target(), rejection))
                         .await;
-                    refused_count += 1;
+                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
                     continue;
                 }
             };
@@ -279,7 +386,10 @@ where
                         "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
-                refused_count += 1;
+                if let Some(stop) = tally.refuse(config, token, failed()) {
+                    stopped = Some(stop);
+                    break 'packages;
+                }
                 continue;
             }
 
@@ -292,7 +402,10 @@ where
             // writes through a link, so there is no outcome the read could change.
             if let Some(refusal) = guard_refusal(filesystem, &target_path) {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
-                refused_count += 1;
+                if let Some(stop) = tally.refuse(config, token, failed()) {
+                    stopped = Some(stop);
+                    break 'packages;
+                }
                 continue;
             }
 
@@ -307,7 +420,10 @@ where
                         repository_read_refusal(&refusal)
                     ))
                     .await;
-                refused_count += 1;
+                if let Some(stop) = tally.refuse(config, token, failed()) {
+                    stopped = Some(stop);
+                    break 'packages;
+                }
                 continue;
             }
 
@@ -321,7 +437,10 @@ where
                             source_path.display()
                         ))
                         .await;
-                    refused_count += 1;
+                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
                     continue;
                 }
             };
@@ -336,7 +455,10 @@ where
                 Ok(current) => current,
                 Err(warning) => {
                     sender.send_warning(warning).await;
-                    refused_count += 1;
+                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
                     continue;
                 }
             };
@@ -383,14 +505,14 @@ where
                         )
                         .await
                     {
-                        stopped = Some(reason);
+                        stopped = Some(Stop::Unrecorded(reason));
                         break 'packages;
                     }
 
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
-                    skipped_count += 1;
+                    tally.skipped += 1;
                     None
                 }
                 DeployDecision::Conflict => {
@@ -464,7 +586,7 @@ where
                                 rendered.get_or_insert_with(&render),
                             )
                             .await;
-                        conflict_count += 1;
+                        tally.conflicts += 1;
                         None
                     }
                 }
@@ -482,13 +604,18 @@ where
                 )
                 .await
                 {
-                    DeployOutcome::Deployed => deployed_count += 1,
-                    DeployOutcome::Previewed => skipped_count += 1,
+                    DeployOutcome::Deployed => tally.deployed += 1,
+                    DeployOutcome::Previewed => tally.skipped += 1,
                     // A refusal or a write failure, already reported as whichever it
                     // was. Here they are the same thing: asked to deploy, did not.
-                    DeployOutcome::Refused => refused_count += 1,
+                    DeployOutcome::Refused => {
+                        if let Some(stop) = tally.refuse(config, token, failed()) {
+                            stopped = Some(stop);
+                            break 'packages;
+                        }
+                    }
                     DeployOutcome::Unrecorded(reason) => {
-                        stopped = Some(reason);
+                        stopped = Some(Stop::Unrecorded(reason));
                         break 'packages;
                     }
                 }
@@ -507,28 +634,12 @@ where
     // Does not overwrite an existing reason: `stop_on_error` names the entry that
     // failed, which is more specific than this.
     if stopped.is_none() && token.is_cancelled() {
-        stopped = Some(APPLY_CANCELLED.to_string());
+        stopped = Some(Stop::Cancelled);
     }
 
-    if let Some(message) = stopped {
-        return OperationResult::Failure(OperationFailure::Generic(message));
+    if let Some(stop) = stopped {
+        return OperationResult::Failure(OperationFailure::Generic(stop.to_string()));
     }
 
-    // `refused_count` belongs in the total: leaving it out would shrink the step
-    // count by exactly the number of refusals, so a run that refused two of three
-    // entries would report (1/1) and the two refusals would vanish from the
-    // summary as well as from the counters.
-    //
-    // That makes this "outcomes recorded" rather than "entries seen": a package
-    // refused whole for a top-level unknown key contributes one outcome and no
-    // entries.
-    let total = deployed_count + skipped_count + conflict_count + refused_count;
-    OperationResult::Success(OperationSuccess::DotfilesApplied {
-        deployed_count,
-        skipped_count,
-        conflict_count,
-        refused_count,
-        environment: config.environment().to_string(),
-        steps_completed: StepCount::new(total, total),
-    })
+    OperationResult::Success(tally.into_success(config.environment()))
 }

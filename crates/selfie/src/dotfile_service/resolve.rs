@@ -81,6 +81,29 @@ pub(crate) enum ResolveError {
     TemplateEscapesPackage { template: String },
 }
 
+impl ResolveError {
+    /// The command whose failure this is, when a command the entry ran failed:
+    /// the provider's own command, or for a binding, that binding's command in
+    /// `entry`. `None` for content that was produced and could not be used, and
+    /// for a check made without running anything.
+    pub(crate) fn failed_command<'a>(&'a self, entry: &'a DotfileEntry) -> Option<&'a str> {
+        match self {
+            Self::CommandFailed { command, .. } | Self::UnseparableOutput { command } => {
+                Some(command)
+            }
+            Self::BindingFailed { name, .. } | Self::UnseparableBinding { name } => {
+                entry.vars().get(name).map(String::as_str)
+            }
+            Self::EmptyOutput { .. }
+            | Self::EmptyBinding { .. }
+            | Self::TooLarge
+            | Self::TemplateUnreadable { .. }
+            | Self::NotSecretBearing { .. }
+            | Self::TemplateEscapesPackage { .. } => None,
+        }
+    }
+}
+
 /// Resolve a template entry's path, refusing one that escapes `base_dir`.
 ///
 /// The same runtime containment check the repository-file path applies, and it
