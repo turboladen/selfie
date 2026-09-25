@@ -1089,7 +1089,8 @@ Consequences worth knowing before you adopt this:
   cache would be a secret at rest.
 - `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
   checking them. Checking would mean resolving, which would run your commands from a read-only
-  command.
+  command. They are counted as not verifiable, apart from the entries drift compared, and are not
+  refusals, so they do not make the check exit `1`.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section

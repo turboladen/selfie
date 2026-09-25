@@ -157,6 +157,17 @@ fn drift_summary(events: &[PackageEvent]) -> (usize, usize, usize) {
     }
 }
 
+// `unverified_count` of a drift check's completion.
+fn unverified(events: &[PackageEvent]) -> usize {
+    match get_operation_result(events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            unverified_count,
+            ..
+        })) => *unverified_count,
+        other => panic!("expected a drift completion, got: {other:?}"),
+    }
+}
+
 // Run `work` on a thread and runtime of its own, and give up after `deadline`:
 // `None` for a timeout, and a panic in `work` raised again here.
 //
@@ -13654,6 +13665,103 @@ mod one_order_of_checks {
                 .iter()
                 .any(|w| w.contains("a directory is at the target")),
             "the directory is not the first reason: {warnings:?}"
+        );
+    }
+}
+
+// Drift counts an entry once: compared, refused, or unverified. `total_count` holds
+// only the compared ones, since `sync status` renders it as the entries in place,
+// and every refusal apply would also make reaches `refused_count`.
+mod drift_counts_each_entry_once {
+    use super::*;
+
+    fn had_refusals(events: &[PackageEvent]) -> bool {
+        match get_operation_result(events) {
+            Some(OperationResult::Success(success)) => success.had_refusals(),
+            other => panic!("expected a success, got: {other:?}"),
+        }
+    }
+
+    // One entry of each refusal drift makes before it reads a target, beside one
+    // clean entry. Each refusal is a different kind, so dropping the count from any
+    // one arm moves the refused total, and the clean entry is what `total_count`
+    // may hold.
+    #[tokio::test]
+    async fn drift_counts_each_refused_entry_and_totals_only_compared_ones() {
+        let dirs = TestDirs::new();
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("clean.toml"), "CLEAN").unwrap();
+        std::fs::write(dirs._temp.path().join("outside.toml"), "OUTSIDE").unwrap();
+        nix::unistd::mkfifo(&app.join("pipe.toml"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let t = |name: &str| dirs.target_dir.join(name).display().to_string();
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/clean.toml"
+    target: "{clean}"
+  - source: "myapp/typo.toml"
+    target: "{invalid}"
+    var: oops
+  - source: "myapp/clean.toml"
+    target: "relative/target.toml"
+  - source: "../outside.toml"
+    target: "{escaping}"
+  - source: "myapp/pipe.toml"
+    target: "{fifo}"
+  - source: "myapp/missing.toml"
+    target: "{missing}"
+"#,
+                clean = t("clean.toml"),
+                invalid = t("invalid.toml"),
+                escaping = t("escaping.toml"),
+                fifo = t("fifo.toml"),
+                missing = t("missing.toml"),
+            ),
+        );
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let (_, total, refused) = drift_summary(&events);
+        assert_eq!(refused, 5, "every refused entry must count: {events:?}");
+        assert_eq!(
+            total, 1,
+            "only the compared entry is in the total: {events:?}"
+        );
+        assert_eq!(unverified(&events), 0);
+        assert!(had_refusals(&events), "a refusal must fail the drift check");
+    }
+
+    // Provider-sourced entries are reported as unverifiable, which is neither a
+    // refusal nor a comparison, so a machine whose dotfiles all come from providers
+    // passes a drift check: counting them as refused would fail every such run.
+    #[tokio::test]
+    async fn drift_over_provider_entries_alone_exits_clean() {
+        let dirs = TestDirs::new();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read a\"\n    target: \"{}\"\n  \
+             - command: \"op read b\"\n    target: \"{}\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("b").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let (drifted, total, refused) = drift_summary(&events);
+        assert_eq!((drifted, total, refused), (0, 0, 0), "{events:?}");
+        assert_eq!(unverified(&events), 2, "{events:?}");
+        assert!(
+            !had_refusals(&events),
+            "an unverified entry is not a refusal"
         );
     }
 }
