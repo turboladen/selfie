@@ -67,7 +67,11 @@ where
     };
 
     let mut drift_count: usize = 0;
+    // Entries compared against their source, and nothing else. `sync status`
+    // renders this as the entries in place, so an entry refused or reported
+    // unverified must never reach it.
     let mut total_count: usize = 0;
+    let mut unverified_count: usize = 0;
     // One for an unlistable dotfiles directory, as apply counts it. A drift
     // report missing every standalone dotfile must not read as all clear.
     let mut refused_count = usize::from(unreadable_repository);
@@ -118,8 +122,6 @@ where
                 return None;
             }
 
-            total_count += 1;
-
             let source = match entry.content_source() {
                 Ok(ContentSource::RepoFile(source)) => source,
 
@@ -128,8 +130,8 @@ where
                 // the user's commands: leaking content into a read-only
                 // operation and prompting for authentication.
                 //
-                // Reported as unverifiable rather than counted as drift.
-                // Counting them would leave `dotfiles drift` permanently dirty
+                // Reported as unverifiable rather than counted as drift or as a
+                // refusal. Either would leave `dotfiles drift` permanently dirty
                 // on any machine with one provider-sourced dotfile (ADR-0003).
                 Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
                     sender
@@ -139,6 +141,7 @@ where
                             "provider-sourced (not verifiable without resolving)",
                         )
                         .await;
+                    unverified_count += 1;
                     continue;
                 }
 
@@ -150,6 +153,7 @@ where
                     sender
                         .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
                         .await;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -166,6 +170,7 @@ where
                     sender
                         .send_warning(target_refusal(entry.target(), rejection))
                         .await;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -177,6 +182,7 @@ where
                         "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
+                refused_count += 1;
                 continue;
             }
 
@@ -186,12 +192,11 @@ where
             // to checksum it, so it hangs on a fifo exactly as apply does, and reading
             // through a link would checksum a file selfie does not manage.
             //
-            // Refused and not examined, like an unreadable target below: a green
-            // result over a target drift never looked at is a false success.
+            // Every refusal in this loop counts, and none reaches `total_count`: a
+            // green result over an entry drift never examined is a false success.
             if let Some(refusal) = guard_refusal(filesystem, &target_path) {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
                 refused_count += 1;
-                total_count -= 1;
                 continue;
             }
 
@@ -208,6 +213,7 @@ where
                         repository_read_refusal(&refusal)
                     ))
                     .await;
+                refused_count += 1;
                 continue;
             }
 
@@ -221,6 +227,7 @@ where
                             source_path.display()
                         ))
                         .await;
+                    refused_count += 1;
                     continue;
                 }
             };
@@ -230,18 +237,13 @@ where
                 Ok(current) => current,
                 Err(warning) => {
                     sender.send_warning(warning).await;
-                    // Refused and not examined, unlike the per-entry refusals
-                    // above it: a green "0 drifted" over a target drift could
-                    // not read is a false success, which outranks parity with
-                    // its neighbors, and `sync status` renders the total as
-                    // "N deployed".
                     refused_count += 1;
-                    total_count -= 1;
                     continue;
                 }
             };
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
+            total_count += 1;
             let drift = deploy_state.detect_drift(
                 &target_path.display().to_string(),
                 &source_checksum,
@@ -262,6 +264,7 @@ where
             total_count,
             refused_count,
             unloaded_specs,
+            unverified_count,
             environment: config.environment().to_string(),
             steps_completed: StepCount::new(total_count, total_count),
         },

@@ -49,9 +49,14 @@ relayed warning, such as a configured dotfiles directory that does not exist, is
 summary line stops claiming no drift when either count is non-zero.
 
 It does not print how an individual target drifted; `selfie dotfiles drift` shows the drift type
-beside each entry. A target the drift check refused without comparing, such as a
+beside each entry. An entry the drift check refused without comparing, such as a
 [symlinked target](package-files.md#symlinked-targets), appears among the relayed warnings and is
 counted as a refusal that left dotfiles unchecked, not as drift.
+
+The deployed count covers only entries the check compared. A secret-bearing entry, whose content
+comes from running a command, cannot be compared without running it, so the line names it
+separately, as in `No dotfile drift (3 deployed, 2 not verifiable)`. That is informational: such an
+entry is unverifiable by design, so it does not keep the line from reading as clean.
 
 ### `selfie sync push`
 

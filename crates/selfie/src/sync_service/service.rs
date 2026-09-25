@@ -224,6 +224,7 @@ where
                     refused_count: summary.refused_count,
                     unloaded_specs: summary.unloaded_specs,
                     warned: summary.warned,
+                    unverified_count: summary.unverified,
                 })
                 .await;
 
@@ -1222,6 +1223,8 @@ struct DriftSummary {
     unloaded_specs: usize,
     /// How many relayed warnings named work the check could not complete.
     warned: usize,
+    /// How many secret-bearing entries the check reported without verifying.
+    unverified: usize,
     /// The failure message, when the check failed.
     error: Option<String>,
     /// Why the check was cancelled, when it was.
@@ -1262,12 +1265,14 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                         drift_count: _,
                         total_count,
                         refused_count,
+                        unverified_count,
                         ..
                     }),
                 ..
             } => {
                 summary.total_deployed = total_count;
                 summary.refused_count = refused_count;
+                summary.unverified = unverified_count;
             }
             PackageEvent::Completed {
                 result: OperationResult::Failure(failure),
@@ -1911,6 +1916,7 @@ mod tests {
                     total_count: 0,
                     refused_count: 0,
                     unloaded_specs: 0,
+                    unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(0, 0),
                 }),
@@ -1958,6 +1964,7 @@ mod tests {
                 total_count: 4,
                 refused_count: 2,
                 unloaded_specs: 0,
+                unverified_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(4, 4),
             }),
@@ -1977,6 +1984,35 @@ mod tests {
         assert!(summary.error.is_none());
     }
 
+    // The unverified count differs from every other count in the fixture, so
+    // taking it from the wrong field fails here.
+    #[tokio::test]
+    async fn collect_drift_summary_carries_the_unverified_count() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_operation_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 1,
+                refused_count: 0,
+                unloaded_specs: 0,
+                unverified_count: 3,
+                environment: "test".to_string(),
+                steps_completed: crate::package::event::StepCount::new(1, 1),
+            }),
+        }];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(
+            summary.unverified, 3,
+            "the unverified count must reach status"
+        );
+        assert_eq!(
+            summary.total_deployed, 1,
+            "the deployed total must not absorb the entries it did not verify"
+        );
+    }
+
     #[tokio::test]
     async fn collect_drift_summary_returns_none_on_success() {
         let events = vec![
@@ -1992,6 +2028,7 @@ mod tests {
                     total_count: 3,
                     refused_count: 0,
                     unloaded_specs: 0,
+                    unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
                 }),
@@ -2148,6 +2185,7 @@ mod tests {
                         total_count: 0,
                         refused_count: 0,
                         unloaded_specs: 0,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2324,6 +2362,7 @@ mod tests {
                         total_count: 0,
                         refused_count: 0,
                         unloaded_specs: 0,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2405,6 +2444,7 @@ mod tests {
                         total_count: 0,
                         refused_count: 0,
                         unloaded_specs: 0,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2507,6 +2547,7 @@ mod tests {
                         total_count: 0,
                         refused_count: 0,
                         unloaded_specs: 0,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),

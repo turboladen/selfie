@@ -52,7 +52,9 @@ pub(crate) async fn handle_drift(
             } if !success.had_refusals() => {
                 // A spec that could not be loaded leaves part of the check
                 // undone, so a green check would claim more than was examined.
-                // `sync status` gates its clean line on the same count.
+                // `sync status` gates its clean line on the same count. An
+                // unverified entry does not: it is unverifiable by design, and the
+                // summary names the count.
                 let unclean = matches!(
                     success,
                     OperationSuccess::DotfileDriftChecked {
