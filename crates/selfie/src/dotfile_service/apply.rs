@@ -249,18 +249,6 @@ where
 
             let source_path = resolve_source_path(&base_dir, source);
 
-            // Lexical: catches a written `..`, not a planted symlink. See
-            // `crate::paths::is_within`.
-            if !is_within(&source_path, &base_dir) {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{source}': source path escapes YAML base directory"
-                    ))
-                    .await;
-                refused_count += 1;
-                continue;
-            }
-
             // The one target rule. A relative target would write relative to CWD,
             // which is surprising and potentially dangerous; a `~user/…` one names
             // a home directory selfie does not resolve.
@@ -281,6 +269,20 @@ where
                 }
             };
 
+            // After the target rule, as drift and the secret-bearing path ask it,
+            // so an entry failing both gets the same first reason from every
+            // command. Lexical: catches a written `..`, not a planted symlink. See
+            // `crate::paths::is_within`.
+            if !is_within(&source_path, &base_dir) {
+                sender
+                    .send_warning(format!(
+                        "Skipping '{source}': source path escapes YAML base directory"
+                    ))
+                    .await;
+                refused_count += 1;
+                continue;
+            }
+
             // Ahead of every read of the target below, not merely ahead of the
             // write. Reading a fifo blocks until a writer opens it, and a
             // character device would be read from, then written to. A symlink is
@@ -296,10 +298,6 @@ where
 
             // Immediately ahead of the read, which is what this guards: a fifo
             // source blocks `read_file` until a writer arrives and hangs apply.
-            // Anchored to the read rather than to the containment check above,
-            // because drift runs those two in the opposite order (selfie-tl1w)
-            // and anchoring to `is_within` would put this guard on a different
-            // side of the target rule in the two commands.
             if let Some(refusal) =
                 filesystem.irregular_target_refusal(&repository_path(&source_path))
             {

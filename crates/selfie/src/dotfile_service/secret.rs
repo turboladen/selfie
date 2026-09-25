@@ -181,7 +181,6 @@ where
 
     async fn run(&self, entry: &DotfileEntry, origin: String) -> Phase<SecretOutcome> {
         let target = self.usable_target(entry, origin).await?;
-        self.refuse_unresolvable(&target).await?;
         self.short_circuit_dry_run(&target).await?;
 
         let resolved = self.resolve(&target).await?;
@@ -266,11 +265,9 @@ where
     /// both surprising and dangerous for a credential; a `~user/…` one names a
     /// home directory selfie does not resolve.
     ///
-    /// `Failed` rather than `Skipped`, and the same outcome
-    /// [`refuse_unresolvable`](Self::refuse_unresolvable) returns: both are
-    /// decided from the entry alone before anything runs, so returning different
-    /// outcomes made `stop_on_error` end the run for one and not the other, and
-    /// the documentation described the opposite. A refused entry is
+    /// Also refuses a template whose path escapes the package directory, and a
+    /// target that is a fifo, socket or device node, a directory, or cannot be
+    /// classified. Every refusal is `Failed`, never `Skipped`: a refused entry is
     /// not a skipped one.
     async fn usable_target<'e>(
         &self,
@@ -286,6 +283,18 @@ where
                 return Err(SecretOutcome::Failed);
             }
         };
+
+        // Decided from the entry alone, so it is asked after the target rule and
+        // ahead of anything that looks at the file system, the order the
+        // repository-file path and drift take: the target rule, then containment,
+        // then what is at the target. An entry failing more than one gets the same
+        // first reason from every command.
+        if let Err(e) = check_resolvable(entry, self.base_dir) {
+            self.sender
+                .send_warning(format!("Failed to resolve '{}': {e}", entry.target()))
+                .await;
+            return Err(SecretOutcome::Failed);
+        }
 
         // Both questions, before any command runs: what a link or a fifo at the
         // target means is decided here, not by the read after the fetch, which could
@@ -371,24 +380,6 @@ where
                 "Skipping '{source}': selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
             )),
         }
-    }
-
-    /// Refuse anything decidable without running a command or reading a file.
-    ///
-    /// Applied before the dry-run short-circuit for the same reason the target
-    /// check is: a preview that promises to run commands for an entry a real
-    /// apply would refuse outright is reporting something that will never happen.
-    async fn refuse_unresolvable(&self, target: &SecretTarget<'_>) -> Phase {
-        if let Err(e) = check_resolvable(target.entry, self.base_dir) {
-            self.sender
-                .send_warning(format!(
-                    "Failed to resolve '{}': {e}",
-                    target.entry.target()
-                ))
-                .await;
-            return Err(SecretOutcome::Failed);
-        }
-        Ok(())
     }
 
     /// End a dry run here, before anything is resolved.

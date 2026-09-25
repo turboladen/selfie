@@ -13536,3 +13536,124 @@ mod an_already_tracked_target_selfie_cannot_write {
         );
     }
 }
+
+// Apply, drift and the secret-bearing path ask their checks in one order: the
+// target rule, then containment, then what is at the target. An entry failing more
+// than one gets the same first reason whichever command the user ran, so fixing
+// what one command named does not produce a different complaint from the other.
+mod one_order_of_checks {
+    use super::*;
+
+    // The first warning that names `target` or reports an escaping source.
+    fn reason_for(events: &[PackageEvent], target: &str) -> String {
+        warning_messages(events)
+            .into_iter()
+            .find(|w| w.contains(target) || w.contains("escapes"))
+            .unwrap_or_else(|| panic!("no warning about '{target}': {events:?}"))
+    }
+
+    #[tokio::test]
+    async fn an_entry_failing_the_target_rule_and_containment_gets_one_reason_from_apply_and_drift()
+    {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.toml"), "OUTSIDE").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("../outside.toml", "~alice/.config/app.toml")],
+        );
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        let from_apply = reason_for(&applied, "~alice/.config/app.toml");
+        let from_drift = reason_for(&drifted, "~alice/.config/app.toml");
+        assert_eq!(
+            from_apply, from_drift,
+            "apply and drift must name one reason"
+        );
+        assert!(
+            from_apply.contains("'~user' form"),
+            "the target rule comes first: {from_apply}"
+        );
+        assert!(
+            !from_apply.contains("escapes"),
+            "containment is not the first reason: {from_apply}"
+        );
+    }
+
+    // A source that cannot be read is refused in one sentence by both commands, so
+    // the user does not meet two wordings for one missing file.
+    #[tokio::test]
+    async fn an_unreadable_source_is_worded_alike_by_apply_and_drift() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("app.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/missing.toml", target.to_str().unwrap())],
+        );
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        let reason = |events: &[PackageEvent]| {
+            warning_messages(events)
+                .into_iter()
+                .find(|w| w.starts_with("Cannot read source"))
+                .unwrap_or_else(|| panic!("no source-read warning: {events:?}"))
+        };
+        let from_drift = reason(&drifted);
+        assert_eq!(
+            reason(&applied),
+            from_drift,
+            "apply and drift must word it alike"
+        );
+        assert!(
+            !from_drift.contains("for drift check"),
+            "drift must not word it differently: {from_drift}"
+        );
+    }
+
+    // A directory at the target is refused before any command runs, and so is an
+    // escaping template; the escape is named because it is decided from the entry
+    // alone, ahead of anything that looks at the file system.
+    #[tokio::test]
+    async fn a_template_escaping_with_a_directory_target_is_refused_for_the_escape() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir(&target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"value");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "nothing may run for a refused entry"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("escapes the package directory")),
+            "the escape is the reason: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "the directory is not the first reason: {warnings:?}"
+        );
+    }
+}

@@ -217,7 +217,7 @@ where
                 Err(e) => {
                     sender
                         .send_warning(format!(
-                            "Cannot read source '{}' for drift check: {e}",
+                            "Cannot read source '{}': {e}",
                             source_path.display()
                         ))
                         .await;
