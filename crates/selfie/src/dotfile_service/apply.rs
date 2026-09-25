@@ -21,7 +21,7 @@ use crate::{
         state::{DeployState, DriftType},
     },
     fs::{
-        filesystem::FileSystem,
+        filesystem::{FileSystem, repository_read_refusal},
         target::{deploy_target, repository_path},
     },
     package::{
@@ -33,10 +33,7 @@ use crate::{
 
 use super::deploy_entry::{DeployUnit, Recorded, perform_deploy, record_and_save};
 use super::port::ApplyOptions;
-use super::refusal::{
-    readable_target, refusal_warning, repository_read_refusal, target_refusal,
-    unmanaged_symlink_reason,
-};
+use super::refusal::{readable_target, refusal_warning, target_refusal, unmanaged_symlink_reason};
 use super::secret::{SecretApply, SecretOutcome, secret_origin};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
 

@@ -36,7 +36,7 @@ pub mod diff;
 pub(crate) mod directory;
 mod drift;
 pub mod port;
-pub(crate) mod refusal;
+mod refusal;
 pub(crate) mod resolve;
 mod secret;
 pub mod semantic;

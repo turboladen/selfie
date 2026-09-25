@@ -15,10 +15,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::deploy::resolve_source_path;
-use super::refusal::repository_read_refusal;
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
-use crate::fs::filesystem::FileSystem;
+use crate::fs::filesystem::{FileSystem, repository_read_refusal};
 use crate::fs::target::repository_path;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
 use crate::paths::is_within;

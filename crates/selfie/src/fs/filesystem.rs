@@ -498,6 +498,30 @@ pub enum FileSystemError {
     IrregularTarget { path: PathBuf, kind: &'static str },
 }
 
+// Why selfie will not read a file out of its own repository.
+//
+// Reading a fifo blocks until a writer arrives, so one committed into the
+// dotfiles directory hangs `selfie apply` and `dotfiles drift` with no timeout --
+// `command_timeout` governs provider commands, not filesystem calls (selfie-lwv5).
+//
+// Returns the reason only; the three read sites frame it differently.
+//
+// Worded for a *source*. `IrregularTarget`'s own `Display` describes a deploy
+// target, and here the problem is a file in the repository the user syncs.
+pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
+    match refusal {
+        FileSystemError::IrregularTarget { kind, .. } => {
+            format!("the repository file is a {kind} and selfie will not read it")
+        }
+        // Fails **closed**, and deliberately not a `_ => {}` that would skip the
+        // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
+        // so nothing reaches this arm; a wildcard would silently let a future
+        // variant through and un-guard the read, which is the failure this whole
+        // guard exists to prevent. Refuse on anything it reports.
+        other => format!("selfie will not read the repository file: {other}"),
+    }
+}
+
 /// Helpers that set up common expectations, so library and CLI tests can drive
 /// real code paths without touching the disk.
 ///
@@ -657,5 +681,27 @@ impl MockFileSystem {
         self.expect_expand_path()
             .with(mockall::predicate::eq(input))
             .return_once(|_| Ok(output));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
+    // variant from `irregular_target_refusal` today, so this is the only thing
+    // holding the arm: hand it one directly and the read must still be refused
+    // with something a user can read. A `_ => {}` that skipped the guard would
+    // return an empty string here.
+    #[test]
+    fn a_read_refusal_that_is_not_an_irregular_file_still_refuses() {
+        let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
+            path: PathBuf::from("/pkgs/myapp/config.toml"),
+            points_to: None,
+        });
+        assert!(!message.is_empty(), "the guard fell through silently");
+        assert!(message.contains("repository file"), "got: {message}");
     }
 }
