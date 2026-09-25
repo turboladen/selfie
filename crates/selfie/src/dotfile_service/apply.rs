@@ -31,7 +31,9 @@ use crate::{
     paths::is_within,
 };
 
-use super::deploy_entry::{Decided, DeployUnit, Recorded, perform_deploy, record_and_save};
+use super::deploy_entry::{
+    Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
+};
 use super::port::ApplyOptions;
 use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
 use super::secret::{SecretApply, SecretOutcome, secret_origin};
@@ -363,43 +365,11 @@ where
             let decision =
                 deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
-            match decision {
-                DeployDecision::Deploy => {
-                    if perform_deploy(
-                        filesystem,
-                        sender,
-                        &unit,
-                        Decided::Now(current.as_deref()),
-                        options.dry_run,
-                        &mut backed_up,
-                    )
-                    .await
-                    .is_ok()
-                    {
-                        if options.dry_run {
-                            skipped_count += 1;
-                        } else {
-                            deployed_count += 1;
-                            if let Some(reason) = record_and_save(
-                                filesystem,
-                                &mut loaded,
-                                sender,
-                                Recorded::Deployed,
-                                &unit,
-                            )
-                            .await
-                            {
-                                stopped = Some(reason);
-                                break 'packages;
-                            }
-                        }
-                    } else {
-                        // A refusal or a write failure. `perform_deploy` has
-                        // already said which in a warning; here they are the same
-                        // thing — asked to deploy, did not.
-                        refused_count += 1;
-                    }
-                }
+            // Every arm that writes names what the target held when it decided, and
+            // the one write below carries it out, so the two ways to reach a write
+            // cannot count or record it differently.
+            let write = match decision {
+                DeployDecision::Deploy => Some(Decided::Now(current.as_deref())),
                 DeployDecision::Skip(reason) => {
                     // Record an untracked but in-sync entry so future runs see
                     // `DriftType::None`. A symlinked target never reaches here: the
@@ -423,6 +393,7 @@ where
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
                     skipped_count += 1;
+                    None
                 }
                 DeployDecision::Conflict => {
                     // Built only where it is read. It renders two whole files, and
@@ -452,7 +423,7 @@ where
                     // A dry run accepts nothing, whatever else was asked for,
                     // and is asked first for that reason. It writes nothing, so
                     // there is no answer to honor, and an accept would carry the
-                    // entry to `perform_deploy`'s dry-run skip and report it as
+                    // entry to the write's dry-run preview and report it as
                     // skipped -- leaving the summary at zero conflicts. The preview
                     // someone runs to see what `--yes` would overwrite is the one
                     // place that count has to be right.
@@ -486,41 +457,7 @@ where
                     };
 
                     if accept {
-                        if perform_deploy(
-                            filesystem,
-                            sender,
-                            &unit,
-                            decided,
-                            options.dry_run,
-                            &mut backed_up,
-                        )
-                        .await
-                        .is_ok()
-                        {
-                            if options.dry_run {
-                                skipped_count += 1;
-                            } else {
-                                deployed_count += 1;
-                                if let Some(reason) = record_and_save(
-                                    filesystem,
-                                    &mut loaded,
-                                    sender,
-                                    Recorded::Deployed,
-                                    &unit,
-                                )
-                                .await
-                                {
-                                    stopped = Some(reason);
-                                    break 'packages;
-                                }
-                            }
-                        } else {
-                            // The second of `perform_deploy`'s two failure sites,
-                            // easy to miss because the first one looks the same.
-                            // A conflict the user accepted and selfie then could
-                            // not write is a refusal exactly like the plain one.
-                            refused_count += 1;
-                        }
+                        Some(decided)
                     } else {
                         sender
                             .send_dotfile_conflict(
@@ -530,6 +467,31 @@ where
                             )
                             .await;
                         conflict_count += 1;
+                        None
+                    }
+                }
+            };
+
+            if let Some(decided) = write {
+                match deploy_and_record(
+                    filesystem,
+                    sender,
+                    &mut loaded,
+                    &unit,
+                    decided,
+                    options.dry_run,
+                    &mut backed_up,
+                )
+                .await
+                {
+                    DeployOutcome::Deployed => deployed_count += 1,
+                    DeployOutcome::Previewed => skipped_count += 1,
+                    // A refusal or a write failure, already reported as whichever it
+                    // was. Here they are the same thing: asked to deploy, did not.
+                    DeployOutcome::Refused => refused_count += 1,
+                    DeployOutcome::Unrecorded(reason) => {
+                        stopped = Some(reason);
+                        break 'packages;
                     }
                 }
             }

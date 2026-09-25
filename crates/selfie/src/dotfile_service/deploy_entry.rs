@@ -48,19 +48,67 @@ pub(super) enum Decided<'a> {
     BeforePrompt,
 }
 
-/// Deploy a single config file to its target path and emit events. Records
-/// nothing: the caller records and saves once the write is known to have landed.
+/// What became of an entry apply decided to write.
+pub(super) enum DeployOutcome {
+    /// Written, and recorded when there is a state to record it in.
+    Deployed,
+    /// A dry run: reported as what it would do, and nothing written.
+    Previewed,
+    /// Refused or failed, and already reported as whichever it was. Nothing was
+    /// written or recorded.
+    Refused,
+    /// Written, and the deploy state could not record it. Carries why the run
+    /// stops.
+    Unrecorded(String),
+}
+
+/// Write `unit` to its target and record it, emitting the events for each step.
+///
+/// The one path from a decision to deploy to a recorded deployment, whatever
+/// made the decision: the entry's own drift, or an accepted conflict.
 ///
 /// `backed_up` carries what this run has already copied aside, keyed by target,
 /// so a target two entries deploy to is copied once.
-pub(super) async fn perform_deploy<F: FileSystem>(
+pub(super) async fn deploy_and_record<F: FileSystem>(
+    filesystem: &F,
+    sender: &EventSender,
+    loaded: &mut Option<LoadedState>,
+    unit: &DeployUnit<'_>,
+    decided: Decided<'_>,
+    dry_run: bool,
+    backed_up: &mut HashMap<String, Option<PathBuf>>,
+) -> DeployOutcome {
+    match perform_deploy(filesystem, sender, unit, decided, dry_run, backed_up).await {
+        Wrote::Written => {
+            match record_and_save(filesystem, loaded, sender, Recorded::Deployed, unit).await {
+                Some(reason) => DeployOutcome::Unrecorded(reason),
+                None => DeployOutcome::Deployed,
+            }
+        }
+        Wrote::Previewed => DeployOutcome::Previewed,
+        Wrote::Refused => DeployOutcome::Refused,
+    }
+}
+
+/// What a write did, before anything is recorded.
+enum Wrote {
+    Written,
+    /// A dry run: reported, and nothing written.
+    Previewed,
+    /// Refused or failed, and already reported as whichever it was.
+    Refused,
+}
+
+/// Deploy a single config file to its target path and emit events. Records
+/// nothing.
+async fn perform_deploy<F: FileSystem>(
     filesystem: &F,
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
     dry_run: bool,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
-) -> Result<(), ()> {
+) -> Wrote {
     if dry_run {
         sender
             .send_dotfile_skipped(
@@ -69,7 +117,7 @@ pub(super) async fn perform_deploy<F: FileSystem>(
                 "dry run",
             )
             .await;
-        return Ok(());
+        return Wrote::Previewed;
     }
 
     sender
@@ -102,7 +150,7 @@ pub(super) async fn perform_deploy<F: FileSystem>(
                 sender.send_warning(warning).await;
                 // Left out of `backed_up`, so a refused entry does not mark the
                 // target as settled for a later one.
-                return Err(());
+                return Wrote::Refused;
             }
         },
     };
@@ -130,12 +178,12 @@ pub(super) async fn perform_deploy<F: FileSystem>(
             _ => format!("Failed to write: {e}"),
         };
         sender.send_warning(message).await;
-        // `Err` has the caller count this as refused and record nothing, so
+        // `Refused` has the caller count this as refused and record nothing, so
         // nothing is recorded as deployed that was not. An entry already in the
         // state keeps its previous checksum and is stale rather than untracked,
         // which is the honest record: a refusal writes nothing, and a failed write
         // leaves the target as it was, so the previous checksum still describes it.
-        return Err(());
+        return Wrote::Refused;
     }
 
     // Only now that the overwrite has landed is an earlier copy redundant. Before
@@ -158,7 +206,7 @@ pub(super) async fn perform_deploy<F: FileSystem>(
             backup.as_deref(),
         )
         .await;
-    Ok(())
+    Wrote::Written
 }
 
 /// Copy the target's content aside, if this overwrite would destroy any.

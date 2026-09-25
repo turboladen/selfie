@@ -8648,9 +8648,9 @@ dotfiles:
 
     // A conflict the user accepted, which selfie then could not write.
     //
-    // This is `perform_deploy`'s *second* failure site — the one inside the
-    // conflict branch, which looks identical to the first and was missed when
-    // this fix was planned as "six sites". A readable, owner read-only target
+    // The accepted-conflict route to the write, as against a plain `Deploy`
+    // decision, which `an_earlier_copy_survives_a_failed_overwrite` covers. Both
+    // routes must count a failed write as refused. A readable, owner read-only target
     // reaches it: the target differs, so the entry is a `Conflict`; `auto_accept`
     // settles it; and the in-place write then fails with `EACCES`. An unreadable
     // target would not do, because it is refused before the decision.
