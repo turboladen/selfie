@@ -244,12 +244,16 @@ fn test_package_check_command_failure() {
 #[test]
 fn test_package_check_command_timeout() {
     let temp_dir = setup_default_test_config();
+    // One second is the shortest timeout the config accepts; the check sleeps past it.
+    let config_path = temp_dir.path().join(".config/selfie/config.yaml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("command_timeout: 1\n");
+    fs::write(&config_path, config).unwrap();
 
-    // Create package with slow check command that will timeout
     let package = PackageBuilder::default()
         .name("timeout-package")
         .environment(SELFIE_ENV, |builder| {
-            builder.install("echo 'installed'").check_some("sleep 10") // This will timeout with default 5s timeout
+            builder.install("echo 'installed'").check_some("sleep 5")
         })
         .build();
 
@@ -258,7 +262,9 @@ fn test_package_check_command_timeout() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "timeout-package"]);
 
-    cmd.assert().success(); // Timeout test is unreliable in CI environments
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "Command timed out after 1s: sleep 5",
+    ));
 }
 
 #[test]
