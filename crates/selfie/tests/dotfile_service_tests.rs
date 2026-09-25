@@ -660,43 +660,77 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     }
 }
 
-// `RealFileSystem` that records every path a target read is asked for, and
-// changes nothing else.
+// `RealFileSystem` that records every path a target read is asked for, and can
+// stage two answers the disk cannot give on demand: a read failing with a chosen
+// error kind, and a pre-command directory check that sees no directory.
 //
 // "Never read" is otherwise unobservable: a read through a link that ends in a
-// refusal leaves the same events as no read at all. Every test using this pairs the
-// negative with a control target the run does read, so an empty record cannot pass.
+// refusal leaves the same events as no read at all. Every test asserting a path was
+// not read pairs it with a control target the run does read, so an empty record
+// cannot pass.
 #[derive(Clone, Debug)]
-struct RecordsTargetReads(
-    RealFileSystem,
-    std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
-);
+struct RecordsTargetReads {
+    inner: RealFileSystem,
+    reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    failing_read: Option<(PathBuf, std::io::ErrorKind)>,
+    blind_to_directories: bool,
+}
 
 impl RecordsTargetReads {
     fn new() -> Self {
-        Self(RealFileSystem, std::sync::Arc::default())
+        Self {
+            inner: RealFileSystem,
+            reads: std::sync::Arc::default(),
+            failing_read: None,
+            blind_to_directories: false,
+        }
+    }
+
+    // A read of `path` fails with `kind`, whatever is on disk.
+    fn failing_read(mut self, path: &std::path::Path, kind: std::io::ErrorKind) -> Self {
+        self.failing_read = Some((path.to_path_buf(), kind));
+        self
+    }
+
+    // `is_directory` answers `false` everywhere: a directory put in place after the
+    // secret path's pre-command check.
+    fn blind_to_directories(mut self) -> Self {
+        self.blind_to_directories = true;
+        self
     }
 
     fn read(&self, path: &std::path::Path) -> bool {
-        self.1.lock().unwrap().iter().any(|read| read == path)
+        self.reads.lock().unwrap().iter().any(|read| read == path)
+    }
+
+    fn record_read(&self, path: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.reads.lock().unwrap().push(path.to_path_buf());
+        match &self.failing_read {
+            Some((failing, kind)) if failing == path => Some(selfie::fs::FileSystemError::IoError(
+                std::sync::Arc::new(std::io::Error::from(*kind)),
+            )),
+            _ => None,
+        }
     }
 }
 
 impl selfie::fs::FileSystem for RecordsTargetReads {
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
-        self.0.directory_state(path)
+        self.inner.directory_state(path)
     }
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
-        self.0.read_file(path)
+        self.inner.read_file(path)
     }
 
     fn read_file_bytes(
         &self,
         path: &std::path::Path,
     ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.1.lock().unwrap().push(path.to_path_buf());
-        self.0.read_file_bytes(path)
+        if let Some(error) = self.record_read(path) {
+            return Err(error);
+        }
+        self.inner.read_file_bytes(path)
     }
 
     fn write_file_private(
@@ -704,7 +738,7 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         path: &selfie::fs::TargetPath,
         data: &[u8],
     ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_private(path, data)
+        self.inner.write_file_private(path, data)
     }
 
     fn write_file_no_follow(
@@ -712,62 +746,65 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         path: &selfie::fs::TargetPath,
         data: &[u8],
     ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_no_follow(path, data)
+        self.inner.write_file_no_follow(path, data)
     }
 
     fn symlink_refusal(
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
-        self.0.symlink_refusal(path)
+        self.inner.symlink_refusal(path)
     }
 
     fn irregular_target_refusal(
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
-        self.0.irregular_target_refusal(path)
+        self.inner.irregular_target_refusal(path)
     }
 
     fn is_directory(
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.0.is_directory(path)
+        if self.blind_to_directories {
+            return Ok(false);
+        }
+        self.inner.is_directory(path)
     }
 
     fn is_owner_only(
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.0.is_owner_only(path)
+        self.inner.is_owner_only(path)
     }
 
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.remove_file(path)
+        self.inner.remove_file(path)
     }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
-        self.0.path_exists(path)
+        self.inner.path_exists(path)
     }
 
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
-        self.0.expand_path(path)
+        self.inner.expand_path(path)
     }
 
     fn list_directory(
         &self,
         path: &std::path::Path,
     ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
-        self.0.list_directory(path)
+        self.inner.list_directory(path)
     }
 
     fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
-        self.0.canonicalize(path)
+        self.inner.canonicalize(path)
     }
 
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
-        self.0.config_dir()
+        self.inner.config_dir()
     }
 }
 
@@ -10589,6 +10626,276 @@ mod unreadable_targets {
             "the diff must show what the target holds: {diff}"
         );
         assert_eq!(std::fs::read(&target).unwrap(), binary);
+    }
+}
+
+// What one read of a target says is there. Only the two errors proving nothing can
+// be at the path read as absent; a directory is named as one; anything else leaves
+// the target unknown, and an unknown target is refused rather than written over.
+mod target_classification {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    const DIRECTORY: &str = "a directory is at the target";
+
+    fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
+        let source = dirs.package_dir.join("myapp/config.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, content).unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    fn drift_types(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Restores a directory's mode on drop, so a failed assertion still leaves a
+    // removable temporary directory.
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // A directory at a repository-file target is named as one by apply, drift and
+    // track, rather than as a read that failed with "Is a directory".
+    #[tokio::test]
+    async fn a_directory_at_a_target_is_named_by_apply_drift_and_track() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        for (command, warnings) in [
+            ("apply", warning_messages(&apply)),
+            ("drift", warning_messages(&drift)),
+        ] {
+            assert!(
+                warnings.iter().any(|w| w.contains(DIRECTORY)
+                    && w.contains(target.to_str().unwrap())
+                    && !w.contains("could not be read")),
+                "{command} must name the directory: {warnings:?}"
+            );
+        }
+        assert_eq!(refused_count(&apply), 1);
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+        assert!(target.join("inner").exists(), "the directory is left alone");
+
+        let track = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("other", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+        let message = failure_message(&track);
+        assert!(
+            message.contains(DIRECTORY) && !message.contains("Cannot read"),
+            "track must name the directory: {message}"
+        );
+    }
+
+    // A file gone between the guard and the read deploys, as an absent one does.
+    // The file is really there, so a probe-then-read classifier would have called it
+    // present and refused the failed read.
+    #[tokio::test]
+    async fn a_target_that_vanishes_before_the_read_deploys() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "WAS HERE").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let fs = RecordsTargetReads::new().failing_read(&target, std::io::ErrorKind::NotFound);
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(fs.read(&target), "control: the staged read was reached");
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "an absent target deploys: {events:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "FROM REPO");
+    }
+
+    // Below a regular file nothing can be, so the target is absent as it always was:
+    // apply's write fails and says so, and drift calls it untracked. It is not
+    // "could not be read", which would claim something is there.
+    #[tokio::test]
+    async fn a_target_below_a_regular_file_is_absent() {
+        let dirs = TestDirs::new();
+        let file = dirs.target_dir.join("a-file");
+        std::fs::write(&file, "PLAIN").unwrap();
+        let target = file.join("config.toml");
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(refused_count(&apply), 1, "the write cannot succeed");
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings.iter().all(|w| !w.contains("could not be read")),
+            "nothing is there to fail a read: {warnings:?}"
+        );
+        assert_eq!(drift_types(&drift), vec!["not tracked"]);
+        assert_eq!(
+            drift_summary(&drift),
+            (1, 1, 0),
+            "(drifted, total, refused)"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PLAIN");
+    }
+
+    // A parent selfie cannot search hides what is at the target, so the target is
+    // unknown, not absent: refused as unreadable by apply and by drift.
+    #[tokio::test]
+    async fn a_target_behind_a_parent_that_denies_access_is_unreadable() {
+        let dirs = TestDirs::new();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let target = locked.join("config.toml");
+        std::fs::write(&target, "HIDDEN").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = RestoreMode(locked.clone());
+        if std::fs::read(&target).is_ok() {
+            eprintln!(
+                "SKIP a_target_behind_a_parent_that_denies_access_is_unreadable: running as \
+                 root, mode bits ignored"
+            );
+            return;
+        }
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        drop(restore);
+
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read") && w.contains("ermission denied")),
+            "apply must refuse it as unreadable: {warnings:?}"
+        );
+        assert_eq!(refused_count(&apply), 1);
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "HIDDEN");
+    }
+
+    // A loop above the target leaves it unknown too, never absent.
+    #[tokio::test]
+    async fn a_target_below_a_symlink_loop_is_unreadable() {
+        let dirs = TestDirs::new();
+        let looped = dirs.target_dir.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let target = looped.join("config.toml");
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings.iter().any(|w| w.contains("could not be read")),
+            "apply must refuse it as unreadable: {warnings:?}"
+        );
+        assert_eq!(refused_count(&apply), 1);
+        assert!(
+            !apply
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing is deployed below a loop"
+        );
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+    }
+
+    // A directory put at a secret target while its command ran. The pre-command
+    // check saw none, so the command ran; the read after it names the directory and
+    // refuses, and the resolver is never asked to overwrite one.
+    #[tokio::test]
+    async fn a_directory_appearing_at_a_secret_target_during_the_resolve_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN-VALUE");
+        let counted = runner.clone();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(
+            dirs.service_with_fs(RecordsTargetReads::new().blind_to_directories(), runner)
+                .apply_all(options)
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            counted.call_count(),
+            1,
+            "control: the pre-command check was blinded"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the resolver must not be asked"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains(DIRECTORY)),
+            "the refusal must name the directory: {warnings:?}"
+        );
+        // A failure, which `stop_on_error` (on by default) turns into a stopped run.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing is deployed: {events:?}"
+        );
+        assert!(target.join("inner").exists(), "the directory is left alone");
     }
 }
 

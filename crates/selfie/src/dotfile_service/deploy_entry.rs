@@ -16,7 +16,10 @@ use crate::{
     package::event::EventSender,
 };
 
-use super::refusal::{TargetState, read_target_state, refusal_warning, unreadable_target_refusal};
+use super::refusal::{
+    TargetState, directory_target_refusal, read_target_state, refusal_warning,
+    unreadable_target_refusal,
+};
 use super::state_file::{LoadedState, save_deploy_state};
 
 /// Describes a single config file deployment operation
@@ -175,6 +178,11 @@ fn keep_current<F: FileSystem>(
         // Gone since the decision. Nothing to keep, and the write will recreate it.
         TargetState::Absent => return Ok(None),
         TargetState::Readable(bytes) => bytes,
+        // Replaced by a directory since the decision. The write would fail on it
+        // anyway; refusing here says what is there.
+        TargetState::Directory => {
+            return Err(directory_target_refusal(unit.source, unit.target_path));
+        }
         // Readable when the decision was made and not now. Refusing leaves the
         // target alone, which is the same answer apply gives a target it could
         // not read in the first place, in the same words.

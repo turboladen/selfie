@@ -24,7 +24,7 @@ use crate::{
     paths::{is_within, normalize_path},
 };
 
-use super::refusal::guard_refusal;
+use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
 
 /// Check that a name is safe for use as a filesystem path component.
@@ -532,7 +532,7 @@ where
 
     // Ahead of the existence check and every write. Tracking reads *through* a link,
     // so accepting one copies the destination into the dotfiles directory, where
-    // `sync push` commits it; and `path_exists` follows the link, so a dangling one
+    // `sync push` commits it; and the read follows the link, so a dangling one
     // would read as a missing file. A fifo would block the read. After the
     // already-tracked answer above, because refusing an idempotent no-op helps nobody.
     //
@@ -551,16 +551,33 @@ where
         }
     }
 
-    if !filesystem.path_exists(expanded_target.path()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Target file does not exist: {}",
-            expanded_target.display()
-        )));
-    }
-
-    let content = match filesystem.read_file(expanded_target.path()) {
-        Ok(c) => c,
-        Err(e) => {
+    // The one read of the target, through the classifier apply and drift use, so a
+    // directory and a vanished file are named for what they are.
+    //
+    // Text, as apply reads the repository copy back: a file that is not UTF-8 would
+    // track and then never deploy.
+    let content = match read_target_state(filesystem, &expanded_target) {
+        TargetState::Readable(bytes) => match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(e) => {
+                return OperationResult::Failure(OperationFailure::Generic(format!(
+                    "Cannot read target file: it is not UTF-8 text ({e})"
+                )));
+            }
+        },
+        TargetState::Absent => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Target file does not exist: {}",
+                expanded_target.display()
+            )));
+        }
+        TargetState::Directory => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot track the target: {}",
+                directory_at_target(&expanded_target)
+            )));
+        }
+        TargetState::Unreadable(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Cannot read target file: {e}"
             )));

@@ -652,10 +652,13 @@ Without `--yes`, conflicts are reported but the target file is left untouched. W
 are reported the same way, diff included, and you are not asked to resolve them: nothing would be
 written either way.
 
-A repository-file target that exists but selfie cannot read is not a conflict, and it is not empty.
-selfie refuses the entry with a warning naming the target and the read error, shows no diff, and
-writes nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning,
-counts the entry as refused, and exits `1` rather than calling the target changed. Make the target
+A repository-file target that selfie cannot read is not a conflict, and it is not empty. That
+includes a target behind a parent directory selfie is not allowed to search, or below a symlink
+loop: selfie cannot tell what is there, so it does not write there. A target below a regular file,
+where nothing can be, is treated as absent, and the write that follows fails and is refused. selfie
+refuses the entry with a warning naming the target and the read error, shows no diff, and writes
+nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning, counts
+the entry as refused, and exits `1` rather than calling the target changed. Make the target
 readable, or point the entry elsewhere, and run apply again. A secret-bearing entry handles an
 unreadable target [differently](#deploy-behavior-and-permissions): it is a conflict, reported and
 skipped unless an interactive prompt accepts it.
@@ -795,11 +798,12 @@ For a repository-file entry, a symlink pointing at one of these is refused as a
 entry, whose link is otherwise replaced, it is refused as what the link resolves to — the message
 says _resolves to_ for that reason. `selfie dotfiles drift` counts every such target as refused,
 because it did not compare it, so a drift check that meets one exits non-zero. A **directory** at
-the target is not in this group. For a repository-file entry it is reported as an ordinary error;
-for a secret-bearing entry it is refused before any command runs, because a file cannot replace a
-directory and nothing should be fetched for a target that cannot receive it. Provider-sourced and
-templated entries refuse these targets too, and so does the deploy-state file: selfie renames
-nothing over a pipe, socket or device that is there when it checks.
+the target is not in this group, and is refused as what it is — "a directory is at the target
+'<path>', and a file cannot replace a directory" — by `selfie apply`, `selfie dotfiles drift` and
+`selfie dotfiles track`. For a secret-bearing entry it is refused before any command runs, since
+nothing should be fetched for a target that cannot receive it. Provider-sourced and templated
+entries refuse these targets too, and so does the deploy-state file: selfie renames nothing over a
+pipe, socket or device that is there when it checks.
 
 #### `selfie dotfiles track` refuses a symlinked target
 
@@ -1101,10 +1105,11 @@ A symlink **at the target** is replaced rather than written through: writing thr
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
 
 For a secret-bearing entry, an existing regular file whose read fails is a conflict as well,
-summarized as "exists but could not be read", and is never treated as absent: an interactive prompt
-can still accept the overwrite, since replacing a file needs only write permission on its directory,
-and without one the entry is skipped. A directory and a symlink do not reach that case — the first
-is refused before any command runs, and a symlink selfie has seen is replaced without being read.
+summarized as "could not be read", and is never treated as absent: an interactive prompt can still
+accept the overwrite, since replacing a file needs only write permission on its directory, and
+without one the entry is skipped. A directory and a symlink do not reach that case — the first is
+refused before any command runs, or when selfie reads the target if it appeared while the command
+ran, and a symlink selfie has seen is replaced without being read.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the

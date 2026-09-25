@@ -25,8 +25,8 @@ use crate::{
 
 use super::port::ApplyOptions;
 use super::refusal::{
-    Link, TargetGuard, TargetState, classify_link, guard_target, read_target_state,
-    refusal_warning, target_refusal,
+    Link, TargetGuard, TargetState, classify_link, directory_target_refusal, guard_target,
+    read_target_state, refusal_warning, target_refusal,
 };
 
 /// Identify a secret-bearing entry by what produces it, never by its content.
@@ -62,7 +62,7 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
         Some(bytes) => count(bytes),
         // Said plainly rather than shown as "0 lines", which would read as an
         // empty file and understate what an overwrite destroys.
-        None => "exists but could not be read".to_string(),
+        None => "could not be read".to_string(),
     };
 
     // Says that nothing is kept, because every other overwrite selfie performs
@@ -221,6 +221,18 @@ where
             return Ok(outcome);
         }
         let current = self.read_target(&target);
+        // A directory put there during the resolve. The pre-command check refused
+        // one already present, so this is the same refusal, arriving late; it never
+        // reaches the resolver, which could only be asked to overwrite a directory.
+        if matches!(current, TargetState::Directory) {
+            self.sender
+                .send_warning(directory_target_refusal(
+                    target.entry.target(),
+                    &target.path,
+                ))
+                .await;
+            return Ok(SecretOutcome::Failed);
+        }
         self.settle_in_sync(&target, &resolved, &current).await?;
         self.settle_conflict(&target, &resolved, &current).await?;
 
@@ -329,17 +341,16 @@ where
     // `FileSystemError`, and every variant's `Display` embeds the path, so routing
     // this through it prints the path twice.
     fn unwritable_target_refusal(&self, source: &str, path: &TargetPath) -> Option<String> {
-        let reason = match self.filesystem.is_directory(path) {
-            Ok(false) => return None,
-            Ok(true) => String::from(
-                "a directory is at the target, and a file cannot replace a directory. No command was run. Remove it or point the entry somewhere else.",
-            ),
-            Err(e) => format!(
-                "selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
-            ),
-        };
-
-        Some(format!("Skipping '{source}': {reason}"))
+        match self.filesystem.is_directory(path) {
+            Ok(false) => None,
+            Ok(true) => Some(format!(
+                "{} No command was run.",
+                directory_target_refusal(source, path)
+            )),
+            Err(e) => Some(format!(
+                "Skipping '{source}': selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
+            )),
+        }
     }
 
     /// Refuse anything decidable without running a command or reading a file.
@@ -433,7 +444,7 @@ where
         }
     }
 
-    /// What is at the target: absent, readable, or present but unreadable.
+    /// What is at the target: absent, readable, a directory, or unreadable.
     ///
     /// Conflating any two of those loses a credential.
     fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
@@ -666,7 +677,7 @@ mod tests {
     fn an_unreadable_current_target_is_still_said_plainly() {
         let summary = secret_conflict_summary("op read x", b"token", None);
         assert!(
-            summary.contains("current target  : exists but could not be read"),
+            summary.contains("current target  : could not be read"),
             "got: {summary}"
         );
     }
