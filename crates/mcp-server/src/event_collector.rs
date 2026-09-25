@@ -401,18 +401,13 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "target": target,
             "diff": diff,
         })),
-        // `drift_type` stays the bare classification an assistant can match on;
-        // the explanation is its own field rather than appended prose.
+        // `drift_type` stays the bare classification an assistant can match on.
         PackageEvent::DotfileDriftDetected {
-            target,
-            drift_type,
-            reason,
-            ..
+            target, drift_type, ..
         } => Some(serde_json::json!({
             "type": "dotfile_drift_detected",
             "target": target,
             "drift_type": drift_type,
-            "reason": reason,
         })),
         PackageEvent::PostInstallNote {
             package_name, note, ..
@@ -661,6 +656,67 @@ mod tests {
                 .contains("1 refused"),
             "the count belongs in the message an assistant reads: {:?}",
             result.data["result"]["message"]
+        );
+    }
+
+    // A drift that refused a target it could not examine -- a symlink, a fifo --
+    // is an error result too. The mapping runs through `had_refusals` for both
+    // variants, so each is pinned; drift is the tool whose success most reads as
+    // "every file is clean".
+    #[tokio::test]
+    async fn a_drift_that_refused_a_target_is_an_error_result() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 0,
+                refused_count: 1,
+                unloaded_specs: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(0, 0),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "refused");
+        assert_eq!(result.data["result"]["refused"], 1);
+    }
+
+    // A drift row is the target and its bare classification, and nothing else an
+    // assistant might read as an explanation.
+    #[tokio::test]
+    async fn a_drift_row_carries_the_target_and_its_type_only() {
+        let events = vec![
+            PackageEvent::DotfileDriftDetected {
+                operation_info: test_op_info(),
+                target: "/home/u/.gitconfig".to_string(),
+                drift_type: "repo changed".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["drift_type"], "repo changed");
+        // A set, so the assertion holds whatever order the map keeps its keys in.
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from(["drift_type", "target", "type"]),
+            "row: {row}"
         );
     }
 

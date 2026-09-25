@@ -6,12 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
-    dotfile_service::{deploy::DeployDecision, state::DriftType},
-    fs::{
-        filesystem::{FileSystem, FileSystemError},
-        target::{TargetPath, TargetRejection},
-    },
+use crate::fs::{
+    filesystem::{FileSystem, FileSystemError},
+    target::{TargetPath, TargetRejection},
 };
 
 /// A symlink at a target's final component.
@@ -161,29 +158,6 @@ pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPa
         Ok(bytes) => TargetState::Readable(bytes),
         Err(e) => TargetState::Unreadable(e),
     }
-}
-
-/// Why an in-sync entry will never settle, when that is the case.
-///
-/// `Some` for an untracked target whose contents already match but which is a
-/// symlink: apply skips it and records nothing, so drift reports it on every run
-/// forever. Call it from both apply and drift so their wording cannot diverge.
-// Scoped to `NotTracked` deliberately. A *tracked* entry whose target later became
-// a symlink produces no drift line at all — a different bug — and answering for it
-// here would half-fix that one from the wrong place (selfie-v7py).
-pub(super) fn unmanaged_symlink_reason<F: FileSystem>(
-    filesystem: &F,
-    drift: &DriftType,
-    decision: &DeployDecision,
-    target: &TargetPath,
-) -> Option<&'static str> {
-    (*drift == DriftType::NotTracked
-        && matches!(decision, DeployDecision::Skip(_))
-        && filesystem.symlink_refusal(target).is_some())
-    .then_some(
-        "the target is a symlink, so selfie will not manage it \
-         and records no deployment for it",
-    )
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the

@@ -220,8 +220,9 @@ not be loaded, is a failure and exits `1` with nothing deployed.
 `selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run
 succeeded and the command reports itself as completed. Selfie refuses an entry when it cannot deploy
 it safely or unambiguously — an unrecognized key in the entry, a target it will not write to (a
-symlink, or a path outside your home directory), a target that exists but it cannot read, or a
-source file it cannot read. Each refusal is named in the output, and the summary line counts them:
+symlink, whether or not its content already matches, or a path outside your home directory), a
+target it cannot read, or a source file it cannot read. Each refusal is named in the output, and the
+summary line counts them:
 
 ```
 Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)
@@ -237,13 +238,17 @@ running a command the file's author did not write — a key hiding `environments
 mapping they take that command from. Each was given one package name, so a refusal leaves them
 nothing to do.
 
-A dotfiles directory that exists but cannot be listed counts as one refusal for `selfie apply` with
-no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it was part of the run
-and none could be read, while the package dotfiles still deploy or are still checked.
+`selfie dotfiles drift` follows the same rule for a target it did not compare: a symlink, a fifo,
+socket or device node, a directory, or a target it cannot read is a refusal, and the check exits
+`1`. A dotfiles directory that exists but cannot be listed counts as one refusal for `selfie apply`
+with no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it was part of
+the run and none could be read, while the package dotfiles still deploy or are still checked.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 
-- **A skip.** The entry was already in sync, so there was nothing to do.
+- **A skip.** The entry was already in sync, so there was nothing to do. A symlinked target is not a
+  skip even when its content matches: selfie does not read through the link to find out, and refuses
+  it.
 - **A conflict.** The target exists, is untracked, and differs from the repository file. Selfie
   leaves it alone and reports it, because overwriting it is your decision — see
   [Dotfiles](docs/package-files.md#dotfiles). When you do decide to overwrite, selfie copies the

@@ -749,11 +749,11 @@ except when a fifo, socket or device node sits behind it, which refuses before a
 a link selfie sees at either of its two checks is not read through. See
 [Deploy behavior and permissions](#deploy-behavior-and-permissions).
 
-selfie deploys by copying, so a symlink at a target is not a supported setup. When one is there and
-selfie would otherwise write, it **refuses and skips that entry** with a warning naming the target
-and where the link points. The link and the file it points at are both left exactly as they were,
-and a dangling link's destination is not created. `selfie apply --dry-run` reports the same refusal
-rather than previewing a deploy that would not happen.
+selfie deploys by copying, so a symlink at a target is not a supported setup. When one is there,
+`selfie apply` **refuses and skips that entry** with a warning naming the target and where the link
+points. The link and the file it points at are both left exactly as they were, and a dangling link's
+destination is not created. `selfie apply --dry-run` reports the same refusal rather than previewing
+a deploy that would not happen.
 
 ```
 ⚠ Skipping 'git/gitconfig': /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write through it
@@ -763,19 +763,17 @@ Writing through the link would send the content somewhere other than the path yo
 possibly somewhere chosen by whoever created the link. Replacing the link instead would discard it
 on the first apply after any edit to the repository file, which is not selfie's to decide.
 
-The refusal applies only when selfie was going to write. A symlinked target whose contents already
-match is in sync, so it is skipped as usual with no refusal reported. `--yes` does not lift the
-refusal, and neither does answering an interactive conflict prompt — in fact you will not be asked,
-since a refused entry is settled before the prompt. Overwriting a conflict and writing through a
-link are separate questions, and `--yes` speaks only to the first.
+The refusal applies to every symlinked target, **including one whose contents already match** and
+one selfie deployed before you replaced it with a link. selfie does not read the target to find out:
+reading through the link would compare a file you never asked selfie to manage, and no answer could
+change the outcome, since selfie will not write through the link either way. A refusal counts as
+one, so [the run exits non-zero](../README.md#a-refusal-is-not-a-success) on every run while the
+link is there. `--yes` does not lift the refusal, and neither does answering an interactive conflict
+prompt — in fact you will not be asked, since a refused entry is settled before the prompt.
 
-**No deployment is recorded for a symlinked target**, including one that already matches. selfie did
-not write it and never will, so an entry claiming otherwise would be a promise the refusal
-guarantees it cannot keep. The visible consequence is in `selfie dotfiles drift`: the entry stays
-[`not tracked`](#selfie-dotfiles-drift-reports-the-symlink-refusal) on every run rather than
-settling to in sync, and `selfie sync status` keeps counting it. That is the honest report of a
-config file selfie does not manage — and it is what replacing the link, or retargeting the entry at
-the path the link points to, clears.
+**No deployment is recorded for a symlinked target** that selfie has not deployed before. One it did
+deploy keeps its record, since removing it would claim selfie never deployed there, which is false.
+Either way the entry stays refused until the link is dealt with.
 
 To put a target under selfie's management, replace the symlink with a regular file
 (`rm ~/.gitconfig` before the next `selfie apply`, which then writes it), or point the entry's
@@ -792,13 +790,16 @@ by `selfie apply`, `selfie dotfiles drift` and `selfie dotfiles track` alike:
 ⚠ Skipping 'myapp/config.toml': /home/you/.config/myapp/config.toml: target resolves to a named pipe (fifo) and selfie will not write to it
 ```
 
-A symlink pointing at one of these is refused the same way — the message says _resolves to_ for that
-reason. A **directory** at the target is not in this group. For a repository-file entry it is
-reported as an ordinary error; for a secret-bearing entry it is refused before any command runs,
-because a file cannot replace a directory and nothing should be fetched for a target that cannot
-receive it. Provider-sourced and templated entries refuse these targets too, and so does the
-deploy-state file: selfie renames nothing over a pipe, socket or device that is there when it
-checks.
+For a repository-file entry, a symlink pointing at one of these is refused as a
+[symlinked target](#symlinked-targets): the link is what you would replace. For a secret-bearing
+entry, whose link is otherwise replaced, it is refused as what the link resolves to — the message
+says _resolves to_ for that reason. `selfie dotfiles drift` counts every such target as refused,
+because it did not compare it, so a drift check that meets one exits non-zero. A **directory** at
+the target is not in this group. For a repository-file entry it is reported as an ordinary error;
+for a secret-bearing entry it is refused before any command runs, because a file cannot replace a
+directory and nothing should be fetched for a target that cannot receive it. Provider-sourced and
+templated entries refuse these targets too, and so does the deploy-state file: selfie renames
+nothing over a pipe, socket or device that is there when it checks.
 
 #### `selfie dotfiles track` refuses a symlinked target
 
@@ -821,38 +822,21 @@ A dangling link is refused the same way, and is reported as a symlink rather tha
 
 #### `selfie dotfiles drift` reports the symlink refusal
 
-`drift` names the symlink whenever `apply` would refuse the entry, using the same wording:
+`drift` refuses a symlinked target exactly where `apply` does, which is everywhere, using the same
+wording:
 
 ```
-⚠   Drift in ~/.gitconfig: repo changed
 ⚠ Skipping 'myapp/config.toml': /home/you/.gitconfig: target is a symlink to '/home/you/Sync/gitconfig' and selfie will not write through it
 ```
 
-The drift type on its own is misleading for a symlinked target, which is why the reason accompanies
-it. Drift reads _through_ the link, so the checksum it compares belongs to the link's destination
-rather than to the target — and because a refused entry never updates its recorded state, the same
-drift is reported on every subsequent run. That permanence is real, not a display artifact: nothing
-will clear it until the link is dealt with.
+It prints no drift line for the entry. A drift type would have to come from reading through the
+link, which compares the link's destination rather than the target. Instead the entry is counted as
+refused and left out of the total it checked, so the summary never claims a file it did not compare,
+and the check [exits non-zero](../README.md#a-refusal-is-not-a-success) until the link is dealt
+with. [Symlinked targets](#symlinked-targets) explains what clears it.
 
-The **refusal** follows `apply`'s own decision, so it appears only where `apply` would refuse to
-write. The **drift line** does not: an untracked target whose contents already match the repository
-file is still listed as drifted, even though `apply` writes nothing and refuses nothing for it. That
-line carries the reason as well, without the refusal:
-
-```
-⚠   Drift in ~/.gitconfig: not tracked — the target is a symlink, so selfie will not manage it and records no deployment for it
-```
-
-`selfie apply` says the same thing on its skip line for the same entry, so the two commands agree
-about a target neither of them will ever manage.
-
-That combination — `not tracked`, on every run, with the symlink reason beside it — is what a
-symlinked target already in sync looks like, and running `selfie apply` does not clear it: nothing
-is recorded for a target selfie will not write to, so there is no state for the entry to advance to.
-[Symlinked targets](#symlinked-targets) explains what clears it.
-
-Note that `selfie sync status` summarizes drift counts and does not carry this reason; it points at
-`selfie dotfiles drift`, which does.
+`selfie sync status` carries the same refusal forward among the warnings it relays and counts it as
+a refusal that left dotfiles unchecked.
 
 ### Files in your repository
 
