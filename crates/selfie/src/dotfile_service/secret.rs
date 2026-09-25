@@ -39,6 +39,37 @@ pub(super) fn secret_origin(content: &ContentSource<'_>) -> String {
     content.to_string()
 }
 
+/// The program a command runs: its first word after any leading `NAME=value`
+/// assignments, as the shell reads it, or `None` for a command the shell would
+/// reject, such as one with an unclosed quote.
+// Split as the shell splits, so a quoted assignment value containing spaces is one
+// word. A full path and a wrapper such as `sh -c` or `env` are taken as written.
+pub(super) fn program_of(command: &str) -> Option<String> {
+    shlex::split(command)?
+        .into_iter()
+        .find(|word| !is_assignment(word))
+}
+
+/// Whether `word` is a shell variable assignment, `NAME=value`.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Every program `entry` would run: its command's, or each binding's.
+pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<String> {
+    match entry.command() {
+        Some(command) => program_of(command).into_iter().collect(),
+        None => entry
+            .vars()
+            .values()
+            .filter_map(|c| program_of(c))
+            .collect(),
+    }
+}
+
 /// A conflict summary describing shape without revealing content.
 ///
 /// Line counts distinguish a rotated value (1 line vs 1 line) from a hand-edited
@@ -83,9 +114,13 @@ pub(super) enum SecretOutcome {
     Deployed,
     Skipped,
     Conflicted,
-    /// Resolution failed; the caller decides whether to abort based on
-    /// `stop_on_error`.
+    /// Refused or failed without a command failing; the caller decides whether
+    /// to abort based on `stop_on_error`.
     Failed,
+    /// A command the entry ran failed. Refused like `Failed`, and carries the
+    /// failed command's program so the caller can hold back that program's later
+    /// commands in this run.
+    CommandFailed(String),
 }
 
 /// A phase either lets the apply continue, or ends it with an outcome.
@@ -450,7 +485,10 @@ where
                         target.entry.target()
                     ))
                     .await;
-                Err(SecretOutcome::Failed)
+                Err(match e.failed_command(target.entry).and_then(program_of) {
+                    Some(program) => SecretOutcome::CommandFailed(program),
+                    None => SecretOutcome::Failed,
+                })
             }
         }
     }
@@ -660,6 +698,35 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Leading assignments are the environment, not the program, however many.
+    #[test]
+    fn a_program_is_the_first_word_after_any_assignments() {
+        let program = |command| super::program_of(command);
+        assert_eq!(program("op read a").as_deref(), Some("op"));
+        assert_eq!(program("OP_ACCOUNT=me op read a").as_deref(), Some("op"));
+        assert_eq!(program("A=1 _B=2 gh auth token").as_deref(), Some("gh"));
+        // Not an assignment: nothing before the `=`, or a name that is not one.
+        assert_eq!(program("=x op").as_deref(), Some("=x"));
+        assert_eq!(program("1A=x op").as_deref(), Some("1A=x"));
+    }
+
+    // A quoted assignment value is one word however many spaces it holds, in
+    // single or double quotes, so the program is still the word after it.
+    #[test]
+    fn a_quoted_assignment_value_with_spaces_is_one_word() {
+        let program = |command| super::program_of(command);
+        assert_eq!(
+            program("VAULT_ADDR='https://x/path with spaces' op read x").as_deref(),
+            Some("op")
+        );
+        assert_eq!(
+            program("VAULT_ADDR=\"https://x/path with spaces\" op read x").as_deref(),
+            Some("op")
+        );
+        // A command the shell would reject names no program.
+        assert_eq!(program("VAULT_ADDR='unclosed op read x"), None);
+    }
+
     use super::*;
 
     // selfie-ir68.21. Both sides render a line count, on the only line a user gets

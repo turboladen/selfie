@@ -262,6 +262,8 @@ struct TestDirs {
     // What every service built from these dirs believes about its privilege,
     // and whether `--allow-sudo` was passed.
     sudo_policy: SudoPolicy<RunningAs>,
+    // `stop_on_error` for every service built from these dirs.
+    stop_on_error: bool,
 }
 
 impl TestDirs {
@@ -282,7 +284,15 @@ impl TestDirs {
             target_dir,
             state_dir,
             sudo_policy: SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
+            stop_on_error: false,
         }
+    }
+
+    // Build every subsequent service with `stop_on_error` set to `on`. A test about
+    // stopping sets it rather than relying on the default.
+    fn stopping_on_error(mut self, on: bool) -> Self {
+        self.stop_on_error = on;
+        self
     }
 
     // Build every subsequent service as though the process were at `elevation`.
@@ -342,6 +352,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let repo = YamlPackageRepository::new(
             fs,
@@ -367,46 +378,10 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let repo = YamlPackageRepository::new(
             RealFileSystem,
-            config.package_directory().clone(),
-            SpecOrigin::PackageDirectory,
-        );
-        DotfileServiceImpl::new(
-            repo,
-            fs,
-            runner,
-            config,
-            CancellationToken::new(),
-            self.sudo_policy,
-        )
-    }
-
-    // A packages-only service whose `stop_on_error` is set explicitly.
-    //
-    // The flag decides whether a refused entry ends the run, so a test about
-    // that has to set both sides rather than rely on the default.
-    fn service_with_runner_and_stop_on_error(
-        &self,
-        runner: FakeCommandRunner,
-        stop_on_error: bool,
-    ) -> DotfileServiceImpl<
-        YamlPackageRepository<RealFileSystem>,
-        RealFileSystem,
-        FakeCommandRunner,
-        RunningAs,
-    > {
-        let fs = RealFileSystem;
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory(&self.package_dir)
-            .dotfiles_directory(self.dotfiles_dir.clone())
-            .state_directory(self.state_dir.clone())
-            .stop_on_error(stop_on_error)
-            .build();
-        let repo = YamlPackageRepository::new(
-            fs,
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
@@ -435,6 +410,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let package_repo = YamlPackageRepository::new(
             fs,
@@ -472,6 +448,7 @@ impl TestDirs {
             .environment("test")
             .package_directory(&self.package_dir)
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         assert_eq!(
             config.dotfiles_directory(),
@@ -521,6 +498,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         DotfileServiceImpl::new(
             YamlPackageRepository::new(
@@ -547,6 +525,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         DotfileServiceImpl::new(
             YamlPackageRepository::new(
@@ -4882,17 +4861,17 @@ mod secret_bearing {
     // to a fifo is refused by the guard ahead of this on both paths already.
     #[tokio::test]
     async fn a_dry_run_over_a_bare_directory_at_a_secret_target_refuses() {
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(false);
         let target = dirs.target_dir.join("credentials");
         std::fs::create_dir_all(&target).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let counted = runner.clone();
-        // `stop_on_error` is on by default and a refusal would abort the run before
-        // the summary, leaving nothing to read the counts off. The counts are what
-        // this test is about.
-        let service = dirs.service_with_runner_and_stop_on_error(runner, false);
+        // Set explicitly: with `stop_on_error` on, a refusal would abort the run
+        // before the summary, leaving nothing to read the counts off. The counts are
+        // what this test is about.
+        let service = dirs.service_with_runner(runner);
 
         let options = ApplyOptions {
             dry_run: true,
@@ -5010,7 +4989,7 @@ mod secret_bearing {
 
     #[tokio::test]
     async fn a_failing_provider_stops_the_apply_when_stop_on_error_is_set() {
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(true);
         let target = dirs.target_dir.join("credentials");
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
@@ -5024,7 +5003,7 @@ mod secret_bearing {
                 get_operation_result(&events),
                 Some(OperationResult::Failure(_))
             ),
-            "stop_on_error defaults to true, so a failed resolve aborts"
+            "stop_on_error is set, so a failed resolve aborts"
         );
         assert!(!target.exists());
     }
@@ -5575,16 +5554,10 @@ mod secret_bearing {
             format!("{events:?}").contains("is not absolute"),
             "a dry run should report the same refusal a real apply would, got: {events:?}"
         );
-        // The refusal is a failure, not a skip, so `stop_on_error` (default true)
-        // ends the preview here — which is what `docs/package-files.md` promises
-        // and what nothing asserted before (selfie-m5dv).
-        assert!(
-            matches!(
-                get_operation_result(&events).expect("no Completed event"),
-                OperationResult::Failure(_)
-            ),
-            "got: {events:?}"
-        );
+        // The refusal is counted as one, not as a skip. `stop_on_error` is off
+        // by default, so the preview carries on and lists every refusal a real
+        // apply would make.
+        assert_eq!(refused_count(&events), 1, "got: {events:?}");
         assert!(
             !format!("{events:?}").contains("would run"),
             "must not claim it would run commands for an entry that can never deploy"
@@ -5634,7 +5607,7 @@ mod secret_bearing {
         // An abort must not discard the deploy state for files already written in
         // the same run: the files are on disk, so dropping their record would make
         // the next drift check report correctly-deployed files as untracked.
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(true);
 
         // Relies on packages being enumerated in sorted path order, so "aaa"
         // is processed before "zzz" and the ordinary dotfile deploys before the
@@ -6426,7 +6399,8 @@ mod secret_bearing {
         // explicitly, so it cannot show the window closed when it is not.
         #[tokio::test]
         async fn a_cancellation_between_two_bindings_is_reported_honestly() {
-            let dirs = TestDirs::new();
+            // Set, so blaming stop_on_error for the cancellation could show here.
+            let dirs = TestDirs::new().stopping_on_error(true);
             let target = dirs.target_dir.join("credentials");
             template_package(
                 &dirs.package_dir,
@@ -6529,15 +6503,15 @@ mod secret_bearing {
 
         // A command killed by Ctrl+C must not be blamed on the package file.
         //
-        // `stop_on_error` defaults to **true**, and a cancelled command fails —
-        // so the failure arm reaches `stop_on_error`'s explanation first and the
-        // run reports "Stopped after failing to apply dotfile 'X' (stop_on_error
-        // is enabled)". That names the user's own interrupt as a spec problem
-        // and sends them looking for one. The between-entries guard cannot help
+        // `stop_on_error` is set here, and a cancelled command fails -- so a
+        // refusal that asked `stop_on_error` before the token would report
+        // "Stopped after failing to apply dotfile 'X' (stop_on_error is enabled)".
+        // That names the user's own interrupt as a spec problem and sends them
+        // looking for one. Without the setting this passes whatever the order. The between-entries guard cannot help
         // here: the break happens in the same iteration the command died in.
         #[tokio::test]
         async fn a_command_killed_by_cancellation_is_not_reported_as_a_spec_failure() {
-            let dirs = TestDirs::new();
+            let dirs = TestDirs::new().stopping_on_error(true);
             let target = dirs.target_dir.join("credentials");
             provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
@@ -8064,7 +8038,7 @@ mod target_rule {
     #[tokio::test]
     async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
         async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
-            let dirs = TestDirs::new();
+            let dirs = TestDirs::new().stopping_on_error(stop_on_error);
             let second = dirs.target_dir.join("second-credentials");
             let yaml = format!(
                 "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
@@ -8077,7 +8051,7 @@ mod target_rule {
             let runner = FakeCommandRunner::new()
                 .succeeding("op read first", b"FIRST")
                 .succeeding("op read second", b"SECOND");
-            let service = dirs.service_with_runner_and_stop_on_error(runner, stop_on_error);
+            let service = dirs.service_with_runner(runner);
             let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
             (events, second, dirs)
         }
@@ -11007,7 +10981,7 @@ mod target_classification {
             warnings.iter().any(|w| w.contains(DIRECTORY)),
             "the refusal must name the directory: {warnings:?}"
         );
-        // A failure, which `stop_on_error` (on by default) turns into a stopped run.
+        // A refusal, so nothing is written.
         assert!(
             !events
                 .iter()
@@ -11425,8 +11399,8 @@ mod target_reads_never_follow {
         make_fifo(&fifo);
         let plain = dirs.target_dir.join("plain.toml");
         std::fs::write(&plain, "OTHER").unwrap();
-        // One package, the plain entry first: the refused secret entry stops the run
-        // under the default `stop_on_error`, and the control has to be read before.
+        // One package, the plain entry first, so the control is read before the
+        // refused secret entry whatever `stop_on_error` says.
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/plain.toml"), "FROM REPO").unwrap();
         let yaml = format!(
@@ -13763,5 +13737,383 @@ dotfiles:
             !had_refusals(&events),
             "an unverified entry is not a refusal"
         );
+    }
+}
+
+// `stop_on_error` governs every failure an apply counts as refused, and nothing
+// else: a conflict never stops a run. Each test puts a deployable entry after the
+// failure, because a run that stopped and one that carried on are told apart only
+// by whether that later entry deployed.
+mod stop_on_error_governs_every_failure {
+    use super::*;
+
+    // Two repository-file entries in one package: `first` from `first_source`, and
+    // a deployable `second`. Returns `second`'s target.
+    fn two_entries(dirs: &TestDirs, first_source: &str, first: &std::path::Path) -> PathBuf {
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("second.toml"), "SECOND").unwrap();
+        let second = dirs.target_dir.join("second.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                (first_source, first.to_str().unwrap()),
+                ("myapp/second.toml", second.to_str().unwrap()),
+            ],
+        );
+        second
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_repository_source_stops_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let first = dirs.target_dir.join("first.toml");
+        let second = two_entries(&dirs, "myapp/missing.toml", &first);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains(&format!(
+                "Stopped after failing to apply dotfile '{}'",
+                first.display()
+            )),
+            "the stop must name the entry: {message}"
+        );
+        assert!(
+            !second.exists(),
+            "the run must stop before the second entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_stops_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let first = locked.join("first.toml");
+        std::fs::write(dirs.package_dir.join("first.toml"), "FIRST").unwrap();
+        let second = two_entries(&dirs, "first.toml", &first);
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP a_failed_write_stops_the_run: mode bits do not bite");
+            return;
+        };
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("Stopped after failing to apply dotfile"),
+            "a failed write must stop the run: {message}"
+        );
+        assert!(!first.exists(), "control: the write really failed");
+        assert!(
+            !second.exists(),
+            "the run must stop before the second entry"
+        );
+    }
+
+    // Packages are applied in sorted path order, so `aaa` is refused before `zzz`
+    // is reached.
+    #[tokio::test]
+    async fn a_package_refused_whole_stops_the_run_naming_the_package() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        write_package_yaml(
+            &dirs.package_dir,
+            "aaa",
+            "name: aaa\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
+        );
+        std::fs::write(dirs.package_dir.join("zzz.toml"), "ZZZ").unwrap();
+        let later = dirs.target_dir.join("zzz.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "zzz",
+            &[("zzz.toml", later.to_str().unwrap())],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert_eq!(
+            message,
+            "Stopped after refusing package 'aaa' (stop_on_error is enabled)"
+        );
+        assert!(!later.exists(), "the run must stop before the next package");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_dotfiles_directory_stops_the_run_before_any_package() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new().stopping_on_error(true);
+        std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+        let target = dirs.target_dir.join("bat.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat.conf", target.to_str().unwrap())],
+        );
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let _restore = RestoreMode(dirs.dotfiles_dir.clone(), 0o700);
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            eprintln!("SKIP an_unreadable_dotfiles_directory_stops_the_run: mode bits do not bite");
+            return;
+        }
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("Stopped before applying anything")
+                && message.contains("standalone dotfiles directory"),
+            "the stop must name the directory: {message}"
+        );
+        assert!(!target.exists(), "no package may deploy after the stop");
+    }
+
+    // A conflict is the designed answer to a target that differs, not a failure.
+    #[tokio::test]
+    async fn a_conflict_does_not_stop_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let first = dirs.target_dir.join("first.toml");
+        std::fs::write(dirs.package_dir.join("first.toml"), "FROM REPO").unwrap();
+        std::fs::write(&first, "HAND EDITED").unwrap();
+        let second = two_entries(&dirs, "first.toml", &first);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::DotfilesApplied {
+                        conflict_count: 1,
+                        ..
+                    }
+                ))
+            ),
+            "a conflict must be counted and the run completed: {events:?}"
+        );
+        assert!(second.exists(), "the run must carry on past a conflict");
+    }
+
+    // Off, which is the default: every failure is reported and counted in one run.
+    #[tokio::test]
+    async fn with_stop_on_error_off_every_failure_is_reported() {
+        let dirs = TestDirs::new();
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("third.toml"), "THIRD").unwrap();
+        let third = dirs.target_dir.join("third.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                (
+                    "myapp/missing-one.toml",
+                    dirs.target_dir.join("one").to_str().unwrap(),
+                ),
+                (
+                    "myapp/missing-two.toml",
+                    dirs.target_dir.join("two").to_str().unwrap(),
+                ),
+                ("myapp/third.toml", third.to_str().unwrap()),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 2, "both failures must be counted");
+        assert!(third.exists(), "the run must reach the deployable entry");
+    }
+
+    // What ran after the first entry of `cutoff_package`: how many later `op`
+    // commands, how many `gh` ones, and whether the repository file deployed.
+    struct AfterFirst {
+        op_after: usize,
+        gh: usize,
+        plain_deployed: bool,
+        events: Vec<PackageEvent>,
+    }
+
+    // A package whose first entry is `first` (YAML for one list item), followed by
+    // a later `op` provider, a `gh` provider, and a repository file, applied with
+    // `runner`. The cutoff should hold back the later `op` command and nothing else.
+    async fn cutoff_package(first: &str, runner: FakeCommandRunner) -> AfterFirst {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("plain.toml"), "PLAIN").unwrap();
+        std::fs::write(dirs.package_dir.join("creds.tpl"), "t={{ t }}\n").unwrap();
+        let plain = dirs.target_dir.join("plain.toml");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n{first}  \
+             - command: \"op read b\"\n    target: \"{}\"\n  \
+             - command: \"gh auth token\"\n    target: \"{}\"\n  \
+             - source: \"plain.toml\"\n    target: \"{}\"\n",
+            dirs.target_dir.join("b").display(),
+            dirs.target_dir.join("gh").display(),
+            plain.display(),
+        )
+        .replace("TARGET_DIR", dirs.target_dir.to_str().unwrap());
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = runner
+            .succeeding("op read b", b"B")
+            .succeeding("gh auth token", b"GH");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let calls: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        AfterFirst {
+            op_after: calls.iter().filter(|c| c.as_str() == "op read b").count(),
+            gh: calls.iter().filter(|c| c.starts_with("gh ")).count(),
+            plain_deployed: plain.exists(),
+            events,
+        }
+    }
+
+    const PROVIDER_A: &str = "  - command: \"op read a\"\n    target: \"TARGET_DIR/a\"\n";
+
+    // A failed command holds back that program's later commands, whatever
+    // `stop_on_error` says, and nothing else: another program's entry and a
+    // repository file still deploy.
+    #[tokio::test]
+    async fn a_failed_command_holds_back_only_that_program() {
+        let after = cutoff_package(
+            PROVIDER_A,
+            FakeCommandRunner::new().failing("op read a", b"vault is locked"),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1, "a `gh` command must still run");
+        assert!(after.plain_deployed, "a repository file needs no command");
+        assert!(
+            warning_messages(&after.events)
+                .iter()
+                .any(|w| w.ends_with("an earlier `op` command failed; no command was run")),
+            "{:?}",
+            after.events
+        );
+        assert_eq!(refused_count(&after.events), 2, "{:?}", after.events);
+    }
+
+    // A template's binding is a command like any other: its failure holds back
+    // that binding's program.
+    #[tokio::test]
+    async fn a_failed_binding_holds_back_its_program() {
+        let first = "  - source: \"creds.tpl\"\n    target: \"TARGET_DIR/t\"\n    vars:\n      t: \"op read t\"\n";
+        let after = cutoff_package(
+            first,
+            FakeCommandRunner::new().failing("op read t", b"locked"),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1, "a `gh` command must still run");
+    }
+
+    // Output that cannot be told from the shell's is the command's failure too.
+    #[tokio::test]
+    async fn an_unseparable_output_holds_back_its_program() {
+        let runner = FakeCommandRunner::new().erroring(
+            "op read a",
+            selfie::commands::CommandError::ContentMarkersAbsent {
+                command: "op read a".to_string(),
+                working_directory: PathBuf::from("."),
+            },
+        );
+        let after = cutoff_package(PROVIDER_A, runner).await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1);
+    }
+
+    // A later template is held back when any of its bindings runs a failed
+    // program, and none of its bindings runs, not even the one for another program.
+    #[tokio::test]
+    async fn a_failed_command_holds_back_a_template_that_runs_its_program() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("later.tpl"), "a={{ a }} b={{ b }}\n").unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read a\"\n    target: \"{}\"\n  \
+             - source: \"later.tpl\"\n    target: \"{}\"\n    vars:\n      \
+             a: \"gh auth token\"\n      b: \"op read c\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("later").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new()
+            .failing("op read a", b"vault is locked")
+            .succeeding("gh auth token", b"GH")
+            .succeeding("op read c", b"C");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let calls: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(calls, vec!["op read a".to_string()], "no binding may run");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains(&format!(
+                    "Skipping '{}': an earlier `op` command failed; no command was run",
+                    dirs.target_dir.join("later").display()
+                ))),
+            "{events:?}"
+        );
+        assert_eq!(refused_count(&events), 2, "{events:?}");
+    }
+
+    // The control: a command that succeeded with nothing to deploy did not fail,
+    // so the same program's later commands still run.
+    #[tokio::test]
+    async fn empty_output_holds_back_nothing() {
+        let after = cutoff_package(
+            PROVIDER_A,
+            FakeCommandRunner::new().succeeding("op read a", b""),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 1, "an empty output is not a failed command");
+        assert_eq!(after.gh, 1);
+    }
+
+    // A dry run stops where the real run would, so the preview describes the run
+    // about to be performed.
+    #[tokio::test]
+    async fn a_dry_run_ends_at_the_first_refusal_when_stop_on_error_is_set() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let yaml = "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                    - command: \"op read a\"\n    target: \"relative/one\"\n  \
+                    - command: \"op read b\"\n    target: \"relative/two\"\n";
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new();
+        let service = dirs.service_with_runner(runner.clone());
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            "Stopped after failing to apply dotfile 'relative/one' (stop_on_error is enabled)"
+        );
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("relative/two")),
+            "the preview must stop before the second entry: {events:?}"
+        );
+        assert_eq!(runner.call_count(), 0);
     }
 }

@@ -2782,6 +2782,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shellexpand",
+ "shlex",
  "similar",
  "strum",
  "tempfile",

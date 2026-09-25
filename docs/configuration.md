@@ -88,8 +88,8 @@ state_directory: ~/.local/state/selfie
 # Command timeout in seconds (default: 60)
 command_timeout: 300
 
-# Stop on first error (default: true)
-stop_on_error: true
+# Stop an apply at its first failure (default: false)
+stop_on_error: false
 
 # Maximum concurrent operations (default: number of CPUs)
 max_concurrency: 4
@@ -323,10 +323,25 @@ command_timeout: 600 # 10 minutes
 
 #### `stop_on_error`
 
-Whether to stop on first error during operations.
+Whether `selfie apply` stops at its first failure. Off by default, so one run reports every failure
+and the next run is not needed to find the second one.
+
+A failure is anything the run counts as refused: an entry selfie refused or could not carry out (a
+source it could not read, a target it will not write to or could not classify, a write that failed,
+a provider command that failed), a package refused whole, or a dotfiles directory it could not read.
+A conflict is not a failure and never stops a run, and neither is a warning. A run that carries on
+counts every failure in its summary and exits `1`. A run that stops reports the refused entry's
+warning and the sentence naming what stopped it, with no summary counts, and exits `1`.
+
+With this set, a failed provider command stops the run there, so no later entry is reached. With it
+off, once a provider command fails, later entries whose command, or any of whose template bindings,
+runs the same program are refused without running, with "an earlier `op` command failed; no command
+was run" naming the program. A locked vault or a dismissed prompt fails every one of them the same
+way. Entries that run another program, and repository files, still deploy. A dry run runs no
+command, so this never applies to one.
 
 ```yaml
-stop_on_error: false
+stop_on_error: true
 ```
 
 #### `max_concurrency`
