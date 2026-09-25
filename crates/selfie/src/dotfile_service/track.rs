@@ -24,6 +24,7 @@ use crate::{
     paths::{is_within, normalize_path},
 };
 
+use super::refusal::guard_refusal;
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
 
 /// Check that a name is safe for use as a filesystem path component.
@@ -141,19 +142,17 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
 /// whichever answers. `None` is the ordinary case and says nothing is wrong with the
 /// target.
 // Ask this rather than composing the two questions at a call site: which one
-// answers first is a rule of this module, and an adapter restating it can drift from
-// it.
+// answers first is a rule of the dotfile service, and an adapter restating it can
+// drift from it.
 //
 // One answer, not both: a symlink to a socket satisfies each check and would
-// otherwise warn twice with the same sentence. `or_else` also skips the second stat
-// when the first already answered.
+// otherwise warn twice with the same sentence. `guard_refusal` also skips the second
+// stat when the first already answered.
 pub fn already_tracked_refusal<F: FileSystem>(
     filesystem: &F,
     target: &TargetPath,
 ) -> Option<String> {
-    filesystem
-        .symlink_refusal(target)
-        .or_else(|| filesystem.irregular_target_refusal(target))
+    guard_refusal(filesystem, target)
         .as_ref()
         .map(already_tracked_refusal_warning)
 }
@@ -531,31 +530,25 @@ where
         });
     }
 
-    // Position is load-bearing at both ends. Before the writes: tracking reads
-    // *through* a link, so accepting one copies the destination into the dotfiles
-    // directory — where `sync push` commits it — and records a deployment that never
-    // happened. Before the existence check: `path_exists` follows the link, so a
-    // dangling one would be reported as a missing file.
+    // Ahead of the existence check and every write. Tracking reads *through* a link,
+    // so accepting one copies the destination into the dotfiles directory, where
+    // `sync push` commits it; and `path_exists` follows the link, so a dangling one
+    // would read as a missing file. A fifo would block the read. After the
+    // already-tracked answer above, because refusing an idempotent no-op helps nobody.
     //
-    // After the already-tracked answer above, because refusing an idempotent
-    // no-op helps nobody.
-    if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
-    }
-
-    // Also ahead of the read: tracking copies the target into the dotfiles
-    // repository, and reading a fifo blocks until a writer arrives. There is
-    // nothing to track in a fifo or a device node in any case.
-    //
-    // Deliberately not `track_refusal`, which the symlink case above uses: that
-    // one appends "replace the symlink with a regular file, or track the path it
-    // points to", and neither half applies here -- a fifo points at nothing, and
-    // "replace it with a regular file" describes deleting the user's pipe. The
-    // remedy that does apply is naming a different target, so this says that.
-    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "{refusal}. Point the entry at a regular file instead."
-        )));
+    // A fifo is not given `track_refusal`: its "replace the symlink with a regular
+    // file, or track the path it points to" fits neither half, since a fifo points at
+    // nothing. Naming a different target is the remedy that applies.
+    match guard_refusal(filesystem, &expanded_target) {
+        None => {}
+        Some(link @ FileSystemError::SymlinkedTarget { .. }) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_refusal(&link)));
+        }
+        Some(refusal) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "{refusal}. Point the entry at a regular file instead."
+            )));
+        }
     }
 
     if !filesystem.path_exists(expanded_target.path()) {
