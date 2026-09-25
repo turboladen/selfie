@@ -219,6 +219,19 @@ Test egress at the **boundary**, not by listing known paths:
   now state the limit, `is_within` carries the reasoning, and
   `a_symlinked_source_escapes_the_containment_guard` pins it as an executable fact — it asserts the
   escape **succeeds**, so strengthening the guard must delete the test and the prose together.
+- **An irregular target is refused everywhere a symlinked one is, and the two questions take
+  different stats on purpose.** A fifo, socket or device node at a target is refused by `apply`,
+  `dotfiles drift` and `dotfiles track` through `refusal::guard_refusal`; apply and drift word it
+  with `refusal_warning`, track with its own remedy, and drift counts it as refused. Those three
+  refuse a link to one as a link, without asking what is behind it. The secret path, which replaces
+  links, asks both questions through `refusal::guard_target` and refuses a link whose destination is
+  one. The symlink question (`symlink_refusal`) uses `symlink_metadata`, which does **not** follow,
+  because it is about the name. The irregular question (`irregular_target_refusal`) uses `metadata`,
+  which **does** follow, because the hazard is what an `open` lands on. Swapping the second for a
+  non-following stat lets a secret entry's link to a fifo through its check: the provider command
+  runs, and the writer refuses the link only afterwards, as a failed write. `read_file_no_follow` is
+  the second layer for a read, not a reason to drop the first: opening a device node can have side
+  effects, which only the stat avoids.
 - **A symlinked dotfile target is refused for repository-file content, and every command says so the
   same way.** `apply`, `dotfiles drift` and `dotfiles track` all ask `refusal::guard_refusal` before
   they read the target, so a link is refused whether or not its content matches, and none of them
