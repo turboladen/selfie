@@ -8,8 +8,9 @@ default:
 # changed here changes CI with it. The typos job is the one exception: it
 # uses the crate-ci action, which pins the tool version.
 
-# Run every gate CI runs, in order, stopping at the first failure
-check: fmt typos clippy build test hack docs-check
+# Run every gate CI runs except `hack`, in order, stopping at the first failure. selfie has one
+# feature, and CI's hack job covers building and testing it both ways.
+check: fmt typos clippy build test docs-check
     @echo "All checks passed."
 
 # Format code
