@@ -68,15 +68,17 @@ watch state change, drive the binary against the printed sandbox directory yours
 ### Pre-commit checklist
 
 Before every commit (unless instructed otherwise), run `just check` and fix any issues. It runs
-`fmt`, `typos`, `clippy`, `build`, `test`, `hack` and `docs-check`, in that order, stopping at the
-first failure. `Justfile` is the source of truth for these gates — do not retype the commands.
+`fmt`, `typos`, `clippy`, `build`, `test` and `docs-check`, in that order, stopping at the first
+failure. It leaves out `hack`, which tests selfie with and without its one feature and is the
+slowest step; CI runs it, and `just hack` runs it locally when a change touches a feature gate.
+`Justfile` is the source of truth for these gates — do not retype the commands.
 
-It needs `typos` and `cargo-hack` on `PATH` (`cargo install typos-cli cargo-hack`); the recipes fail
-with that instruction when either is missing. Passing it means every CI job's command passed here.
-The two things CI pins that the local run does not are tool versions: `typos` (the crate-ci action)
-and `dprint`, which CI installs at the version named in `.github/workflows/ci.yml`. A wrap that
-local `dprint` accepts and CI rejects means the two binaries differ; match CI's version rather than
-rewording the sentence.
+It needs `typos` on `PATH` (`cargo install typos-cli`), and `just hack` needs `cargo-hack`; the
+recipes fail with that instruction when either is missing. Passing it means every CI job's command
+except `hack` passed here. The two things CI pins that the local run does not are tool versions:
+`typos` (the crate-ci action) and `dprint`, which CI installs at the version named in
+`.github/workflows/ci.yml`. A wrap that local `dprint` accepts and CI rejects means the two binaries
+differ; match CI's version rather than rewording the sentence.
 
 ### Running `/code-review` and dep bumps
 
