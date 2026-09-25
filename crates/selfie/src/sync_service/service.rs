@@ -1984,7 +1984,6 @@ mod tests {
                 operation_info: test_operation_info(),
                 target: "/home/user/.bashrc".to_string(),
                 drift_type: "content mismatch".to_string(),
-                reason: None,
             },
             PackageEvent::Completed {
                 operation_info: test_operation_info(),

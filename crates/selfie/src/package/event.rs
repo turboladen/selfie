@@ -559,14 +559,12 @@ impl EventSender {
         &self,
         target: impl fmt::Display,
         drift_type: impl fmt::Display,
-        reason: Option<&str>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
             target: target.to_string(),
             drift_type: drift_type.to_string(),
-            reason: reason.map(ToString::to_string),
         })
         .await;
     }
@@ -777,9 +775,10 @@ pub enum OperationSuccess {
     DotfileDriftChecked {
         drift_count: usize,
         total_count: usize,
-        /// What drift could not check: a package apply would refuse whole, an
-        /// entry whose target exists but could not be read, or a dotfiles
-        /// directory that exists and could not be listed.
+        /// What drift could not check: a package apply would refuse whole; an
+        /// entry whose target is a symlink, a fifo, socket or device node, a
+        /// directory, or could not be read; or a dotfiles directory that exists
+        /// and could not be listed.
         ///
         /// Its own field rather than part of `total_count`: `sync status`
         /// renders that total as "N deployed", so a refusal counted there would
@@ -2219,15 +2218,9 @@ pub enum PackageEvent {
         /// The drift classification, and nothing else.
         ///
         /// A bare label — `not tracked`, `repo changed` — which the MCP server
-        /// serializes as a typed field and the CLI prints as one. Explanations go
-        /// in `reason`; appending prose here corrupts a value callers treat as an
-        /// enum.
+        /// serializes as a typed field and the CLI prints as one. Appending prose
+        /// here corrupts a value callers treat as an enum.
         drift_type: String,
-        /// Why this drift will not clear on its own, when that is knowable.
-        ///
-        /// `Some` for an entry selfie will never manage, whose drift line would
-        /// otherwise reappear on every run with nothing to explain it.
-        reason: Option<String>,
     },
 
     /// Post-install note to display to user

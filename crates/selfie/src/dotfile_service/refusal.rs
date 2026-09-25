@@ -1,70 +1,219 @@
 //! What is at a deploy target, and how a refused deploy is worded.
 //!
-//! The secret-bearing path, the repository-file path and drift all classify a
-//! target through here and refuse it in the same words, so none of the three can
-//! describe one refusal differently from the others.
+//! The secret-bearing path, the repository-file path, drift and track all guard
+//! and classify a target through here and refuse it in the same words, so none of
+//! them can describe one refusal differently from the others.
 
-use crate::{
-    dotfile_service::{deploy::DeployDecision, state::DriftType},
-    fs::{
-        filesystem::{FileSystem, FileSystemError},
-        target::{TargetPath, TargetRejection},
-    },
+use std::path::{Path, PathBuf};
+
+use crate::fs::{
+    filesystem::{FileSystem, FileSystemError, TargetRead},
+    target::{TargetPath, TargetRejection},
 };
 
-/// What is at an entry's target when apply or drift reaches it.
+/// A symlink at a target's final component.
+#[derive(Clone)]
+pub(super) struct Link {
+    path: PathBuf,
+    points_to: Option<PathBuf>,
+}
+
+impl Link {
+    /// Where the link points, when the link itself could be read. The raw link
+    /// text, relative whenever the user wrote a relative link: for wording only,
+    /// never to be resolved.
+    pub(super) fn destination(&self) -> Option<&Path> {
+        self.points_to.as_deref()
+    }
+
+    /// The refusal a write that will not follow the link gives for it.
+    pub(super) fn refusal(&self) -> FileSystemError {
+        FileSystemError::SymlinkedTarget {
+            path: self.path.clone(),
+            points_to: self.points_to.clone(),
+        }
+    }
+}
+
+/// What the two questions asked before anything reads a target found there.
+pub(super) enum TargetGuard {
+    /// Neither question found anything. The target may be a regular file, a
+    /// directory, or nothing at all.
+    Clear,
+    /// The final component is a symlink. `behind` is the refusal for what the link
+    /// resolves to, when that is a fifo, socket or device node.
+    Link {
+        link: Link,
+        behind: Option<FileSystemError>,
+    },
+    /// Not a symlink, but a fifo, socket or device node; or a refusal the guard
+    /// does not recognize, which refuses rather than being read as "nothing here".
+    Refused(FileSystemError),
+}
+
+/// Ask both questions every path reaching a target asks before it reads one: is
+/// the final component a symlink, and does the path resolve to a fifo, socket or
+/// device node. For a path that treats a link by what it points at.
+///
+/// A path that refuses every link asks [`guard_refusal`] instead, which does not
+/// look behind one.
+// The symlink question takes a non-following stat, because it is about the name;
+// the irregular one a following stat, because the hazard is what an `open` lands
+// on. They stay two calls with two syscalls. The secret path needs both answers for
+// a link: it replaces one, and refuses one whose destination is a fifo.
+pub(super) fn guard_target<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetGuard {
+    match link_at(filesystem, target) {
+        Err(unrecognized) => TargetGuard::Refused(unrecognized),
+        Ok(Some(link)) => TargetGuard::Link {
+            link,
+            behind: filesystem.irregular_target_refusal(target),
+        },
+        Ok(None) => filesystem
+            .irregular_target_refusal(target)
+            .map_or(TargetGuard::Clear, TargetGuard::Refused),
+    }
+}
+
+/// The refusal for a target on a path that refuses every symlink: the link when
+/// there is one, whatever it points at, otherwise a fifo, socket or device node.
+///
+/// Asks the same questions as [`guard_target`], in the same order.
+// Skips the following stat when the link has already answered. That stat reaches
+// the link's destination, which may sit on a hung mount; a path that refuses the
+// link either way has no reason to wait on it.
+pub(super) fn guard_refusal<F: FileSystem>(
+    filesystem: &F,
+    target: &TargetPath,
+) -> Option<FileSystemError> {
+    match link_at(filesystem, target) {
+        Err(unrecognized) => Some(unrecognized),
+        Ok(Some(link)) => Some(link.refusal()),
+        Ok(None) => filesystem.irregular_target_refusal(target),
+    }
+}
+
+/// Whether `target`'s final component is a symlink, asking only that.
+///
+/// # Errors
+///
+/// A refusal other than [`FileSystemError::SymlinkedTarget`], which the caller
+/// must refuse the entry on.
+fn link_at<F: FileSystem>(
+    filesystem: &F,
+    target: &TargetPath,
+) -> Result<Option<Link>, FileSystemError> {
+    classify_link(filesystem.symlink_refusal(target))
+}
+
+/// A link for a symlink refusal, `None` for no refusal.
+///
+/// # Errors
+///
+/// Any refusal other than [`FileSystemError::SymlinkedTarget`], carried so the
+/// caller refuses on it.
+// Fails **closed**, and deliberately not a `_ => Ok(None)` that would treat an
+// unrecognized refusal as "no link". `symlink_refusal` returns only
+// `SymlinkedTarget` today, so nothing reaches that arm; a fallback would silently
+// send a future variant down a path that reads the target, which for a secret
+// entry hands the bytes to a resolver.
+pub(super) fn classify_link(
+    refusal: Option<FileSystemError>,
+) -> Result<Option<Link>, FileSystemError> {
+    match refusal {
+        None => Ok(None),
+        Some(FileSystemError::SymlinkedTarget { path, points_to }) => {
+            Ok(Some(Link { path, points_to }))
+        }
+        Some(other) => Err(other),
+    }
+}
+
+/// What is at an entry's target when apply, drift or track reaches it.
 ///
 /// Kept distinct from `Option<Vec<u8>>` because "absent" and "present but
 /// unreadable" call for opposite handling: the first is safe to write, the second
 /// must never be written over as though nothing were there.
 pub(super) enum TargetState {
+    /// Nothing is there: the path does not exist, or a component of it is not a
+    /// directory, where nothing can be and a write fails on its own.
     Absent,
     Readable(Vec<u8>),
+    /// A directory, which a file cannot replace.
+    Directory,
+    /// A symlink, found by the read after every look missed it.
+    Link(Link),
+    /// A fifo, socket or device node, found by the read after every look missed it.
+    /// Carries the refusal a writer gives for it.
+    Irregular(FileSystemError),
+    /// Something is there, or may be, and it could not be read.
     Unreadable(FileSystemError),
 }
 
-/// What is at `target`: absent, readable, or present but unreadable.
+/// What is at `target`, from one read of it.
 ///
 /// Read as raw bytes, so two different files are never reported identical after
-/// a lossy decode.
-// An unreadable file is still a file, and it may be the very thing an overwrite
-// would destroy. No caller treats it as absent, which would write over it
-// with no prompt: the secret-bearing path reports a conflict and lets an
-// interactive resolver choose, since replacing a file needs only write
-// permission on its directory; the repository-file path and drift refuse the
-// entry outright, because there is no content to show a diff against.
+/// a lossy decode. The read never follows a link at the target or waits on a fifo,
+/// but ask the guard first all the same, which keeps a device node from being
+/// opened at all: [`guard_refusal`] on a path that refuses every link, and
+/// [`guard_target`] on the secret path, which replaces one.
+// One read rather than an existence probe and then a read, so a file deleted
+// between the two deploys instead of refusing, and a directory is named rather than
+// reported as a read failure. The port says what is there; an error leaves it
+// unknown -- a parent that denies access, a loop above the target -- and an unknown
+// target is never written over: the secret path would put it to a resolver, and the
+// repository-file path and drift refuse it outright.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
-    if !filesystem.path_exists(target.path()) {
-        return TargetState::Absent;
-    }
-
-    match filesystem.read_file_bytes(target.path()) {
-        Ok(bytes) => TargetState::Readable(bytes),
-        Err(e) => TargetState::Unreadable(e),
+    match filesystem.read_file_no_follow(target) {
+        Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
+        Ok(TargetRead::Absent) => TargetState::Absent,
+        Ok(TargetRead::Directory) => TargetState::Directory,
+        Ok(TargetRead::Link { points_to }) => TargetState::Link(Link {
+            path: target.path().to_path_buf(),
+            points_to,
+        }),
+        Ok(TargetRead::Irregular { kind }) => {
+            TargetState::Irregular(FileSystemError::IrregularTarget {
+                path: target.path().to_path_buf(),
+                kind,
+            })
+        }
+        Err(error) => TargetState::Unreadable(error),
     }
 }
 
-/// Why an in-sync entry will never settle, when that is the case.
+/// The bytes at a target an entry may go on to compare (`None` for nothing there),
+/// or the warning refusing the entry for what the read found instead.
 ///
-/// `Some` for an untracked target whose contents already match but which is a
-/// symlink: apply skips it and records nothing, so drift reports it on every run
-/// forever. Call it from both apply and drift so their wording cannot diverge.
-// Scoped to `NotTracked` deliberately. A *tracked* entry whose target later became
-// a symlink produces no drift line at all — a different bug — and answering for it
-// here would half-fix that one from the wrong place (selfie-v7py).
-pub(super) fn unmanaged_symlink_reason<F: FileSystem>(
-    filesystem: &F,
-    drift: &DriftType,
-    decision: &DeployDecision,
+/// A link or fifo the read found is worded as the guard words one, since the
+/// user's remedy is the same whichever check found it.
+pub(super) fn readable_or_refusal(
+    source: &str,
     target: &TargetPath,
-) -> Option<&'static str> {
-    (*drift == DriftType::NotTracked
-        && matches!(decision, DeployDecision::Skip(_))
-        && filesystem.symlink_refusal(target).is_some())
-    .then_some(
-        "the target is a symlink, so selfie will not manage it \
-         and records no deployment for it",
+    state: TargetState,
+) -> Result<Option<Vec<u8>>, String> {
+    match state {
+        TargetState::Absent => Ok(None),
+        TargetState::Readable(bytes) => Ok(Some(bytes)),
+        TargetState::Directory => Err(directory_target_refusal(source, target)),
+        TargetState::Link(link) => Err(refusal_warning(source, &link.refusal())),
+        TargetState::Irregular(refusal) => Err(refusal_warning(source, &refusal)),
+        TargetState::Unreadable(error) => Err(unreadable_target_refusal(source, target, &error)),
+    }
+}
+
+/// What a directory at a target means and what to do about it, as one clause, so
+/// every path that meets one words it the same way.
+pub(super) fn directory_at_target(target: &TargetPath) -> String {
+    format!(
+        "a directory is at the target '{}', and a file cannot replace a directory. Remove it \
+         or point the entry somewhere else.",
+        target.display()
     )
+}
+
+/// Why an entry whose target is a directory is refused.
+pub(super) fn directory_target_refusal(source: &str, target: &TargetPath) -> String {
+    format!("Skipping '{source}': {}", directory_at_target(target))
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the
@@ -80,65 +229,28 @@ pub(super) fn refusal_warning(source: &str, refusal: &FileSystemError) -> String
     format!("Skipping '{source}': {refusal}")
 }
 
-// Why an entry whose target exists but could not be read is refused, worded the
-// same by apply and drift. A symlink whose destination cannot be read is a
-// symlinked target first, which is the refusal every command already shares;
-// only a plain file gets the read failure.
-pub(super) fn unreadable_target_refusal<F: FileSystem>(
-    filesystem: &F,
+// Why an entry whose target could not be read is refused, worded the same by apply
+// and drift.
+pub(super) fn unreadable_target_refusal(
     source: &str,
     target: &TargetPath,
     error: &FileSystemError,
 ) -> String {
-    match filesystem.symlink_refusal(target) {
-        Some(refusal) => refusal_warning(source, &refusal),
-        None => format!(
-            "Skipping '{source}': target '{}' exists but could not be read: {error}",
-            target.display()
-        ),
-    }
+    format!(
+        "Skipping '{source}': target '{}' could not be read: {error}",
+        target.display()
+    )
 }
 
 // The target's bytes if the entry can go on to a decision: `None` for an absent
-// target, `Err(warning)` for one that exists and could not be read. Apply and
-// drift both classify through here, so they cannot answer differently about one
-// file.
+// target, `Err(warning)` for anything else. Apply and drift both classify through
+// here, so they cannot answer differently about one file.
 pub(super) fn readable_target<F: FileSystem>(
     filesystem: &F,
     source: &str,
     target: &TargetPath,
 ) -> Result<Option<Vec<u8>>, String> {
-    match read_target_state(filesystem, target) {
-        TargetState::Absent => Ok(None),
-        TargetState::Readable(bytes) => Ok(Some(bytes)),
-        TargetState::Unreadable(e) => {
-            Err(unreadable_target_refusal(filesystem, source, target, &e))
-        }
-    }
-}
-
-// Why selfie will not read a file out of its own repository.
-//
-// Reading a fifo blocks until a writer arrives, so one committed into the
-// dotfiles directory hangs `selfie apply` and `dotfiles drift` with no timeout --
-// `command_timeout` governs provider commands, not filesystem calls (selfie-lwv5).
-//
-// Returns the reason only; the three read sites frame it differently.
-//
-// Worded for a *source*. `IrregularTarget`'s own `Display` describes a deploy
-// target, and here the problem is a file in the repository the user syncs.
-pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
-    match refusal {
-        FileSystemError::IrregularTarget { kind, .. } => {
-            format!("the repository file is a {kind} and selfie will not read it")
-        }
-        // Fails **closed**, and deliberately not a `_ => {}` that would skip the
-        // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
-        // so nothing reaches this arm; a wildcard would silently let a future
-        // variant through and un-guard the read, which is the failure this whole
-        // guard exists to prevent. Refuse on anything it reports.
-        other => format!("selfie will not read the repository file: {other}"),
-    }
+    readable_or_refusal(source, target, read_target_state(filesystem, target))
 }
 
 // The three deploy-side sites that refuse a target by the rule: apply's
@@ -150,22 +262,127 @@ pub(super) fn target_refusal(target: &str, rejection: TargetRejection) -> String
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::fs::{MockFileSystem, target::repository_path};
 
-    // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
-    // variant from `irregular_target_refusal` today, so this is the only thing
-    // holding the arm: hand it one directly and the read must still be refused
-    // with something a user can read. A `_ => {}` that skipped the guard would
-    // return an empty string here.
+    fn target() -> TargetPath {
+        repository_path(Path::new("/home/u/.config/app/creds"))
+    }
+
+    // A link whose destination is a fifo answers both questions. The link is the
+    // answer, with the fifo carried beside it: a repository-file path refuses the
+    // link as a link, and the secret path, which replaces links, needs to know the
+    // writer would refuse this one.
     #[test]
-    fn a_read_refusal_that_is_not_an_irregular_file_still_refuses() {
-        let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
-            path: PathBuf::from("/pkgs/myapp/config.toml"),
-            points_to: None,
+    fn a_link_to_a_fifo_is_a_link_with_the_fifo_behind_it() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|path| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: Some(PathBuf::from("/tmp/pipe")),
+            })
         });
-        assert!(!message.is_empty(), "the guard fell through silently");
-        assert!(message.contains("repository file"), "got: {message}");
+        fs.expect_irregular_target_refusal().returning(|path| {
+            Some(FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "named pipe (fifo)",
+            })
+        });
+
+        let TargetGuard::Link { link, behind } = guard_target(&fs, &target()) else {
+            panic!("a symlink must answer as a link, whatever it points at");
+        };
+        assert_eq!(link.destination(), Some(Path::new("/tmp/pipe")));
+        assert!(
+            matches!(behind, Some(FileSystemError::IrregularTarget { .. })),
+            "the fifo behind the link must be carried"
+        );
+    }
+
+    // A path that refuses every link does not look behind one: the following stat
+    // can reach a hung mount, and its answer would change nothing.
+    #[test]
+    fn guard_refusal_refuses_a_link_without_asking_what_it_points_at() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|path| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: Some(PathBuf::from("/mnt/hung/pipe")),
+            })
+        });
+        fs.expect_irregular_target_refusal().never();
+
+        assert!(matches!(
+            guard_refusal(&fs, &target()),
+            Some(FileSystemError::SymlinkedTarget { .. })
+        ));
+    }
+
+    // The control for the test above: nothing at either question is `Clear`, and a
+    // fifo that is not behind a link is `Refused`.
+    #[test]
+    fn a_plain_target_is_clear_and_a_bare_fifo_is_refused() {
+        let mut clear = MockFileSystem::default();
+        clear.expect_symlink_refusal().returning(|_| None);
+        clear.expect_irregular_target_refusal().returning(|_| None);
+        assert!(matches!(
+            guard_target(&clear, &target()),
+            TargetGuard::Clear
+        ));
+
+        let mut fifo = MockFileSystem::default();
+        fifo.expect_symlink_refusal().returning(|_| None);
+        fifo.expect_irregular_target_refusal().returning(|path| {
+            Some(FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "named pipe (fifo)",
+            })
+        });
+        assert!(matches!(
+            guard_target(&fifo, &target()),
+            TargetGuard::Refused(FileSystemError::IrregularTarget { .. })
+        ));
+    }
+
+    // `symlink_refusal` answers `None` or `SymlinkedTarget` and nothing else, so
+    // this is the only thing holding the fail-closed arm: hand it another variant
+    // directly and the entry must still be refused. A fallback to "no link" would
+    // return `Ok(None)` here and send the target down a path that reads it.
+    #[test]
+    fn a_symlink_refusal_that_is_not_a_symlinked_target_still_refuses() {
+        let refused = classify_link(Some(FileSystemError::IrregularTarget {
+            path: PathBuf::from("/home/u/.config/app/creds"),
+            kind: "named pipe (fifo)",
+        }));
+
+        let Err(carried) = refused else {
+            panic!("an unrecognized refusal must refuse the entry, not report no link");
+        };
+        assert!(
+            matches!(carried, FileSystemError::IrregularTarget { .. }),
+            "the refusal must be carried to the caller so it can be reported"
+        );
+    }
+
+    #[test]
+    fn no_refusal_is_no_link_and_a_symlinked_target_carries_its_destination() {
+        assert!(matches!(classify_link(None), Ok(None)));
+
+        let link = classify_link(Some(FileSystemError::SymlinkedTarget {
+            path: PathBuf::from("/home/u/.config/app/creds"),
+            points_to: Some(PathBuf::from("../shared/dir")),
+        }));
+        let Ok(Some(link)) = link else {
+            panic!("a symlinked target must be reported as a link");
+        };
+        // The raw link text, relative as the user wrote it. It is for the warning's
+        // wording and is never resolved.
+        assert_eq!(link.destination(), Some(Path::new("../shared/dir")));
+        assert!(matches!(
+            link.refusal(),
+            FileSystemError::SymlinkedTarget { .. }
+        ));
     }
 }

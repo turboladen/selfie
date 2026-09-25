@@ -157,6 +157,40 @@ fn drift_summary(events: &[PackageEvent]) -> (usize, usize, usize) {
     }
 }
 
+// Run `work` on a thread and runtime of its own, and give up after `deadline`:
+// `None` for a timeout, and a panic in `work` raised again here.
+//
+// For a test whose failure mode is a read blocked on a fifo. That read cannot be
+// cancelled, and a runtime whose worker is stuck in it never finishes dropping, so a
+// `tokio::time::timeout` inside the test's own runtime fires and then hangs the test
+// at teardown: the deadline turns a hang into a later hang, not a failure. Here the
+// blocked thread is abandoned instead, and the process ends with the test binary.
+fn within_deadline<T, Fut, F>(deadline: std::time::Duration, work: F) -> Option<T>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = T>,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = tx.send(runtime.block_on(work()));
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(value) => Some(value),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        // The work panicked, which dropped the sender: raise that panic here, so a
+        // failing fixture reads as itself rather than as a hang.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(()) => unreachable!("the worker returned without sending"),
+        },
+    }
+}
+
 // Entries an apply was asked to deploy and declined, which is the counter that
 // separates "selfie refused" from "there was nothing to do".
 fn refused_count(events: &[PackageEvent]) -> usize {
@@ -547,11 +581,11 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.read_file(path)
     }
 
-    fn read_file_bytes(
+    fn read_file_no_follow(
         &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.0.read_file_bytes(path)
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.0.read_file_no_follow(path)
     }
 
     fn write_file_private(
@@ -626,6 +660,256 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     }
 }
 
+// `RealFileSystem` that records every path a target read is asked for, and can
+// stage answers the disk cannot give on demand: the first read of a path answering
+// a chosen `TargetRead`, a pre-command directory check that sees no directory,
+// symlink or irregular questions that miss what is there for all or the first few
+// looks, a fifo that appears between the first and second look, and a link swapped
+// in on disk just before the owner-only check.
+//
+// "Never read" is otherwise unobservable: a read through a link that ends in a
+// refusal leaves the same events as no read at all. Every test asserting a path was
+// not read pairs it with a control target the run does read, so an empty record
+// cannot pass.
+#[derive(Clone, Debug)]
+struct RecordsTargetReads {
+    inner: RealFileSystem,
+    reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
+    blind_to_directories: bool,
+    blind_to_symlinks: bool,
+    symlinks_blind_for: Option<(
+        PathBuf,
+        usize,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    )>,
+    fifo_on_second_look: Option<(PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
+    link_before_mode_check: Option<(PathBuf, PathBuf)>,
+    irregular_blind_for: Option<(
+        PathBuf,
+        usize,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    )>,
+}
+
+impl RecordsTargetReads {
+    fn new() -> Self {
+        Self {
+            inner: RealFileSystem,
+            reads: std::sync::Arc::default(),
+            staged_read: None,
+            blind_to_directories: false,
+            blind_to_symlinks: false,
+            symlinks_blind_for: None,
+            fifo_on_second_look: None,
+            irregular_blind_for: None,
+            link_before_mode_check: None,
+        }
+    }
+
+    // The first `looks` irregular questions about `path` answer `None`, and the
+    // truth after: a fifo behind a link planted after that many looks.
+    // Just before the owner-only check of `path`, replace the file there with a link
+    // to `destination`, on disk: a link swapped in after the target was read.
+    fn link_before_mode_check(
+        mut self,
+        path: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Self {
+        self.link_before_mode_check = Some((path.to_path_buf(), destination.to_path_buf()));
+        self
+    }
+
+    fn irregular_blind_for(mut self, path: &std::path::Path, looks: usize) -> Self {
+        self.irregular_blind_for = Some((path.to_path_buf(), looks, std::sync::Arc::default()));
+        self
+    }
+
+    fn reads_of(&self, path: &std::path::Path) -> usize {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|read| *read == path)
+            .count()
+    }
+
+    // `symlink_refusal` answers `None` everywhere: a link planted after every look.
+    fn blind_to_symlinks(mut self) -> Self {
+        self.blind_to_symlinks = true;
+        self
+    }
+
+    // The first `looks` symlink questions about `path` answer `None`, and the truth
+    // after: a link planted after that many looks.
+    fn blind_to_symlinks_for(mut self, path: &std::path::Path, looks: usize) -> Self {
+        self.symlinks_blind_for = Some((path.to_path_buf(), looks, std::sync::Arc::default()));
+        self
+    }
+
+    // `irregular_target_refusal` answers a fifo for `path` from its second question
+    // on, though the file on disk is regular: one planted while a command ran.
+    fn fifo_on_second_look(mut self, path: &std::path::Path) -> Self {
+        self.fifo_on_second_look = Some((path.to_path_buf(), std::sync::Arc::default()));
+        self
+    }
+
+    // The first read of `path` answers `found`, whatever is on disk; later reads
+    // see the disk.
+    fn staged_read(mut self, path: &std::path::Path, found: selfie::fs::TargetRead) -> Self {
+        self.staged_read = Some((path.to_path_buf(), found));
+        self
+    }
+
+    // `is_directory` answers `false` everywhere: a directory put in place after the
+    // secret path's pre-command check.
+    fn blind_to_directories(mut self) -> Self {
+        self.blind_to_directories = true;
+        self
+    }
+
+    fn read(&self, path: &std::path::Path) -> bool {
+        self.reads.lock().unwrap().iter().any(|read| read == path)
+    }
+
+    fn record_read(&self, path: &std::path::Path) -> Option<selfie::fs::TargetRead> {
+        let first = self.reads_of(path) == 0;
+        self.reads.lock().unwrap().push(path.to_path_buf());
+        match &self.staged_read {
+            Some((staged, found)) if first && staged == path => Some(found.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl selfie::fs::FileSystem for RecordsTargetReads {
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+
+    fn read_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        if let Some(found) = self.record_read(path.path()) {
+            return Ok(found);
+        }
+        self.inner.read_file_no_follow(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        if self.blind_to_symlinks {
+            return None;
+        }
+        if let Some((blind, looks, asked)) = &self.symlinks_blind_for
+            && blind == path.path()
+            && asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < *looks
+        {
+            return None;
+        }
+        self.inner.symlink_refusal(path)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        if let Some((fifo, asked)) = &self.fifo_on_second_look
+            && fifo == path.path()
+            && asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        {
+            return Some(selfie::fs::FileSystemError::IrregularTarget {
+                path: fifo.clone(),
+                kind: "named pipe (fifo)",
+            });
+        }
+        if let Some((blind, looks, asked)) = &self.irregular_blind_for
+            && blind == path.path()
+            && asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < *looks
+        {
+            return None;
+        }
+        self.inner.irregular_target_refusal(path)
+    }
+
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        if self.blind_to_directories {
+            return Ok(false);
+        }
+        self.inner.is_directory(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        if let Some((swapped, destination)) = &self.link_before_mode_check
+            && swapped == path.path()
+            && !std::fs::symlink_metadata(swapped)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        {
+            std::fs::remove_file(swapped).unwrap();
+            std::os::unix::fs::symlink(destination, swapped).unwrap();
+        }
+        self.inner.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
+    }
+}
+
 // `RealFileSystem` with a chosen home directory and nothing else changed.
 #[derive(Clone, Debug)]
 struct HomeAt(RealFileSystem, PathBuf);
@@ -662,11 +946,11 @@ impl selfie::fs::FileSystem for HomeAt {
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.0.read_file(path)
     }
-    fn read_file_bytes(
+    fn read_file_no_follow(
         &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.0.read_file_bytes(path)
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.0.read_file_no_follow(path)
     }
     fn write_file_private(
         &self,
@@ -717,9 +1001,8 @@ impl selfie::fs::FileSystem for HomeAt {
 // `RealFileSystem` that reports no symlink at a path the first time it is asked and
 // the truth afterwards, so a test can stage a link appearing between two checks.
 //
-// This is the window the deploy path's second `symlink_refusal` exists to narrow: the
-// first answer is taken before the resolve runs, and a link planted during the resolve
-// would otherwise be read through.
+// A link planted during the resolve is what the secret path's second look is for:
+// it is found there and replaced, where the first look's answer is stale.
 #[derive(Clone, Debug)]
 struct SymlinkAppearsAfterFirstLook {
     inner: RealFileSystem,
@@ -758,11 +1041,11 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         self.inner.read_file(path)
     }
 
-    fn read_file_bytes(
+    fn read_file_no_follow(
         &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.inner.read_file_bytes(path)
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.inner.read_file_no_follow(path)
     }
 
     fn write_file_private(
@@ -864,11 +1147,11 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.read_file(path)
     }
 
-    fn read_file_bytes(
+    fn read_file_no_follow(
         &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.inner.read_file_bytes(path)
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.inner.read_file_no_follow(path)
     }
 
     fn write_file_private(
@@ -983,11 +1266,11 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
     }
-    fn read_file_bytes(
+    fn read_file_no_follow(
         &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<u8>, selfie::fs::FileSystemError> {
-        self.inner.read_file_bytes(path)
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.inner.read_file_no_follow(path)
     }
     fn write_file_no_follow(
         &self,
@@ -4069,9 +4352,9 @@ mod secret_bearing {
     // A link that appears while the provider command is running.
     //
     // The check in `usable_target` runs before the resolve, so its answer is stale by
-    // the time the target is read. Without the second check immediately before that
-    // read, the classifier reads *through* the newly planted link and the destination's
-    // bytes reach the conflict resolver.
+    // the time the target is read. The second look, immediately before the read,
+    // finds the new link and the entry replaces it; the read, which refuses a link
+    // itself, is the layer behind that look.
     //
     // The file system double reports no link the first time it is asked and the truth
     // afterwards, which is the only way to stage this: a real link is either there for
@@ -4225,10 +4508,10 @@ mod secret_bearing {
     // The link is replaced even when the destination already holds the resolved
     // content, and even when it is already owner-only.
     //
-    // Mode `0600` is the whole fixture. `settle_in_sync` skips only when
-    // `is_owner_only` answers true, and that call follows the link -- so a `0644`
-    // destination is replaced by the tightening path whether or not a link is
-    // handled correctly, and the fixture could not tell the two apart.
+    // Mode `0600` is the whole fixture. `settle_in_sync` skips only when the target
+    // reads as owner-only, so a `0644` destination is replaced by the tightening path
+    // whether or not a link is handled correctly, and the fixture could not tell the
+    // two apart.
     #[tokio::test]
     async fn a_symlinked_secret_target_is_replaced_even_when_the_destination_matches() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4465,15 +4748,26 @@ mod secret_bearing {
     // fifo. A check that resolved the link's own text instead would resolve
     // "pipe" against the process's working directory, find nothing, and let the
     // credential fetch run for a target the writer then refuses.
-    #[tokio::test]
-    async fn a_secret_target_relatively_linked_to_a_fifo_refuses_before_running_anything() {
+    //
+    // Through `within_deadline`, as every fifo test is: a regression reaching the read
+    // blocks on the fifo, and must fail rather than hang.
+    #[test]
+    fn a_secret_target_relatively_linked_to_a_fifo_refuses_before_running_anything() {
         let dirs = TestDirs::new();
         let pipe = dirs.target_dir.join("pipe");
         nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
         let target = dirs.target_dir.join("credentials");
         std::os::unix::fs::symlink("pipe", &target).unwrap();
 
-        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
+        let service = dirs.service_with_runner(runner);
+        let events = within_deadline(std::time::Duration::from_secs(10), move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
+        })
+        .expect("apply must not block on a fifo behind a link");
+        let (calls, warnings) = (counted.call_count(), warning_messages(&events));
 
         assert_eq!(
             calls, 0,
@@ -6543,39 +6837,6 @@ mod symlinked_targets {
         }
     }
 
-    // The refusal must not fire on a target apply had no reason to write to.
-    //
-    // Deploying by copying does not forbid a symlinked target; it declines to
-    // *write through* one. Someone who keeps their dotfiles symlinked from
-    // elsewhere and is already in sync should see nothing at all. Without this,
-    // `a_symlinked_target_is_refused_on_a_routine_repo_update` would also pass
-    // against an implementation that refused every symlinked target outright —
-    // confirmed by mutation.
-    #[tokio::test]
-    async fn an_in_sync_symlinked_target_is_left_alone_and_not_reported() {
-        let dirs = TestDirs::new();
-        repo_source(&dirs, "myapp/config.toml", "SAME");
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "SAME").unwrap();
-        let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
-        create_package_with_dotfiles(
-            &dirs.package_dir,
-            "myapp",
-            &[("myapp/config.toml", target.to_str().unwrap())],
-        );
-
-        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-
-        assert!(is_symlink(&target), "an untouched target must stay a link");
-        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "SAME");
-        assert!(
-            warnings(&events).is_empty(),
-            "nothing was written, so nothing should be reported: {:?}",
-            warnings(&events)
-        );
-    }
-
     // An untracked, already-matching symlinked target is not recorded as deployed.
     //
     // selfie never wrote it and never will, so an entry claiming it did is a
@@ -6645,12 +6906,8 @@ mod symlinked_targets {
         );
 
         // Deploy to a plain file first, then migrate it to a link — the stow-style
-        // layout a user adopts after using selfie. The first apply has to genuinely
-        // *write*, because that is what records the state the second apply needs to
-        // classify the entry `RepoChanged`. Starting from an already-symlinked
-        // matching target would record nothing (selfie-phnh), and the second apply
-        // would reach the refusal as a `Conflict` instead — passing every assertion
-        // below while testing a different branch.
+        // layout a user adopts after using selfie — and edit the repository file: the
+        // ordinary apply after any edit.
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
@@ -6683,31 +6940,14 @@ mod symlinked_targets {
             (0, 0, 0, 1),
             "a refusal is counted as refused, not as a deploy"
         );
-        // Which branch the refusal was reached from is invisible in the counts —
-        // `Deploy` and `Conflict` both land in the same bucket behind it. Drift
-        // reads the same state through the same classifier, so it is where the
-        // fixture's `RepoChanged` becomes observable rather than assumed.
-        let drift = collect_events(dirs.service().check_drift().await).await;
-        assert_eq!(
-            drift
-                .iter()
-                .filter_map(|e| match e {
-                    PackageEvent::DotfileDriftDetected { drift_type, .. } =>
-                        Some(drift_type.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            vec!["repo changed"],
-            "the entry must reach the refusal as a repository update, not as a conflict"
-        );
     }
 
     // A dangling link is refused too, and its destination is not created.
     //
-    // This is the case a caller cannot detect by inspecting the target
-    // afterwards: `path_exists` follows the link and reports false, so apply
-    // decides to deploy with no conflict, and `fs::write` would then create the
-    // file at whatever path the link names.
+    // A following look at the target sees nothing there, which would decide a
+    // deploy with no conflict, and a following write would create the file at
+    // whatever path the link names. Nothing after the inspection shows the
+    // difference, so the refusal is asserted along with the missing destination.
     #[tokio::test]
     async fn a_dangling_symlinked_target_does_not_create_its_destination() {
         let dirs = TestDirs::new();
@@ -6778,12 +7018,8 @@ mod symlinked_targets {
             &[("myapp/config.toml", target.to_str().unwrap())],
         );
 
-        // Same setup as the routine-update test, and for the same reason: the entry
-        // has to reach the *deploy* decision rather than be reported as a conflict,
-        // which means deploying to a plain file first and linking it aside
-        // afterwards. Starting from an already-symlinked matching target records
-        // nothing (selfie-phnh), leaving the second apply a `Conflict` — which
-        // satisfies every assertion below while testing a different branch.
+        // Same setup as the routine-update test: a tracked entry whose repository
+        // file changed, which a preview would otherwise show as a deploy.
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         assert_eq!(
             deploy_counts(&first),
@@ -6813,26 +7049,6 @@ mod symlinked_targets {
             "the entry must not also be previewed as a deploy: {events:?}"
         );
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), "V1");
-        // Neither assertion above can see *which* branch reached the refusal: the
-        // check at the top of the loop precedes `match decision`, so `Deploy` and
-        // `Conflict` both warn and both skip, and a resolver-less conflict emits a
-        // conflict event rather than a "dry run" skip either way. Reverting the
-        // fixture to an already-symlinked target therefore left this test green
-        // while it tested the conflict path. Drift reads the same state through the
-        // same classifier, so it is what pins the fixture.
-        let drift = collect_events(dirs.service().check_drift().await).await;
-        assert_eq!(
-            drift
-                .iter()
-                .filter_map(|e| match e {
-                    PackageEvent::DotfileDriftDetected { drift_type, .. } =>
-                        Some(drift_type.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            vec!["repo changed"],
-            "the dry run must preview a deploy decision, not a conflict"
-        );
     }
 
     // The user is never asked a question whose answer cannot be honored.
@@ -6958,8 +7174,15 @@ mod symlinked_targets {
             fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
                 self.0.read_file(path)
             }
-            fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
-                self.0.read_file_bytes(path)
+            // Follows, as a link planted between the read and the write is never
+            // seen by the read: the race this test stands for runs past both looks.
+            fn read_file_no_follow(
+                &self,
+                path: &TargetPath,
+            ) -> Result<selfie::fs::TargetRead, FileSystemError> {
+                std::fs::read(path.path())
+                    .map(selfie::fs::TargetRead::Bytes)
+                    .map_err(|e| FileSystemError::IoError(Arc::new(e)))
             }
             fn write_file_private(
                 &self,
@@ -7270,11 +7493,15 @@ mod symlink_consistency {
 
     // ── drift ───────────────────────────────────────────────────────────────
 
-    // D1. The case in selfie-qvwq's title: a repository edit that can never reach
-    // the target, reported as `repo changed` on every run forever because the
-    // deploy state can never advance. Drift now names the symlink alongside it.
+    // Drift asks the same guard apply asks, before it reads, so a symlinked target
+    // is a refusal rather than a drift type computed from the link's destination.
+    // Refused and not examined: counted, and left out of the total, so the check does
+    // not claim to have compared a file it never read.
+
+    // D1. Tracked, and the repository edited since: the case in selfie-qvwq's title.
+    // Refused, not reported as `repo changed`, which no apply could ever clear.
     #[tokio::test]
-    async fn drift_names_the_symlink_when_it_reports_drift() {
+    async fn drift_refuses_a_symlinked_target_instead_of_calling_it_drift() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         package_targeting(&dirs, "V1", &target);
@@ -7283,7 +7510,7 @@ mod symlink_consistency {
 
         let events = collect_events(dirs.service().check_drift().await).await;
 
-        assert_eq!(drift_types(&events), vec!["repo changed"]);
+        assert_eq!(drift_types(&events), Vec::<String>::new());
         let named = symlink_warnings(&events);
         assert_eq!(named.len(), 1, "expected one refusal, got {named:?}");
         assert!(
@@ -7291,17 +7518,18 @@ mod symlink_consistency {
                 && named[0].contains(&*destination.to_string_lossy()),
             "the refusal must name both the target and where the link points: {named:?}"
         );
+        assert_eq!(
+            drift_summary(&events),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
     }
 
-    // D2. Parity in the silent direction: a symlinked target already in sync is one
-    // apply has no reason to write to, and apply says nothing about it
-    // (`an_in_sync_symlinked_target_is_left_alone_and_not_reported`). Drift must not
-    // invent a complaint apply does not make.
-    //
-    // Without this, D1 would also pass against an implementation that warned about
-    // every symlinked target it saw.
+    // D2. Tracked and still matching: selfie-v7py. Apply refuses it on every run, so
+    // drift must too, rather than staying silent over a record selfie can no longer
+    // honor.
     #[tokio::test]
-    async fn drift_says_nothing_about_an_in_sync_symlinked_target() {
+    async fn drift_refuses_a_tracked_target_that_became_a_symlink() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         package_targeting(&dirs, "V1", &target);
@@ -7311,108 +7539,87 @@ mod symlink_consistency {
 
         assert_eq!(drift_types(&events), Vec::<String>::new());
         assert_eq!(
-            warnings(&events),
-            Vec::<String>::new(),
-            "nothing is out of sync, so there is nothing to report"
-        );
-    }
-
-    // D4. What the state file does not claim, seen from the command that reads it.
-    //
-    // The fresh-machine sequence in selfie-phnh: a config already symlinked into
-    // place by another tool, matching the repository file, and `apply` run once.
-    // The entry stays `not tracked` because nothing was recorded. Settling to
-    // `none` would report the target as in sync on a machine selfie has never
-    // deployed to and cannot deploy to.
-    //
-    // Still no refusal *reason*, which is the parity D5 pins: `apply` is silent
-    // about this entry, so drift is too.
-    #[tokio::test]
-    async fn drift_no_longer_calls_a_never_deployed_symlinked_target_in_sync() {
-        let dirs = TestDirs::new();
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "SAME BYTES").unwrap();
-        let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
-        package_targeting(&dirs, "SAME BYTES", &target);
-
-        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let events = collect_events(dirs.service().check_drift().await).await;
-
-        assert_eq!(
-            drift_types(&events),
-            vec!["not tracked"],
-            "apply recorded a deployment for a target it never wrote to"
-        );
-        assert_eq!(
-            symlink_warnings(&events),
-            Vec::<String>::new(),
-            "control: drift stays as silent as apply about this entry"
-        );
-    }
-
-    // D3 (row 1a). The fresh-machine case: a target already symlinked into place by
-    // another tool, never deployed by selfie, whose destination differs from the
-    // repository file. Drift classifies it `not tracked` rather than `repo changed`,
-    // so a fix that only handled `RepoChanged` would leave this silent — which is
-    // why the fixture varies along the drift-type axis.
-    #[tokio::test]
-    async fn drift_names_the_symlink_on_a_never_deployed_target() {
-        let dirs = TestDirs::new();
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "SOMETHING ELSE").unwrap();
-        let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
-        package_targeting(&dirs, "V1", &target);
-
-        let events = collect_events(dirs.service().check_drift().await).await;
-
-        assert_eq!(drift_types(&events), vec!["not tracked"]);
-        assert_eq!(
             symlink_warnings(&events).len(),
             1,
-            "a never-deployed symlinked target is refused too: {:?}",
+            "{:?}",
             warnings(&events)
+        );
+        assert_eq!(
+            drift_summary(&events),
+            (0, 0, 1),
+            "(drifted, total, refused)"
         );
     }
 
-    // D5 (row 1b). The fixture that separates `deploy_decision` from `drift != None`.
-    //
-    // Never deployed, so drift is `NotTracked` and the entry is reported as drifted
-    // — but the destination's contents already match the repository file, so
-    // `deploy_decision` returns `Skip` and **apply is silent**. Gating the refusal on
-    // the drift type instead of on apply's own decision would warn here, recreating
-    // the drift-vs-apply disagreement in the opposite direction.
-    //
-    // The apply half is asserted in the same test on purpose: the property is that
-    // the two commands agree, and a test that only looked at drift could not see it.
+    // D3. Never deployed, with differing and with matching content. Both refuse the
+    // same way, because the content is never read, and apply agrees on both. The
+    // matching case is the one a check gated on apply's decision would stay silent on.
     #[tokio::test]
-    async fn drift_is_silent_where_apply_is_silent_on_an_untracked_matching_link() {
-        let dirs = TestDirs::new();
-        let destination = dirs.target_dir.join("destination");
-        std::fs::write(&destination, "SAME BYTES").unwrap();
-        let target = dirs.target_dir.join("config.toml");
-        std::os::unix::fs::symlink(&destination, &target).unwrap();
-        package_targeting(&dirs, "SAME BYTES", &target);
+    async fn drift_refuses_a_never_deployed_symlinked_target_whatever_it_holds() {
+        for content in ["SOMETHING ELSE", "V1"] {
+            let dirs = TestDirs::new();
+            let destination = dirs.target_dir.join("destination");
+            std::fs::write(&destination, content).unwrap();
+            let target = dirs.target_dir.join("config.toml");
+            std::os::unix::fs::symlink(&destination, &target).unwrap();
+            package_targeting(&dirs, "V1", &target);
 
-        let drift = collect_events(dirs.service().check_drift().await).await;
-        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+            let drift = collect_events(dirs.service().check_drift().await).await;
+            let apply =
+                collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
+            assert_eq!(drift_types(&drift), Vec::<String>::new(), "{content}");
+            assert_eq!(symlink_warnings(&drift).len(), 1, "{content}: {drift:?}");
+            assert_eq!(drift_summary(&drift), (0, 0, 1), "{content}");
+            assert_eq!(
+                symlink_warnings(&apply).len(),
+                1,
+                "{content}: apply disagrees"
+            );
+        }
+    }
+
+    // D5. An escaping source is refused by the source check, which runs ahead of the
+    // guard in drift as in apply, so what is at the target does not change the
+    // counts, the warnings, or the exit code. This pins that the two runs agree, not
+    // that their counts are right: drift keeps an escaping source in its total and
+    // does not count it as refused, which is its own open question (selfie-ir68.14).
+    #[tokio::test]
+    async fn drift_refuses_an_escaping_source_the_same_way_whatever_is_at_the_target() {
+        let mut summaries = Vec::new();
+        for linked in [false, true] {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("config.toml");
+            if linked {
+                let destination = dirs.target_dir.join("destination");
+                std::fs::write(&destination, "V1").unwrap();
+                std::os::unix::fs::symlink(&destination, &target).unwrap();
+            } else {
+                std::fs::write(&target, "V1").unwrap();
+            }
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                "myapp",
+                &[("../../escape.toml", target.to_str().unwrap())],
+            );
+
+            let events = collect_events(dirs.service().check_drift().await).await;
+
+            let warnings = warnings(&events);
+            assert!(
+                warnings.iter().any(|w| w.contains("source path escapes")),
+                "linked: {linked}: {warnings:?}"
+            );
+            assert_eq!(
+                symlink_warnings(&events),
+                Vec::<String>::new(),
+                "linked: {linked}"
+            );
+            summaries.push(drift_summary(&events));
+        }
         assert_eq!(
-            symlink_warnings(&apply),
-            Vec::<String>::new(),
-            "control: apply must be silent here, or this fixture proves nothing"
-        );
-        assert_eq!(
-            symlink_warnings(&drift),
-            Vec::<String>::new(),
-            "drift warned where apply did not"
-        );
-        assert_eq!(
-            drift_types(&drift),
-            vec!["not tracked"],
-            "control: the entry is still reported as drifted, so a `drift != None` \
-             gate really would have fired here"
+            summaries[0], summaries[1],
+            "the target changed drift's counts"
         );
     }
 
@@ -7469,11 +7676,11 @@ mod symlink_consistency {
 
     // T2. The refusal lands before every write, which is the part that matters.
     //
-    // Tracking reads *through* a link, so a refusal placed after any of the three
-    // writes would already have copied the destination's contents into the dotfiles
-    // directory — a file the user never named, and one `selfie sync push` would
-    // commit — written a spec, and recorded a deploy state entry for a deployment
-    // that never happened. T1 cannot see any of that; it only sees the verdict.
+    // A refusal placed after any of the three writes could have copied the link's
+    // destination into the dotfiles directory -- a file the user never named, and
+    // one `selfie sync push` would commit -- written a spec, and recorded a deploy
+    // state entry for a deployment that never happened. T1 cannot see any of that;
+    // it only sees the verdict.
     #[tokio::test]
     async fn a_refused_track_writes_nothing() {
         let dirs = TestDirs::new();
@@ -7514,9 +7721,9 @@ mod symlink_consistency {
 
     // T3. A dangling link is refused as a symlink, not reported as a missing file.
     //
-    // `path_exists` follows the link, so the existence check answers "no" for a path
-    // the user can see in their own shell. This is the only fixture on which the
-    // refusal's position relative to that check is observable.
+    // A following look answers "nothing there" for a path the user can see in their
+    // own shell, so the symlink refusal has to come ahead of any look that follows.
+    // This is the only fixture on which that order is observable.
     #[tokio::test]
     async fn tracking_a_dangling_symlink_says_symlink_not_missing() {
         let dirs = TestDirs::new();
@@ -9206,12 +9413,8 @@ environments:
 // Targets that are neither absent nor a regular file.
 //
 // A fifo target hung `selfie apply` forever and a device node was written to
-// (selfie-qwj3). The hang is why every test here has a deadline: reaching the
-// unguarded path wedges a test rather than failing it.
-//
-// `flavor = "multi_thread"` is load-bearing. The service works in a spawned
-// task, so on a current-thread runtime a blocking `read` stalls the whole
-// runtime including the timer, which then never fires.
+// (selfie-qwj3). The hang is why every test here runs through `within_deadline`:
+// reaching the unguarded path must fail a test, not wedge it.
 mod irregular_targets {
     use super::*;
     use std::path::Path;
@@ -9251,17 +9454,17 @@ mod irregular_targets {
     // Before the guard, the *checksum read* blocked — not the write. Opening a
     // fifo for reading waits for a writer exactly as opening it for writing waits
     // for a reader, and that read happens well before any write is attempted.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn apply_refuses_a_fifo_target_without_hanging() {
+    #[test]
+    fn apply_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         make_fifo(&target);
         package_targeting(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block on a fifo target");
 
         assert_eq!(refused_count(&events), 1);
@@ -9272,13 +9475,12 @@ mod irregular_targets {
         );
     }
 
-    // A symlink pointing at a fifo is refused too.
+    // A symlink pointing at a fifo is refused too, without hanging.
     //
-    // The case a non-following stat misses. `symlink_refusal` answers "it is a
-    // symlink" and returns before the fifo is ever considered, and the target
-    // read then follows the link and blocks — the guard present, the hang intact.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn apply_refuses_a_symlink_to_a_fifo_without_hanging() {
+    // The guard refuses the link before the target is read, so the read that
+    // would follow the link and block on the fifo never happens.
+    #[test]
+    fn apply_refuses_a_symlink_to_a_fifo_without_hanging() {
         let dirs = TestDirs::new();
         let fifo = dirs.target_dir.join("real-fifo");
         make_fifo(&fifo);
@@ -9286,30 +9488,33 @@ mod irregular_targets {
         std::os::unix::fs::symlink(&fifo, &target).unwrap();
         package_targeting(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block on a symlink to a fifo");
 
         assert_eq!(refused_count(&events), 1);
         let warnings = warning_messages(&events);
+        // Refused as the link, which the guard asks about first: the remedy is to
+        // replace the link, and a repository-file entry refuses every link whatever
+        // it points at.
         assert!(
-            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
-            "a link to a fifo must be refused as a fifo: {warnings:?}"
+            warnings.iter().any(|w| w.contains("is a symlink")),
+            "a link to a fifo must be refused as a link: {warnings:?}"
         );
     }
 
     // Apply refuses a character device rather than writing to it.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn apply_refuses_a_character_device_target() {
+    #[test]
+    fn apply_refuses_a_character_device_target() {
         let dirs = TestDirs::new();
         package_targeting(&dirs, Path::new("/dev/null"));
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block on a device target");
 
         assert_eq!(refused_count(&events), 1);
@@ -9325,17 +9530,17 @@ mod irregular_targets {
     // Drift checksums the target exactly as apply does, so it hung on the same
     // open — which selfie-qwj3 does not mention and which the fix has to cover
     // for the two commands to keep agreeing.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn drift_refuses_a_fifo_target_without_hanging() {
+    #[test]
+    fn drift_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         make_fifo(&target);
         package_targeting(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().check_drift().await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.check_drift().await).await
         })
-        .await
         .expect("drift must not block on a fifo target");
 
         let warnings = warning_messages(&events);
@@ -9345,22 +9550,49 @@ mod irregular_targets {
         );
     }
 
+    // A target drift refused without examining it is counted as refused and left
+    // out of the total, for a bare fifo and for a link to one alike, so the check
+    // exits non-zero rather than reading as though it compared every file.
+    #[test]
+    fn drift_counts_an_irregular_target_it_did_not_examine() {
+        for linked in [false, true] {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("config.toml");
+            if linked {
+                let fifo = dirs.target_dir.join("real-fifo");
+                make_fifo(&fifo);
+                std::os::unix::fs::symlink(&fifo, &target).unwrap();
+            } else {
+                make_fifo(&target);
+            }
+            package_targeting(&dirs, &target);
+
+            let service = dirs.service();
+            let events = within_deadline(DEADLINE, move || async move {
+                collect_events(service.check_drift().await).await
+            })
+            .expect("drift must not block on a fifo target");
+
+            assert_eq!(
+                drift_summary(&events),
+                (0, 0, 1),
+                "linked: {linked}; (drifted, total, refused)"
+            );
+        }
+    }
+
     // Track refuses a fifo target instead of copying it into the repository.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn track_refuses_a_fifo_target_without_hanging() {
+    #[test]
+    fn track_refuses_a_fifo_target_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         make_fifo(&target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(
-                dirs.service_with_dotfiles()
-                    .track_standalone("myapp", target.to_str().unwrap())
-                    .await,
-            )
-            .await
+        let service = dirs.service_with_dotfiles();
+        let tracked = target.to_str().unwrap().to_string();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.track_standalone("myapp", &tracked).await).await
         })
-        .await
         .expect("track must not block on a fifo target");
 
         match get_operation_result(&events).expect("no Completed event") {
@@ -9376,16 +9608,16 @@ mod irregular_targets {
     //
     // Without this, a guard that refused every target would pass every test
     // above.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_regular_target_is_still_deployed() {
+    #[test]
+    fn a_regular_target_is_still_deployed() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         package_targeting(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("a regular target must not block");
 
         assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
@@ -9450,198 +9682,129 @@ mod write_failure_warnings {
     }
 }
 
-// The permanent `not tracked` drift line for a target selfie will never manage.
-//
-// An untracked dotfile whose target is a symlink and whose contents already match
-// is `Skip`: apply writes nothing, refuses nothing, records nothing. So
-// `detect_drift` keeps answering `NotTracked` and `dotfiles drift` keeps listing
-// it forever with nothing saying why (selfie-ktha).
-//
-// Both commands say the same sentence in the channel each already uses, raising
-// no warning that did not exist, which is what keeps the two in-sync tests
-// passing unmodified.
-mod unmanageable_symlink_reason {
+// A symlinked repository-file target is refused before anything reads it, whether
+// or not its content matches and whether or not selfie deployed it. Reading it
+// would checksum the link's destination, a file selfie was never asked to manage,
+// and no answer the read could give changes the outcome: a repository-file entry
+// never writes through a link. ADR-0005 decisions 3 and 7.
+mod symlinked_target_is_refused_before_it_is_read {
     use super::*;
-    use std::path::Path;
 
-    // An untracked entry, already in sync, whose target is `link` or a plain
-    // file — the axis under test.
-    fn in_sync_entry(dirs: &TestDirs, target: &Path, symlinked: bool) {
-        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
-        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
+    fn repo_source(dirs: &TestDirs, relative: &str, content: &str) {
+        let path = dirs.package_dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
 
-        if symlinked {
-            let destination = dirs.target_dir.join("destination");
-            std::fs::write(&destination, "SAME").unwrap();
-            std::os::unix::fs::symlink(&destination, target).unwrap();
-        } else {
-            std::fs::write(target, "SAME").unwrap();
-        }
+    fn recorded_state(dirs: &TestDirs) -> DeployState {
+        let written =
+            std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).expect("state file");
+        selfie::yaml::parse(&written).expect("state file parses")
+    }
 
+    // Untracked and already in sync: the one case where reading through the link
+    // would find nothing to do, so the refusal has to come before any read. The
+    // plain target is the control: it is read, deployed as in sync, and recorded,
+    // so neither the read record nor the state can be empty for the wrong reason.
+    #[tokio::test]
+    async fn an_in_sync_symlinked_target_is_refused_without_being_read() {
+        let dirs = TestDirs::new();
+        repo_source(&dirs, "myapp/plain.toml", "SAME");
+        repo_source(&dirs, "myapp/linked.toml", "SAME");
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "SAME").unwrap();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SAME").unwrap();
+        let linked = dirs.target_dir.join("linked.toml");
+        std::os::unix::fs::symlink(&destination, &linked).unwrap();
         create_package_with_dotfiles(
             &dirs.package_dir,
             "myapp",
-            &[("myapp/config.toml", target.to_str().unwrap())],
+            &[
+                ("myapp/plain.toml", plain.to_str().unwrap()),
+                ("myapp/linked.toml", linked.to_str().unwrap()),
+            ],
         );
-    }
 
-    fn skip_reasons(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::DotfileSkipped { reason, .. } => Some(reason.clone()),
-                _ => None,
-            })
-            .collect()
-    }
+        let fs = RecordsTargetReads::new();
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
 
-    fn drift_reasons(events: &[PackageEvent]) -> Vec<Option<String>> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { reason, .. } => Some(reason.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    // Apply says why it is leaving the entry alone.
-    #[tokio::test]
-    async fn apply_says_why_an_in_sync_symlinked_target_will_not_settle() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("config.toml");
-        in_sync_entry(&dirs, &target, true);
-
-        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-
-        let reasons = skip_reasons(&events);
+        assert!(fs.read(&plain), "control: the plain target is read");
+        assert!(!fs.read(&linked), "the symlinked target was read through");
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
         assert!(
-            reasons.iter().any(|r| r.contains("already in sync")
-                && r.contains("symlink")
-                && r.contains("records no deployment")),
-            "the skip line must carry the reason: {reasons:?}"
+            warnings.iter().any(|w| w.contains("is a symlink")
+                && w.contains(linked.to_str().unwrap())
+                && w.contains(destination.to_str().unwrap())),
+            "the refusal must name the link and where it points: {warnings:?}"
         );
-    }
-
-    // Drift says the same thing, on the line that keeps reappearing.
-    #[tokio::test]
-    async fn drift_says_why_the_not_tracked_line_never_clears() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("config.toml");
-        in_sync_entry(&dirs, &target, true);
-
-        // Apply first: this is the state the user is actually in, having run apply
-        // and found the drift line still there afterwards.
-        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let events = collect_events(dirs.service().check_drift().await).await;
-
-        let reasons = drift_reasons(&events);
-        assert_eq!(reasons.len(), 1, "expected one drift line: {reasons:?}");
         assert!(
-            reasons[0]
-                .as_deref()
-                .is_some_and(|r| r.contains("symlink") && r.contains("will not manage")),
-            "the drift line must carry the reason: {reasons:?}"
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { target, .. } if target == linked.to_str().unwrap()
+            )),
+            "a refused entry is not also reported as skipped: {events:?}"
         );
-    }
 
-    // The control: a plain untracked in-sync target gets no reason from either
-    // command.
-    //
-    // It settles on the first apply, so there is nothing to explain. Without
-    // this, a change that attached the reason unconditionally would satisfy both
-    // tests above.
-    #[tokio::test]
-    async fn a_plain_in_sync_target_gets_no_reason_from_either_command() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("config.toml");
-        in_sync_entry(&dirs, &target, false);
-
-        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let reasons = skip_reasons(&apply);
+        let state = recorded_state(&dirs);
         assert!(
-            reasons.iter().all(|r| !r.contains("symlink")),
-            "a plain target has nothing to explain: {reasons:?}"
+            state.get(plain.to_str().unwrap()).is_some(),
+            "control: the plain in-sync target is recorded"
         );
-
-        // And having been recorded, it produces no drift line at all.
-        let drift = collect_events(dirs.service().check_drift().await).await;
-        assert_eq!(
-            drift_reasons(&drift),
-            Vec::<Option<String>>::new(),
-            "a plain target settles, so there is no line to annotate"
+        assert!(
+            state.get(linked.to_str().unwrap()).is_none(),
+            "a target selfie never wrote to was recorded as deployed"
         );
     }
 
-    // A *tracked* symlinked target gets no reason, and that boundary is deliberate.
-    //
-    // Found by mutation: widening the condition from `NotTracked` to include
-    // `None` failed nothing, because every other fixture varies the symlink axis
-    // and none varies the drift type.
-    //
-    // An entry deployed and later symlinked is selfie-v7py: it produces no drift
-    // line at all, so there is nothing here that should speak. Whoever fixes
-    // v7py has to change this test on purpose.
+    // Deployed by selfie, then replaced by a link to identical content (stow). The
+    // record stays, since deleting it would claim the entry was never deployed, and
+    // every run says why the entry no longer advances.
     #[tokio::test]
-    async fn a_tracked_symlinked_target_is_outside_this_reason() {
+    async fn a_tracked_target_that_became_a_symlink_is_refused_every_run() {
         let dirs = TestDirs::new();
+        repo_source(&dirs, "myapp/config.toml", "SAME");
         let target = dirs.target_dir.join("config.toml");
-
-        // Deploy to a plain file first, so the entry is tracked.
-        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
-        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "SAME").unwrap();
         create_package_with_dotfiles(
             &dirs.package_dir,
             "myapp",
             &[("myapp/config.toml", target.to_str().unwrap())],
         );
         let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        assert!(
-            skip_reasons(&first).is_empty(),
-            "control: the first apply deploys rather than skipping"
-        );
+        assert_eq!(refused_count(&first), 0, "control: the first apply deploys");
+        let recorded = recorded_state(&dirs)
+            .get(target.to_str().unwrap())
+            .map(|entry| entry.checksum().to_string())
+            .expect("control: the first apply recorded the deployment");
 
-        // Now move it aside and link to it: same content, still tracked.
         let destination = dirs.target_dir.join("destination");
         std::fs::rename(&target, &destination).unwrap();
         std::os::unix::fs::symlink(&destination, &target).unwrap();
 
-        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let reasons = skip_reasons(&apply);
-        assert!(
-            reasons.iter().all(|r| !r.contains("symlink")),
-            "a tracked entry is not what this reason is about: {reasons:?}"
-        );
+        for run in 1..=2 {
+            let events =
+                collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+            assert_eq!(refused_count(&events), 1, "run {run} did not refuse");
+            let warnings = warning_messages(&events);
+            assert!(
+                warnings.iter().any(|w| w.contains("is a symlink")),
+                "run {run} did not say why: {warnings:?}"
+            );
+        }
 
-        let drift = collect_events(dirs.service().check_drift().await).await;
         assert_eq!(
-            drift_reasons(&drift),
-            Vec::<Option<String>>::new(),
-            "selfie-v7py: no drift line at all, so nothing to annotate"
+            recorded_state(&dirs)
+                .get(target.to_str().unwrap())
+                .map(|entry| entry.checksum().to_string()),
+            Some(recorded),
+            "the recorded deployment is left in place"
         );
-    }
-
-    // The drift classification stays a bare label.
-    //
-    // The reason travels in its own field: the MCP server serializes
-    // `drift_type` as a typed value and the CLI prints it as one, so appending
-    // prose to it would corrupt what a caller matches on.
-    #[tokio::test]
-    async fn the_reason_does_not_contaminate_the_drift_type() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("config.toml");
-        in_sync_entry(&dirs, &target, true);
-
-        let events = collect_events(dirs.service().check_drift().await).await;
-
-        let types: Vec<String> = events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(types, vec!["not tracked".to_string()]);
     }
 }
 
@@ -9822,8 +9985,8 @@ mod repository_writes_do_not_follow_symlinks {
 // repository is read as a source, and reading one blocks until a writer arrives.
 //
 // Four reads, not one: `handle_apply`, `handle_check_drift`, `resolve_content`'s
-// `Template` arm, and `read_referenced_file`. `flavor = "multi_thread"` is
-// load-bearing -- the blocking read sits in a spawned task. selfie-lwv5
+// `Template` arm, and `read_referenced_file`. Each runs through `within_deadline`,
+// so a read that blocks fails its test. selfie-lwv5
 mod irregular_sources {
     use super::*;
     use std::path::Path;
@@ -9873,16 +10036,16 @@ mod irregular_sources {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn apply_refuses_a_fifo_source_without_hanging() {
+    #[test]
+    fn apply_refuses_a_fifo_source_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         package_with_fifo_source(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block on a fifo source");
 
         assert_names_the_repository_file(&warning_messages(&events));
@@ -9892,17 +10055,17 @@ mod irregular_sources {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn drift_refuses_a_fifo_source_without_hanging() {
+    #[test]
+    fn drift_refuses_a_fifo_source_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         std::fs::write(&target, "whatever").unwrap();
         package_with_fifo_source(&dirs, &target);
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().check_drift().await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.check_drift().await).await
         })
-        .await
         .expect("drift must not block on a fifo source");
 
         assert_names_the_repository_file(&warning_messages(&events));
@@ -9914,8 +10077,8 @@ mod irregular_sources {
     // running a command. That is true of `command:` entries only -- a template
     // entry reads a repository file like any other, and this is the read that
     // hangs while apply is handling a credential.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_fifo_template_is_refused_without_hanging() {
+    #[test]
+    fn a_fifo_template_is_refused_without_hanging() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
 
@@ -9932,10 +10095,10 @@ mod irregular_sources {
         )
         .unwrap();
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block on a fifo template");
 
         let warnings = warning_messages(&events);
@@ -9954,8 +10117,8 @@ mod irregular_sources {
     // The control for all three, and the reason none of them is vacuous: the
     // same fixtures with a *regular* source deploy and report drift normally. A
     // guard that refused every source would pass the three tests above.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_regular_source_is_still_deployed() {
+    #[test]
+    fn a_regular_source_is_still_deployed() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
 
@@ -9967,10 +10130,10 @@ mod irregular_sources {
             &[("myapp/config.toml", target.to_str().unwrap())],
         );
 
-        let events = tokio::time::timeout(DEADLINE, async {
-            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+        let service = dirs.service();
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
         })
-        .await
         .expect("apply must not block");
 
         assert_eq!(
@@ -10571,6 +10734,815 @@ mod unreadable_targets {
             "the diff must show what the target holds: {diff}"
         );
         assert_eq!(std::fs::read(&target).unwrap(), binary);
+    }
+}
+
+// What one read of a target says is there. Only the two errors proving nothing can
+// be at the path read as absent; a directory is named as one; anything else leaves
+// the target unknown, and an unknown target is refused rather than written over.
+mod target_classification {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    const DIRECTORY: &str = "a directory is at the target";
+
+    fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
+        let source = dirs.package_dir.join("myapp/config.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, content).unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    fn drift_types(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Restores a directory's mode on drop, so a failed assertion still leaves a
+    // removable temporary directory.
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // A directory at a repository-file target is named as one by apply, drift and
+    // track, rather than as a read that failed with "Is a directory".
+    #[tokio::test]
+    async fn a_directory_at_a_target_is_named_by_apply_drift_and_track() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        for (command, warnings) in [
+            ("apply", warning_messages(&apply)),
+            ("drift", warning_messages(&drift)),
+        ] {
+            assert!(
+                warnings.iter().any(|w| w.contains(DIRECTORY)
+                    && w.contains(target.to_str().unwrap())
+                    && !w.contains("could not be read")),
+                "{command} must name the directory: {warnings:?}"
+            );
+        }
+        assert_eq!(refused_count(&apply), 1);
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+        assert!(target.join("inner").exists(), "the directory is left alone");
+
+        let track = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("other", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+        let message = failure_message(&track);
+        assert!(
+            message.contains(DIRECTORY) && !message.contains("Cannot read"),
+            "track must name the directory: {message}"
+        );
+    }
+
+    // A file gone between the guard and the read deploys, as an absent one does.
+    // The file is really there, so a probe-then-read classifier would have called it
+    // present and refused the failed read.
+    #[tokio::test]
+    async fn a_target_that_vanishes_before_the_read_deploys() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "WAS HERE").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let fs = RecordsTargetReads::new().staged_read(&target, selfie::fs::TargetRead::Absent);
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(fs.read(&target), "control: the staged read was reached");
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "an absent target deploys: {events:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "FROM REPO");
+    }
+
+    // Below a regular file nothing can be, so the target is absent as it always was:
+    // apply's write fails and says so, and drift calls it untracked. It is not
+    // "could not be read", which would claim something is there.
+    #[tokio::test]
+    async fn a_target_below_a_regular_file_is_absent() {
+        let dirs = TestDirs::new();
+        let file = dirs.target_dir.join("a-file");
+        std::fs::write(&file, "PLAIN").unwrap();
+        let target = file.join("config.toml");
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(refused_count(&apply), 1, "the write cannot succeed");
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings.iter().all(|w| !w.contains("could not be read")),
+            "nothing is there to fail a read: {warnings:?}"
+        );
+        assert_eq!(drift_types(&drift), vec!["not tracked"]);
+        assert_eq!(
+            drift_summary(&drift),
+            (1, 1, 0),
+            "(drifted, total, refused)"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PLAIN");
+    }
+
+    // A parent selfie cannot search hides what is at the target, so the target is
+    // unknown, not absent: refused as unreadable by apply and by drift.
+    #[tokio::test]
+    async fn a_target_behind_a_parent_that_denies_access_is_unreadable() {
+        let dirs = TestDirs::new();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let target = locked.join("config.toml");
+        std::fs::write(&target, "HIDDEN").unwrap();
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = RestoreMode(locked.clone());
+        if std::fs::read(&target).is_ok() {
+            eprintln!(
+                "SKIP a_target_behind_a_parent_that_denies_access_is_unreadable: running as \
+                 root, mode bits ignored"
+            );
+            return;
+        }
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        drop(restore);
+
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read") && w.contains("ermission denied")),
+            "apply must refuse it as unreadable: {warnings:?}"
+        );
+        assert_eq!(refused_count(&apply), 1);
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "HIDDEN");
+    }
+
+    // A loop above the target leaves it unknown too, never absent.
+    #[tokio::test]
+    async fn a_target_below_a_symlink_loop_is_unreadable() {
+        let dirs = TestDirs::new();
+        let looped = dirs.target_dir.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let target = looped.join("config.toml");
+        package_targeting(&dirs, "FROM REPO", &target);
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        let warnings = warning_messages(&apply);
+        assert!(
+            warnings.iter().any(|w| w.contains("could not be read")),
+            "apply must refuse it as unreadable: {warnings:?}"
+        );
+        assert_eq!(refused_count(&apply), 1);
+        assert!(
+            !apply
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing is deployed below a loop"
+        );
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+    }
+
+    // A directory put at a secret target while its command ran. The pre-command
+    // check saw none, so the command ran; the read after it names the directory and
+    // refuses, and the resolver is never asked to overwrite one.
+    #[tokio::test]
+    async fn a_directory_appearing_at_a_secret_target_during_the_resolve_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN-VALUE");
+        let counted = runner.clone();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(
+            dirs.service_with_fs(RecordsTargetReads::new().blind_to_directories(), runner)
+                .apply_all(options)
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            counted.call_count(),
+            1,
+            "control: the pre-command check was blinded"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the resolver must not be asked"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains(DIRECTORY)),
+            "the refusal must name the directory: {warnings:?}"
+        );
+        // A failure, which `stop_on_error` (on by default) turns into a stopped run.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing is deployed: {events:?}"
+        );
+        assert!(target.join("inner").exists(), "the directory is left alone");
+    }
+}
+
+// The target read refuses a link or a fifo itself, so no earlier look has to be
+// current for a read to be safe. Each test stages a look that missed what is there
+// and asserts the read, or the look it backs up, still refused.
+mod target_reads_never_follow {
+    use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+    const TOKEN: &str = "TOKEN-VALUE-PLANTED-RACE";
+
+    fn make_fifo(path: &Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    // A package with a repository-file entry for each target in `targets`.
+    fn repo_package(dirs: &TestDirs, targets: &[&Path]) {
+        let mut entries = Vec::new();
+        for (i, target) in targets.iter().enumerate() {
+            let source = format!("myapp/file{i}.toml");
+            let path = dirs.package_dir.join(&source);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "FROM REPO").unwrap();
+            entries.push((source, target.to_str().unwrap().to_string()));
+        }
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(source, target)| (source.as_str(), target.as_str()))
+            .collect();
+        create_package_with_dotfiles(&dirs.package_dir, "myapp", &pairs);
+    }
+
+    fn provider_package(dirs: &TestDirs, target: &Path) {
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    fn counting_resolver(asked: &Arc<AtomicUsize>) -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(asked)))),
+            ..Default::default()
+        }
+    }
+
+    // A link that appears after the secret path's second look. The read finds it,
+    // the look after the read confirms it, and it is replaced without its
+    // destination ever reaching the resolver.
+    #[tokio::test]
+    async fn a_link_planted_after_the_last_look_is_replaced_not_read() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "SOMEONE ELSE'S").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        provider_package(&dirs, &target);
+
+        let fs = RecordsTargetReads::new().blind_to_symlinks_for(&target, 2);
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), runner)
+                .apply_all(counting_resolver(&asked))
+                .await,
+        )
+        .await;
+
+        assert!(fs.read(&target), "control: the read was reached");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "the resolver was asked");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("Replaced") && w.contains("which was a symlink")),
+            "the replacement must be reported: {warnings:?}"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must be replaced"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), TOKEN);
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "SOMEONE ELSE'S"
+        );
+    }
+
+    // Nothing waits between a deploy decided without a prompt and its write, so the
+    // copy taken before the overwrite is made from the bytes the decision read: the
+    // target is read once, and the copy still holds what the write destroys.
+    #[tokio::test]
+    async fn a_deploy_without_a_prompt_reads_its_target_once() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        repo_package(&dirs, &[&target]);
+        let first = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(refused_count(&first), 0, "control: the first apply deploys");
+        std::fs::write(dirs.package_dir.join("myapp/file0.toml"), "V2").unwrap();
+
+        let fs = RecordsTargetReads::new();
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            fs.reads_of(&target),
+            1,
+            "the target was read again after the decision"
+        );
+        let backup = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileDeployed { backup, .. } => backup.clone(),
+                _ => None,
+            })
+            .expect("the overwrite kept a copy");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "FROM REPO");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "V2");
+    }
+
+    // A link the read found, gone by the look after it: something else, here the
+    // user's own file, took its place. That file is read again and compared, and the
+    // conflict goes to the resolver; it is never written over as the link it replaced.
+    #[tokio::test]
+    async fn a_file_that_replaced_a_link_after_the_read_is_compared_not_overwritten() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "USER FILE").unwrap();
+        provider_package(&dirs, &target);
+
+        let fs = RecordsTargetReads::new().staged_read(
+            &target,
+            selfie::fs::TargetRead::Link {
+                points_to: Some(dirs.target_dir.join("elsewhere")),
+            },
+        );
+        // Declines, so the file must survive: only a user's accept may overwrite it.
+        struct CountsAndDeclines(Arc<AtomicUsize>);
+        impl selfie::dotfile_service::port::ConflictResolver for CountsAndDeclines {
+            fn resolve(
+                &self,
+                _target: &str,
+                _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+            ) -> selfie::dotfile_service::port::ConflictResolution {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                selfie::dotfile_service::port::ConflictResolution::Skip
+            }
+        }
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(CountsAndDeclines(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), runner)
+                .apply_all(options)
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            fs.reads_of(&target),
+            2,
+            "control: the staged link was read, then the file"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "the conflict was not put to the resolver"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "USER FILE");
+        let warnings = warning_messages(&events);
+        assert!(
+            !warnings.iter().any(|w| w.starts_with("Replaced")),
+            "a file is not reported as a replaced link: {warnings:?}"
+        );
+    }
+
+    // A link swapped in after the read, to an owner-only file already holding the
+    // resolved content. The owner-only check does not follow it, so the link is
+    // replaced like any other rather than reported in sync on its destination's mode,
+    // and the destination is left as it was.
+    #[tokio::test]
+    async fn a_link_swapped_in_before_the_mode_check_is_replaced_not_reported_in_sync() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, TOKEN).unwrap();
+        let destination = dirs.target_dir.join("elsewhere");
+        std::fs::write(&destination, TOKEN).unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+        provider_package(&dirs, &target);
+
+        let fs = RecordsTargetReads::new().link_before_mode_check(&target, &destination);
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            fs.read(&target),
+            "control: the target was read before the swap"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("already in sync")
+            )),
+            "a link must not be reported in sync: {events:?}"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("Replaced") && w.contains("which was a symlink")),
+            "the link must be replaced and said so: {warnings:?}"
+        );
+        let metadata = std::fs::symlink_metadata(&target).unwrap();
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "the link is still there"
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o077,
+            0,
+            "the replacement is owner-only"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), TOKEN);
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), TOKEN);
+    }
+
+    // A fifo that appears at a secret target while its command runs. The file on
+    // disk is regular, so only the second look can refuse it: the read would
+    // succeed. This is the second look's own test.
+    #[test]
+    fn an_irregular_target_planted_during_the_resolve_is_refused_at_the_second_look() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "OLD").unwrap();
+        provider_package(&dirs, &target);
+
+        let fs = RecordsTargetReads::new().fifo_on_second_look(&target);
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let counted = runner.clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let service = dirs.service_with_fs(fs.clone(), runner);
+        let options = counting_resolver(&asked);
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(options).await).await
+        })
+        .expect("the second look must not wait on the fifo");
+
+        assert_eq!(counted.call_count(), 1, "control: the first look passed");
+        assert!(
+            !fs.read(&target),
+            "the target was read after the second look"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "the resolver was asked");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "the refusal must name the fifo: {warnings:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD");
+    }
+
+    // A link the repository-file guard missed is refused by the read, in the words
+    // the guard would have used.
+    #[tokio::test]
+    async fn a_link_the_guard_missed_is_refused_by_the_read_as_a_link() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("destination");
+        std::fs::write(&destination, "FROM REPO").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        repo_package(&dirs, &[&target]);
+
+        let fs = RecordsTargetReads::new().blind_to_symlinks();
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(fs.read(&target), "control: the read was reached");
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("is a symlink") && !w.contains("could not be read")),
+            "the read's refusal must be worded as the link: {warnings:?}"
+        );
+    }
+
+    // The guard's irregular question keeps a fifo from being opened at all, on
+    // every path that reaches a target. The read would refuse one too, so only a
+    // record of reads can tell the guard did its job. Each run also reads an
+    // ordinary target, so the record is not empty for the wrong reason, and runs
+    // through `within_deadline`, so losing both layers fails the test.
+
+    #[test]
+    fn apply_never_opens_a_fifo_target() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("fifo.toml");
+        make_fifo(&fifo);
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "OTHER").unwrap();
+        repo_package(&dirs, &[&fifo, &plain]);
+
+        let fs = RecordsTargetReads::new();
+        let service = dirs.service_with_fs(fs.clone(), FakeCommandRunner::new());
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
+        })
+        .expect("apply must not block on a fifo target");
+
+        assert!(fs.read(&plain), "control: the plain target is read");
+        assert!(!fs.read(&fifo), "the fifo was opened");
+        assert!(refused_count(&events) >= 1);
+    }
+
+    #[test]
+    fn drift_never_opens_a_fifo_target() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("fifo.toml");
+        make_fifo(&fifo);
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "OTHER").unwrap();
+        repo_package(&dirs, &[&fifo, &plain]);
+
+        let fs = RecordsTargetReads::new();
+        let service = dirs.service_with_fs(fs.clone(), FakeCommandRunner::new());
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.check_drift().await).await
+        })
+        .expect("drift must not block on a fifo target");
+
+        assert!(fs.read(&plain), "control: the plain target is read");
+        assert!(!fs.read(&fifo), "the fifo was opened");
+        assert_eq!(drift_summary(&events).2, 1, "the fifo is refused");
+    }
+
+    #[test]
+    fn track_never_opens_a_fifo_target() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("fifo.toml");
+        make_fifo(&fifo);
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "OTHER").unwrap();
+
+        create_package_with_dotfiles(&dirs.package_dir, "myapp", &[]);
+
+        let fs = RecordsTargetReads::new();
+        let service = dirs.service_with_fs(fs.clone(), FakeCommandRunner::new());
+        let (fifo_arg, plain_arg) = (
+            fifo.to_str().unwrap().to_string(),
+            plain.to_str().unwrap().to_string(),
+        );
+        let (refused, tracked) = within_deadline(DEADLINE, move || async move {
+            let refused = collect_events(service.track_for_package("myapp", &fifo_arg).await).await;
+            let tracked =
+                collect_events(service.track_for_package("myapp", &plain_arg).await).await;
+            (refused, tracked)
+        })
+        .expect("track must not block on a fifo target");
+
+        assert!(
+            matches!(
+                get_operation_result(&tracked),
+                Some(OperationResult::Success(_))
+            ),
+            "control: the plain target tracks: {tracked:?}"
+        );
+        assert!(fs.read(&plain), "control: the plain target is read");
+        assert!(!fs.read(&fifo), "the fifo was opened");
+        assert!(
+            failure_message(&refused).contains("named pipe (fifo)"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn the_secret_path_never_opens_a_fifo_target() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("credentials");
+        make_fifo(&fifo);
+        let plain = dirs.target_dir.join("plain.toml");
+        std::fs::write(&plain, "OTHER").unwrap();
+        // One package, the plain entry first: the refused secret entry stops the run
+        // under the default `stop_on_error`, and the control has to be read before.
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/plain.toml"), "FROM REPO").unwrap();
+        let yaml = format!(
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"myapp/plain.toml\"\n    target: \"{}\"\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            plain.display(),
+            fifo.display()
+        );
+        std::fs::write(dirs.package_dir.join("myapp.yml"), yaml).unwrap();
+
+        let fs = RecordsTargetReads::new();
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let counted = runner.clone();
+        let service = dirs.service_with_fs(fs.clone(), runner);
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
+        })
+        .expect("apply must not block on a fifo target");
+
+        assert!(fs.read(&plain), "control: the plain target is read");
+        assert!(!fs.read(&fifo), "the fifo was opened");
+        assert_eq!(counted.call_count(), 0, "no command runs for a fifo target");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "{warnings:?}"
+        );
+    }
+
+    // A fifo put at the target while the user sat at the conflict prompt. The copy
+    // taken before the overwrite asks the guard again, so the fifo is refused without
+    // being opened: the target is read once, for the prompt, and never after it.
+    #[test]
+    fn a_fifo_planted_during_the_prompt_is_never_opened() {
+        use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+        use std::os::unix::fs::FileTypeExt as _;
+
+        struct PlantsFifo(PathBuf);
+        impl ConflictResolver for PlantsFifo {
+            fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+                std::fs::remove_file(&self.0).unwrap();
+                nix::unistd::mkfifo(&self.0, nix::sys::stat::Mode::S_IRWXU).unwrap();
+                ConflictResolution::Accept
+            }
+        }
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "USER EDITED").unwrap();
+        repo_package(&dirs, &[&target]);
+
+        let fs = RecordsTargetReads::new();
+        let service = dirs.service_with_fs(fs.clone(), FakeCommandRunner::new());
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(PlantsFifo(target.clone()))),
+            ..Default::default()
+        };
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(options).await).await
+        })
+        .expect("apply must not block on a fifo planted during the prompt");
+
+        assert_eq!(
+            fs.reads_of(&target),
+            1,
+            "the target was opened after the prompt"
+        );
+        assert_eq!(refused_count(&events), 1);
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "{warnings:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "the fifo is left in place"
+        );
+    }
+
+    // A link to a fifo put at a secret target after its second look. The read finds
+    // the link, and the look it then takes names the fifo behind it, so the refusal
+    // is worded as every look words one rather than as a failed write.
+    #[test]
+    fn a_link_to_a_fifo_found_by_the_read_is_refused_as_the_looks_refuse_it() {
+        let dirs = TestDirs::new();
+        let pipe = dirs.target_dir.join("pipe");
+        make_fifo(&pipe);
+        let target = dirs.target_dir.join("credentials");
+        std::os::unix::fs::symlink(&pipe, &target).unwrap();
+        provider_package(&dirs, &target);
+
+        let fs = RecordsTargetReads::new()
+            .blind_to_symlinks()
+            .irregular_blind_for(&target, 2);
+        let runner = FakeCommandRunner::new().succeeding("op read x", TOKEN.as_bytes());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let service = dirs.service_with_fs(fs.clone(), runner);
+        let options = counting_resolver(&asked);
+        let events = within_deadline(DEADLINE, move || async move {
+            collect_events(service.apply_all(options).await).await
+        })
+        .expect("apply must not block on a fifo behind a link");
+
+        assert!(fs.read(&target), "control: the read found the link");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "the resolver was asked");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("Skipping") && w.contains("named pipe (fifo)")),
+            "the refusal must be the guard's: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.starts_with("Failed to write")),
+            "the writer must not be the one to refuse it: {warnings:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is left in place"
+        );
     }
 }
 

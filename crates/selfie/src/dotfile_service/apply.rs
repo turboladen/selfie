@@ -21,7 +21,7 @@ use crate::{
         state::{DeployState, DriftType},
     },
     fs::{
-        filesystem::FileSystem,
+        filesystem::{FileSystem, repository_read_refusal},
         target::{deploy_target, repository_path},
     },
     package::{
@@ -31,12 +31,9 @@ use crate::{
     paths::is_within,
 };
 
-use super::deploy_entry::{DeployUnit, Recorded, perform_deploy, record_and_save};
+use super::deploy_entry::{Decided, DeployUnit, Recorded, perform_deploy, record_and_save};
 use super::port::ApplyOptions;
-use super::refusal::{
-    readable_target, refusal_warning, repository_read_refusal, target_refusal,
-    unmanaged_symlink_reason,
-};
+use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
 use super::secret::{SecretApply, SecretOutcome, secret_origin};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
 
@@ -283,12 +280,13 @@ where
             };
 
             // Ahead of every read of the target below, not merely ahead of the
-            // write. Reading a fifo blocks until a writer opens it, exactly as
-            // writing one blocks until a reader does, so the checksum read further
-            // down hangs `selfie apply` before the write is ever reached — and a
-            // character device would be read from, then written to. Placing this
-            // beside the symlink check instead would leave the hang in place.
-            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
+            // write. Reading a fifo blocks until a writer opens it, and a
+            // character device would be read from, then written to. A symlink is
+            // refused here whatever it points at and whether or not its content
+            // already matches: reading it would checksum the destination, a file
+            // selfie was never asked to manage, and a repository-file entry never
+            // writes through a link, so there is no outcome the read could change.
+            if let Some(refusal) = guard_refusal(filesystem, &target_path) {
                 sender.send_warning(refusal_warning(source, &refusal)).await;
                 refused_count += 1;
                 continue;
@@ -365,32 +363,18 @@ where
             let decision =
                 deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
-            // Refuse a symlinked target before anything acts on the decision, so a
-            // dry run previews what a real apply would do, an interactive resolver
-            // is never asked a question whose answer cannot be honored, and the
-            // link destination is never rendered in a diff.
-            //
-            // `Skip` is excluded: an in-sync target is not written to. Recording one
-            // as deployed would let `detect_drift` answer `None` forever for a path
-            // selfie will never write (selfie-phnh), so the suppression below covers
-            // only the symlinked case. `write_file_no_follow` checks again itself.
-            if !matches!(decision, DeployDecision::Skip(_))
-                && let Some(refusal) = filesystem.symlink_refusal(&target_path)
-            {
-                sender.send_warning(refusal_warning(source, &refusal)).await;
-                refused_count += 1;
-                continue;
-            }
-
-            // Computed before the match, which consumes `decision`. `None` for
-            // every branch but `Skip`, so only that one reads it.
-            let unmanaged = unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path);
-
             match decision {
                 DeployDecision::Deploy => {
-                    if perform_deploy(filesystem, sender, &unit, options.dry_run, &mut backed_up)
-                        .await
-                        .is_ok()
+                    if perform_deploy(
+                        filesystem,
+                        sender,
+                        &unit,
+                        Decided::Now(current.as_deref()),
+                        options.dry_run,
+                        &mut backed_up,
+                    )
+                    .await
+                    .is_ok()
                     {
                         if options.dry_run {
                             skipped_count += 1;
@@ -418,18 +402,10 @@ where
                 }
                 DeployDecision::Skip(reason) => {
                     // Record an untracked but in-sync entry so future runs see
-                    // `DriftType::None`, unless the target is a symlink.
-                    //
-                    // Gating this on `symlink_refusal` is safe despite its
-                    // advisory-and-racy documentation, because nothing is
-                    // written here. Where this path does write, `perform_deploy`
-                    // relies on `write_file_no_follow`'s own check.
-                    //
-                    // A stale answer omits an entry the next run re-evaluates.
-                    // The window that could manufacture one is small, not absent.
+                    // `DriftType::None`. A symlinked target never reaches here: the
+                    // guard above refused it before the read.
                     if drift == DriftType::NotTracked
                         && !options.dry_run
-                        && unmanaged.is_none()
                         && let Some(reason) = record_and_save(
                             filesystem,
                             &mut loaded,
@@ -443,15 +419,6 @@ where
                         break 'packages;
                     }
 
-                    // Say why it will not settle, on the line the user is already
-                    // reading. Not a warning: nothing was written and nothing was
-                    // refused, and raising one here would break the control whose
-                    // whole value is that an in-sync symlinked target is left in
-                    // silence.
-                    let reason = match unmanaged {
-                        Some(why) => format!("{reason}; {why}"),
-                        None => reason,
-                    };
                     sender
                         .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
                         .await;
@@ -489,11 +456,15 @@ where
                     // skipped -- leaving the summary at zero conflicts. The preview
                     // someone runs to see what `--yes` would overwrite is the one
                     // place that count has to be right.
+                    let mut decided = Decided::Now(current.as_deref());
                     let accept = if options.dry_run {
                         false
                     } else if options.auto_accept {
                         true
                     } else if let Some(resolver) = &options.conflict_resolver {
+                        // The prompt waits on the user, so what the decision read
+                        // may no longer be at the target when the write comes.
+                        decided = Decided::BeforePrompt;
                         let src = source_path.display().to_string();
                         let tgt = target_path.display().to_string();
                         let d = rendered.get_or_insert_with(&render).clone();
@@ -519,6 +490,7 @@ where
                             filesystem,
                             sender,
                             &unit,
+                            decided,
                             options.dry_run,
                             &mut backed_up,
                         )

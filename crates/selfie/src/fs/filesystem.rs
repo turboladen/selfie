@@ -34,6 +34,31 @@ pub enum DirectoryState {
     Unknown(Arc<io::Error>),
 }
 
+/// What a read of a deploy target found there.
+///
+/// Returned by [`FileSystem::read_file_no_follow`], so no caller classifies a
+/// target by decoding an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRead {
+    /// A regular file, and its bytes.
+    Bytes(Vec<u8>),
+    /// Nothing is at the path: it does not exist, or a component of it is not a
+    /// directory, where nothing can be.
+    Absent,
+    /// A directory, whether or not selfie may open it.
+    Directory,
+    /// A symlink at the final component, dangling or not. Not followed.
+    Link {
+        /// Where the link points, when the link itself could be read.
+        points_to: Option<PathBuf>,
+    },
+    /// A fifo, socket or device node, never read from.
+    Irregular {
+        /// What is there, for the sentence: `named pipe (fifo)`, `socket`.
+        kind: &'static str,
+    },
+}
+
 /// Why no directory is at a path.
 ///
 /// Carried because the remedy is not shared: only [`Empty`](AbsentReason::Empty) is
@@ -207,18 +232,22 @@ pub trait FileSystem: Send + Sync {
     /// content is not valid UTF-8, or any other IO error occurs.
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
-    /// Read a file's raw bytes, imposing no encoding requirement.
+    /// Read a target without following a symlink at its final component and
+    /// without blocking on a fifo. The reader for deploy targets.
     ///
-    /// Use this wherever the content is compared or written rather than
-    /// displayed. Secret-bearing dotfile content is not guaranteed to be UTF-8,
-    /// and decoding it lossily before a comparison would report two different
-    /// files as identical.
+    /// Imposes no encoding requirement: secret-bearing content is not guaranteed
+    /// to be UTF-8, and decoding it lossily before a comparison would report two
+    /// different files as identical. Symlinked **parent** directories are still
+    /// followed, as they are by both writers.
+    ///
+    /// What is at the path is decided when it is opened, so a link or fifo planted
+    /// after any earlier check is reported as one rather than read.
     ///
     /// # Errors
     ///
-    /// [`FileSystemError`] if the file does not exist, permission is denied, or
-    /// any other IO error occurs.
-    fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
+    /// [`FileSystemError::IoError`] when what is there is unknown: a regular file
+    /// or a parent selfie may not open, a loop above the target.
+    fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError>;
 
     /// Write a file readable only by its owner, replacing it atomically. The
     /// writer for secret-bearing content.
@@ -373,12 +402,14 @@ pub trait FileSystem: Send + Sync {
     /// permissions are independent: a target whose bytes already match may still
     /// be world-readable.
     ///
-    /// True when no group or other permission bit is set. Symlinks are
-    /// followed, so it reports on the file the path resolves to.
+    /// True when no group or other permission bit is set. Answers for what is at
+    /// the path itself: a symlink there is refused, never judged by its
+    /// destination's mode.
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if the file's metadata cannot be read.
+    /// [`FileSystemError::SymlinkedTarget`] if the final component is a symlink.
+    /// [`FileSystemError`] if the metadata cannot be read.
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
 
     /// Remove a file. Irreversible.
@@ -496,6 +527,30 @@ pub enum FileSystemError {
     /// instead, asked with a non-following stat; do not conflate the two.
     #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
     IrregularTarget { path: PathBuf, kind: &'static str },
+}
+
+// Why selfie will not read a file out of its own repository.
+//
+// Reading a fifo blocks until a writer arrives, so one committed into the
+// dotfiles directory hangs `selfie apply` and `dotfiles drift` with no timeout --
+// `command_timeout` governs provider commands, not filesystem calls (selfie-lwv5).
+//
+// Returns the reason only; the three read sites frame it differently.
+//
+// Worded for a *source*. `IrregularTarget`'s own `Display` describes a deploy
+// target, and here the problem is a file in the repository the user syncs.
+pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
+    match refusal {
+        FileSystemError::IrregularTarget { kind, .. } => {
+            format!("the repository file is a {kind} and selfie will not read it")
+        }
+        // Fails **closed**, and deliberately not a `_ => {}` that would skip the
+        // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
+        // so nothing reaches this arm; a wildcard would silently let a future
+        // variant through and un-guard the read, which is the failure this whole
+        // guard exists to prevent. Refuse on anything it reports.
+        other => format!("selfie will not read the repository file: {other}"),
+    }
 }
 
 /// Helpers that set up common expectations, so library and CLI tests can drive
@@ -657,5 +712,27 @@ impl MockFileSystem {
         self.expect_expand_path()
             .with(mockall::predicate::eq(input))
             .return_once(|_| Ok(output));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
+    // variant from `irregular_target_refusal` today, so this is the only thing
+    // holding the arm: hand it one directly and the read must still be refused
+    // with something a user can read. A `_ => {}` that skipped the guard would
+    // return an empty string here.
+    #[test]
+    fn a_read_refusal_that_is_not_an_irregular_file_still_refuses() {
+        let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
+            path: PathBuf::from("/pkgs/myapp/config.toml"),
+            points_to: None,
+        });
+        assert!(!message.is_empty(), "the guard fell through silently");
+        assert!(message.contains("repository file"), "got: {message}");
     }
 }

@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::SelfieConfig,
     dotfile_service::{
-        deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
+        deploy::{compute_checksum, resolve_source_path},
         state::{DeployState, DriftType},
     },
     fs::{
-        filesystem::FileSystem,
+        filesystem::{FileSystem, repository_read_refusal},
         target::{deploy_target, expand_target_path, repository_path},
     },
     package::{
@@ -25,10 +25,7 @@ use crate::{
     paths::is_within,
 };
 
-use super::refusal::{
-    readable_target, refusal_warning, repository_read_refusal, target_refusal,
-    unmanaged_symlink_reason,
-};
+use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
 use super::secret::secret_origin;
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
@@ -173,14 +170,6 @@ where
                 }
             };
 
-            // Drift reads the target to checksum it, so it hangs on a fifo exactly
-            // as apply does. Same guard, same position — ahead of the read — and
-            // worded identically through `refusal_warning`.
-            if let Some(refusal) = filesystem.irregular_target_refusal(&target_path) {
-                sender.send_warning(refusal_warning(source, &refusal)).await;
-                continue;
-            }
-
             // Same lexical guard as handle_apply — see `crate::paths::is_within`.
             if !is_within(&source_path, &base_dir) {
                 sender
@@ -188,6 +177,21 @@ where
                         "Skipping '{source}': source path escapes YAML base directory"
                     ))
                     .await;
+                continue;
+            }
+
+            // The guard apply asks, after the containment check as apply asks it, so
+            // an escaping source is refused the same way whatever is at the target,
+            // and worded identically through `refusal_warning`. Drift reads the target
+            // to checksum it, so it hangs on a fifo exactly as apply does, and reading
+            // through a link would checksum a file selfie does not manage.
+            //
+            // Refused and not examined, like an unreadable target below: a green
+            // result over a target drift never looked at is a false success.
+            if let Some(refusal) = guard_refusal(filesystem, &target_path) {
+                sender.send_warning(refusal_warning(source, &refusal)).await;
+                refused_count += 1;
+                total_count -= 1;
                 continue;
             }
 
@@ -222,10 +226,6 @@ where
             };
             let source_checksum = compute_checksum(source_content.as_bytes());
 
-            // `read_file_bytes` follows a final-component symlink, so a symlinked
-            // target is checksummed by its destination. Following the link is
-            // deliberate: not following would change the drift type, and with it
-            // the counts `sync status` reads.
             let current = match readable_target(filesystem, source, &target_path) {
                 Ok(current) => current,
                 Err(warning) => {
@@ -240,7 +240,6 @@ where
                     continue;
                 }
             };
-            let target_exists = current.is_some();
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
             let drift = deploy_state.detect_drift(
@@ -248,34 +247,11 @@ where
                 &source_checksum,
                 &target_checksum,
             );
-            let decision =
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
-
             if drift != DriftType::None {
-                // The reason rides on the drift line rather than on a warning,
-                // because this is the line the user is already looking at and the
-                // one that keeps coming back. Apply says the same sentence on its
-                // skip line; both read `unmanaged_symlink_reason`.
                 sender
-                    .send_dotfile_drift_detected(
-                        target_path.display(),
-                        &drift,
-                        unmanaged_symlink_reason(filesystem, &drift, &decision, &target_path),
-                    )
+                    .send_dotfile_drift_detected(target_path.display(), &drift)
                     .await;
                 drift_count += 1;
-            }
-
-            // Gate on `deploy_decision`, the function apply calls — not on
-            // `drift != None`. An untracked target whose contents already match is
-            // `NotTracked`, so the block above reports it as drift, but it is `Skip`
-            // and apply is silent for it; gating on the drift type would warn
-            // exactly where apply says nothing. The drift event keeps its own gate
-            // on purpose: only the refusal follows apply's decision.
-            if !matches!(decision, DeployDecision::Skip(_))
-                && let Some(refusal) = filesystem.symlink_refusal(&target_path)
-            {
-                sender.send_warning(refusal_warning(source, &refusal)).await;
             }
         }
     }

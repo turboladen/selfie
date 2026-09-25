@@ -4,7 +4,7 @@
 //! directly, written owner-only, never recorded in deploy state and never put in
 //! an event.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,10 @@ use crate::{
 };
 
 use super::port::ApplyOptions;
-use super::refusal::{TargetState, read_target_state, refusal_warning, target_refusal};
+use super::refusal::{
+    Link, TargetGuard, TargetState, classify_link, directory_target_refusal, guard_target,
+    read_target_state, refusal_warning, target_refusal,
+};
 
 /// Identify a secret-bearing entry by what produces it, never by its content.
 ///
@@ -59,7 +62,7 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
         Some(bytes) => count(bytes),
         // Said plainly rather than shown as "0 lines", which would read as an
         // empty file and understate what an overwrite destroys.
-        None => "exists but could not be read".to_string(),
+        None => "could not be read".to_string(),
     };
 
     // Says that nothing is kept, because every other overwrite selfie performs
@@ -91,19 +94,13 @@ pub(super) enum SecretOutcome {
 /// is what every one of these steps does.
 type Phase<T = ()> = Result<T, SecretOutcome>;
 
-/// Whether a secret-bearing entry's target is a symlink.
-#[derive(Clone)]
-enum TargetLink {
-    /// The final component is a symlink.
-    ///
-    /// `destination` is the raw link text, and `None` when the link could not be
-    /// read. Use it for wording only: it is relative whenever the user wrote a
-    /// relative link, so resolving it reaches whatever sits under the process's
-    /// working directory.
-    Link { destination: Option<PathBuf> },
-    /// The final component is not a symlink. It may be a regular file, a
-    /// directory, or nothing at all.
-    Plain,
+/// What the looks and the read found at a secret target just before the write.
+enum Found {
+    /// A symlink, which is replaced whatever it points at.
+    Link(Link),
+    /// Anything a write may land on after a comparison: nothing there, a readable
+    /// file, or one that could not be read.
+    State(TargetState),
 }
 
 /// One secret-bearing entry, with its target resolved and classified.
@@ -114,36 +111,10 @@ struct SecretTarget<'a> {
     origin: String,
     // Absolute, checked below. Unresolved is the type's job, not a caller's.
     path: TargetPath,
-    /// Whether the target is a symlink, as of the check in `usable_target`. The
-    /// deploy path re-asks before reading, because a resolve runs in between.
-    link: TargetLink,
-}
-
-/// Read the non-following symlink question's answer.
-///
-/// `Ok` says whether the final component is a link. `Err` carries a refusal this
-/// function does not understand, and the caller must refuse the entry on it.
-///
-/// # Errors
-///
-/// Any [`FileSystemError`] other than
-/// [`SymlinkedTarget`](FileSystemError::SymlinkedTarget).
-// Fails **closed**, and deliberately not a `_ => TargetLink::Plain` that would
-// treat an unrecognized refusal as "no link". `symlink_refusal` returns only
-// `SymlinkedTarget` today, so nothing reaches that arm; a fallback to `Plain` would
-// silently send a future variant down the path that reads the target and hands its
-// bytes to a resolver, which is the leak this guard exists to prevent.
-//
-// A free function so the arm can be exercised directly: the real file system cannot
-// produce another variant here, so nothing else holds it.
-fn classify_link(refusal: Option<FileSystemError>) -> Result<TargetLink, FileSystemError> {
-    match refusal {
-        None => Ok(TargetLink::Plain),
-        Some(FileSystemError::SymlinkedTarget { points_to, .. }) => Ok(TargetLink::Link {
-            destination: points_to,
-        }),
-        Some(other) => Err(other),
-    }
+    /// The symlink at the target, if there is one, as of the check in
+    /// `usable_target`. The deploy path re-asks before reading, because a resolve
+    /// runs in between.
+    link: Option<Link>,
 }
 
 /// Say that a symlinked target was replaced, naming the link and its destination.
@@ -156,13 +127,8 @@ fn classify_link(refusal: Option<FileSystemError>) -> Result<TargetLink, FileSys
 //
 // Names the link alone when the destination could not be read. Printing "unknown"
 // would be a fact about selfie rather than about their file.
-fn replaced_link_warning(target: &SecretTarget<'_>, link: &TargetLink) -> String {
-    let destination = match link {
-        TargetLink::Link { destination } => destination.as_deref(),
-        TargetLink::Plain => None,
-    };
-
-    let what = match destination {
+fn replaced_link_warning(target: &SecretTarget<'_>, link: &Link) -> String {
+    let what = match link.destination() {
         Some(dest) => format!(
             "'{}', which was a symlink to '{}'",
             target.path.display(),
@@ -223,51 +189,75 @@ where
             self.sender.send_warning(warning).await;
         }
 
-        // Asked again here, immediately before the read, because the answer taken in
-        // `usable_target` is older than the resolve that ran in between.
-        //
-        // Advisory, not binding: the read below opens the target by pathname and
-        // resolves it again, so a link planted between this stat and that open is
-        // still followed and its destination still reaches a conflict resolver. What
-        // this buys is that a link present at either ask is never read through. The
-        // remaining window closes only with a non-following read on the port, which
-        // selfie does not have. The write is safe either way, because the owner-only
-        // writer refuses to follow.
-        let link = match classify_link(self.filesystem.symlink_refusal(&target.path)) {
-            Ok(link) => link,
-            // Fails closed here as it does at the first ask. Falling back to the
-            // earlier answer would swallow a refusal this code cannot interpret, at
-            // the one point where the next statement reads the target.
-            Err(refusal) => {
-                self.sender
-                    .send_warning(refusal_warning(target.entry.target(), &refusal))
-                    .await;
-                return Err(SecretOutcome::Failed);
-            }
+        // Both questions again, immediately before the read, because the answers
+        // taken in `usable_target` are older than the resolve that ran in between. A
+        // link that appeared meanwhile is replaced like any other; a fifo, socket or
+        // device node that appeared, at the target or behind a new link, refuses,
+        // since the read would meet it and the writer refuse it.
+        let found = match self.look(target.entry.target(), &target.path).await? {
+            Some(link) => Found::Link(link),
+            None => self.read_before_write(&target).await?,
         };
 
         // A link is replaced whatever is behind it, so there is nothing to compare and
-        // nothing to put to a resolver. Skipping all three is the fix: every one of
-        // them reads or stats *through* the link.
+        // nothing to put to a resolver, and both are skipped.
         //
-        // `settle_in_sync` matters as much as the read does. It asks `is_owner_only`,
-        // which follows, so a link whose destination is already owner-only would be
-        // left alone -- making the outcome depend on the destination's mode, which
-        // ADR-0005 decision 3 removes.
-        if matches!(link, TargetLink::Link { .. }) {
-            let outcome = self.write(&target, &resolved).await;
-            if matches!(outcome, SecretOutcome::Deployed) {
-                self.sender
-                    .send_warning(replaced_link_warning(&target, &link))
-                    .await;
+        // Skipping `settle_in_sync` matters as much as skipping the read: the mode of a
+        // link's destination says nothing about the file that replaces the link, and
+        // the outcome must not depend on it (ADR-0005 decision 3).
+        let current = match found {
+            Found::Link(link) => {
+                let outcome = self.write(&target, &resolved).await;
+                if matches!(outcome, SecretOutcome::Deployed) {
+                    self.sender
+                        .send_warning(replaced_link_warning(&target, &link))
+                        .await;
+                }
+                return Ok(outcome);
             }
-            return Ok(outcome);
-        }
-        let current = self.read_target(&target);
+            Found::State(current) => current,
+        };
         self.settle_in_sync(&target, &resolved, &current).await?;
         self.settle_conflict(&target, &resolved, &current).await?;
 
         Ok(self.write(&target, &resolved).await)
+    }
+
+    /// Read the target immediately before the write, and settle what the read found:
+    /// a link to replace, a target to compare, or a refusal.
+    ///
+    /// Never replaces a link the read found without a look confirming it is still
+    /// one, so whatever took its place is compared, not written over.
+    async fn read_before_write(&self, target: &SecretTarget<'_>) -> Phase<Found> {
+        let source = target.entry.target();
+        let state = match self.read_target(target) {
+            // Planted after the last look. Looked at once more, which refuses a link
+            // to a fifo in the looks' own words at any timing.
+            TargetState::Link(_) => match self.look(source, &target.path).await? {
+                Some(link) => return Ok(Found::Link(link)),
+                // No link any more: something else took its place since the read,
+                // perhaps the user's own file. Read again and settle that instead;
+                // replacing the link the read saw would overwrite it unasked.
+                None => self.read_target(target),
+            },
+            state => state,
+        };
+
+        let refusal = match state {
+            TargetState::Absent | TargetState::Readable(_) | TargetState::Unreadable(_) => {
+                return Ok(Found::State(state));
+            }
+            // A link again, where the look just found none: a target changing under
+            // every look is refused rather than chased.
+            TargetState::Link(link) => refusal_warning(source, &link.refusal()),
+            TargetState::Irregular(refusal) => refusal_warning(source, &refusal),
+            // A directory put there during the resolve. The pre-command check refused
+            // one already present, so this is the same refusal, arriving late; the
+            // resolver could only be asked to overwrite a directory.
+            TargetState::Directory => directory_target_refusal(source, &target.path),
+        };
+        self.sender.send_warning(refusal).await;
+        Err(SecretOutcome::Failed)
     }
 
     /// Expand the target, or refuse the entry naming the form that was refused.
@@ -297,40 +287,15 @@ where
             }
         };
 
-        // The non-following question, ahead of the classifier, because `read_target`
-        // reads *through* a link and would hand the destination's bytes to a conflict
-        // resolver -- someone else's file, revealed at a prompt.
+        // Both questions, before any command runs: what a link or a fifo at the
+        // target means is decided here, not by the read after the fetch, which could
+        // only refuse either.
         //
-        // It narrows the window rather than closing it: a link planted between this
-        // stat and the read is still followed. Closing it needs a non-following read
-        // on the port. The write is safe either way, because the owner-only writer
-        // refuses to follow.
-        //
-        // Any refusal this does not understand ends the entry.
-        let link = match classify_link(self.filesystem.symlink_refusal(&path)) {
-            Ok(link) => link,
-            Err(refusal) => {
-                self.sender
-                    .send_warning(refusal_warning(entry.target(), &refusal))
-                    .await;
-                return Err(SecretOutcome::Failed);
-            }
-        };
-
-        // Same guard the repository-file path applies, in the same position:
-        // before anything reads the target. `read_target` below opens it, and a
-        // fifo blocks that open indefinitely. It stats *following*, so it answers
-        // for a link's destination too.
-        //
-        // `Failed` rather than `Skipped`, for the reason given above: this is
-        // decided from the target alone before anything runs, and a refused entry
-        // is not a skipped one.
-        if let Some(refusal) = self.filesystem.irregular_target_refusal(&path) {
-            self.sender
-                .send_warning(refusal_warning(entry.target(), &refusal))
-                .await;
-            return Err(SecretOutcome::Failed);
-        }
+        // A link is replaced whatever it points at, unless it resolves to a fifo,
+        // socket or device node, which the writer refuses. `Failed` rather than
+        // `Skipped`, for the reason given above: this is decided from the target alone
+        // before anything runs, and a refused entry is not a skipped one.
+        let link = self.look(entry.target(), &path).await?;
 
         // The case the guard above does not cover: it excludes directories, because
         // opening one never blocks. Nothing may run for a target that provably cannot
@@ -340,7 +305,7 @@ where
         // Only for a plain target. A link is replaced whatever it points at, so the
         // guard above -- which stats following the link -- is the whole of what
         // refuses one.
-        if matches!(link, TargetLink::Plain)
+        if link.is_none()
             && let Some(refusal) = self.unwritable_target_refusal(entry.target(), &path)
         {
             self.sender.send_warning(refusal).await;
@@ -353,6 +318,29 @@ where
             path,
             link,
         })
+    }
+
+    /// Ask both of the guard's questions of `path`: the link to replace, if there is
+    /// one, or `None` for a target that is not a link.
+    ///
+    /// A link whose destination is a fifo, socket or device node refuses the entry,
+    /// as does such a target itself, since the writer refuses both. `source` is the
+    /// target as the package file spells it, for the refusal.
+    async fn look(&self, source: &str, path: &TargetPath) -> Phase<Option<Link>> {
+        match guard_target(self.filesystem, path) {
+            TargetGuard::Clear => Ok(None),
+            TargetGuard::Link { link, behind: None } => Ok(Some(link)),
+            TargetGuard::Link {
+                behind: Some(refusal),
+                ..
+            }
+            | TargetGuard::Refused(refusal) => {
+                self.sender
+                    .send_warning(refusal_warning(source, &refusal))
+                    .await;
+                Err(SecretOutcome::Failed)
+            }
+        }
     }
 
     /// Why a write to this target could never land, when that is the case.
@@ -373,17 +361,16 @@ where
     // `FileSystemError`, and every variant's `Display` embeds the path, so routing
     // this through it prints the path twice.
     fn unwritable_target_refusal(&self, source: &str, path: &TargetPath) -> Option<String> {
-        let reason = match self.filesystem.is_directory(path) {
-            Ok(false) => return None,
-            Ok(true) => String::from(
-                "a directory is at the target, and a file cannot replace a directory. No command was run. Remove it or point the entry somewhere else.",
-            ),
-            Err(e) => format!(
-                "selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
-            ),
-        };
-
-        Some(format!("Skipping '{source}': {reason}"))
+        match self.filesystem.is_directory(path) {
+            Ok(false) => None,
+            Ok(true) => Some(format!(
+                "{} No command was run.",
+                directory_target_refusal(source, path)
+            )),
+            Err(e) => Some(format!(
+                "Skipping '{source}': selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
+            )),
+        }
     }
 
     /// Refuse anything decidable without running a command or reading a file.
@@ -430,8 +417,8 @@ where
         // reports a deployment for a run that wrote nothing.
         let commands = target.entry.command_count();
         let reason = match &target.link {
-            TargetLink::Link { destination } => {
-                let dest = match destination {
+            Some(link) => {
+                let dest = match link.destination() {
                     Some(dest) => format!(" to '{}'", dest.display()),
                     None => String::new(),
                 };
@@ -439,7 +426,7 @@ where
                     "dry run: would run {commands} command(s), then replace the symlink{dest} with a regular file readable only by you"
                 )
             }
-            TargetLink::Plain => format!(
+            None => format!(
                 "dry run: would run {commands} command(s); content not resolved, so no comparison is possible"
             ),
         };
@@ -477,7 +464,8 @@ where
         }
     }
 
-    /// What is at the target: absent, readable, or present but unreadable.
+    /// What is at the target: absent, readable, a directory, a link, a fifo, socket or
+    /// device node, or unreadable.
     ///
     /// Conflating any two of those loses a credential.
     fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
@@ -511,11 +499,27 @@ where
             return Ok(());
         }
 
-        if self.filesystem.is_owner_only(&target.path).unwrap_or(true) {
-            self.sender
-                .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
-                .await;
-            return Err(SecretOutcome::Skipped);
+        match self.filesystem.is_owner_only(&target.path) {
+            // A link put there since the read: replaced like any link, never
+            // reported in sync on the strength of a file it no longer is.
+            Err(refusal @ FileSystemError::SymlinkedTarget { .. }) => {
+                if let Ok(Some(link)) = classify_link(Some(refusal)) {
+                    let outcome = self.write(target, resolved).await;
+                    if matches!(outcome, SecretOutcome::Deployed) {
+                        self.sender
+                            .send_warning(replaced_link_warning(target, &link))
+                            .await;
+                    }
+                    return Err(outcome);
+                }
+            }
+            Ok(true) | Err(_) => {
+                self.sender
+                    .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
+                    .await;
+                return Err(SecretOutcome::Skipped);
+            }
+            Ok(false) => {}
         }
 
         // Same content, written the one way that establishes the mode atomically.
@@ -665,8 +669,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     // selfie-ir68.21. Both sides render a line count, on the only line a user gets
@@ -712,45 +714,9 @@ mod tests {
     fn an_unreadable_current_target_is_still_said_plainly() {
         let summary = secret_conflict_summary("op read x", b"token", None);
         assert!(
-            summary.contains("current target  : exists but could not be read"),
+            summary.contains("current target  : could not be read"),
             "got: {summary}"
         );
-    }
-
-    // `symlink_refusal` answers `None` or `SymlinkedTarget` and nothing else, so
-    // this is the only thing holding the fail-closed arm: hand it another variant
-    // directly and the entry must still be refused. A fallback to `Plain` would
-    // return `Ok` here and send the target down the path that reads it.
-    #[test]
-    fn a_symlink_refusal_that_is_not_a_symlinked_target_still_refuses() {
-        let refused = classify_link(Some(FileSystemError::IrregularTarget {
-            path: PathBuf::from("/home/u/.config/app/creds"),
-            kind: "named pipe (fifo)",
-        }));
-
-        let Err(carried) = refused else {
-            panic!("an unrecognized refusal must refuse the entry, not report no link");
-        };
-        assert!(
-            matches!(carried, FileSystemError::IrregularTarget { .. }),
-            "the refusal must be carried to the caller so it can be reported"
-        );
-    }
-
-    #[test]
-    fn no_refusal_is_a_plain_target_and_a_symlinked_target_carries_its_destination() {
-        assert!(matches!(classify_link(None), Ok(TargetLink::Plain)));
-
-        let link = classify_link(Some(FileSystemError::SymlinkedTarget {
-            path: PathBuf::from("/home/u/.config/app/creds"),
-            points_to: Some(PathBuf::from("../shared/dir")),
-        }));
-        let Ok(TargetLink::Link { destination }) = link else {
-            panic!("a symlinked target must be reported as a link");
-        };
-        // The raw link text, relative as the user wrote it. It is for the warning's
-        // wording and is never resolved.
-        assert_eq!(destination, Some(PathBuf::from("../shared/dir")));
     }
 
     // A link selfie could not read still names the link, with no destination clause.
@@ -767,23 +733,27 @@ mod tests {
             path: crate::fs::target::repository_path(std::path::Path::new(
                 "/home/u/.config/app/creds",
             )),
-            // Deliberately `Plain`, and not what either call below reads. The warning
+            // Deliberately no link, and not what either call below reads. The warning
             // takes its link as the second argument, because the deploy path hands it
             // the answer from the ask before the read rather than this one, which is
             // older than the resolve. A warning reading the field instead would name no
             // destination here, and the first assertion below would fail.
-            link: TargetLink::Plain,
+            link: None,
+        };
+        let link_to = |points_to: Option<&str>| {
+            classify_link(Some(crate::fs::FileSystemError::SymlinkedTarget {
+                path: std::path::PathBuf::from("/home/u/.config/app/creds"),
+                points_to: points_to.map(std::path::PathBuf::from),
+            }))
+            .expect("a symlink refusal")
+            .expect("is a link")
         };
 
         // One target, two links: the calls differ only in the argument, so the
         // difference between the messages isolates the destination clause.
-        let with_destination = replaced_link_warning(
-            &target,
-            &TargetLink::Link {
-                destination: Some(std::path::PathBuf::from("/home/u/.ssh/id_ed25519")),
-            },
-        );
-        let without = replaced_link_warning(&target, &TargetLink::Link { destination: None });
+        let with_destination =
+            replaced_link_warning(&target, &link_to(Some("/home/u/.ssh/id_ed25519")));
+        let without = replaced_link_warning(&target, &link_to(None));
 
         assert!(
             with_destination.contains("symlink to '/home/u/.ssh/id_ed25519'"),

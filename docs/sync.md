@@ -48,9 +48,10 @@ every spec it could not load. A spec that could not be loaded is counted and nam
 relayed warning, such as a configured dotfiles directory that does not exist, is counted too; the
 summary line stops claiming no drift when either count is non-zero.
 
-It does not print why an individual target drifted. When a target keeps reappearing here and
-`selfie apply` never clears it, run `selfie dotfiles drift`, which shows the reason beside the
-entry; a [symlinked target](package-files.md#symlinked-targets) is the usual cause.
+It does not print how an individual target drifted; `selfie dotfiles drift` shows the drift type
+beside each entry. A target the drift check refused without comparing, such as a
+[symlinked target](package-files.md#symlinked-targets), appears among the relayed warnings and is
+counted as a refusal that left dotfiles unchecked, not as drift.
 
 ### `selfie sync push`
 

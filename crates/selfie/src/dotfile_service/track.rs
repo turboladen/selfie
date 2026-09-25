@@ -24,6 +24,7 @@ use crate::{
     paths::{is_within, normalize_path},
 };
 
+use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
 
 /// Check that a name is safe for use as a filesystem path component.
@@ -141,19 +142,17 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> St
 /// whichever answers. `None` is the ordinary case and says nothing is wrong with the
 /// target.
 // Ask this rather than composing the two questions at a call site: which one
-// answers first is a rule of this module, and an adapter restating it can drift from
-// it.
+// answers first is a rule of the dotfile service, and an adapter restating it can
+// drift from it.
 //
 // One answer, not both: a symlink to a socket satisfies each check and would
-// otherwise warn twice with the same sentence. `or_else` also skips the second stat
-// when the first already answered.
+// otherwise warn twice with the same sentence. `guard_refusal` also skips the second
+// stat when the first already answered.
 pub fn already_tracked_refusal<F: FileSystem>(
     filesystem: &F,
     target: &TargetPath,
 ) -> Option<String> {
-    filesystem
-        .symlink_refusal(target)
-        .or_else(|| filesystem.irregular_target_refusal(target))
+    guard_refusal(filesystem, target)
         .as_ref()
         .map(already_tracked_refusal_warning)
 }
@@ -477,11 +476,11 @@ where
 {
     // Expand the target, or refuse it if selfie could never deploy to it.
     //
-    // First of the three refusals, and ahead of `symlink_refusal` for a reason of
-    // its own: this one touches no filesystem at all, while `symlink_refusal` and
-    // `path_exists` both stat a relative path against the *process working
-    // directory* -- which is what made track record entries every later apply
-    // refuses (selfie-q9t3). It therefore also sits ahead of all three writes.
+    // First of the three refusals, and ahead of the guard for a reason of its own:
+    // this one touches no filesystem at all, while the guard's stats and the read
+    // would each resolve a relative path against the *process working directory*
+    // -- which is what made track record entries every later apply refuses
+    // (selfie-q9t3). It therefore also sits ahead of all three writes.
     //
     // Ahead of the already-tracked answer below as well: an entry recording a
     // target that can never deploy is not a reason to report it as tracked.
@@ -531,43 +530,65 @@ where
         });
     }
 
-    // Position is load-bearing at both ends. Before the writes: tracking reads
-    // *through* a link, so accepting one copies the destination into the dotfiles
-    // directory — where `sync push` commits it — and records a deployment that never
-    // happened. Before the existence check: `path_exists` follows the link, so a
-    // dangling one would be reported as a missing file.
+    // Ahead of the read and every write, so a link or a fifo gets its own sentence
+    // and remedy: accepting a link would copy its destination into the dotfiles
+    // directory, where `sync push` commits it, and the read would refuse one only as
+    // unreadable. After the already-tracked answer above, because refusing an
+    // idempotent no-op helps nobody.
     //
-    // After the already-tracked answer above, because refusing an idempotent
-    // no-op helps nobody.
-    if let Some(refusal) = filesystem.symlink_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(track_refusal(&refusal)));
+    // A fifo is not given `track_refusal`: its "replace the symlink with a regular
+    // file, or track the path it points to" fits neither half, since a fifo points at
+    // nothing. Naming a different target is the remedy that applies.
+    match guard_refusal(filesystem, &expanded_target) {
+        None => {}
+        Some(link @ FileSystemError::SymlinkedTarget { .. }) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_refusal(&link)));
+        }
+        Some(refusal) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "{refusal}. Point the entry at a regular file instead."
+            )));
+        }
     }
 
-    // Also ahead of the read: tracking copies the target into the dotfiles
-    // repository, and reading a fifo blocks until a writer arrives. There is
-    // nothing to track in a fifo or a device node in any case.
+    // The one read of the target, through the classifier apply and drift use, so a
+    // directory and a vanished file are named for what they are.
     //
-    // Deliberately not `track_refusal`, which the symlink case above uses: that
-    // one appends "replace the symlink with a regular file, or track the path it
-    // points to", and neither half applies here -- a fifo points at nothing, and
-    // "replace it with a regular file" describes deleting the user's pipe. The
-    // remedy that does apply is naming a different target, so this says that.
-    if let Some(refusal) = filesystem.irregular_target_refusal(&expanded_target) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "{refusal}. Point the entry at a regular file instead."
-        )));
-    }
-
-    if !filesystem.path_exists(expanded_target.path()) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Target file does not exist: {}",
-            expanded_target.display()
-        )));
-    }
-
-    let content = match filesystem.read_file(expanded_target.path()) {
-        Ok(c) => c,
-        Err(e) => {
+    // Text, as apply reads the repository copy back: a file that is not UTF-8 would
+    // track and then never deploy.
+    let content = match read_target_state(filesystem, &expanded_target) {
+        TargetState::Readable(bytes) => match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(e) => {
+                return OperationResult::Failure(OperationFailure::Generic(format!(
+                    "Cannot read target file: it is not UTF-8 text ({e})"
+                )));
+            }
+        },
+        TargetState::Absent => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Target file does not exist: {}",
+                expanded_target.display()
+            )));
+        }
+        TargetState::Directory => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot track the target: {}",
+                directory_at_target(&expanded_target)
+            )));
+        }
+        // A link or fifo put there after the guard, refused in the guard's words.
+        TargetState::Link(link) => {
+            return OperationResult::Failure(OperationFailure::Generic(track_refusal(
+                &link.refusal(),
+            )));
+        }
+        TargetState::Irregular(refusal) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "{refusal}. Point the entry at a regular file instead."
+            )));
+        }
+        TargetState::Unreadable(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Cannot read target file: {e}"
             )));

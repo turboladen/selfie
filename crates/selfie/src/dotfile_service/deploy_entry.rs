@@ -16,7 +16,7 @@ use crate::{
     package::event::EventSender,
 };
 
-use super::refusal::{TargetState, read_target_state, refusal_warning, unreadable_target_refusal};
+use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
 use super::state_file::{LoadedState, save_deploy_state};
 
 /// Describes a single config file deployment operation
@@ -36,6 +36,18 @@ pub(super) struct DeployUnit<'a> {
     pub(super) backups: Option<&'a Path>,
 }
 
+/// What the target held when the deploy decision was made, and whether that
+/// answer is still current when the write comes.
+#[derive(Clone, Copy)]
+pub(super) enum Decided<'a> {
+    /// Nothing waited between the decision and the write: these are the bytes
+    /// the write replaces, `None` for a target that was absent.
+    Now(Option<&'a [u8]>),
+    /// An interactive resolver's prompt ran in between, for as long as the user
+    /// took, so the target is looked at and read again before the write.
+    BeforePrompt,
+}
+
 /// Deploy a single config file to its target path and emit events. Records
 /// nothing: the caller records and saves once the write is known to have landed.
 ///
@@ -45,6 +57,7 @@ pub(super) async fn perform_deploy<F: FileSystem>(
     filesystem: &F,
     sender: &EventSender,
     unit: &DeployUnit<'_>,
+    decided: Decided<'_>,
     dry_run: bool,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> Result<(), ()> {
@@ -76,7 +89,7 @@ pub(super) async fn perform_deploy<F: FileSystem>(
         // Two entries can name one target -- an apply covers every package, and
         // the only same-target check anywhere looks inside a single package.
         Some(existing) => (existing.clone(), None),
-        None => match keep_current(filesystem, unit) {
+        None => match keep_current(filesystem, unit, decided) {
             Ok(kept) => {
                 let path = kept.as_ref().map(|kept| kept.path().to_path_buf());
                 // Recorded before the write, not after: a copy that was made and a
@@ -160,32 +173,34 @@ pub(super) async fn perform_deploy<F: FileSystem>(
 fn keep_current<F: FileSystem>(
     filesystem: &F,
     unit: &DeployUnit<'_>,
+    decided: Decided<'_>,
 ) -> Result<Option<backup::Kept>, String> {
     let Some(root) = unit.backups else {
         return Ok(None);
     };
 
-    // Read again here rather than reuse the bytes the deploy decision was made
-    // from. An interactive resolver sits at a prompt for as long as the user
-    // takes, and the target can change while it waits -- so the earlier read is
-    // what the user was shown, and this one is what the write is about to
-    // destroy. Copying the first would keep bytes that are still reachable and
-    // lose the ones that are not.
-    let current = match read_target_state(filesystem, unit.target_path) {
-        // Gone since the decision. Nothing to keep, and the write will recreate it.
-        TargetState::Absent => return Ok(None),
-        TargetState::Readable(bytes) => bytes,
-        // Readable when the decision was made and not now. Refusing leaves the
-        // target alone, which is the same answer apply gives a target it could
-        // not read in the first place, in the same words.
-        TargetState::Unreadable(e) => {
-            return Err(unreadable_target_refusal(
-                filesystem,
+    let current = match decided {
+        Decided::Now(current) => current.map(<[u8]>::to_vec),
+        // Read again rather than reuse the bytes the decision was made from: the
+        // earlier read is what the user was shown, and this one is what the write
+        // is about to destroy. Copying the first would keep bytes that are still
+        // reachable and lose the ones that are not.
+        Decided::BeforePrompt => {
+            // The guard first, as before every read of a target: a fifo or device
+            // node put in place during the prompt must not be opened at all.
+            if let Some(refusal) = guard_refusal(filesystem, unit.target_path) {
+                return Err(refusal_warning(unit.source, &refusal));
+            }
+            readable_or_refusal(
                 unit.source,
                 unit.target_path,
-                &e,
-            ));
+                read_target_state(filesystem, unit.target_path),
+            )?
         }
+    };
+    // Nothing there: nothing to keep, and the write creates it.
+    let Some(current) = current else {
+        return Ok(None);
     };
 
     // Decided from the bytes rather than from the deploy decision. A refresh whose

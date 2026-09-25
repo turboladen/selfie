@@ -219,24 +219,40 @@ Test egress at the **boundary**, not by listing known paths:
   now state the limit, `is_within` carries the reasoning, and
   `a_symlinked_source_escapes_the_containment_guard` pins it as an executable fact — it asserts the
   escape **succeeds**, so strengthening the guard must delete the test and the prose together.
+- **An irregular target is refused everywhere a symlinked one is, and the two questions take
+  different stats on purpose.** A fifo, socket or device node at a target is refused by `apply`,
+  `dotfiles drift` and `dotfiles track` through `refusal::guard_refusal`; apply and drift word it
+  with `refusal_warning`, track with its own remedy, and drift counts it as refused. Those three
+  refuse a link to one as a link, without asking what is behind it. The secret path, which replaces
+  links, asks both questions through `refusal::guard_target` and refuses a link whose destination is
+  one. The symlink question (`symlink_refusal`) uses `symlink_metadata`, which does **not** follow,
+  because it is about the name. The irregular question (`irregular_target_refusal`) uses `metadata`,
+  which **does** follow, because the hazard is what an `open` lands on. Swapping the second for a
+  non-following stat lets a secret entry's link to a fifo through its check: the provider command
+  runs, and the writer refuses the link only afterwards, as a failed write. `read_file_no_follow` is
+  the second layer for a read, not a reason to drop the first: opening a device node can have side
+  effects, which only the stat avoids.
 - **A symlinked dotfile target is refused for repository-file content, and every command says so the
-  same way.** `apply` refuses the write, `dotfiles drift` reports the refusal wherever `apply` would
-  refuse — gated on `deploy_decision`, the same function `apply` calls, so the parity is structural
-  rather than asserted — and `dotfiles track` refuses to create the entry at all. A secret-bearing
-  entry is the exception: its link is **always replaced**, whatever it points at and whatever the
-  destination's mode, because following it would send a credential where the link's author pointed
-  and refusing would leave it undeployed. The replacement lands on the link, never on the
-  destination, which is why a directory behind a link is no obstacle. What refuses before anything
-  runs is what a write could never land on: a fifo, socket or device node, at the target or behind a
-  link alike; a directory **at** the target, since a file cannot replace one; and a plain target
-  selfie could not classify, since that is where the write goes. A link present at either check is
-  never read through, not for a comparison and not for the owner-only check, which follows and was
-  the second route to the destination's contents. The non-following question is asked **twice**,
-  once before the provider command and once immediately before the read, because the first answer is
-  stale by the time the target is read. The read itself is still by pathname, so a link planted
-  between the last check and the read is a remaining window; only a non-following read on the port
-  closes it. The warning naming the link and its destination is sent **after** the write succeeds,
-  worded as what happened, so it can never precede a refusal or a failed write. ADR-0005 decision 3
-  records all of it. Track's refusal sits ahead of every write it performs: tracking reads _through_
-  a link, so accepting one copies the destination into the dotfiles repository, where `sync push`
-  commits it. Do not relax that ordering.
+  same way.** `apply`, `dotfiles drift` and `dotfiles track` all ask `refusal::guard_refusal` before
+  they read the target, so a link is refused whether or not its content matches, and none of them
+  reads through it to find out. Drift counts the refusal rather than reporting a drift type computed
+  from the destination. A secret-bearing entry is the exception: its link is **always replaced**,
+  whatever it points at and whatever the destination's mode, because following it would send a
+  credential where the link's author pointed and refusing would leave it undeployed. The replacement
+  lands on the link, never on the destination, which is why a directory behind a link is no
+  obstacle. What refuses before anything runs is what a write could never land on: a fifo, socket or
+  device node, at the target or behind a link alike; a directory **at** the target, since a file
+  cannot replace one; and a plain target selfie could not classify, since that is where the write
+  goes. A link present at either check is never read through, not for a comparison and not for the
+  owner-only check, which does not follow either: a link put at the target after the read is
+  replaced, never reported in sync on its destination's mode. Both questions are asked **twice**,
+  once before the provider command and once immediately before the read, because the first answers
+  are stale by the time the target is read. The read itself is `read_file_no_follow`, which opens
+  with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
+  after the last check is refused by the read rather than followed or waited on; a link it finds is
+  replaced like one a check found. The checks stay: opening a device node can have side effects, and
+  they word the refusal. The warning naming the link and its destination is sent **after** the write
+  succeeds, worded as what happened, so it can never precede a refusal or a failed write. ADR-0005
+  decision 3 records all of it. Track's refusal sits ahead of every write it performs, so nothing is
+  copied, written or recorded for a link: accepting one would copy the link's destination into the
+  dotfiles repository, where `sync push` commits it. Do not relax that ordering.
