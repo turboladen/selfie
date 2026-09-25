@@ -300,3 +300,309 @@ fn dotfiles_track_refuses_once_when_the_dotfiles_directory_is_missing() {
         "the refusal must be reported exactly once, got:\n{combined}"
     );
 }
+
+// Only an empty path is silent at the unset default. A plain file or a dangling
+// symlink there cannot come from leaving the setting out, so `selfie track` names it
+// before the prompt exactly as it would at a configured path.
+#[test]
+fn track_reports_an_occupied_unset_default_dotfiles_directory_before_prompting() {
+    for (clause, a_plain_file) in [
+        ("is a regular file", true),
+        ("is a symlink to nothing", false),
+    ] {
+        let temp = config_without_dotfiles_dir();
+        let dotfiles = temp.path().join("dotfiles");
+        if a_plain_file {
+            std::fs::write(&dotfiles, "not a directory\n").unwrap();
+        } else {
+            std::os::unix::fs::symlink(temp.path().join("moved-away"), &dotfiles).unwrap();
+        }
+        let untracked = temp.path().join("untracked.conf");
+        std::fs::write(&untracked, "x").unwrap();
+
+        let output = sandboxed_command(&temp)
+            .args(["track", untracked.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // The refusal is what ends the run, so the warning appearing ahead of it is
+        // the evidence it came before any prompt.
+        let warning_at = combined
+            .find(clause)
+            .unwrap_or_else(|| panic!("`{clause}` must be named, got:\n{combined}"));
+        let refusal_at = combined
+            .find("needs a terminal")
+            .unwrap_or_else(|| panic!("the run must end on the refusal, got:\n{combined}"));
+        assert!(
+            warning_at < refusal_at,
+            "`{clause}` must be reported before the run ends, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("cannot be tracked until that is fixed"),
+            "the consequence must be stated for `{clause}`, got:\n{combined}"
+        );
+    }
+}
+
+// The control for the test above: with nothing at the unset default, `selfie track`
+// says nothing about the directory. Without it, a guard deleted outright would pass.
+#[test]
+fn track_is_silent_about_an_empty_unset_default_dotfiles_directory() {
+    let temp = config_without_dotfiles_dir();
+    let untracked = temp.path().join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["track", untracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        combined.contains("needs a terminal"),
+        "the run must reach the refusal, got:\n{combined}"
+    );
+    assert!(
+        !combined.to_lowercase().contains("dotfiles directory"),
+        "an empty unset default must not be reported, got:\n{combined}"
+    );
+}
+
+// A dotfiles directory a standalone entry cannot be written into is reported by
+// `selfie track` before the prompt, not after the user has chosen a name.
+//
+// The run is not a TTY, so the interactive select cannot be driven: everything this
+// test can read was printed before any prompt, which is what makes the ordering
+// checkable rather than asserted.
+#[test]
+fn track_reports_a_dangling_symlink_dotfiles_directory_before_prompting() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+    // A link whose destination was never created: the path is occupied and nothing
+    // is behind it, so `mkdir -p` cannot fix it.
+    std::os::unix::fs::symlink(temp.path().join("moved-away"), &dotfiles).unwrap();
+
+    let untracked = temp.path().join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["track", untracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("is a symlink to nothing"),
+        "the state must be named, got:\n{combined}"
+    );
+    assert!(
+        combined.contains("cannot be tracked until that is fixed"),
+        "the consequence must be stated before the prompt, got:\n{combined}"
+    );
+    // The ordering itself. The refusal is what ends the run, so the warning appearing
+    // ahead of it in the stream is the evidence the user learns the directory is
+    // unusable before being asked anything.
+    let warning_at = combined.find("is a symlink to nothing").unwrap();
+    let refusal_at = combined.find("needs a terminal").unwrap();
+    assert!(
+        warning_at < refusal_at,
+        "the directory must be reported before the run ends, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("mkdir -p"),
+        "mkdir -p cannot create a path a link occupies, got:\n{combined}"
+    );
+}
+
+// The control for the test above: a dotfiles directory that is simply not there is
+// reported the same way and does get the `mkdir -p` remedy, because that command
+// works. Without this pair, a change that dropped the remedy everywhere would pass.
+#[test]
+fn track_offers_mkdir_for_a_dotfiles_directory_that_is_merely_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+
+    let untracked = temp.path().join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["track", untracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("does not exist"), "got:\n{combined}");
+    assert!(
+        combined.contains(&format!("mkdir -p -- {}", dotfiles.display())),
+        "an absent path is the one case the remedy works for, got:\n{combined}"
+    );
+}
+
+// `selfie dotfiles track` against an unreadable dotfiles directory reports the
+// directory, and does not tell the user their name is unusable. The name may be
+// perfectly good; nothing could check it.
+//
+// Skipped for a user who can read a 0o000 directory, since the fixture cannot be
+// built for root and a pass would mean nothing.
+#[test]
+fn dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read_dir(&dotfiles).is_ok() {
+        eprintln!("SKIP dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read");
+        return;
+    }
+
+    let tracked = temp.path().join("starship.toml");
+    std::fs::write(&tracked, "format = \"$all\"").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "track", "starship", tracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    // Restored before the assertions, so a failure does not leave an unreadable
+    // directory behind for the temp dir's own cleanup to trip over.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "got:\n{combined}");
+    assert!(
+        combined.contains("cannot tell whether the name is already taken"),
+        "the refusal must say the answer is unknown, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Cannot use name"),
+        "the name is not what failed, got:\n{combined}"
+    );
+}
+
+// `selfie spec create` against an unreadable dotfiles directory prints the name
+// check's own sentence, which leads with the directory's path. A noun in front of
+// that path reads as two subjects.
+//
+// Skipped for a user who can read a 0o000 directory, since the fixture cannot be
+// built for root and a pass would mean nothing.
+#[test]
+fn spec_create_names_an_unreadable_dotfiles_directory_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(temp.path().join("packages")).unwrap();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            temp.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read_dir(&dotfiles).is_ok() {
+        eprintln!("SKIP spec_create_names_an_unreadable_dotfiles_directory_once");
+        return;
+    }
+
+    let output = sandboxed_command(&temp)
+        .args(["spec", "create", "vim"])
+        .output()
+        .unwrap();
+
+    // Restored before the assertions, so a failure does not leave an unreadable
+    // directory behind for the temp dir's own cleanup to trip over.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "got:\n{combined}");
+    assert!(
+        combined.contains(&format!(
+            "Cannot create 'vim': cannot tell whether the name is already taken: {}",
+            dotfiles.display()
+        )),
+        "the refusal must lead with the directory's path, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains(&format!("dotfiles directory {}", dotfiles.display())),
+        "a noun in front of the path reads as two subjects, got:\n{combined}"
+    );
+}

@@ -690,9 +690,12 @@ mod tests {
             .withf(|name| name == "pkg-b")
             .returning(|_| {
                 Err(crate::package::port::PackageRepoError::PackageListError(
-                    crate::package::port::PackageListError::IoError(std::sync::Arc::new(
-                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
-                    )),
+                    crate::package::port::PackageListError::new(
+                        std::path::PathBuf::from("/locked"),
+                        crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(
+                            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+                        )),
+                    ),
                 ))
             });
 
@@ -709,6 +712,46 @@ mod tests {
         assert!(
             rendered.contains("denied"),
             "the listing failure must survive to the user, got: {rendered}"
+        );
+    }
+
+    // A dangling link at the package directory holds no specs, but it is not a
+    // verdict that pkg-b is missing either: reporting it as one sends the user
+    // looking for a spec when the directory is what needs fixing.
+    #[tokio::test]
+    async fn a_dangling_package_directory_is_not_reported_as_a_missing_dependency() {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-a")
+            .returning(|_| Ok(mock_package("pkg-a", &["pkg-b"])));
+        repo.expect_get_package()
+            .withf(|name| name == "pkg-b")
+            .returning(|_| {
+                Err(crate::package::port::PackageRepoError::PackageListError(
+                    crate::package::port::PackageListError::new(
+                        std::path::PathBuf::from("/packages"),
+                        crate::fs::DirectoryState::Absent(
+                            crate::fs::AbsentReason::DanglingSymlink {
+                                points_to: Some(std::path::PathBuf::from("/gone")),
+                            },
+                        ),
+                    ),
+                ))
+            });
+
+        let sender = make_sender();
+        let err = resolve_dependencies("pkg-a", &repo, "test", &sender)
+            .await
+            .expect_err("a dangling package directory must not resolve");
+
+        assert!(
+            err.dependency_failure().is_none(),
+            "the directory is the problem, not pkg-b, got: {err}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("/packages is a symlink to nothing"),
+            "the directory must be named, got: {rendered}"
         );
     }
 

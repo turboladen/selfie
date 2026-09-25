@@ -10,6 +10,176 @@ use thiserror::Error;
 
 use crate::fs::target::TargetPath;
 
+/// What is at a directory path.
+///
+/// One type for the question selfie asks of every directory it reads — the package
+/// directory, the dotfiles directory, the state directory — so no two consumers can
+/// answer it differently. See ADR-0005 decision 1.
+///
+/// [`Unlistable`](DirectoryState::Unlistable) and [`Unknown`](DirectoryState::Unknown)
+/// stay separate variants rather than one error a caller inspects, because they mean
+/// different things: the first is a directory that may be hiding entries, the second
+/// is a path nothing is known about. Conflating them is what let "could not look" read
+/// as "nothing there".
+#[derive(Debug, Clone)]
+pub enum DirectoryState {
+    /// A directory. Its entries may still fail to read; that is
+    /// [`Unlistable`](DirectoryState::Unlistable).
+    Directory,
+    /// No directory is at the path, and why not.
+    Absent(AbsentReason),
+    /// A directory whose entries could not be read, so it may be hiding entries.
+    Unlistable(Arc<io::Error>),
+    /// The check itself failed. Nothing is known about the path.
+    Unknown(Arc<io::Error>),
+}
+
+/// Why no directory is at a path.
+///
+/// Carried because the remedy is not shared: only [`Empty`](AbsentReason::Empty) is
+/// fixed by creating the directory. `mkdir -p` fails with "File exists" against a
+/// plain file and "No such file or directory" against a dangling link, so a sentence
+/// offering it for those is worse than no sentence.
+#[derive(Debug, Clone)]
+pub enum AbsentReason {
+    /// Nothing is at the path. The one reason `mkdir -p` answers.
+    Empty,
+    /// Something that is not a directory is at the path.
+    Occupied {
+        /// What is there, for the sentence: `regular file`, `named pipe (fifo)`.
+        kind: &'static str,
+    },
+    /// The final component is a symlink whose destination is not there.
+    DanglingSymlink {
+        /// Where the link points, when the link itself could be read.
+        points_to: Option<PathBuf>,
+    },
+    /// A component of the path is not a directory: a file, or a symlink whose
+    /// destination is not there.
+    ParentNotADirectory {
+        /// The first such component, found by walking the path's ancestors. The
+        /// errno says only that some component is not a directory, never which.
+        parent: PathBuf,
+    },
+}
+
+impl AbsentReason {
+    /// What is at the path instead of a directory, as a clause that follows the
+    /// directory's name: "does not exist", "is a regular file".
+    ///
+    /// Shared so a refusal and a warning about the same directory describe it the
+    /// same way, and so no caller has to match on the variants to word one.
+    #[must_use]
+    pub fn clause(&self) -> String {
+        match self {
+            Self::Empty => "does not exist".to_string(),
+            Self::Occupied { kind } => format!("is not a directory, it is a {kind}"),
+            Self::DanglingSymlink { points_to } => match points_to {
+                Some(destination) => {
+                    format!(
+                        "is a symlink to nothing: it points at {}",
+                        destination.display()
+                    )
+                }
+                // The link read once and would not read again, so the sentence names
+                // what is known rather than guessing a destination.
+                None => "is a symlink to nothing".to_string(),
+            },
+            Self::ParentNotADirectory { parent } => {
+                format!("is below {}, which is not a directory", parent.display())
+            }
+        }
+    }
+
+    /// The command that would create the directory at `path`, or `None` when no
+    /// single command is the remedy.
+    ///
+    /// Only [`Empty`](Self::Empty) has one. `mkdir -p` fails with "File exists"
+    /// against a plain file and "No such file or directory" against a dangling
+    /// symlink, so offering it for those sends the user to a command that cannot
+    /// work. The path is shell-quoted, because the sentence exists to be pasted.
+    #[must_use]
+    pub fn remedy(&self, path: &Path) -> Option<String> {
+        // `--` ends the option list. Without it a dotfiles directory named `-p` or
+        // `-foo` is read by mkdir as options, so the command fails or creates
+        // something the user did not ask for.
+        match self {
+            Self::Empty => Some(format!("Create it with: mkdir -p -- {}", shell_quote(path))),
+            Self::Occupied { .. }
+            | Self::DanglingSymlink { .. }
+            | Self::ParentNotADirectory { .. } => None,
+        }
+    }
+}
+
+/// `path` as shell words that expand to it, for a remedy the user will paste.
+///
+/// A leading `~/` is left outside the quotes, so the shell still expands it. Pair it
+/// with a `--` before the path, which this does not add: a leading dash is not a
+/// character quoting protects, so only the option separator ends it.
+#[must_use]
+pub fn shell_quote(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    // A tilde arrives here only when the config loader could not expand it, which
+    // needs a home directory selfie cannot determine. Quoting it whole offers a
+    // command that creates a directory named `~` in the working directory. Only a
+    // bare `~` and a leading `~/` are held out, because those are the two the loader
+    // expands; `~user` stays quoted, since a command reaching further than selfie
+    // does would name a directory selfie will not then use.
+    if rendered == "~" {
+        return rendered;
+    }
+    match rendered.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", quote_word(rest)),
+        None => quote_word(&rendered),
+    }
+}
+
+/// One shell word, quoted unless every character is one the shell leaves alone.
+///
+/// Single quotes, with the shell's own escape for an embedded single quote, which is
+/// the one character single quotes do not cover.
+fn quote_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+impl DirectoryState {
+    /// The state a failed listing implies, for a caller that has already listed.
+    ///
+    /// The repositories list to read their specs, so asking them to classify first
+    /// would read the directory twice. This turns the listing they already did into
+    /// the same states [`FileSystem::directory_state`] returns.
+    ///
+    /// One classifier, not two: anything that is not a listing failure is handed to
+    /// [`FileSystem::directory_state`], so the two entry points cannot disagree
+    /// about one path.
+    pub fn from_listing<F: FileSystem + ?Sized>(
+        filesystem: &F,
+        path: &Path,
+        error: &io::Error,
+    ) -> Self {
+        match error.kind() {
+            // A directory that is there and will not open its entries. The one state
+            // only a listing can discover.
+            io::ErrorKind::PermissionDenied => Self::Unlistable(Arc::new(clone_io_error(error))),
+            _ => filesystem.directory_state(path),
+        }
+    }
+}
+
+// `io::Error` is not `Clone`, and both carrying variants need to be. Keeps the kind
+// and the message, which is all any sentence renders.
+fn clone_io_error(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
+}
+
 /// Port for file system operations. Every file system interaction in the selfie
 /// library goes through it.
 ///
@@ -222,6 +392,17 @@ pub trait FileSystem: Send + Sync {
     /// Whether `path` exists, as either a file or a directory.
     fn path_exists(&self, path: &Path) -> bool;
 
+    /// What is at a directory path: a directory, absent with a reason, unlistable, or
+    /// unknown.
+    ///
+    /// A dangling symlink is absent with a reason of its own rather than as an empty
+    /// path, and a symlink loop is unknown.
+    ///
+    /// Never returns [`Unlistable`](DirectoryState::Unlistable): discovering that needs
+    /// a listing, and a caller that has listed gets there through
+    /// [`DirectoryState::from_listing`].
+    fn directory_state(&self, path: &Path) -> DirectoryState;
+
     /// Expand `~` and environment variables in a path, for user-provided paths
     /// out of configuration files.
     ///
@@ -340,6 +521,21 @@ pub enum FileSystemError {
 /// ```
 #[cfg(feature = "with_mocks")]
 impl MockFileSystem {
+    /// Answer `state` for every directory classified.
+    ///
+    /// Most tests are not about the directory, and this is what keeps the
+    /// classification out of their way. A test whose subject *is* the directory
+    /// sets its own expectation per path instead.
+    pub fn mock_directory_state(&mut self, state: DirectoryState) {
+        self.expect_directory_state()
+            .returning(move |_| state.clone());
+    }
+
+    /// Answer "a directory" for every directory classified.
+    pub fn mock_directories_exist(&mut self) {
+        self.mock_directory_state(DirectoryState::Directory);
+    }
+
     /// Return `content` whenever `path` is read.
     pub fn mock_read_file<P, S>(&mut self, path: P, content: S)
     where

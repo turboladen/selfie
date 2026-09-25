@@ -92,7 +92,12 @@ where
     // re-evaluate every one of them as untracked. A dry run writes nothing, so it
     // warns instead and previews against an empty state.
     let mut loaded = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => Some(loaded),
+        StateLoad::Usable(loaded) => {
+            if let Some(warning) = loaded.directory_warning() {
+                sender.send_warning(warning.to_string()).await;
+            }
+            Some(loaded)
+        }
         StateLoad::Unusable(failure) if options.dry_run => {
             sender.send_warning(read_only_state_warning(&failure)).await;
             None

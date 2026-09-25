@@ -20,8 +20,20 @@ pub(super) enum ApplyWarning {
     /// A repository that exists and could not be listed, so the collection is
     /// missing whatever it holds.
     UnreadableRepository(crate::package::port::PackageListError),
-    /// A dotfiles directory the user configured that does not exist.
-    MissingDotfilesDirectory(PathBuf),
+    /// A repository whose path could not be classified, so nothing is known about
+    /// what is at it. Kept apart from
+    /// [`UnreadableRepository`](Self::UnreadableRepository) because that one says a
+    /// directory is there: this one cannot say even that.
+    UncheckableRepository(crate::package::port::PackageListError),
+    /// A dotfiles directory the user configured that is not a directory, and why
+    /// not. The reason is carried because it decides both the sentence and
+    /// whether any remedy is offered.
+    AbsentDotfilesDirectory {
+        /// The configured path.
+        path: PathBuf,
+        /// What is there instead of a directory.
+        reason: crate::fs::AbsentReason,
+    },
     /// Anything else worth saying, already worded.
     Other(String),
 }
@@ -39,11 +51,18 @@ pub(super) enum NameCollision {
 }
 
 impl ApplyWarning {
-    /// Whether any of `warnings` is an [`UnreadableRepository`](Self::UnreadableRepository).
+    /// Whether any of `warnings` is a repository selfie could not read through.
+    ///
+    /// Both kinds count. A directory that would not list and a path that would not
+    /// classify are alike in the one way that matters to a caller deciding whether
+    /// its collection is complete: it is not.
     pub(super) fn any_unreadable_repository(warnings: &[Self]) -> bool {
-        warnings
-            .iter()
-            .any(|warning| matches!(warning, Self::UnreadableRepository(_)))
+        warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Self::UnreadableRepository(_) | Self::UncheckableRepository(_)
+            )
+        })
     }
 
     /// Emit this warning on the event stream it belongs to.
@@ -59,9 +78,16 @@ impl ApplyWarning {
                     .send_warning(format!("Failed to load standalone dotfiles: {e}"))
                     .await;
             }
-            Self::MissingDotfilesDirectory(path) => {
+            Self::UncheckableRepository(e) => {
                 sender
-                    .send_warning(super::directory::missing_warning(&path))
+                    .send_warning(format!(
+                        "Could not check the standalone dotfiles directory: {e}"
+                    ))
+                    .await;
+            }
+            Self::AbsentDotfilesDirectory { path, reason } => {
+                sender
+                    .send_warning(super::directory::absent_warning(&path, &reason))
                     .await;
             }
             Self::Other(message) => sender.send_warning(message).await,
@@ -83,10 +109,22 @@ pub(super) fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> Operatio
                 .is_some_and(|spec_name| spec_name == requested))
     });
 
+    // Derived from what the directory turned out to be, not from the fact that some
+    // repository failed: the two unreadable states take different sentences, and
+    // saying "could not be listed" about a symlink loop sends the user to look
+    // inside a directory that may not exist.
     let reason = if unloadable {
         NoSuchPackageReason::NotLoaded
-    } else if ApplyWarning::any_unreadable_repository(warnings) {
+    } else if warnings
+        .iter()
+        .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)))
+    {
         NoSuchPackageReason::MaybeInUnlistableDirectory
+    } else if warnings
+        .iter()
+        .any(|w| matches!(w, ApplyWarning::UncheckableRepository(_)))
+    {
+        NoSuchPackageReason::MaybeInUncheckableDirectory
     } else {
         NoSuchPackageReason::NotFound
     };

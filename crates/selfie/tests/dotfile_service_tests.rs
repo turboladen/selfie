@@ -534,6 +534,12 @@ impl TestDirs {
 struct CancelOnReadOf(RealFileSystem, PathBuf, CancellationToken);
 
 impl selfie::fs::FileSystem for CancelOnReadOf {
+    // Delegated: this decorator's subject is when the token is canceled, not what is
+    // at a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.0.directory_state(path)
+    }
+
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         if path == self.1 {
             self.2.cancel();
@@ -632,6 +638,11 @@ impl selfie::fs::FileSystem for HomeAt {
         self.0.is_directory(path)
     }
 
+    // Delegated: this decorator's subject is the home directory, not directory state.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.0.directory_state(path)
+    }
+
     fn irregular_target_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -717,6 +728,12 @@ struct SymlinkAppearsAfterFirstLook {
 }
 
 impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
+    // Delegated: this decorator's subject is the symlink question's second answer, not
+    // what is at a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
     fn is_directory(
         &self,
         path: &selfie::fs::TargetPath,
@@ -816,6 +833,12 @@ struct SecondLookIsAnUnknownRefusal {
 }
 
 impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
+    // Delegated: this decorator's subject is the second symlink answer, not what is at
+    // a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
     fn symlink_refusal(
         &self,
         path: &selfie::fs::TargetPath,
@@ -922,6 +945,11 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         path: &selfie::fs::TargetPath,
     ) -> Result<bool, selfie::fs::FileSystemError> {
         self.inner.is_directory(path)
+    }
+
+    // Delegated: this decorator's subject is a failing write, not directory state.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
     }
 
     fn write_file_private(
@@ -1958,6 +1986,33 @@ async fn apply_by_name_says_an_unlistable_directory_may_hold_the_package() {
     );
 }
 
+// A symlink loop at the dotfiles directory is not a directory that could not be
+// listed, and the reason says so. "Could not be listed" asserts a directory is there
+// holding entries selfie cannot see, which sends the user to look inside something
+// that may not exist.
+//
+// The pair with the test above is the point: two states, two reasons. A single test
+// asserting "some unreadable reason" would pass with both collapsed into one.
+#[tokio::test]
+async fn apply_by_name_says_an_unchecked_directory_is_unknown_rather_than_unlistable() {
+    let dirs = TestDirs::new();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    std::os::unix::fs::symlink(&dirs.dotfiles_dir, &dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(
+        dirs.service_with_dotfiles()
+            .apply("standalone", ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_no_such_package(
+        &events,
+        "standalone",
+        selfie::package::event::NoSuchPackageReason::MaybeInUncheckableDirectory,
+    );
+}
+
 // A spec that failed to parse is dropped before the name is looked for, so "no
 // package named" would send the user looking for a file that is there.
 #[tokio::test]
@@ -2896,12 +2951,16 @@ async fn track_standalone_refuses_a_missing_dotfiles_directory_and_does_not_crea
     );
 }
 
-// A directory that exists and cannot be listed is a refusal, not an absence.
-// `filesystem.path_exists` reads false for a symlink loop exactly as it does
-// for a missing path, and the "does not exist" sentence carries a `mkdir -p`
-// hint that cannot work on a path that is already there.
+// A symlink loop is a path nothing is known about, and it refuses. Two sentences
+// it must not get: "does not exist", which carries a `mkdir -p` hint that cannot
+// work on a path already there, and "could not be listed", which claims a
+// directory is there hiding entries when no such thing has been established.
+//
+// The wording is asserted, not only the refusal. Every state refuses, so a test
+// checking that a refusal happened cannot tell the states apart, and this one
+// could not before: it named a classification its assertions never reached.
 #[tokio::test]
-async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistable() {
+async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unknown() {
     let dirs = TestDirs::new();
     let target_file = dirs.target_dir.join("starship.toml");
     std::fs::write(&target_file, "format = \"$all\"").unwrap();
@@ -2922,12 +2981,20 @@ async fn track_standalone_reports_a_symlink_loop_dotfiles_directory_as_unlistabl
         "got: {message}"
     );
     assert!(
+        message.contains("could not be checked"),
+        "a loop is a path nothing is known about, got: {message}"
+    );
+    assert!(
+        !message.contains("could not be listed"),
+        "nothing established that a directory is there, got: {message}"
+    );
+    assert!(
         !message.contains("mkdir -p"),
-        "an unlistable directory offers no hint that cannot work, got: {message}"
+        "a path that is already there offers no hint that cannot work, got: {message}"
     );
     assert!(
         !dirs.dotfiles_dir.join("starship.yml").exists(),
-        "nothing must be written when the directory cannot be listed"
+        "nothing must be written when the directory cannot be checked"
     );
     assert!(
         !dirs.dotfiles_dir.join("starship").exists(),
@@ -6871,6 +6938,11 @@ mod symlinked_targets {
                 self.0.is_directory(path)
             }
 
+            // Delegated: this decorator blinds the symlink check only.
+            fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+                self.0.directory_state(path)
+            }
+
             fn symlink_refusal(&self, _path: &TargetPath) -> Option<FileSystemError> {
                 None
             }
@@ -8114,39 +8186,64 @@ mod deploy_state_diagnostics {
         );
     }
 
-    // A configured state directory that does not exist is refused by apply and
-    // warned about by drift, naming the setting. The default under the home
-    // directory is created on first write; a directory the user named is not.
+    // A configured state directory that is not there is created by the run that
+    // needs it, and the deploy is recorded in it. It is selfie's own directory
+    // whether the user named the path or took the default, which is what ADR-0005
+    // decision 8.2 settles.
+    //
+    // Refusing here cost a working apply: a user who set `state_directory` had
+    // every dotfile command refuse until they created the directory by hand, and
+    // the refusal named a setting rather than saying what to do with it.
     #[tokio::test]
-    async fn a_missing_configured_state_directory_refuses_apply_and_warns_drift() {
+    async fn a_configured_state_directory_that_is_not_there_is_created_by_the_run() {
         let dirs = TestDirs::new();
         a_package_with_one_dotfile(&dirs);
         std::fs::remove_dir(&dirs.state_dir).unwrap();
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "events: {events:?}");
+        assert!(
+            dirs.target_dir.join("config.toml").exists(),
+            "the dotfile must be deployed"
+        );
+        assert!(
+            state_file(&dirs).exists(),
+            "the deploy must be recorded, which is what the directory is for"
+        );
+
+        // The second run reads what the first wrote. A directory created but not
+        // recorded into would leave drift reporting a first run forever.
+        let events = collect_events(dirs.service().check_drift().await).await;
+        let warnings = warning_messages(&events);
+        assert!(
+            !warnings.iter().any(|w| w.contains("state_directory")),
+            "nothing is wrong with the state directory now: {warnings:?}"
+        );
+    }
+
+    // What still refuses, and why the change above is a narrowing rather than a
+    // removal: creating the directory is the remedy for nothing being there and no
+    // remedy at all for a file in the way. Refused before the deploy, so the run
+    // does not write dotfiles it cannot record.
+    #[tokio::test]
+    async fn a_file_where_the_state_directory_belongs_refuses_apply() {
+        let dirs = TestDirs::new();
+        a_package_with_one_dotfile(&dirs);
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+        std::fs::write(&dirs.state_dir, "not a directory").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
         let message = failure_message(&events);
         assert!(
-            message.contains("state_directory")
-                && message.contains(dirs.state_dir.to_str().unwrap())
-                && message.contains("does not exist"),
-            "apply must refuse and name the missing directory: {message}"
+            message.contains(dirs.state_dir.to_str().unwrap())
+                && message.contains("is a regular file"),
+            "the refusal must name the path and what is there: {message}"
         );
         assert!(
             !dirs.target_dir.join("config.toml").exists(),
             "a dotfile was deployed by a run that could not record it"
-        );
-        assert!(
-            !dirs.state_dir.exists(),
-            "the configured state directory was created rather than required"
-        );
-
-        let events = collect_events(dirs.service().check_drift().await).await;
-        let warnings = warning_messages(&events);
-        assert!(
-            warnings.iter().any(|w| w.contains("state_directory")
-                && w.contains("does not exist")
-                && w.contains("continuing as though nothing had been deployed")),
-            "drift must warn and carry on: {warnings:?}"
         );
     }
 
@@ -10738,6 +10835,95 @@ fn dirs_with_an_unlistable_dotfiles_directory() -> Option<(UnlistableDotfilesDir
     Some((dirs, target))
 }
 
+// The regression guard for ADR-0005 decision 2: a directory selfie could not read is
+// refused whether or not the user configured the path. Configuredness decides whether
+// an **absence** is worth a word, and nothing else.
+//
+// The guard exists because the refusal and the absence warning are decided a few
+// lines apart from the same fact. A change routing the refusal through the
+// configured-or-not rule would make an unconfigured unlistable directory report
+// success having read nothing, and nothing else in the suite would notice. Both
+// halves are asserted in one test on purpose: what has to hold is that the two
+// answers are the same.
+#[tokio::test]
+async fn an_unlistable_dotfiles_directory_is_refused_whether_or_not_it_is_configured() {
+    let Some((dirs, _target)) = dirs_with_an_unlistable_dotfiles_directory() else {
+        eprintln!(
+            "SKIP an_unlistable_dotfiles_directory_is_refused_whether_or_not_it_is_configured"
+        );
+        return;
+    };
+
+    let configured = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+    let unconfigured = collect_events(
+        dirs.service_with_default_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        refused_count(&configured),
+        1,
+        "a configured unlistable directory must refuse: {configured:?}"
+    );
+    assert_eq!(
+        refused_count(&unconfigured),
+        refused_count(&configured),
+        "the refusal must not depend on whether the path was configured: {unconfigured:?}"
+    );
+}
+
+// The other half of the rule, and the reason it is not simply "always warn": an
+// absent default is the ordinary state of anyone who keeps no standalone dotfiles,
+// so it is silent, while an absent configured path is a mistake and is named.
+#[tokio::test]
+async fn an_absent_dotfiles_directory_is_reported_only_when_it_was_configured() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+
+    let configured = collect_events(
+        dirs.service_with_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+    let unconfigured = collect_events(
+        dirs.service_with_default_dotfiles()
+            .apply_all(ApplyOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        dotfiles_directory_warnings(&configured).len(),
+        1,
+        "a configured path that is not there is a mistake worth naming: {configured:?}"
+    );
+    assert!(
+        dotfiles_directory_warnings(&unconfigured).is_empty(),
+        "an absent default is the ordinary case and must stay silent: {unconfigured:?}"
+    );
+    assert_eq!(
+        refused_count(&configured),
+        0,
+        "an absence holds nothing, so there is nothing to refuse: {configured:?}"
+    );
+    assert_eq!(refused_count(&unconfigured), 0, "events: {unconfigured:?}");
+}
+
 // Every standalone dotfile in an unlistable directory was asked for and none can
 // deploy, so the run carries a refusal. The package dotfile still deploys, which
 // is what keeps this a refusal rather than a failure.
@@ -10783,6 +10969,88 @@ async fn apply_by_name_is_not_refused_over_an_unlistable_dotfiles_directory() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
 }
 
+// A dangling symlink at the configured dotfiles directory. The user-visible half of
+// the same defect: apply reported "does not exist" and offered `mkdir -p`, which
+// fails with "No such file or directory" against a path where a link already sits.
+//
+// Asserts the sentence and the hint's absence rather than the warning's presence,
+// because the merge-base binary also warns here and also carries on.
+#[tokio::test]
+async fn apply_all_names_a_dangling_symlink_at_the_dotfiles_directory() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    let destination = dirs.dotfiles_dir.parent().unwrap().join("moved-away");
+    std::os::unix::fs::symlink(&destination, &dirs.dotfiles_dir).unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
+    assert!(
+        warnings[0].contains("is a symlink to nothing"),
+        "got: {}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains(&destination.display().to_string()),
+        "the destination the user has to fix must be named, got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("mkdir"),
+        "mkdir -p cannot create a path a link already occupies, got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("does not exist"),
+        "the path exists; its destination does not, got: {}",
+        warnings[0]
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theme = dark");
+}
+
+// A plain file at the configured dotfiles directory. `mkdir -p` fails with "File
+// exists" here, so the sentence names what is there instead of offering it.
+#[tokio::test]
+async fn apply_all_names_a_plain_file_at_the_dotfiles_directory() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+    let target = dirs.target_dir.join("bat.conf");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "bat",
+        &[("bat.conf", target.to_str().unwrap())],
+    );
+    let service = dirs.service_with_dotfiles();
+    std::fs::remove_dir_all(&dirs.dotfiles_dir).unwrap();
+    std::fs::write(&dirs.dotfiles_dir, "not a directory").unwrap();
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert_eq!(refused_count(&events), 0, "events: {events:?}");
+    let warnings = dotfiles_directory_warnings(&events);
+    assert_eq!(warnings.len(), 1, "events: {events:?}");
+    assert!(
+        warnings[0].contains("is not a directory, it is a regular file"),
+        "got: {}",
+        warnings[0]
+    );
+    assert!(
+        !warnings[0].contains("mkdir"),
+        "mkdir -p fails with \"File exists\" here, got: {}",
+        warnings[0]
+    );
+}
+
 // A configured dotfiles directory that is not there is reported and carries on:
 // it holds nothing, so there is nothing to refuse.
 #[tokio::test]
@@ -10804,8 +11072,8 @@ async fn apply_all_is_not_refused_when_the_dotfiles_directory_is_gone() {
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: ")
-            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+        warnings[0].starts_with("Dotfiles directory ")
+            && warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display()))
             && warnings[0].contains("standalone dotfiles will not be read"),
         "got: {}",
         warnings[0]
@@ -10879,8 +11147,8 @@ async fn list_carries_on_when_the_dotfiles_directory_is_gone() {
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: ")
-            && warnings[0].contains(&dirs.dotfiles_dir.display().to_string())
+        warnings[0].starts_with("Dotfiles directory ")
+            && warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display()))
             && warnings[0].contains("standalone dotfiles will not be read"),
         "got: {}",
         warnings[0]
@@ -10905,7 +11173,7 @@ async fn drift_reports_a_configured_dotfiles_directory_that_is_gone_without_refu
     let warnings = dotfiles_directory_warnings(&events);
     assert_eq!(warnings.len(), 1, "events: {events:?}");
     assert!(
-        warnings[0].starts_with("Dotfiles directory does not exist: "),
+        warnings[0].contains(&format!("{} does not exist", dirs.dotfiles_dir.display())),
         "got: {}",
         warnings[0]
     );

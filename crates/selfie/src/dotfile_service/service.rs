@@ -140,13 +140,13 @@ where
     fn collect_all_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
-        dotfiles_directory_configured: bool,
+        dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         Self::collect_packages(
             package_repo,
             dotfiles_repo,
             NameCollision::PackagesWin,
-            dotfiles_directory_configured,
+            dotfiles_directory_is_expected,
         )
     }
 
@@ -156,14 +156,14 @@ where
     /// Listing must not: both files exist, and a caller asking what is on disk is
     /// asking about the files rather than about what would win.
     ///
-    /// `dotfiles_directory_configured` says whether the user set
-    /// `dotfiles_directory`, which decides whether a dotfiles directory that is
-    /// not there is worth a warning.
+    /// `dotfiles_directory_is_expected` decides whether a dotfiles directory that is
+    /// **not there** is worth a warning, and nothing else. A directory that could not
+    /// be read or classified is refused either way.
     fn collect_packages(
         package_repo: &R,
         dotfiles_repo: Option<&R>,
         collision: NameCollision,
-        dotfiles_directory_configured: bool,
+        dotfiles_directory_is_expected: bool,
     ) -> Result<(Vec<Package>, Vec<ApplyWarning>), crate::package::port::PackageListError> {
         let mut warnings = Vec::new();
 
@@ -198,19 +198,24 @@ where
                     note_unparsable(&output, &mut warnings);
                     packages.extend(output.valid_packages().cloned());
                 }
-                Err(error) => match super::directory::UnlistedDotfilesDirectory::from_list_error(
+                Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
                     error,
-                    dotfiles_directory_configured,
+                    dotfiles_directory_is_expected,
                 ) {
-                    super::directory::UnlistedDotfilesDirectory::UnsetAndMissing => {}
-                    super::directory::UnlistedDotfilesDirectory::ConfiguredAndMissing(path) => {
-                        warnings.push(ApplyWarning::MissingDotfilesDirectory(path));
+                    super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
+                    super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
+                        warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
                     }
-                    // Only a directory that exists and cannot be listed may be
-                    // hiding dotfiles, so only this one refuses the run or fails
-                    // the listing.
+                    // Both refuse the run, because neither can claim the collection
+                    // is complete. They are pushed as different warnings so the
+                    // sentence a user reads says which one happened: one asserts a
+                    // directory is there and unreadable, the other cannot say even
+                    // that.
                     super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
                         warnings.push(ApplyWarning::UnreadableRepository(error));
+                    }
+                    super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
+                        warnings.push(ApplyWarning::UncheckableRepository(error));
                     }
                 },
             }
@@ -289,7 +294,7 @@ where
             None => Self::collect_all_packages(
                 &self.package_repository,
                 self.dotfiles_repository.as_ref(),
-                self.config.configured_dotfiles_directory().is_some(),
+                self.config.dotfiles_directory_is_expected(),
             )
             .map_err(OperationFailure::PackageList),
         };
@@ -381,7 +386,7 @@ where
         let collected = Self::collect_all_packages(
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
-            self.config.configured_dotfiles_directory().is_some(),
+            self.config.dotfiles_directory_is_expected(),
         );
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -451,7 +456,7 @@ where
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
             NameCollision::KeepBoth,
-            self.config.configured_dotfiles_directory().is_some(),
+            self.config.dotfiles_directory_is_expected(),
         );
         let config = self.config.clone();
 

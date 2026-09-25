@@ -13,6 +13,7 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::state::DeployState,
     fs::{
+        AbsentReason, DirectoryState,
         filesystem::{FileSystem, FileSystemError},
         target::{StatePathError, TargetPath, state_file_path},
     },
@@ -31,11 +32,21 @@ const BACKUPS_DIRNAME: &str = "backups";
 pub(super) struct LoadedState {
     path: TargetPath,
     state: DeployState,
+    directory_warning: Option<String>,
 }
 
 impl LoadedState {
     pub(super) fn state(&self) -> &DeployState {
         &self.state
+    }
+
+    /// What to tell the user about the directory this state came from, or `None`.
+    ///
+    /// Present when a configured `state_directory` is not there. Every caller sends
+    /// it, because the load succeeds either way and an empty state that arrives
+    /// silently is indistinguishable from a machine where nothing is deployed.
+    pub(super) fn directory_warning(&self) -> Option<&str> {
+        self.directory_warning.as_deref()
     }
 
     /// Where a deploy keeps a copy of a target it is about to overwrite.
@@ -70,23 +81,19 @@ pub(super) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
     Locate(#[source] StatePathError),
-    /// The configured `state_directory` does not exist.
+    /// Something that is not a directory occupies the state directory's path.
     #[error(
-        "Cannot use the deploy state: state_directory '{}' does not exist. Create it, or change the setting",
-        .0.display()
-    )]
-    Missing(PathBuf),
-    /// The configured `state_directory` exists and is not a directory selfie
-    /// can read.
-    #[error(
-        "Cannot use the deploy state: state_directory '{}' cannot be read as a directory: {source}. Point the setting at a directory selfie can read",
+        "Cannot use the deploy state: '{}' {what}. Remove it, or point state_directory elsewhere",
         .path.display()
     )]
-    Unlistable {
-        path: PathBuf,
-        #[source]
-        source: FileSystemError,
-    },
+    StateDirectoryOccupied { path: PathBuf, what: String },
+    /// The state directory could not be read or could not be classified, so
+    /// selfie cannot tell whether a state it must not overwrite is in there.
+    #[error(
+        "Cannot use the deploy state: '{}' {why}. Point state_directory at a directory selfie can read",
+        .path.display()
+    )]
+    StateDirectoryUnreadable { path: PathBuf, why: String },
     /// Something that is not a regular file sits at the path.
     #[error(
         "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
@@ -141,38 +148,71 @@ pub(super) fn read_only_state_warning(failure: &StateLoadFailure) -> String {
     format!("{failure}; continuing as though nothing had been deployed")
 }
 
+/// Where the deploy state lives, with a warning about its directory when one is
+/// worth making.
 fn deploy_state_path<F: FileSystem>(
     filesystem: &F,
     config: &SelfieConfig,
-) -> Result<TargetPath, StateLoadFailure> {
+) -> Result<(TargetPath, Option<String>), StateLoadFailure> {
     let path = state_file_path(
         filesystem,
         config.state_directory().map(PathBuf::as_path),
         DEPLOY_STATE_FILENAME,
     )
     .map_err(StateLoadFailure::Locate)?;
-    // A directory the user configured must already exist, as `package_directory`
-    // must. Only the default under the home directory is selfie's to create,
-    // which `write_file_private` does on the first write. Checked after the
-    // path rule above, so a relative value is reported as relative rather than
-    // as absent from the working directory.
+    // The state directory is selfie's own, so selfie creates it — whether the user
+    // configured the path or took the default. `write_file_private` creates the
+    // parent on the first write, so an absent directory needs nothing done here
+    // and a read before that first write has nothing to read either way.
     //
-    // Listed as well as stat'ed: `path_exists` answers true for a regular file,
-    // and the state path beneath one then reads as absent, so the load would be
-    // usable and the first save would be the failure. A directory is the one
-    // thing `list_directory` succeeds on.
-    if let Some(configured) = config.state_directory() {
-        if !filesystem.path_exists(configured) {
-            return Err(StateLoadFailure::Missing(configured.clone()));
-        }
-        if let Err(source) = filesystem.list_directory(configured) {
-            return Err(StateLoadFailure::Unlistable {
-                path: configured.clone(),
-                source,
+    // Checked after the path rule above, so a relative value is reported as
+    // relative rather than as absent. The directory is the resolved file's parent
+    // rather than the configured value, so the default gets the same checks: a file
+    // in the way would otherwise surface as a write error after the run had done
+    // its work.
+    let directory = path.path().parent().unwrap_or_else(|| path.path());
+    match filesystem.directory_state(directory) {
+        DirectoryState::Directory => Ok((path, None)),
+        // Nothing is there, and the first write creates it. Said out loud when the
+        // user named the path, because the two ways to reach this are a first run and
+        // a typo, and they are indistinguishable from the run's output otherwise: a
+        // mistyped directory reports every deployed dotfile as untracked, and an
+        // `apply -y` then overwrites edited targets instead of reporting conflicts.
+        // An unnamed default needs no warning, since a first run is its ordinary
+        // state and nothing was typed to get it wrong.
+        DirectoryState::Absent(AbsentReason::Empty) => {
+            let warning = config.state_directory().map(|_| {
+                format!(
+                    "state_directory '{}' is not there yet, so nothing shows as deployed; \
+                     selfie creates it on the first write. Correct the setting if that path \
+                     is a typo",
+                    directory.display()
+                )
             });
+            Ok((path, warning))
+        }
+        // Creating cannot help: something else holds the path. `create_dir_all`
+        // fails here, and it would fail after the run had already deployed.
+        DirectoryState::Absent(reason) => Err(StateLoadFailure::StateDirectoryOccupied {
+            path: directory.to_path_buf(),
+            what: reason.clause(),
+        }),
+        // A path selfie cannot classify may hold a state it must not overwrite, so it
+        // refuses rather than starting from an empty one and writing over whatever is
+        // there.
+        //
+        // `Unlistable` is grouped in to keep the match total, not because this call
+        // can produce it: only a listing discovers that a directory will not open its
+        // entries, and this stats the path. A `0o000` state directory is a
+        // `Directory` here and is refused by the read that follows, which names the
+        // state file rather than the directory.
+        DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
+            Err(StateLoadFailure::StateDirectoryUnreadable {
+                path: directory.to_path_buf(),
+                why: format!("could not be checked: {error}"),
+            })
         }
     }
-    Ok(path)
 }
 
 /// Load the deploy state.
@@ -181,8 +221,8 @@ fn deploy_state_path<F: FileSystem>(
 /// A file that cannot be located, read or parsed, or that is empty, is
 /// unusable, and the failure says which because the fixes differ.
 pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> StateLoad {
-    let path = match deploy_state_path(filesystem, config) {
-        Ok(path) => path,
+    let (path, directory_warning) = match deploy_state_path(filesystem, config) {
+        Ok(pair) => pair,
         Err(failure) => return StateLoad::Unusable(failure),
     };
     // Ahead of the read: `read_file` opens the path, and opening a fifo blocks
@@ -214,6 +254,7 @@ pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieCo
             return StateLoad::Usable(LoadedState {
                 path,
                 state: DeployState::empty(),
+                directory_warning,
             });
         }
         Err(source) => {
@@ -244,7 +285,11 @@ pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieCo
     // character a scanner failure stopped on still get through; the reasoning for
     // accepting those is on `ParseFailure`.
     match crate::yaml::parse(&content) {
-        Ok(state) => StateLoad::Usable(LoadedState { path, state }),
+        Ok(state) => StateLoad::Usable(LoadedState {
+            path,
+            state,
+            directory_warning,
+        }),
         Err(source) => StateLoad::Unusable(StateLoadFailure::Parse {
             path: path.path().to_path_buf(),
             source,
@@ -294,7 +339,7 @@ pub(super) fn save_deploy_state<F: FileSystem>(
 mod tests {
     use super::*;
     use crate::config::SelfieConfigBuilder;
-    use crate::fs::MockFileSystem;
+    use crate::fs::{AbsentReason, DirectoryState, MockFileSystem};
 
     const STATE_DIR: &str = "/state";
     const STATE_FILE: &str = "/state/deploy-state.yml";
@@ -307,57 +352,159 @@ mod tests {
             .build()
     }
 
-    // A filesystem on which the configured state directory exists and lists.
+    // A filesystem on which the state directory is a directory. Every test whose
+    // subject is the state file rather than the directory starts here.
     fn under_a_state_directory() -> MockFileSystem {
         let mut fs = MockFileSystem::default();
-        fs.mock_path_exists(PathBuf::from(STATE_DIR), true);
-        fs.mock_list_directory(PathBuf::from(STATE_DIR), &[]);
+        fs.mock_directories_exist();
         fs
     }
 
-    // A configured directory that does not exist is refused before the file is
-    // looked for, with the setting named: nothing else on the mock is expected,
-    // so looking further would panic.
+    // A configured directory that is not there is selfie's to create, exactly as
+    // the default is, so the load is usable and empty and the first write creates
+    // the directory. This is the behavior ADR-0005 decision 8.2 settles: refusing
+    // here made a configured `state_directory` a setting the user had to create by
+    // hand before any dotfile command would run.
     #[test]
-    fn a_missing_configured_state_directory_is_refused_by_name() {
+    fn a_configured_state_directory_that_is_not_there_is_created_rather_than_refused() {
         let mut fs = MockFileSystem::default();
-        fs.mock_path_exists(PathBuf::from(STATE_DIR), false);
-
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
-
-        assert!(
-            message.contains("state_directory")
-                && message.contains(STATE_DIR)
-                && message.contains("does not exist"),
-            "the refusal must name the setting, the directory and the condition: {message}"
-        );
-    }
-
-    // A configured path that exists but is not a directory is refused before
-    // the file is looked for, and apart from a missing one: "create it" is the
-    // wrong remedy for a path that is already taken. The state file's own
-    // existence is not mocked, so reaching that check would panic.
-    #[test]
-    fn a_configured_state_directory_that_is_not_a_directory_is_refused() {
-        let mut fs = MockFileSystem::default();
-        fs.mock_path_exists(PathBuf::from(STATE_DIR), true);
-        fs.expect_list_directory().returning(|_| {
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("Not a directory"),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
             )))
         });
 
+        let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            state.entries().is_empty(),
+            "a directory that is not there holds no state: {state:?}"
+        );
+    }
+
+    // Creating it is right, and saying nothing about it is not: a mistyped
+    // `state_directory` reaches exactly this arm, and the run then reports every
+    // deployed dotfile as untracked. The warning names the path and the setting, so
+    // the two ways to get here can be told apart from the output.
+    #[test]
+    fn a_configured_state_directory_that_is_not_there_is_warned_about() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
+            )))
+        });
+
+        let StateLoad::Usable(loaded) = load_deploy_state(&fs, &config_with_state_dir()) else {
+            panic!("a directory that is not there is selfie's to create");
+        };
+        let warning = loaded
+            .directory_warning()
+            .expect("a configured directory that is not there is worth a word");
+
+        assert!(
+            warning.contains(STATE_DIR) && warning.contains("state_directory"),
+            "the warning must name the path and the setting: {warning}"
+        );
+    }
+
+    // The default path gets none, because a first run is its ordinary state and
+    // nothing was typed to get it wrong. This is the control: without it, warning on
+    // every state directory would pass the test above.
+    #[test]
+    fn an_unset_default_state_directory_is_not_warned_about() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
+            )))
+        });
+        fs.expect_expand_path()
+            .returning(|_| Ok(PathBuf::from("/home/me")));
+
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .build();
+
+        let StateLoad::Usable(loaded) = load_deploy_state(&fs, &config) else {
+            panic!("the default is selfie's to create");
+        };
+
+        assert_eq!(
+            loaded.directory_warning(),
+            None,
+            "an unset default is silent"
+        );
+    }
+
+    // The same for the default path, which no setting names. Both take one rule.
+    #[test]
+    fn a_default_state_directory_that_is_not_there_is_created_rather_than_refused() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
+            )))
+        });
+        fs.expect_expand_path()
+            .returning(|_| Ok(PathBuf::from("/home/me")));
+
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .build();
+
+        let state = state_of(load_deploy_state(&fs, &config));
+
+        assert!(state.entries().is_empty(), "got: {state:?}");
+    }
+
+    // A path something else occupies is still refused, and this is what makes the
+    // change above a narrowing rather than a removal: creating the directory is the
+    // remedy for nothing being there, and no remedy at all for a file in the way.
+    // `create_dir_all` fails on it, and it would fail after the run had deployed.
+    #[test]
+    fn a_state_directory_with_a_file_in_the_way_is_refused() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Occupied {
+            kind: "regular file",
+        }));
+
         let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
 
         assert!(
-            message.contains("state_directory")
-                && message.contains(STATE_DIR)
-                && message.contains("cannot be read as a directory"),
-            "the refusal must name the setting, the path and the condition: {message}"
+            message.contains(STATE_DIR) && message.contains("is a regular file"),
+            "the refusal must name the path and what is there: {message}"
         );
         assert!(
-            !message.contains("does not exist"),
-            "a path that exists was reported as missing: {message}"
+            !message.contains("does not exist") && !message.contains("is not there"),
+            "a path something occupies was reported as absent: {message}"
+        );
+    }
+
+    // A path nothing is known about may hold a deploy state, and starting from an
+    // empty one would write over it. Refuses rather than guessing it is empty.
+    #[test]
+    fn a_state_directory_that_cannot_be_checked_is_refused() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Unknown(std::sync::Arc::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        )));
+
+        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+
+        assert!(
+            message.contains(STATE_DIR) && message.contains("could not be checked"),
+            "got: {message}"
         );
     }
 

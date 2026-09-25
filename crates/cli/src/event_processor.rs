@@ -8,7 +8,7 @@
 use futures::StreamExt;
 use selfie::package::{
     event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
-    port::{PackageError, PackageListError, PackageParseKind},
+    port::{PackageError, PackageParseKind},
 };
 
 use crate::display_manager::{DisplayManager, ErrorDetail};
@@ -225,12 +225,17 @@ impl EventProcessor {
                                 packages_path.display()
                             ));
                         }
-                        OperationFailure::PackageList(
-                            PackageListError::PackageDirectoryNotFound(path),
-                        ) => {
+                        OperationFailure::PackageList(listing) => {
+                            // The reason, not "not found". A plain file or a dangling
+                            // link at the path is not a missing directory, and saying
+                            // it is sends the user to a `mkdir -p` that fails with
+                            // "File exists" or "No such file or directory". The
+                            // repository classified the path once and the error carries
+                            // the answer, so this renders it rather than looking again.
                             self.display.print_error(format!(
-                                "Package directory not found: {}",
-                                path.display()
+                                "Package directory at {} {}",
+                                listing.path().display(),
+                                listing.clause()
                             ));
                             // `selfie config` requires a subcommand and has only
                             // one, `validate`, so it is not a way to set the
@@ -238,10 +243,30 @@ impl EventProcessor {
                             // directory is already missing to a usage error.
                             // The global flag is per-run and the file is the
                             // durable fix, so both are named.
-                            self.display.print_suggestion(format!(
-                                "Create the directory with 'mkdir -p {}', edit 'package_directory' in your config file, or name another for this run with the global flag: 'selfie --package-directory <path> …'",
-                                path.display()
-                            ));
+                            let mut suggestion = String::from(
+                                "Edit 'package_directory' in your config file, or name another for this run with the global flag 'selfie --package-directory <path> …'",
+                            );
+                            // `mkdir -p` answers an empty path and nothing else, so
+                            // the remedy comes from the reason rather than being
+                            // offered for every state. The two settings are named
+                            // either way, since they are the fix when no command is.
+                            // Same quoter and same `--` as the dotfiles directory's
+                            // remedy, because this sentence is pasted too: a path
+                            // holding a space breaks the command, and one beginning
+                            // with a dash is read by mkdir as options.
+                            if let selfie::fs::DirectoryState::Absent(reason) = listing.state()
+                                && let Some(command) = reason.remedy(listing.path())
+                            {
+                                // The command ends the sentence, and nothing may follow
+                                // it. A shell word ends at whitespace, so a comma or a
+                                // period touching the closing quote is inside the word,
+                                // and the pasted command creates a directory whose name
+                                // carries it.
+                                suggestion.push_str(". Or ");
+                                suggestion.push_str(&command[..1].to_lowercase());
+                                suggestion.push_str(&command[1..]);
+                            }
+                            self.display.print_suggestion(suggestion);
                         }
                         OperationFailure::Privilege(refusal) => {
                             self.display.print_error(refusal.message());

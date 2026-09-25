@@ -31,12 +31,24 @@ pub(crate) async fn handle_track(
         return code;
     }
 
-    // A dotfiles directory that is not there holds no names, so the check is
-    // complete, and the service refuses the track itself.
+    // A dotfiles directory that is genuinely not there holds no names, and the
+    // service refuses the track itself. One that will not read cannot say whether
+    // the name is free, so the check refuses rather than answering.
     let repo = create_package_repository(config);
     let dotfiles_repo = create_dotfiles_repository(config);
     if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
-        display.print_error(format!("Cannot use name '{name}': {e}"));
+        // The prefix blames the name, so it belongs only where the name is the
+        // problem. A dotfiles directory that would not read says nothing about the
+        // name the user chose, and telling them they cannot use it sends them off to
+        // pick another one — which will fail in exactly the same way.
+        let message = match &e {
+            namespace::NamespaceValidationError::DotfilesDirectoryUnreadable(_) => e.to_string(),
+            namespace::NamespaceValidationError::Conflict(_)
+            | namespace::NamespaceValidationError::LookupFailed(_) => {
+                format!("Cannot use name '{name}': {e}")
+            }
+        };
+        display.print_error(message);
         return 1;
     }
 

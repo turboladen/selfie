@@ -92,16 +92,20 @@ impl SelfieConfig {
         })
     }
 
-    /// The dotfiles directory as the user configured it, or `None` when the
-    /// sibling default applies.
+    /// Whether a dotfiles directory that is not there is worth reporting.
     ///
-    /// Use this, not [`dotfiles_directory`](Self::dotfiles_directory), to decide
-    /// whether a missing directory is worth reporting: a configured path that
-    /// does not exist is a mistake, an absent default is the ordinary state of
-    /// anyone who keeps no standalone dotfiles.
+    /// True when the user named the path: a configured directory that is not there
+    /// is a mistake they can fix. An absent default is the ordinary state of anyone
+    /// who keeps no standalone dotfiles, and saying so on every command would be
+    /// noise.
+    ///
+    /// This answers whether an **absence** is worth a word, and nothing else. A
+    /// directory selfie could not read or could not classify is refused either way,
+    /// because what is behind it is unknown whether or not the user named the path.
+    /// Deciding that from this rule is the confusion ADR-0005 decision 2 settles.
     #[must_use]
-    pub fn configured_dotfiles_directory(&self) -> Option<&PathBuf> {
-        self.dotfiles_directory.as_ref()
+    pub fn dotfiles_directory_is_expected(&self) -> bool {
+        self.dotfiles_directory.is_some()
     }
 
     /// Get the deploy state directory path.
