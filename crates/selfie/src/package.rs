@@ -246,6 +246,34 @@ pub(crate) fn spec_name_of(path: &std::path::Path) -> Option<String> {
         .and_then(spec_name_from_file_name)
 }
 
+/// `items` grouped by the package name each one's file name claims, each group
+/// sorted. An item whose file name claims no name is left out.
+///
+/// The one grouping of files by package name, so every caller asking which files
+/// claim one name gets the same answer.
+pub(crate) fn group_by_spec_name<T, I, F>(
+    items: I,
+    file_name: F,
+) -> std::collections::BTreeMap<String, Vec<T>>
+where
+    T: Ord,
+    I: IntoIterator<Item = T>,
+    F: Fn(&T) -> Option<&str>,
+{
+    let mut groups: std::collections::BTreeMap<String, Vec<T>> = std::collections::BTreeMap::new();
+    for item in items {
+        if let Some(name) = file_name(&item).and_then(spec_name_from_file_name) {
+            groups.entry(name).or_default().push(item);
+        }
+    }
+    // Sorted, because enumeration order differs between file systems and a caller
+    // may name every item in a group.
+    for group in groups.values_mut() {
+        group.sort();
+    }
+    groups
+}
+
 /// An unrecognized key, already worded for the level it was found at.
 #[derive(Debug, Clone)]
 pub(crate) struct UnknownKey {

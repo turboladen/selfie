@@ -212,8 +212,13 @@ argument — is rejected by the argument parser before any of this applies, and 
 | `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
-`selfie package install` does. A name that matches no package, or names a package file that could
-not be loaded, is a failure and exits `1` with nothing deployed.
+`selfie package install` does. A name that matches no package, names a package file that could not
+be loaded, or is claimed by several package files (such as `bat.yml` and `bat.yaml`), is a failure
+and exits `1` with nothing deployed. Without a name, such a set of files is refused, counted, and
+the rest of the run carries on, when one of them failed to parse or declares dotfiles for the
+current environment; a set that would deploy nothing here is left to `selfie package install` to
+refuse. A named package that declares no dotfiles for the current environment says so and exits `0`:
+there is nothing to apply on this machine.
 
 ### A refusal is not a success
 
@@ -245,7 +250,10 @@ check exits `1`. A secret-bearing entry is not a refusal: drift reports it as no
 checking it would run its commands, and counts it apart. A dotfiles directory that exists but cannot
 be listed counts as one refusal for `selfie apply` with no package name, and for
 `selfie dotfiles drift`. Every standalone dotfile in it was part of the run and none could be read,
-while the package dotfiles still deploy or are still checked.
+while the package dotfiles still deploy or are still checked. A package file that cannot be loaded
+counts the same way, one refusal each, since nothing it declares was deployed or checked: every such
+file in the package directory, and one in the dotfiles directory unless the package directory
+already has a spec of that name, which it only warns about.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 
