@@ -4341,7 +4341,7 @@ mod secret_bearing {
 
     // A link that appears while the provider command is running.
     //
-    // The check in `usable_target` runs before the resolve, so its answer is stale by
+    // The check in `classify_entry` runs before the resolve, so its answer is stale by
     // the time the target is read. The second look, immediately before the read,
     // finds the new link and the entry replaces it; the read, which refuses a link
     // itself, is the layer behind that look.
@@ -7105,7 +7105,7 @@ mod symlinked_targets {
     // The writer refuses on its own, with the hoisted check taken out of the way.
     //
     // This is the TOCTOU defense, and the half of the fix nothing else observes:
-    // with the `handle_apply` check in place, reverting `perform_deploy` to a
+    // with `classify_entry`'s check in place, reverting `perform_deploy` to a
     // following write fails no other test in the workspace. Without this test a
     // reader can find the writer redundant, delete it, and see a green suite.
     //
@@ -9969,7 +9969,7 @@ mod repository_writes_do_not_follow_symlinks {
 // same defect on the other side of the copy: a fifo committed into the
 // repository is read as a source, and reading one blocks until a writer arrives.
 //
-// Four reads, not one: `handle_apply`, `handle_check_drift`, `resolve_content`'s
+// Three reads: `read_repo_file`, which apply and drift share, `resolve_content`'s
 // `Template` arm, and `read_referenced_file`. Each runs through `within_deadline`,
 // so a read that blocks fails its test. selfie-lwv5
 mod irregular_sources {

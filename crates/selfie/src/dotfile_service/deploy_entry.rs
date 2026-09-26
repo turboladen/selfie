@@ -166,7 +166,7 @@ async fn perform_deploy<F: FileSystem>(
         // in both arms, so neither repeats it.
         //
         // Reaching the refusal arm here means the link or fifo appeared between
-        // the checks in `handle_apply` and this write. It is exercised by
+        // `classify_entry`'s checks and this write. It is exercised by
         // `the_writer_refuses_even_when_the_check_is_blinded`, which asserts only
         // that the message names a symlink — not the `Skipping '{source}': `
         // wrapper. Share `refusal_warning` rather than repeating the wording, or

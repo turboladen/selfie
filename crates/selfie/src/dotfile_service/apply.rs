@@ -15,28 +15,24 @@ use crate::{
     commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
-        deploy::{DeployDecision, compute_checksum, deploy_decision, resolve_source_path},
+        deploy::{DeployDecision, compute_checksum, deploy_decision},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
         state::{DeployState, DriftType},
     },
-    fs::{
-        filesystem::{FileSystem, repository_read_refusal},
-        target::{deploy_target, repository_path},
-    },
+    fs::filesystem::FileSystem,
     package::{
-        ContentSource, Package,
+        Package,
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
     },
-    paths::is_within,
 };
 
+use super::classify::{Classified, RepoFile, RepoRead, classify_entry, read_repo_file};
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
 };
 use super::port::ApplyOptions;
-use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
-use super::secret::{SecretApply, SecretOutcome, programs_of, secret_origin};
+use super::secret::{SecretApply, SecretOutcome, programs_of};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
 
 /// Why an apply stopped before its last entry.
@@ -78,6 +74,19 @@ impl std::fmt::Display for Stop {
             Self::Unrecorded(reason) => f.write_str(reason),
         }
     }
+}
+
+/// How one entry ended, for the loop to tally once.
+enum EntryOutcome {
+    Deployed,
+    /// In sync, or only previewed by a dry run.
+    Skipped,
+    Conflicted,
+    /// Refused or failed, and already reported as whichever it was.
+    Refused,
+    /// Written, and the deploy state could not record it. Carries why the run
+    /// stops.
+    Unrecorded(String),
 }
 
 /// What an apply did with each entry, counted as it goes.
@@ -300,299 +309,196 @@ where
             // is on.
             let failed = || Stop::Entry(entry.target().to_string());
 
-            let source = match entry.content_source() {
-                Ok(ContentSource::RepoFile(source)) => source,
-
-                // Secret-bearing entries resolve their content by running
-                // commands, compare it in memory, and record nothing.
-                Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
-                    if let Some(program) = programs_of(entry)
-                        .into_iter()
-                        .find(|program| failed_programs.contains(*program))
-                    {
-                        sender
-                            .send_warning(format!(
-                                "Skipping '{}': an earlier `{program}` command failed; no \
-                                 command was run",
-                                entry.target()
-                            ))
-                            .await;
-                        if let Some(stop) = tally.refuse(config, token, failed()) {
-                            stopped = Some(stop);
-                            break 'packages;
-                        }
-                        continue;
+            // Settled once for the entry, and tallied once below, so every way an
+            // entry can end reports, counts and stops through one place.
+            let outcome = 'entry: {
+                let classified = match classify_entry(filesystem, &base_dir, entry) {
+                    Ok(classified) => classified,
+                    Err(refused) => {
+                        refused.send(sender).await;
+                        break 'entry EntryOutcome::Refused;
                     }
-                    match secret_apply.apply(entry, secret_origin(&content)).await {
-                        SecretOutcome::Deployed => tally.deployed += 1,
-                        SecretOutcome::Skipped => tally.skipped += 1,
-                        SecretOutcome::Conflicted => tally.conflicts += 1,
-                        outcome @ (SecretOutcome::Failed | SecretOutcome::CommandFailed(_)) => {
-                            if let SecretOutcome::CommandFailed(program) = outcome {
+                };
+
+                let repo = match classified {
+                    Classified::RepoFile(repo) => repo,
+                    // Secret-bearing entries resolve their content by running
+                    // commands, compare it in memory, and record nothing.
+                    Classified::SecretBearing(secret) => {
+                        if let Some(program) = programs_of(entry)
+                            .into_iter()
+                            .find(|program| failed_programs.contains(*program))
+                        {
+                            sender
+                                .send_warning(format!(
+                                    "Skipping '{}': an earlier `{program}` command failed; no \
+                                     command was run",
+                                    entry.target()
+                                ))
+                                .await;
+                            break 'entry EntryOutcome::Refused;
+                        }
+                        break 'entry match secret_apply.apply(&secret).await {
+                            SecretOutcome::Deployed => EntryOutcome::Deployed,
+                            SecretOutcome::Skipped => EntryOutcome::Skipped,
+                            SecretOutcome::Conflicted => EntryOutcome::Conflicted,
+                            SecretOutcome::Failed => EntryOutcome::Refused,
+                            SecretOutcome::CommandFailed(program) => {
                                 failed_programs.insert(program);
+                                EntryOutcome::Refused
                             }
-                            if let Some(stop) = tally.refuse(config, token, failed()) {
-                                stopped = Some(stop);
-                                break 'packages;
-                            }
-                        }
+                        };
                     }
-                    continue;
-                }
+                };
 
-                // Refused before anything runs. For a template that means the
-                // binding commands — real credential fetches, which can raise a
-                // biometric prompt — never execute for a file that provably
-                // cannot be rendered.
-                Err(invalid) => {
-                    sender
-                        .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
-                        .await;
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
-                        stopped = Some(stop);
-                        break 'packages;
+                let RepoRead {
+                    source_content,
+                    current,
+                } = match read_repo_file(filesystem, &repo) {
+                    Ok(read) => read,
+                    Err(refused) => {
+                        refused.send(sender).await;
+                        break 'entry EntryOutcome::Refused;
                     }
-                    continue;
-                }
-            };
+                };
+                let RepoFile {
+                    source,
+                    source_path,
+                    target: target_path,
+                } = repo;
+                let source_checksum = compute_checksum(source_content.as_bytes());
 
-            let source_path = resolve_source_path(&base_dir, source);
+                let target_exists = current.is_some();
+                let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
-            // The one target rule. A relative target would write relative to CWD,
-            // which is surprising and potentially dangerous; a `~user/…` one names
-            // a home directory selfie does not resolve.
-            //
-            let target_path = match deploy_target(filesystem, entry.target()) {
-                Ok(path) => path,
-                Err(rejection) => {
-                    sender
-                        .send_warning(target_refusal(entry.target(), rejection))
-                        .await;
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
-                        stopped = Some(stop);
-                        break 'packages;
-                    }
-                    continue;
-                }
-            };
+                // State is keyed by the expanded target, the one path that has one
+                // file and one checksum however many sources name it.
+                let target_key = target_path.display().to_string();
+                let unit = DeployUnit {
+                    source_path: &source_path,
+                    target_path: &target_path,
+                    target_key: &target_key,
+                    source_content: &source_content,
+                    source_checksum: &source_checksum,
+                    source,
+                    backups: backups_root.as_deref(),
+                };
 
-            // After the target rule, as drift and the secret-bearing path ask it,
-            // so an entry failing both gets the same first reason from every
-            // command. Lexical: catches a written `..`, not a planted symlink. See
-            // `crate::paths::is_within`.
-            if !is_within(&source_path, &base_dir) {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{source}': source path escapes YAML base directory"
-                    ))
-                    .await;
-                if let Some(stop) = tally.refuse(config, token, failed()) {
-                    stopped = Some(stop);
-                    break 'packages;
-                }
-                continue;
-            }
+                let drift = loaded
+                    .as_ref()
+                    .map_or(&empty, LoadedState::state)
+                    .detect_drift(&target_key, &source_checksum, &target_checksum);
+                let decision =
+                    deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
 
-            // Ahead of every read of the target below, not merely ahead of the
-            // write. Reading a fifo blocks until a writer opens it, and a
-            // character device would be read from, then written to. A symlink is
-            // refused here whatever it points at and whether or not its content
-            // already matches: reading it would checksum the destination, a file
-            // selfie was never asked to manage, and a repository-file entry never
-            // writes through a link, so there is no outcome the read could change.
-            if let Some(refusal) = guard_refusal(filesystem, &target_path) {
-                sender.send_warning(refusal_warning(source, &refusal)).await;
-                if let Some(stop) = tally.refuse(config, token, failed()) {
-                    stopped = Some(stop);
-                    break 'packages;
-                }
-                continue;
-            }
-
-            // Immediately ahead of the read, which is what this guards: a fifo
-            // source blocks `read_file` until a writer arrives and hangs apply.
-            if let Some(refusal) =
-                filesystem.irregular_target_refusal(&repository_path(&source_path))
-            {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{source}': {}. Replace it with a regular file.",
-                        repository_read_refusal(&refusal)
-                    ))
-                    .await;
-                if let Some(stop) = tally.refuse(config, token, failed()) {
-                    stopped = Some(stop);
-                    break 'packages;
-                }
-                continue;
-            }
-
-            // Read source file
-            let source_content = match filesystem.read_file(&source_path) {
-                Ok(content) => content,
-                Err(e) => {
-                    sender
-                        .send_warning(format!(
-                            "Cannot read source '{}': {e}",
-                            source_path.display()
-                        ))
-                        .await;
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
-                        stopped = Some(stop);
-                        break 'packages;
-                    }
-                    continue;
-                }
-            };
-
-            let source_checksum = compute_checksum(source_content.as_bytes());
-
-            // Ahead of the decision, like the fifo refusal, so it holds under
-            // `auto_accept`, under an interactive resolver, and in a dry run. The
-            // bytes read here are also what the conflict diff shows, so the
-            // checksum and the diff cannot disagree about the target.
-            let current = match readable_target(filesystem, source, &target_path) {
-                Ok(current) => current,
-                Err(warning) => {
-                    sender.send_warning(warning).await;
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
-                        stopped = Some(stop);
-                        break 'packages;
-                    }
-                    continue;
-                }
-            };
-            let target_exists = current.is_some();
-            let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
-
-            // State is keyed by the expanded target, the one path that has one
-            // file and one checksum however many sources name it.
-            let target_key = target_path.display().to_string();
-            let unit = DeployUnit {
-                source_path: &source_path,
-                target_path: &target_path,
-                target_key: &target_key,
-                source_content: &source_content,
-                source_checksum: &source_checksum,
-                source,
-                backups: backups_root.as_deref(),
-            };
-
-            let drift = loaded
-                .as_ref()
-                .map_or(&empty, LoadedState::state)
-                .detect_drift(&target_key, &source_checksum, &target_checksum);
-            let decision =
-                deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
-
-            // Every arm that writes names what the target held when it decided, and
-            // the one write below carries it out, so the two ways to reach a write
-            // cannot count or record it differently.
-            let write = match decision {
-                DeployDecision::Deploy => Some(Decided::Now(current.as_deref())),
-                DeployDecision::Skip(reason) => {
-                    // Record an untracked but in-sync entry so future runs see
-                    // `DriftType::None`. A symlinked target never reaches here: the
-                    // guard above refused it before the read.
-                    if drift == DriftType::NotTracked
-                        && !options.dry_run
-                        && let Some(reason) = record_and_save(
-                            filesystem,
-                            &mut loaded,
-                            sender,
-                            Recorded::InSync,
-                            &unit,
-                        )
-                        .await
-                    {
-                        stopped = Some(Stop::Unrecorded(reason));
-                        break 'packages;
-                    }
-
-                    sender
-                        .send_dotfile_skipped(source_path.display(), target_path.display(), &reason)
-                        .await;
-                    tally.skipped += 1;
-                    None
-                }
-                DeployDecision::Conflict => {
-                    // Built only where it is read. It renders two whole files, and
-                    // a run that accepts without asking reads it nowhere.
-                    //
-                    // An absent target decides `Deploy`, so a conflict always has
-                    // bytes; the default is never reached. Lossy only for
-                    // display: the checksum above compared the raw bytes.
-                    let render = || {
-                        let target_content =
-                            String::from_utf8_lossy(current.as_deref().unwrap_or_default());
-                        unified_diff(
-                            &target_content,
-                            &source_content,
-                            &target_path.display().to_string(),
-                            &source_path.to_string_lossy(),
-                        )
-                    };
-                    // Rendered at most once. A declined conflict reaches the
-                    // resolver branch and then the reported-conflict branch, and
-                    // both read the diff.
-                    let mut rendered: Option<String> = None;
-
-                    // Determine whether to accept: --yes flag, interactive
-                    // resolver, or neither (report the conflict).
-                    //
-                    // A dry run accepts nothing, whatever else was asked for,
-                    // and is asked first for that reason. It writes nothing, so
-                    // there is no answer to honor, and an accept would carry the
-                    // entry to the write's dry-run preview and report it as
-                    // skipped -- leaving the summary at zero conflicts. The preview
-                    // someone runs to see what `--yes` would overwrite is the one
-                    // place that count has to be right.
-                    let mut decided = Decided::Now(current.as_deref());
-                    let accept = if options.dry_run {
-                        false
-                    } else if options.auto_accept {
-                        true
-                    } else if let Some(resolver) = &options.conflict_resolver {
-                        // The prompt waits on the user, so what the decision read
-                        // may no longer be at the target when the write comes.
-                        decided = Decided::BeforePrompt;
-                        let src = source_path.display().to_string();
-                        let tgt = target_path.display().to_string();
-                        let d = rendered.get_or_insert_with(&render).clone();
-                        let r = Arc::clone(resolver);
-                        tokio::task::spawn_blocking(move || {
-                            r.resolve(
-                                &tgt,
-                                ConflictDetail::Diff {
-                                    source: &src,
-                                    diff: &d,
-                                },
+                // Every arm that writes names what the target held when it decided, and
+                // the one write below carries it out, so the two ways to reach a write
+                // cannot count or record it differently.
+                let decided = match decision {
+                    DeployDecision::Deploy => Decided::Now(current.as_deref()),
+                    DeployDecision::Skip(reason) => {
+                        // Record an untracked but in-sync entry so future runs see
+                        // `DriftType::None`. A symlinked target never reaches here: the
+                        // guard above refused it before the read.
+                        if drift == DriftType::NotTracked
+                            && !options.dry_run
+                            && let Some(reason) = record_and_save(
+                                filesystem,
+                                &mut loaded,
+                                sender,
+                                Recorded::InSync,
+                                &unit,
                             )
-                        })
-                        .await
-                        .unwrap_or(ConflictResolution::Skip)
-                            == ConflictResolution::Accept
-                    } else {
-                        false
-                    };
+                            .await
+                        {
+                            break 'entry EntryOutcome::Unrecorded(reason);
+                        }
 
-                    if accept {
-                        Some(decided)
-                    } else {
                         sender
-                            .send_dotfile_conflict(
+                            .send_dotfile_skipped(
                                 source_path.display(),
                                 target_path.display(),
-                                rendered.get_or_insert_with(&render),
+                                &reason,
                             )
                             .await;
-                        tally.conflicts += 1;
-                        None
+                        break 'entry EntryOutcome::Skipped;
                     }
-                }
-            };
+                    DeployDecision::Conflict => {
+                        // Built only where it is read. It renders two whole files, and
+                        // a run that accepts without asking reads it nowhere.
+                        //
+                        // An absent target decides `Deploy`, so a conflict always has
+                        // bytes; the default is never reached. Lossy only for
+                        // display: the checksum above compared the raw bytes.
+                        let render = || {
+                            let target_content =
+                                String::from_utf8_lossy(current.as_deref().unwrap_or_default());
+                            unified_diff(
+                                &target_content,
+                                &source_content,
+                                &target_path.display().to_string(),
+                                &source_path.to_string_lossy(),
+                            )
+                        };
+                        // Rendered at most once. A declined conflict reaches the
+                        // resolver branch and then the reported-conflict branch, and
+                        // both read the diff.
+                        let mut rendered: Option<String> = None;
 
-            if let Some(decided) = write {
+                        // Determine whether to accept: --yes flag, interactive
+                        // resolver, or neither (report the conflict).
+                        //
+                        // A dry run accepts nothing, whatever else was asked for,
+                        // and is asked first for that reason. It writes nothing, so
+                        // there is no answer to honor, and an accept would carry the
+                        // entry to the write's dry-run preview and report it as
+                        // skipped -- leaving the summary at zero conflicts. The preview
+                        // someone runs to see what `--yes` would overwrite is the one
+                        // place that count has to be right.
+                        let mut decided = Decided::Now(current.as_deref());
+                        let accept = if options.dry_run {
+                            false
+                        } else if options.auto_accept {
+                            true
+                        } else if let Some(resolver) = &options.conflict_resolver {
+                            // The prompt waits on the user, so what the decision read
+                            // may no longer be at the target when the write comes.
+                            decided = Decided::BeforePrompt;
+                            let src = source_path.display().to_string();
+                            let tgt = target_path.display().to_string();
+                            let d = rendered.get_or_insert_with(&render).clone();
+                            let r = Arc::clone(resolver);
+                            tokio::task::spawn_blocking(move || {
+                                r.resolve(
+                                    &tgt,
+                                    ConflictDetail::Diff {
+                                        source: &src,
+                                        diff: &d,
+                                    },
+                                )
+                            })
+                            .await
+                            .unwrap_or(ConflictResolution::Skip)
+                                == ConflictResolution::Accept
+                        } else {
+                            false
+                        };
+
+                        if accept {
+                            decided
+                        } else {
+                            sender
+                                .send_dotfile_conflict(
+                                    source_path.display(),
+                                    target_path.display(),
+                                    rendered.get_or_insert_with(&render),
+                                )
+                                .await;
+                            break 'entry EntryOutcome::Conflicted;
+                        }
+                    }
+                };
+
                 match deploy_and_record(
                     filesystem,
                     sender,
@@ -604,20 +510,28 @@ where
                 )
                 .await
                 {
-                    DeployOutcome::Deployed => tally.deployed += 1,
-                    DeployOutcome::Previewed => tally.skipped += 1,
+                    DeployOutcome::Deployed => EntryOutcome::Deployed,
+                    DeployOutcome::Previewed => EntryOutcome::Skipped,
                     // A refusal or a write failure, already reported as whichever it
                     // was. Here they are the same thing: asked to deploy, did not.
-                    DeployOutcome::Refused => {
-                        if let Some(stop) = tally.refuse(config, token, failed()) {
-                            stopped = Some(stop);
-                            break 'packages;
-                        }
-                    }
-                    DeployOutcome::Unrecorded(reason) => {
-                        stopped = Some(Stop::Unrecorded(reason));
+                    DeployOutcome::Refused => EntryOutcome::Refused,
+                    DeployOutcome::Unrecorded(reason) => EntryOutcome::Unrecorded(reason),
+                }
+            };
+
+            match outcome {
+                EntryOutcome::Deployed => tally.deployed += 1,
+                EntryOutcome::Skipped => tally.skipped += 1,
+                EntryOutcome::Conflicted => tally.conflicts += 1,
+                EntryOutcome::Refused => {
+                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                        stopped = Some(stop);
                         break 'packages;
                     }
+                }
+                EntryOutcome::Unrecorded(reason) => {
+                    stopped = Some(Stop::Unrecorded(reason));
+                    break 'packages;
                 }
             }
         }

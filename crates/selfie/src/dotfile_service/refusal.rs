@@ -253,9 +253,9 @@ pub(super) fn readable_target<F: FileSystem>(
     readable_or_refusal(source, target, read_target_state(filesystem, target))
 }
 
-// The three deploy-side sites that refuse a target by the rule: apply's
-// secret-bearing path, apply's repository-file path, and drift. `TargetRejection`
-// supplies the words so all three say the same thing; this supplies the frame.
+// The frame for a target refused by the rule, which `classify_entry` gives for
+// apply and drift alike. `TargetRejection` supplies the words; this supplies the
+// frame.
 pub(super) fn target_refusal(target: &str, rejection: TargetRejection) -> String {
     format!("Skipping '{target}': {}", rejection.message())
 }
