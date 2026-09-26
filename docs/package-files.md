@@ -1375,8 +1375,10 @@ rewrite the file refuse to save it. See [Unrecognized keys](#unrecognized-keys).
 The fix depends on which you meant, and selfie says so rather than guessing:
 
 ```
-'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'
+'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'. Anchors are legal here; only a name matching a field of this entry is refused
 ```
+
+`selfie dotfiles list` shows the first sentence only, since a table cell has no room for the second.
 
 **Rename the anchor** — `_creds: &v` works exactly as well — or, if you meant the field, drop the
 underscore. Only these four names are affected inside a dotfile entry:
@@ -1408,11 +1410,10 @@ Both cases bite the same way. The keys selfie reads are not the ones you wrote, 
 has less to deploy than the file appears to describe — and with `_dotfiles:` as the only dotfiles
 key, **nothing at all** to deploy, a run that looks completely successful and did nothing.
 
-`selfie apply` therefore **refuses the whole package** and names the key:
+`selfie apply` therefore **refuses the whole package** and names every such key:
 
 ```
-⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'
-⚠ Skipping package 'myapp': unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
+⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'. Anchors are legal here; only a name matching a top-level field is refused. Unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
 ```
 
 The refusal covers the package rather than a single entry, because the problem is in the file's top

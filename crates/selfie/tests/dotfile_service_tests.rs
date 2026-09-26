@@ -15080,3 +15080,148 @@ async fn a_named_package_with_nothing_for_this_environment_says_so() {
         "{all:?}"
     );
 }
+
+// An entry key named like a real field gets the same advice from apply and drift
+// as from `selfie spec validate`: why that anchor is refused where others are
+// legal. A plain misspelling gets none, since no anchor is involved.
+#[tokio::test]
+async fn an_anchor_named_like_an_entry_field_gets_validate_s_advice() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "myapp",
+        &format!(
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    _target: \"x\"\n  \
+             - source: \"b.toml\"\n    target: \"{}\"\n    audt: \"x\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("b").display(),
+        ),
+    );
+    let service = dirs.service();
+
+    for events in [
+        collect_events(service.apply_all(ApplyOptions::default()).await).await,
+        collect_events(service.check_drift().await).await,
+    ] {
+        let warnings = warning_messages(&events);
+        let shadowing = warnings
+            .iter()
+            .find(|w| w.contains("'_target'"))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        let misspelled = warnings
+            .iter()
+            .find(|w| w.contains("'audt'"))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        assert!(shadowing.contains("Anchors are legal here"), "{shadowing}");
+        assert!(!misspelled.contains("Anchors"), "{misspelled}");
+    }
+}
+
+// A top-level key and an environment key named like a real field carry their
+// level's advice too, as validate gives it.
+#[tokio::test]
+async fn a_shadowing_top_level_or_environment_key_gets_its_level_s_advice() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "top",
+        "name: top\nenvironments:\n  test:\n    install: \"echo i\"\n_dotfiles: []\n",
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "env",
+        "name: env\nenvironments:\n  test:\n    install: \"echo i\"\n    _check: \"x\"\n",
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    let find = |package: &str| {
+        warnings
+            .iter()
+            .find(|w| w.starts_with(&format!("Skipping package '{package}'")))
+            .unwrap_or_else(|| panic!("{warnings:?}"))
+    };
+    assert!(find("top").ends_with("only a name matching a top-level field is refused"));
+    assert!(find("env").ends_with("only a name matching a field of this environment is refused"));
+}
+
+// Two keys needing the same advice get it once, after the last key, and the
+// sentence never runs a period into a semicolon.
+#[tokio::test]
+async fn two_shadowing_keys_get_the_advice_once() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "myapp",
+        &format!(
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    _target: \"x\"\n    _vars: \"y\"\n",
+            dirs.target_dir.join("a").display(),
+        ),
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    let warning = warnings
+        .iter()
+        .find(|w| w.contains("'_target'") && w.contains("'_vars'"))
+        .unwrap_or_else(|| panic!("{warnings:?}"));
+    assert_eq!(
+        warning.matches("Anchors are legal here").count(),
+        1,
+        "{warning}"
+    );
+    assert!(!warning.contains(".;"), "{warning}");
+    assert!(warning.ends_with("is refused"), "{warning}");
+}
+
+// At a level holding both kinds of key, the advice follows the keys named like a
+// real field and precedes the plain misspellings, so it never reads as advice
+// about a misspelling. Each file lists the misspelling first.
+#[tokio::test]
+async fn the_advice_follows_the_shadowing_keys_at_every_level() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "entry",
+        &format!(
+            "name: entry\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    audt: \"y\"\n    _target: \"x\"\n",
+            dirs.target_dir.join("a").display(),
+        ),
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "top",
+        "name: top\nconfigs: []\n_dotfiles: []\nenvironments:\n  test:\n    install: \"echo i\"\n",
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "env",
+        "name: env\nenvironments:\n  test:\n    install: \"echo i\"\n    audt: \"x\"\n    \
+         _check: \"y\"\n",
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    for (shadowing, plain) in [
+        ("'_target'", "'audt'"),
+        ("'_dotfiles'", "'configs'"),
+        ("'_check'", "'audt'"),
+    ] {
+        let warning = warnings
+            .iter()
+            .find(|w| w.contains(shadowing))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        let at = |text: &str| warning.find(text).unwrap_or_else(|| panic!("{warning}"));
+        assert!(
+            at(shadowing) < at("Anchors are legal") && at("Anchors are legal") < at(plain),
+            "{warning}"
+        );
+        assert!(warning.contains("is refused. Unknown field"), "{warning}");
+    }
+}

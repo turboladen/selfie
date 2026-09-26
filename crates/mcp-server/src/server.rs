@@ -1202,6 +1202,29 @@ mod tests {
         );
     }
 
+    // The listing's `error` for a refused entry keeps the full sentence, anchor
+    // advice included: an assistant has room for it and needs the remedy.
+    #[tokio::test]
+    async fn the_list_tool_gives_a_shadowing_key_s_advice() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(
+            packages.join("anchor.yml"),
+            "name: anchor\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"a.conf\"\n    target: \"~/.a.conf\"\n    _target: \"x\"\n",
+        )
+        .unwrap();
+
+        let server = server_over(&packages, None);
+        let json = tool_json(&server.selfie_dotfiles_list().await.unwrap());
+
+        assert!(
+            json.to_string().contains("Anchors are legal here"),
+            "got: {json}"
+        );
+    }
+
     // The server reads the dotfiles directory on each call, not once at startup.
     #[tokio::test]
     async fn the_list_tool_reads_a_dotfiles_directory_created_after_startup() {

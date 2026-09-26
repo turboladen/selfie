@@ -896,25 +896,9 @@ fn validate_changed_packages(
         // level says how bad a file is, and what push needs to know is whether it
         // will apply.
         //
-        // Appended only when nothing with the same identity is already reported.
-        // Rules that reach push as validation errors arrive twice otherwise --
-        // once in the validator's words and once in apply's -- and a reader
-        // cannot tell that both name one problem.
         let mut issues = issues;
         if let Some(refusal) = package.spec_refusal(environment) {
-            let category = "ApplyRefusal".to_string();
-            let already = issues
-                .iter()
-                .any(|i| i.category == category || i.message.contains(&refusal.to_string()));
-            if !already {
-                issues.push(PackageValidationIssue {
-                    level: "ERROR".to_string(),
-                    category,
-                    field: "-".to_string(),
-                    message: format!("'selfie apply' would refuse this package: {refusal}"),
-                    location: None,
-                });
-            }
+            issues.extend(apply_refusal_issue(&refusal, &issues));
         }
 
         if !issues.is_empty() {
@@ -930,6 +914,35 @@ fn validate_changed_packages(
     } else {
         Err(SyncError::ValidationFailed { failures })
     }
+}
+
+// Apply's refusal as a push issue, unless the validator already reported every
+// problem in it. Rules that reach push as validation errors arrive twice
+// otherwise, once in the validator's words and once in apply's, and a reader
+// cannot tell that both name one problem.
+//
+// Matched on the field each problem sits at, not on wording: the two describe
+// one key differently (the validator gives the anchor advice as a suggestion),
+// and a refusal covering several keys has no single validator message to match.
+fn apply_refusal_issue(
+    refusal: &crate::package::SpecRefusal,
+    issues: &[super::port::PackageValidationIssue],
+) -> Option<super::port::PackageValidationIssue> {
+    let reported = |field: &String| {
+        issues
+            .iter()
+            .any(|issue| issue.level == "ERROR" && issue.field == *field)
+    };
+    if refusal.fields().iter().all(reported) {
+        return None;
+    }
+    Some(super::port::PackageValidationIssue {
+        level: "ERROR".to_string(),
+        category: "ApplyRefusal".to_string(),
+        field: "-".to_string(),
+        message: format!("'selfie apply' would refuse this package: {refusal}"),
+        location: None,
+    })
 }
 
 /// Collect all changed files from a [`RepoStatus`] into a unified list.
@@ -3323,27 +3336,52 @@ mod name_collision_tests {
     }
 
     // Push asks apply's question, so it cannot ship a file the receiving machine
-    // will refuse. An unknown environment key is the case where that consult is
-    // observable: the validator reports the key per field, apply's refusal names
-    // the environment as well, and the two wordings do not match, so the appended
-    // entry survives the deduplication below.
-    //
-    // The assertion is on that appended entry, not on the push failing: the
-    // validator reports `audt` itself, so this file is refused either way. Weaken
-    // this to `is_err()` and the consult can be deleted with every test green.
+    // will refuse. Every rule apply refuses on is also a validation error today,
+    // so no file makes the consult observable; this asks the helper directly, with
+    // nothing reported, whether it would append the refusal.
     #[test]
-    fn a_push_carrying_a_spec_apply_would_refuse_is_refused() {
-        let spec = "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    audt: \
-                    \"echo a\"\n";
-
-        let Err(error) = push_result(spec) else {
-            panic!("a push carrying a spec apply would refuse must be refused");
-        };
-        let rendered = format!("{error:?}");
-        assert!(
-            rendered.contains("ApplyRefusal"),
-            "the refusal must reach the push report: {rendered}"
+    fn a_refusal_the_validator_did_not_report_is_appended() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
         );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("configs is refused");
+
+        let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported it yet");
+        assert_eq!(issue.category, "ApplyRefusal");
+    }
+
+    // Errors only: a missing section also draws a warning about the current
+    // environment, which is a different problem.
+    fn error_count(spec: &str) -> usize {
+        let Err(super::SyncError::ValidationFailed { failures }) = push_result(spec) else {
+            panic!("the spec must be refused");
+        };
+        failures
+            .iter()
+            .flat_map(|f| &f.issues)
+            .filter(|issue| issue.level == "ERROR")
+            .count()
+    }
+
+    // Each problem is reported once however many keys the refusal covers, and
+    // for an environment key and a missing environment as for a top-level key.
+    #[test]
+    fn a_push_reports_each_refused_problem_once() {
+        let two_keys = "name: myapp\n_dotfiles: []\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        assert_eq!(error_count(two_keys), 2, "two keys, two problems");
+
+        let environment_key =
+            "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    audt: \"x\"\n";
+        assert_eq!(error_count(environment_key), 1, "one environment key");
+
+        let no_environments = "name: myapp\nenvironments: {}\n";
+        assert_eq!(error_count(no_environments), 1, "one missing section");
     }
 
     // A top level selfie could not read back is reported once, not twice.
