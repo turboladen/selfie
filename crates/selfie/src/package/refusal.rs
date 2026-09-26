@@ -16,12 +16,11 @@ use crate::validation::ValidationIssue;
 pub(crate) enum SpecRefusal {
     /// Top-level keys a package does not accept.
     UnknownTopLevelKeys(Vec<UnknownKey>),
-    /// Unrecognized keys inside one environment's mapping, with the environment
-    /// that carries them.
-    UnknownEnvironmentKeys {
-        environment: String,
-        keys: Vec<UnknownKey>,
-    },
+    /// Unrecognized keys inside environment mappings, in name order, each
+    /// environment with its keys. [`Package::listing_refusal`] names every
+    /// environment carrying any; [`Package::spec_refusal`] names only the one
+    /// asked about.
+    UnknownEnvironmentKeys(Vec<(String, Vec<UnknownKey>)>),
     /// The top level could not be read back, carrying the parse failure.
     UncheckedTopLevel(String),
     /// No environment is declared, carrying the issue `spec validate` raises for
@@ -37,9 +36,12 @@ impl SpecRefusal {
     pub(crate) fn fields(&self) -> Vec<String> {
         match self {
             Self::UnknownTopLevelKeys(keys) => keys.iter().map(|key| key.key.clone()).collect(),
-            Self::UnknownEnvironmentKeys { environment, keys } => keys
+            Self::UnknownEnvironmentKeys(environments) => environments
                 .iter()
-                .map(|key| super::environment_field(environment, &key.key))
+                .flat_map(|(environment, keys)| {
+                    keys.iter()
+                        .map(|key| super::environment_field(environment, &key.key))
+                })
                 .collect(),
             // Validate reports an unread top level against the package as a whole.
             Self::UncheckedTopLevel(_) => vec!["package".to_string()],
@@ -54,12 +56,20 @@ impl fmt::Display for SpecRefusal {
             Self::UnknownTopLevelKeys(keys) => {
                 f.write_str(&super::describe_unknown_keys::<PackageField>(keys))
             }
-            Self::UnknownEnvironmentKeys { environment, keys } => {
-                write!(
-                    f,
-                    "in environment '{environment}': {}",
-                    super::describe_unknown_keys::<EnvironmentField>(keys)
-                )
+            // One sentence per environment, so the "; " inside a clause never has
+            // to separate environments too. The first starts lowercase because
+            // every caller puts it after a colon.
+            Self::UnknownEnvironmentKeys(environments) => {
+                let described: Vec<String> = environments
+                    .iter()
+                    .map(|(environment, keys)| {
+                        format!(
+                            "environment '{environment}': {}",
+                            super::describe_unknown_keys::<EnvironmentField>(keys)
+                        )
+                    })
+                    .collect();
+                write!(f, "in {}", described.join(". In "))
             }
             // The parse failure ends the sentence because it is several lines of
             // source snippet, and anything after it reads as part of it.
@@ -152,8 +162,8 @@ impl Package {
         // One answer serves a listing and a rewrite because neither knows which
         // environment matters, so both ask about all of them rather than one.
         //
-        // It names the first offending environment in name order, not every one. A
-        // file with keys in two environments is refused twice over, once per fix.
+        // It names every offending environment, so a file with keys in two is fixed
+        // in one pass.
         //
         // The two top-level rules stay split around the environment. Grouping them
         // ahead of it reports the unread top level for a file whose environment
@@ -164,18 +174,16 @@ impl Package {
     }
 
     // In name order. `environments` is a `HashMap` and its iteration order is
-    // randomized per process, so taking whichever came first names a different
-    // environment between runs of the same file.
+    // randomized per process, so an unsorted walk names the environments in a
+    // different order between runs of the same file.
     fn any_unknown_environment_keys(&self) -> Option<SpecRefusal> {
-        self.environments_sorted()
+        let offending: Vec<(String, Vec<UnknownKey>)> = self
+            .environments_sorted()
             .into_iter()
-            .find_map(|(name, env)| {
-                let unknown = env.unknown_keys();
-                (!unknown.is_empty()).then(|| SpecRefusal::UnknownEnvironmentKeys {
-                    environment: name.to_string(),
-                    keys: unknown.to_vec(),
-                })
-            })
+            .filter(|(_, env)| !env.unknown_keys().is_empty())
+            .map(|(name, env)| (name.to_string(), env.unknown_keys().to_vec()))
+            .collect();
+        (!offending.is_empty()).then_some(SpecRefusal::UnknownEnvironmentKeys(offending))
     }
 
     /// Why selfie refuses this whole package in `environment`, when it does.
@@ -259,9 +267,8 @@ impl Package {
     fn unknown_environment_keys(&self, environment: &str) -> Option<SpecRefusal> {
         let unknown = self.environments().get(environment)?.unknown_keys();
 
-        (!unknown.is_empty()).then(|| SpecRefusal::UnknownEnvironmentKeys {
-            environment: environment.to_string(),
-            keys: unknown.to_vec(),
+        (!unknown.is_empty()).then(|| {
+            SpecRefusal::UnknownEnvironmentKeys(vec![(environment.to_string(), unknown.to_vec())])
         })
     }
 
@@ -611,11 +618,12 @@ environments: {}
         );
     }
 
+    // Every offending environment is named, in name order, one sentence each:
     // `environments` is a `HashMap` whose iteration order is randomized per
-    // process, so a listing that took whichever environment came first would
-    // name a different one between runs of the same file.
+    // process, and a file with keys in two environments is fixed in one pass only
+    // if both are named.
     #[test]
-    fn a_listing_names_the_offending_environment_in_name_order() {
+    fn a_listing_names_every_offending_environment_in_name_order() {
         let yaml = r#"name: myapp
 environments:
   alpha:
@@ -632,9 +640,31 @@ environments:
         let refusal = package_from(yaml)
             .listing_refusal()
             .expect("both environments carry a shadowing key");
+        let rendered = refusal.to_string();
         assert!(
-            refusal.to_string().starts_with("in environment 'alpha':"),
-            "got: {refusal}"
+            rendered.starts_with("in environment 'alpha':"),
+            "got: {rendered}"
         );
+        assert!(
+            rendered.contains("is refused. In environment 'zulu':"),
+            "got: {rendered}"
+        );
+    }
+
+    // Environments are separated by sentences, never by the "; " a clause already
+    // uses between keys and inside an "expected one of" message.
+    #[test]
+    fn a_listing_gives_each_environment_its_own_sentence() {
+        let yaml = "name: myapp\nenvironments:\n  alpha:\n    install: \"echo i\"\n    audt: \
+                    \"x\"\n  zulu:\n    install: \"echo i\"\n    chk: \"x\"\n";
+        let rendered = package_from(yaml)
+            .listing_refusal()
+            .expect("both environments carry an unknown key")
+            .to_string();
+        assert!(
+            rendered.contains("dotfiles. In environment 'zulu': unknown field 'chk'"),
+            "got: {rendered}"
+        );
+        assert!(!rendered.contains("; in environment"), "got: {rendered}");
     }
 }
