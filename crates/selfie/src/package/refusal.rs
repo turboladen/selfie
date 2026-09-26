@@ -100,19 +100,17 @@ impl Package {
         // In name order, because `environments` is a `HashMap` whose iteration
         // order is randomized per process, and both consumers render these in the
         // order they arrive.
-        let mut keys = Self::entry_keys_in(&self.dotfiles, "dotfiles");
+        let mut keys = Self::entry_keys_in(&self.dotfiles, None);
 
         for (name, env) in self.environments_sorted() {
-            keys.extend(Self::entry_keys_in(
-                env.dotfiles(),
-                &format!("environments.{name}.dotfiles"),
-            ));
+            keys.extend(Self::entry_keys_in(env.dotfiles(), Some(name)));
         }
 
         keys
     }
 
-    fn entry_keys_in(entries: &[DotfileEntry], path: &str) -> Vec<UnknownEntryKey> {
+    // `environment` names the scope the list sits in, `None` for the shared list.
+    fn entry_keys_in(entries: &[DotfileEntry], environment: Option<&str>) -> Vec<UnknownEntryKey> {
         entries
             .iter()
             .enumerate()
@@ -126,7 +124,14 @@ impl Package {
             // today. It is here because the failure is silent and destroys the
             // user's text.
             .map(|(i, key)| UnknownEntryKey {
-                field: format!("{path}[{i}].{key}"),
+                field: {
+                    let entry = super::dotfile_field(i);
+                    let entry = match environment {
+                        Some(environment) => super::environment_field(environment, &entry),
+                        None => entry,
+                    };
+                    format!("{entry}.{key}")
+                },
                 unknown: unknown_key::<DotfileField>(key).unwrap_or_else(|| UnknownKey {
                     key: key.clone(),
                     message: format!("unrecognized field '{key}'"),

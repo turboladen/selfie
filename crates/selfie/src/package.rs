@@ -274,6 +274,18 @@ where
     groups
 }
 
+/// The dotted path naming `field` inside environment `environment`, such as
+/// `environments.work.install`, as diagnostics name it.
+pub(crate) fn environment_field(environment: &str, field: &str) -> String {
+    format!("environments.{environment}.{field}")
+}
+
+/// The path segment naming the dotfile entry at `index` in a `dotfiles` list, such
+/// as `dotfiles[0]`, as diagnostics name it.
+pub(crate) fn dotfile_field(index: usize) -> String {
+    format!("dotfiles[{index}]")
+}
+
 /// An unrecognized key, already worded for the level it was found at.
 #[derive(Debug, Clone)]
 pub(crate) struct UnknownKey {
