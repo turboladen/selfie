@@ -1094,7 +1094,11 @@ Consequences worth knowing before you adopt this:
 - `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
   checking them. Checking would mean resolving, which would run your commands from a read-only
   command. They are counted as not verifiable, apart from the entries drift compared, and are not
-  refusals, so they do not make the check exit `1`.
+  refusals, so they do not make the check exit `1`. An entry `selfie apply` would refuse without
+  running anything — a target it will not write to, a template escaping the package directory or
+  missing, unreadable or a fifo, a directory or a fifo at the target — is reported by drift as that
+  same refusal, worded for a check that writes and runs nothing, and does make it exit `1`. A
+  symlink at the target is reported as unverifiable whatever it points at: drift does not follow it.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section

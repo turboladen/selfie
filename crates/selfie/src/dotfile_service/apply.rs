@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-use super::classify::{Classified, RepoFile, RepoRead, classify_entry, read_repo_file};
+use super::classify::{Classified, Purpose, RepoFile, RepoRead, classify_entry, read_repo_file};
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
 };
@@ -312,7 +312,8 @@ where
             // Settled once for the entry, and tallied once below, so every way an
             // entry can end reports, counts and stops through one place.
             let outcome = 'entry: {
-                let classified = match classify_entry(filesystem, &base_dir, entry) {
+                let classified = match classify_entry(filesystem, &base_dir, entry, Purpose::Deploy)
+                {
                     Ok(classified) => classified,
                     Err(refused) => {
                         refused.send(sender).await;

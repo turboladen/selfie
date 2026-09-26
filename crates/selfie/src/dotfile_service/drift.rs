@@ -14,17 +14,14 @@ use crate::{
         deploy::compute_checksum,
         state::{DeployState, DriftType},
     },
-    fs::{
-        filesystem::FileSystem,
-        target::{TargetPath, expand_target_path},
-    },
+    fs::filesystem::FileSystem,
     package::{
-        ContentSource, Package,
+        Package,
         event::{EventSender, OperationResult, OperationSuccess, StepCount},
     },
 };
 
-use super::classify::{Classified, RepoRead, classify_entry, read_repo_file};
+use super::classify::{Classified, Purpose, RepoRead, classify_entry, read_repo_file};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
 /// Core logic for checking drift, or `None` if the run was cancelled part way.
@@ -117,36 +114,31 @@ where
                 return None;
             }
 
-            // Secret-bearing entries hold no deploy state, so there is nothing to
-            // compare against, and resolving them here would run the user's
-            // commands: leaking content into a read-only operation and prompting
-            // for authentication.
-            //
-            // Reported as unverifiable rather than counted as drift or as a
-            // refusal. Either would leave `dotfiles drift` permanently dirty on any
-            // machine with one provider-sourced dotfile (ADR-0003).
-            if let Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) =
-                entry.content_source()
-            {
-                report_unverified(
-                    sender,
-                    &content.to_string(),
-                    &expand_target_path(filesystem, entry.target()),
-                )
-                .await;
-                tally.unverified += 1;
-                continue;
-            }
-
-            // Refused for the same reasons apply refuses it, in the same order and
-            // the same words. A drift check that described an undeployable entry
-            // differently would send the user looking for a different problem from
-            // the one apply reports, and every refusal counts: a green result over
-            // an entry drift never examined is a false success.
-            let repo = match classify_entry(filesystem, &base_dir, entry) {
+            // Refused for the same reasons apply refuses it, in the same order. A
+            // drift check that described an undeployable entry differently would
+            // send the user looking for a different problem from the one apply
+            // reports, and every refusal counts: a green result over an entry drift
+            // never examined is a false success.
+            let repo = match classify_entry(filesystem, &base_dir, entry, Purpose::Check) {
                 Ok(Classified::RepoFile(repo)) => repo,
+                // Secret-bearing entries hold no deploy state, so there is nothing
+                // to compare against, and resolving them here would run the user's
+                // commands: leaking content into a read-only operation and
+                // prompting for authentication. Classified first all the same, so
+                // an entry apply would refuse is reported as refused rather than as
+                // merely unverifiable.
+                //
+                // Reported as unverifiable rather than counted as drift or as a
+                // refusal. Either would leave `dotfiles drift` permanently dirty on
+                // any machine with one provider-sourced dotfile (ADR-0003).
                 Ok(Classified::SecretBearing(secret)) => {
-                    report_unverified(sender, &secret.origin, &secret.path).await;
+                    sender
+                        .send_dotfile_skipped(
+                            &secret.origin,
+                            secret.path.display(),
+                            "provider-sourced (not verifiable without resolving)",
+                        )
+                        .await;
                     tally.unverified += 1;
                     continue;
                 }
@@ -214,16 +206,4 @@ impl DriftTally {
             steps_completed: StepCount::new(self.compared, self.compared),
         }
     }
-}
-
-/// Say that a secret-bearing entry was not verified, since checking it would run
-/// its commands.
-async fn report_unverified(sender: &EventSender, origin: &str, target: &TargetPath) {
-    sender
-        .send_dotfile_skipped(
-            origin,
-            target.display(),
-            "provider-sourced (not verifiable without resolving)",
-        )
-        .await;
 }

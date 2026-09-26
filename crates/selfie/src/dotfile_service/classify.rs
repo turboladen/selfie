@@ -3,13 +3,13 @@
 //!
 //! One order of checks serves every command, so an entry that fails more than one
 //! gets the same first reason from each: what the entry is, the target rule,
-//! containment, then what is at the target. Nothing here runs a command or reads
-//! content that a refusal could have spared.
+//! containment and, for a template entry, the template itself, then what is at the
+//! target. Nothing here runs a command.
 
 use std::path::{Path, PathBuf};
 
 use crate::{
-    dotfile_service::deploy::resolve_source_path,
+    dotfile_service::{deploy::resolve_source_path, resolve::read_template},
     fs::{
         filesystem::{FileSystem, repository_read_refusal},
         target::{TargetPath, deploy_target, repository_path},
@@ -19,8 +19,8 @@ use crate::{
 };
 
 use super::refusal::{
-    Link, TargetGuard, directory_target_refusal, guard_refusal, guard_target, readable_target,
-    refusal_warning, target_refusal,
+    Link, TargetGuard, directory_target_refusal, guard_refusal, guard_target, link_at,
+    readable_target, refusal_warning, target_refusal,
 };
 
 /// An entry refused before it was deployed or compared, with the warning that
@@ -68,14 +68,27 @@ pub(super) struct SecretEntry<'e> {
     pub(super) link: Option<Link>,
 }
 
-/// Classify `entry`, or refuse it with the warning apply and drift both give.
+/// What the caller will do with an entry that passes: deploy it, or only check it.
 ///
-/// Reads nothing but what is at the target, and runs no command. `base_dir` is the
-/// directory of the package file the entry came from.
+/// Both refuse the same entries. They differ in how a secret-bearing entry's
+/// refusal is worded, and in how much a check looks at a secret target: it reads
+/// nothing behind a symlink, since it reports such an entry as unverified either
+/// way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Purpose {
+    Deploy,
+    Check,
+}
+
+/// Classify `entry` for `purpose`, or refuse it with the warning it calls for.
+///
+/// Reads what is at the target and, for a template entry, the template; runs no
+/// command. `base_dir` is the directory of the package file the entry came from.
 pub(super) fn classify_entry<'e, F: FileSystem>(
     filesystem: &F,
     base_dir: &Path,
     entry: &'e DotfileEntry,
+    purpose: Purpose,
 ) -> Result<Classified<'e>, Refused> {
     // Refused before anything runs. For a template that means the binding
     // commands -- real credential fetches, which can raise a biometric prompt --
@@ -118,37 +131,31 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
         secret @ (ContentSource::Template { .. } | ContentSource::Provider(_)) => {
             // Decided from the entry alone, so it is asked after the target rule and
             // ahead of anything that looks at the file system.
-            if let ContentSource::Template { source, .. } = secret
-                && within_package(base_dir, source).is_none()
-            {
-                return Err(Refused(format!(
-                    "Failed to resolve '{}': dotfile template '{source}' escapes the package \
-                     directory",
-                    entry.target()
-                )));
-            }
-
-            // Both questions, before any command runs: what a link or a fifo at
-            // the target means is decided here, not by the read after the fetch,
-            // which could only refuse either. A link is replaced whatever it points
-            // at, unless it resolves to a fifo, socket or device node, which the
-            // writer refuses.
-            let link = secret_target_link(filesystem, entry.target(), &target).map_err(Refused)?;
-
-            // The case the guard does not cover: it excludes directories, because
-            // opening one never blocks. Nothing may run for a target that provably
-            // cannot be written, and a credential fetch can raise a biometric
-            // prompt, so this sits ahead of every command.
             //
-            // Only for a plain target. A link is replaced whatever it points at, so
-            // the guard -- which stats following the link -- is the whole of what
-            // refuses one.
-            if link.is_none()
-                && let Some(refusal) =
-                    unwritable_target_refusal(filesystem, entry.target(), &target)
-            {
-                return Err(Refused(refusal));
+            // The template is read here too, which runs nothing, so a template
+            // that is missing, unreadable or a fifo is refused by a check and a
+            // dry run exactly where the deploy would refuse it.
+            if let ContentSource::Template { source, .. } = secret {
+                // A check resolves nothing, so it does not say it failed to.
+                let frame = match purpose {
+                    Purpose::Deploy => "Failed to resolve",
+                    Purpose::Check => "Skipping",
+                };
+                let Some(path) = within_package(base_dir, source) else {
+                    return Err(Refused(format!(
+                        "{frame} '{}': dotfile template '{source}' escapes the package directory",
+                        entry.target()
+                    )));
+                };
+                if let Err(e) = read_template(filesystem, source, &path) {
+                    return Err(Refused(format!("{frame} '{}': {e}", entry.target())));
+                }
             }
+
+            let link = match purpose {
+                Purpose::Deploy => deployable_secret_target(filesystem, entry.target(), &target)?,
+                Purpose::Check => checkable_secret_target(filesystem, entry.target(), &target)?,
+            };
 
             Ok(Classified::SecretBearing(SecretEntry {
                 entry,
@@ -168,6 +175,64 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
 pub(super) fn within_package(base_dir: &Path, source: &str) -> Option<PathBuf> {
     let path = resolve_source_path(base_dir, source);
     is_within(&path, base_dir).then_some(path)
+}
+
+/// The link at a secret-bearing entry's target that a deploy would replace, or the
+/// refusal for a target no write could land on.
+fn deployable_secret_target<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    target: &TargetPath,
+) -> Result<Option<Link>, Refused> {
+    // Both questions, before any command runs: what a link or a fifo at the target
+    // means is decided here, not by the read after the fetch, which could only
+    // refuse either. A link is replaced whatever it points at, unless it resolves
+    // to a fifo, socket or device node, which the writer refuses.
+    let link = secret_target_link(filesystem, source, target).map_err(Refused)?;
+
+    // The case the guard does not cover: it excludes directories, because opening
+    // one never blocks. Nothing may run for a target that provably cannot be
+    // written, and a credential fetch can raise a biometric prompt, so this sits
+    // ahead of every command.
+    //
+    // Only for a plain target. A link is replaced whatever it points at, so the
+    // guard -- which stats following the link -- is the whole of what refuses one.
+    if link.is_none()
+        && let Some(refusal) =
+            unwritable_target_refusal(filesystem, source, target, Purpose::Deploy)
+    {
+        return Err(Refused(refusal));
+    }
+    Ok(link)
+}
+
+/// The link at a secret-bearing entry's target, or the refusal a deploy would
+/// also give, worded for a command that writes nothing.
+// A link is reported as unverified however it resolves, so nothing behind it is
+// asked: `guard_refusal` answers a link without the following stat, which can
+// block on a destination sitting on a hung mount. A deploy asks, because it
+// refuses a link to a fifo; a check has no answer to give that would change.
+//
+// The questions are `guard_refusal`'s, asked the same way; only a link's answer
+// differs, being unverified here rather than refused.
+fn checkable_secret_target<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    target: &TargetPath,
+) -> Result<Option<Link>, Refused> {
+    match link_at(filesystem, target) {
+        Err(unrecognized) => return Err(Refused(refusal_warning(source, &unrecognized))),
+        Ok(Some(link)) => return Ok(Some(link)),
+        Ok(None) => {}
+    }
+    // A plain target on a hung mount still blocks here, as apply's stat of it does.
+    if let Some(refusal) = filesystem.irregular_target_refusal(target) {
+        return Err(Refused(refusal_warning(source, &refusal)));
+    }
+    match unwritable_target_refusal(filesystem, source, target, Purpose::Check) {
+        Some(refusal) => Err(Refused(refusal)),
+        None => Ok(None),
+    }
 }
 
 /// Ask both of the guard's questions of a secret-bearing entry's target: the link
@@ -194,7 +259,8 @@ pub(super) fn secret_target_link<F: FileSystem>(
     }
 }
 
-/// Why a secret write to this target could never land, when that is the case.
+/// Why a secret write to this target could never land, when that is the case,
+/// worded for `purpose`.
 ///
 /// `source` is the target as the package file spells it, so the refusal names
 /// what the user wrote rather than the expanded path. Asked only of a target that
@@ -210,15 +276,22 @@ fn unwritable_target_refusal<F: FileSystem>(
     filesystem: &F,
     source: &str,
     path: &TargetPath,
+    purpose: Purpose,
 ) -> Option<String> {
+    // Only a deploy would have run a command or written a credential, so only it
+    // says it did not.
+    let (unwritten, unrun) = match purpose {
+        Purpose::Deploy => (
+            ", so it will not write a credential there",
+            " No command was run.",
+        ),
+        Purpose::Check => ("", ""),
+    };
     match filesystem.is_directory(path) {
         Ok(false) => None,
-        Ok(true) => Some(format!(
-            "{} No command was run.",
-            directory_target_refusal(source, path)
-        )),
+        Ok(true) => Some(format!("{}{unrun}", directory_target_refusal(source, path))),
         Err(e) => Some(format!(
-            "Skipping '{source}': selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
+            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.{unrun} The check failed with: {e}"
         )),
     }
 }
