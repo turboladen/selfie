@@ -217,7 +217,8 @@ be loaded, or is claimed by several package files (such as `bat.yml` and `bat.ya
 and exits `1` with nothing deployed. Without a name, such a set of files is refused, counted, and
 the rest of the run carries on, when one of them failed to parse or declares dotfiles for the
 current environment; a set that would deploy nothing here is left to `selfie package install` to
-refuse.
+refuse. A named package that declares no dotfiles for the current environment says so and exits `0`:
+there is nothing to apply on this machine.
 
 ### A refusal is not a success
 

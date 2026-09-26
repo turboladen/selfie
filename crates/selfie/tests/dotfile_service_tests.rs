@@ -15039,3 +15039,44 @@ mod an_unloadable_spec_is_a_refusal {
         assert_eq!(refused_count(&events), 2, "{events:?}");
     }
 }
+
+// A named package with dotfiles only for another environment says it has nothing
+// to apply here, rather than completing with every count at zero, and is not a
+// failure.
+#[tokio::test]
+async fn a_named_package_with_nothing_for_this_environment_says_so() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("rg.conf"), "RG").unwrap();
+    let target = dirs.target_dir.join("rg.conf");
+    write_package_yaml(
+        &dirs.package_dir,
+        "ripgrep",
+        &format!(
+            "name: ripgrep\nenvironments:\n  test:\n    install: \"echo i\"\n  other:\n    \
+             install: \"echo i\"\n    dotfiles:\n      - source: \"rg.conf\"\n        target: \
+             \"{}\"\n",
+            target.display()
+        ),
+    );
+    let service = dirs.service();
+
+    let named = collect_events(service.apply("ripgrep", ApplyOptions::default()).await).await;
+    let all = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert!(
+        warning_messages(&named).contains(
+            &"Package 'ripgrep' has no dotfiles for environment 'test'; nothing to apply"
+                .to_string()
+        ),
+        "{named:?}"
+    );
+    assert_eq!(refused_count(&named), 0, "not a failure: {named:?}");
+    assert!(!target.exists());
+    // Control: an apply of everything names no one package, so says nothing.
+    assert!(
+        !warning_messages(&all)
+            .iter()
+            .any(|w| w.contains("nothing to apply")),
+        "{all:?}"
+    );
+}

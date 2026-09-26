@@ -23,7 +23,7 @@ use crate::{
     privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
 };
 
-use super::apply::{ApplyContext, handle_apply};
+use super::apply::{ApplyContext, Scope, handle_apply};
 use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
 use super::port::{ApplyOptions, DotfileService};
@@ -241,12 +241,12 @@ where
                     // and counts what collection refused as refusals. A named
                     // apply that finds its package lost nothing to those, so it
                     // counts none.
-                    let refusals = if filter.is_none() {
-                        refusals
+                    let scope = if filter.is_none() {
+                        Scope::All(refusals)
                     } else {
-                        Vec::new()
+                        Scope::Named
                     };
-                    handle_apply(&selected, &ctx, &refusals).await
+                    handle_apply(&selected, &ctx, scope).await
                 }
                 Err(failure) => OperationResult::Failure(failure),
             };
