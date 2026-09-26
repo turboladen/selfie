@@ -2300,13 +2300,13 @@ pub enum PackageEvent {
         /// refuses, which is the answer that sends a reader to run the command
         /// that will not run.
         refused_count: usize,
-        /// How many warnings the drift check relayed about work it could not
-        /// complete, such as a configured dotfiles directory that does not
-        /// exist or a deploy state file it could not read.
-        ///
-        /// Its own field rather than part of `refused_count`, which counts work
-        /// selfie refused. Without it this summary reports a clean run under a
-        /// warning that named a problem the count does not capture.
+        /// How many warnings named work the drift check could not complete: each
+        /// one the check relayed, such as a configured dotfiles directory that
+        /// does not exist or a deploy state file it could not read, and the
+        /// warning status itself sends when the check failed outright.
+        // Its own field, apart from `refused_count`, which counts work selfie
+        // refused: without it this summary reports a clean run under a warning
+        // that named a problem the count does not capture.
         warned: usize,
         /// How many secret-bearing entries the drift check reported without
         /// verifying, since checking one would run its commands. Not counted in

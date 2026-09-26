@@ -210,10 +210,14 @@ where
                 return;
             }
 
+            // Counted with the relayed warnings, which it is one of: a summary
+            // under a failed check must not read as a clean run.
+            let mut warned = summary.warned;
             if let Some(error_msg) = summary.error {
                 sender
                     .send_warning(format!("Drift check failed: {error_msg}"))
                     .await;
+                warned += 1;
             }
 
             sender
@@ -222,7 +226,7 @@ where
                     drifted_targets: summary.drifted_targets,
                     total_deployed: summary.total_deployed,
                     refused_count: summary.refused_count,
-                    warned: summary.warned,
+                    warned,
                     unverified_count: summary.unverified,
                 })
                 .await;
@@ -1222,15 +1226,20 @@ struct DriftSummary {
 
 /// Collect drift information from a DotfileService event stream.
 ///
-/// Assumes the stream emits exactly one `Completed` event (either success or
-/// failure), matching the `check_drift()` contract.
+/// A stream that ends without a `Completed` or `Canceled` event is summarized as
+/// a failed check, never a clean one.
 async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
     use futures::StreamExt;
 
     let mut summary = DriftSummary::default();
+    let mut finished = false;
 
     futures::pin_mut!(stream);
     while let Some(event) = stream.next().await {
+        finished |= matches!(
+            event,
+            PackageEvent::Completed { .. } | PackageEvent::Canceled { .. }
+        );
         match event {
             PackageEvent::DotfileDriftDetected { target, .. } => {
                 summary.drifted_targets.push(target);
@@ -1274,6 +1283,12 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             // the summary says needs an arm of its own above.
             _ => {}
         }
+    }
+
+    // A stream that ends without saying how the check went, as it does when the
+    // task running the check panics, is a check that failed, never a clean one.
+    if !finished {
+        summary.error = Some("the drift check ended without reporting a result".to_string());
     }
 
     summary
@@ -1867,6 +1882,18 @@ mod tests {
         assert_eq!(summary.error.as_deref(), Some("permission denied"));
     }
 
+    // A stream that ends with no completion is a check that never finished, as
+    // when the task running it panics.
+    #[tokio::test]
+    async fn collect_drift_summary_counts_a_stream_that_just_ends_as_failed() {
+        let summary = collect_drift_summary(events_to_stream(Vec::new())).await;
+
+        assert!(
+            summary.error.is_some(),
+            "a check that never finished must not read as clean"
+        );
+    }
+
     // What drift warned about and the specs it skipped limit its summary, and
     // both travel in the order drift reported them rather than grouped by
     // kind: an implementation that relayed every skipped spec ahead of every
@@ -2444,6 +2471,76 @@ mod tests {
         async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
             unreachable!("status() does not track dotfiles")
         }
+    }
+
+    // A DotfileService whose `check_drift` fails outright, a state no run of the
+    // binary reaches today: discovery or the git status step fails first.
+    #[derive(Clone)]
+    struct DriftCheckFailing;
+
+    impl DotfileService for DriftCheckFailing {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let events = vec![PackageEvent::Completed {
+                operation_info: test_operation_info(),
+                result: OperationResult::Failure(OperationFailure::Generic(
+                    "could not collect packages".to_string(),
+                )),
+            }];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    // The failed check's warning counts in `warned`, so the summary under it
+    // cannot read as a clean run.
+    #[tokio::test]
+    async fn status_counts_a_failed_drift_check_as_warned() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftCheckFailing,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
+            _ => None,
+        });
+        assert_eq!(warned, Some(1), "{events:?}");
     }
 
     // A relayed warning must raise `warned`, on an event stream that carries no
