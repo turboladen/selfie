@@ -76,6 +76,12 @@ impl std::fmt::Display for Stop {
                 "Stopped before applying anything: several spec files claim the name '{name}' \
                  (stop_on_error is enabled)"
             ),
+            Self::Collection(CollectionRefusal::UnloadableSpec(path)) => write!(
+                f,
+                "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
+                 is enabled)",
+                path.display()
+            ),
             Self::Unrecorded(reason) => f.write_str(reason),
         }
     }

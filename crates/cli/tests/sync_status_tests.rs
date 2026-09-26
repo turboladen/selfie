@@ -60,6 +60,12 @@ fn sync_status_does_not_report_success_over_a_spec_it_could_not_load() {
         !text.contains("No dotfile drift"),
         "must not claim a clean repository over an unloaded spec: {text}"
     );
+    // The spec is one refusal, and the summary says what it covers.
+    assert!(
+        text.contains("1 refusal(s) left dotfiles unchecked")
+            && text.contains("No drift among what could be checked"),
+        "must render the refusal and the bounded line: {text}"
+    );
     // The drift check is non-fatal by design -- `sync status` still reports
     // git status when drift cannot be fully checked -- so an unloaded spec
     // does not fail the command. This asserts the exit code selfie actually

@@ -2708,9 +2708,9 @@ async fn one_source_deployed_to_two_targets_records_both() {
     }
 }
 
-// A spec the collection could not parse leaves part of the check undone, and
-// `unloaded_specs` is what a caller reads to learn that. The count comes from
-// the same warnings the run relays, so the two cannot disagree.
+// A spec the collection could not parse leaves part of the check undone, so it
+// counts as one refusal and fails the check, as apply counts it. The count comes
+// from the same warnings the run relays, so the two cannot disagree.
 #[tokio::test]
 async fn check_drift_counts_a_spec_it_could_not_load() {
     let dirs = TestDirs::new();
@@ -2733,15 +2733,12 @@ async fn check_drift_counts_a_spec_it_could_not_load() {
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
         OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-            unloaded_specs,
             refused_count,
+            total_count,
             ..
         }) => {
-            assert_eq!(*unloaded_specs, 1, "events: {events:?}");
-            // Not a refusal: nothing declined to act here, and the remedy is
-            // the user's to apply to the file, so conflating the two would
-            // point a caller at the wrong fix.
-            assert_eq!(*refused_count, 0, "events: {events:?}");
+            assert_eq!(*refused_count, 1, "events: {events:?}");
+            assert_eq!(*total_count, 1, "the loadable spec is still compared");
         }
         other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
@@ -14622,6 +14619,9 @@ mod folded_names_are_refused {
                 .any(|w| w.starts_with("Skipping package 'bat'")),
             "{events:?}"
         );
+        // Two refusals: the ambiguity, and the file that failed to parse, which
+        // needs its own fix whichever file is kept.
+        assert_eq!(refused_count(&events), 2, "{events:?}");
     }
 
     #[tokio::test]
@@ -14911,5 +14911,131 @@ mod folded_names_are_refused {
 
         assert_eq!(refused_count(&applied), 0, "{applied:?}");
         assert_eq!(drift_summary(&drifted).2, 0, "{drifted:?}");
+    }
+}
+
+// A spec that could not be loaded is one refusal in an apply of everything, as an
+// unreadable dotfiles directory is, and so falls under `stop_on_error`.
+mod an_unloadable_spec_is_a_refusal {
+    use super::*;
+
+    // An unparsable `aaa.yml` and a deployable `zzz`, which sorts after it.
+    fn broken_then_good(dirs: &TestDirs) -> PathBuf {
+        std::fs::write(dirs.package_dir.join("aaa.yml"), "environments: {oops\n").unwrap();
+        std::fs::write(dirs.package_dir.join("zzz.toml"), "ZZZ").unwrap();
+        let target = dirs.target_dir.join("zzz.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "zzz",
+            &[("zzz.toml", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    #[tokio::test]
+    async fn apply_all_counts_it_and_still_deploys_the_rest() {
+        let dirs = TestDirs::new();
+        let target = broken_then_good(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(target.exists(), "a loadable package still deploys");
+    }
+
+    // The control: a named apply is not held to account for an unrelated file.
+    #[tokio::test]
+    async fn a_named_apply_of_another_spec_does_not_count_it() {
+        let dirs = TestDirs::new();
+        broken_then_good(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("zzz", ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn it_stops_the_run_under_stop_on_error() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let target = broken_then_good(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            format!(
+                "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
+                 is enabled)",
+                dirs.package_dir.join("aaa.yml").display()
+            )
+        );
+        assert!(!target.exists(), "nothing may deploy after the stop");
+    }
+
+    // A dotfiles/ file that failed to parse under a name packages/ claims could
+    // never have been used, so it is no refusal.
+    #[tokio::test]
+    async fn one_in_dotfiles_under_a_packages_name_is_not_counted() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("bat.conf"), "BAT").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat.conf", dirs.target_dir.join("bat").to_str().unwrap())],
+        );
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+    }
+
+    // The control: one in dotfiles/ under a name nothing else claims is counted.
+    #[tokio::test]
+    async fn one_in_dotfiles_under_its_own_name_is_counted() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+    }
+
+    // An ambiguity in one directory does not hide a file that failed to parse in
+    // the other: each needs its own fix, so each is counted. `zzz` declares a
+    // dotfile, so its ambiguity matters to the run; nothing is written, since
+    // neither file deploys.
+    #[tokio::test]
+    async fn an_ambiguity_in_one_directory_does_not_hide_one_in_the_other() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.dotfiles_dir.join("aaa.yml"), "environments: {oops\n").unwrap();
+        for file in ["zzz.yml", "zzz.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"z.conf\"\n    target: \"/tmp/selfie-never-written\"\n",
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 2, "{events:?}");
     }
 }

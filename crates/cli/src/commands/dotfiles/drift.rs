@@ -50,18 +50,13 @@ pub(crate) async fn handle_drift(
                 result: OperationResult::Success(success),
                 ..
             } if !success.had_refusals() => {
-                // A spec that could not be loaded leaves part of the check
-                // undone, so a green check would claim more than was examined.
-                // `sync status` gates its clean line on the same count. An
-                // unverified entry does not: it is unverifiable by design, and the
-                // summary names the count.
+                // Drift found is worth the reader's attention. An unverified
+                // entry is not: it is unverifiable by design, and the summary
+                // names the count. Anything refused, including a spec that could
+                // not be loaded, never reaches here: it fails the check above.
                 let unclean = matches!(
                     success,
-                    OperationSuccess::DotfileDriftChecked {
-                        drift_count,
-                        unloaded_specs,
-                        ..
-                    } if *drift_count > 0 || *unloaded_specs > 0
+                    OperationSuccess::DotfileDriftChecked { drift_count, .. } if *drift_count > 0
                 );
 
                 if unclean {

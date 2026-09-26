@@ -304,29 +304,14 @@ where
                 }) => {
                     // Carries on with what it could collect, and
                     // `handle_check_drift` counts what collection refused.
-                    // Counted here rather than from the relayed events: this is
-                    // where the collection reports what it could not load, so
-                    // the count and the warnings cannot disagree.
-                    let unloaded_specs = warnings
-                        .iter()
-                        .filter(|warning| matches!(warning, ApplyWarning::SkippedSpec(_)))
-                        .count();
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
                     for refusal in &refusals {
                         refusal.send(&sender).await;
                     }
-                    handle_check_drift(
-                        &packages,
-                        &fs,
-                        &config,
-                        &sender,
-                        &token,
-                        refusals.len(),
-                        unloaded_specs,
-                    )
-                    .await
+                    handle_check_drift(&packages, &fs, &config, &sender, &token, refusals.len())
+                        .await
                 }
                 Err(e) => Some(OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
