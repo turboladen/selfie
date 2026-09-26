@@ -212,8 +212,12 @@ argument — is rejected by the argument parser before any of this applies, and 
 | `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
-`selfie package install` does. A name that matches no package, or names a package file that could
-not be loaded, is a failure and exits `1` with nothing deployed.
+`selfie package install` does. A name that matches no package, names a package file that could not
+be loaded, or is claimed by several package files (such as `bat.yml` and `bat.yaml`), is a failure
+and exits `1` with nothing deployed. Without a name, such a set of files is refused, counted, and
+the rest of the run carries on, when one of them failed to parse or declares dotfiles for the
+current environment; a set that would deploy nothing here is left to `selfie package install` to
+refuse.
 
 ### A refusal is not a success
 

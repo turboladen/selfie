@@ -31,15 +31,15 @@ use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 /// last entry completed is a whole answer even if the token was cancelled after it,
 /// and a collection failure is not a cancellation whatever the token says.
 ///
-/// `unreadable_repository` says a dotfiles repository could not be listed, so
-/// `packages` is missing whatever it holds.
+/// `collection_refusals` counts what collecting `packages` refused, such as a
+/// dotfiles directory it could not list or a name several spec files claim.
 pub(super) async fn handle_check_drift<F>(
     packages: &[Package],
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
     token: &CancellationToken,
-    unreadable_repository: bool,
+    collection_refusals: usize,
     unloaded_specs: usize,
 ) -> Option<OperationResult>
 where
@@ -61,10 +61,11 @@ where
         }
     };
 
-    // One refusal for an unlistable dotfiles directory, as apply counts it. A
-    // drift report missing every standalone dotfile must not read as all clear.
+    // One refusal for each thing collection refused, as apply counts them: a drift
+    // report missing every standalone dotfile, or a package it never examined,
+    // must not read as all clear.
     let mut tally = DriftTally {
-        refused: usize::from(unreadable_repository),
+        refused: collection_refusals,
         ..DriftTally::default()
     };
 

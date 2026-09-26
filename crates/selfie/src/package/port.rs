@@ -396,6 +396,30 @@ impl PackageListError {
     }
 }
 
+/// Why several spec files claiming one name are refused, and what to do about it.
+///
+/// The one wording, for install and for apply and drift alike. `directory` is
+/// where the files are, and `paths` the files.
+pub(crate) fn ambiguous_name_sentence(name: &str, directory: &Path, paths: &[PathBuf]) -> String {
+    format!(
+        "Multiple packages found with name `{name}` in path {}: {}. Names are compared ignoring \
+         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
+         Rename or remove all but one.",
+        directory.display(),
+        format_conflicting_paths(paths)
+    )
+}
+
+/// [`ambiguous_name_sentence`] for files that all sit in one directory, named
+/// by the first file's.
+pub(crate) fn ambiguous_files_sentence(name: &str, paths: &[PathBuf]) -> String {
+    let directory = paths
+        .first()
+        .and_then(|path| path.parent())
+        .unwrap_or_else(|| Path::new("."));
+    ambiguous_name_sentence(name, directory, paths)
+}
+
 // File names alone -- the directory is already named earlier in the message, so
 // repeating the full path for every conflict buries the part that differs.
 fn format_conflicting_paths(paths: &[PathBuf]) -> String {
@@ -430,13 +454,7 @@ pub enum PackageError {
     },
 
     /// Multiple package files found with the same name, creating ambiguity
-    #[error(
-        "Multiple packages found with name `{name}` in path {}: {}. Names are compared ignoring \
-         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
-         Rename or remove all but one.",
-        packages_path.display(),
-        format_conflicting_paths(conflicting_paths)
-    )]
+    #[error("{}", ambiguous_name_sentence(name, packages_path, conflicting_paths))]
     MultiplePackagesFound {
         name: String,
         packages_path: PathBuf,

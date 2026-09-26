@@ -34,6 +34,7 @@ use super::deploy_entry::{
 use super::port::ApplyOptions;
 use super::secret::{SecretApply, SecretOutcome, programs_of};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
+use super::warning::CollectionRefusal;
 
 /// Why an apply stopped before its last entry.
 ///
@@ -47,9 +48,8 @@ enum Stop {
     Entry(String),
     /// A package was refused whole while `stop_on_error` is on. Carries its name.
     Package(String),
-    /// The standalone dotfiles directory could not be read while `stop_on_error`
-    /// is on.
-    UnreadableDotfilesDirectory,
+    /// Collecting the packages refused something while `stop_on_error` is on.
+    Collection(CollectionRefusal),
     /// The deploy state could not record a write. Carries the reason, already
     /// worded. Stops the run whatever `stop_on_error` says.
     Unrecorded(String),
@@ -67,9 +67,14 @@ impl std::fmt::Display for Stop {
                 f,
                 "Stopped after refusing package '{name}' (stop_on_error is enabled)"
             ),
-            Self::UnreadableDotfilesDirectory => f.write_str(
+            Self::Collection(CollectionRefusal::UnreadableDotfilesDirectory) => f.write_str(
                 "Stopped before applying anything: the standalone dotfiles directory could not \
                  be read (stop_on_error is enabled)",
+            ),
+            Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => write!(
+                f,
+                "Stopped before applying anything: several spec files claim the name '{name}' \
+                 (stop_on_error is enabled)"
             ),
             Self::Unrecorded(reason) => f.write_str(reason),
         }
@@ -164,13 +169,12 @@ pub(super) struct ApplyContext<'a, F, CR> {
 
 /// Core logic for applying config files
 ///
-/// Applies every package in `packages`. `refused_repository` counts one refusal
-/// for a dotfiles repository whose dotfiles were asked for and could not be
-/// listed.
+/// Applies every package in `packages`. `refusals` are what collecting them
+/// refused, each counted as one refusal before any package is looked at.
 pub(super) async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
-    refused_repository: bool,
+    refusals: &[CollectionRefusal],
 ) -> OperationResult
 where
     F: FileSystem,
@@ -234,11 +238,14 @@ where
     // `stop_on_error` says, because the next entry would fail the same way.
     let mut stopped: Option<Stop> = None;
 
-    // The directory is known unreadable before any package is looked at, so under
-    // `stop_on_error` the run stops before it deploys anything: no package is
-    // walked once `stopped` is set here.
-    if refused_repository {
-        stopped = tally.refuse(config, token, Stop::UnreadableDotfilesDirectory);
+    // Known before any package is looked at, so under `stop_on_error` the run
+    // stops before it deploys anything: no package is walked once `stopped` is set
+    // here.
+    for refusal in refusals {
+        stopped = tally.refuse(config, token, Stop::Collection(refusal.clone()));
+        if stopped.is_some() {
+            break;
+        }
     }
     let packages = if stopped.is_some() { &[][..] } else { packages };
 

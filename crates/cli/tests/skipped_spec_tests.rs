@@ -237,3 +237,19 @@ fn drift_reports_a_clean_check_when_every_spec_loads() {
     );
     assert_eq!(code, Some(0), "output was: {stdout}{stderr}");
 }
+
+// A named apply says nothing about specs it was not asked for, even one it could
+// not load.
+#[test]
+fn a_named_apply_does_not_report_another_spec_it_could_not_load() {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["apply", "good"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains("creds.yml"), "{stderr}");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+}

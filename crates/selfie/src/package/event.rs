@@ -880,7 +880,7 @@ pub enum OperationFailure {
 }
 
 /// Why a named package could not be found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoSuchPackageReason {
     /// No spec file has the name.
     NotFound,
@@ -898,6 +898,12 @@ pub enum NoSuchPackageReason {
     MaybeInUncheckableDirectory,
     /// A spec file has the name and could not be loaded.
     NotLoaded,
+    /// More than one spec file in one directory claims the name, so none is
+    /// used.
+    Ambiguous {
+        /// The files claiming it, sorted.
+        conflicting_paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// Command execution failure details
@@ -992,6 +998,9 @@ impl std::fmt::Display for OperationFailure {
                 NoSuchPackageReason::NotLoaded => write!(
                     f,
                     "Package '{name}' could not be loaded, so nothing was applied"
+                ),
+                NoSuchPackageReason::Ambiguous { conflicting_paths } => f.write_str(
+                    &crate::package::port::ambiguous_files_sentence(name, conflicting_paths),
                 ),
             },
             OperationFailure::Generic(msg) => write!(f, "{msg}"),

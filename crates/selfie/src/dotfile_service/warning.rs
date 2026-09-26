@@ -34,8 +34,38 @@ pub(super) enum ApplyWarning {
         /// What is there instead of a directory.
         reason: crate::fs::AbsentReason,
     },
-    /// Anything else worth saying, already worded.
-    Other(String),
+    /// Something worth saying about one package name, already worded.
+    Named { name: String, message: String },
+}
+
+/// A refusal counted before any package is looked at, because collecting the
+/// packages found it.
+#[derive(Clone)]
+pub(super) enum CollectionRefusal {
+    /// A dotfiles directory that exists and could not be listed, or whose path
+    /// could not be classified. Its warning travels as an [`ApplyWarning`].
+    UnreadableDotfilesDirectory,
+    /// A name several spec files in one directory claim, so none of them is used.
+    /// Carries the files, sorted.
+    AmbiguousName { name: String, paths: Vec<PathBuf> },
+}
+
+impl CollectionRefusal {
+    /// Send the warning naming this refusal, when no [`ApplyWarning`] already
+    /// does.
+    pub(super) async fn send(&self, sender: &crate::package::event::EventSender) {
+        match self {
+            Self::UnreadableDotfilesDirectory => {}
+            Self::AmbiguousName { name, paths } => {
+                sender
+                    .send_warning(format!(
+                        "Skipping package '{name}': {}",
+                        crate::package::port::ambiguous_files_sentence(name, paths)
+                    ))
+                    .await;
+            }
+        }
+    }
 }
 
 /// What a package name appearing in both directories means to the caller.
@@ -65,6 +95,19 @@ impl ApplyWarning {
         })
     }
 
+    /// Whether this warning is about a package name other than `name`, which a
+    /// run asked for `name` alone has no reason to report.
+    pub(super) fn is_about_another_name(&self, name: &str) -> bool {
+        let about = match self {
+            Self::SkippedSpec(error) => crate::package::spec_name_of(error.package_path()),
+            Self::Named { name, .. } => Some(name.clone()),
+            Self::UnreadableRepository(_)
+            | Self::UncheckableRepository(_)
+            | Self::AbsentDotfilesDirectory { .. } => None,
+        };
+        about.is_some_and(|about| about != name.to_lowercase())
+    }
+
     /// Emit this warning on the event stream it belongs to.
     ///
     /// The two kinds leave differently on purpose: a skipped spec travels typed so
@@ -90,13 +133,18 @@ impl ApplyWarning {
                     .send_warning(super::directory::absent_warning(&path, &reason))
                     .await;
             }
-            Self::Other(message) => sender.send_warning(message).await,
+            Self::Named { message, .. } => sender.send_warning(message).await,
         }
     }
 }
 
 /// The failure for a named apply that no collected package answers.
-pub(super) fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> OperationFailure {
+pub(super) fn no_such_package(
+    name: &str,
+    warnings: &[ApplyWarning],
+    refusals: &[CollectionRefusal],
+    unrefused_ambiguities: &[(String, Vec<PathBuf>)],
+) -> OperationFailure {
     use crate::package::event::NoSuchPackageReason;
 
     // The unloadable check runs before either not-found answer. A spec that
@@ -109,16 +157,36 @@ pub(super) fn no_such_package(name: &str, warnings: &[ApplyWarning]) -> Operatio
                 .is_some_and(|spec_name| spec_name == requested))
     });
 
-    // Derived from what the directory turned out to be, not from the fact that some
-    // repository failed: the two unreadable states take different sentences, and
-    // saying "could not be listed" about a symlink loop sends the user to look
-    // inside a directory that may not exist.
-    let reason = if unloadable {
+    // An ambiguity is asked first: it is the first thing to fix, since removing a
+    // file may remove the one that failed to parse.
+    // Whether or not the ambiguity mattered to an apply of everything: every file
+    // claiming the name was left out, so the name finds nothing.
+    let ambiguous = refusals
+        .iter()
+        .find_map(|refusal| match refusal {
+            CollectionRefusal::AmbiguousName { name, paths } if *name == requested => {
+                Some(paths.clone())
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            unrefused_ambiguities
+                .iter()
+                .find(|(name, _)| *name == requested)
+                .map(|(_, paths)| paths.clone())
+        });
+    let reason = if let Some(conflicting_paths) = ambiguous {
+        NoSuchPackageReason::Ambiguous { conflicting_paths }
+    } else if unloadable {
         NoSuchPackageReason::NotLoaded
     } else if warnings
         .iter()
         .any(|w| matches!(w, ApplyWarning::UnreadableRepository(_)))
     {
+        // Derived from what the directory turned out to be, not from the fact that
+        // some repository failed: the two unreadable states take different
+        // sentences, and saying "could not be listed" about a symlink loop sends the
+        // user to look inside a directory that may not exist.
         NoSuchPackageReason::MaybeInUnlistableDirectory
     } else if warnings
         .iter()

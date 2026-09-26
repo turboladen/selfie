@@ -14513,3 +14513,403 @@ mod drift_refuses_secret_entries_as_apply_does {
         .await;
     }
 }
+
+// Several spec files in one directory claiming one name are refused, as install
+// refuses them, rather than all deployed (the last overwriting the rest) or one
+// picked by enumeration order.
+mod folded_names_are_refused {
+    use super::*;
+    use std::path::Path;
+
+    // Write `file_name` in `dir` as a spec deploying `source`, holding `content`,
+    // to `target`.
+    fn spec(dir: &std::path::Path, file_name: &str, source: &str, content: &str, target: &Path) {
+        std::fs::write(dir.join(source), content).unwrap();
+        let yaml = format!(
+            "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"{source}\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dir.join(file_name), yaml).unwrap();
+    }
+
+    // bat.yml and bat.yaml with different sources and targets, so deploying either
+    // one shows, and a third package that deploys.
+    fn two_bats(dirs: &TestDirs) -> (PathBuf, PathBuf, PathBuf) {
+        let yml = dirs.target_dir.join("from-yml");
+        let yaml = dirs.target_dir.join("from-yaml");
+        spec(&dirs.package_dir, "bat.yml", "yml.conf", "YML", &yml);
+        spec(&dirs.package_dir, "bat.yaml", "yaml.conf", "YAML", &yaml);
+        std::fs::write(dirs.package_dir.join("other.conf"), "OTHER").unwrap();
+        let other = dirs.target_dir.join("other.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "other",
+            &[("other.conf", other.to_str().unwrap())],
+        );
+        (yml, yaml, other)
+    }
+
+    #[tokio::test]
+    async fn apply_all_deploys_neither_file_and_counts_one_refusal() {
+        let dirs = TestDirs::new();
+        let (yml, yaml, other) = two_bats(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !yml.exists() && !yaml.exists(),
+            "neither may deploy: {events:?}"
+        );
+        assert!(other.exists(), "an unrelated package still deploys");
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")
+                    && w.contains("bat.yaml, bat.yml")
+                    && w.contains("Rename or remove all but one")),
+            "the warning must be install's, naming both files: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_apply_fails_as_ambiguous() {
+        let dirs = TestDirs::new();
+        let (yml, yaml, _) = two_bats(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert_no_such_package(
+            &events,
+            "bat",
+            selfie::package::event::NoSuchPackageReason::Ambiguous {
+                conflicting_paths: vec![
+                    dirs.package_dir.join("bat.yaml"),
+                    dirs.package_dir.join("bat.yml"),
+                ],
+            },
+        );
+        assert!(!yml.exists() && !yaml.exists());
+    }
+
+    #[tokio::test]
+    async fn drift_counts_one_refusal() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 1, "{events:?}");
+    }
+
+    // A file that failed to parse still claims its name, so the one that parsed is
+    // not deployed in its place.
+    #[tokio::test]
+    async fn an_unparsable_file_still_makes_the_name_ambiguous() {
+        let dirs = TestDirs::new();
+        let yml = dirs.target_dir.join("from-yml");
+        spec(&dirs.package_dir, "bat.yml", "yml.conf", "YML", &yml);
+        std::fs::write(dirs.package_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!yml.exists(), "the parsed file must not deploy: {events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_repeated_within_dotfiles_is_refused() {
+        let dirs = TestDirs::new();
+        let yml = dirs.target_dir.join("from-yml");
+        let yaml = dirs.target_dir.join("from-yaml");
+        spec(&dirs.dotfiles_dir, "bat.yml", "yml.conf", "YML", &yml);
+        spec(&dirs.dotfiles_dir, "bat.yaml", "yaml.conf", "YAML", &yaml);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            !yml.exists() && !yaml.exists(),
+            "neither may deploy: {events:?}"
+        );
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+    }
+
+    // An ambiguous packages/ name still claims the name, so a dotfiles/ spec of
+    // the same name is not deployed in its place.
+    #[tokio::test]
+    async fn an_ambiguous_packages_name_keeps_its_dotfiles_namesake_out() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+        let namesake = dirs.target_dir.join("from-dotfiles");
+        spec(&dirs.dotfiles_dir, "bat.yml", "dot.conf", "DOT", &namesake);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            !namesake.exists(),
+            "the dotfiles/ copy must not deploy: {events:?}"
+        );
+        assert!(
+            warning_messages(&events).iter().any(|w| w
+                == "Not using 'bat' from dotfiles/: packages/ has more than one spec by that name"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_name_stops_the_run_under_stop_on_error() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let (_, _, other) = two_bats(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            "Stopped before applying anything: several spec files claim the name 'bat' \
+             (stop_on_error is enabled)"
+        );
+        assert!(!other.exists(), "nothing may deploy after the stop");
+    }
+
+    // A name packages/ claims is settled there: dotfiles/ files of that name are
+    // set aside with the collision warning, and two of them that fail to parse are
+    // no refusal, since neither could have been used.
+    #[tokio::test]
+    async fn dotfiles_files_under_a_packages_name_are_never_a_refusal() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("from-packages");
+        spec(&dirs.package_dir, "bat.yml", "p.conf", "P", &target);
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "name: [unclosed\n").unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(target.exists(), "the packages/ spec deploys: {events:?}");
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")),
+            "{events:?}"
+        );
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Duplicate name 'bat'")),
+            "{events:?}"
+        );
+    }
+
+    // The reason for a named apply names what to fix in packages/, which claims
+    // the name even when its spec did not parse, not an ambiguity in dotfiles/.
+    #[tokio::test]
+    async fn a_named_apply_names_what_to_fix_in_packages() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("bat.yml"), "name: [unclosed\n").unwrap();
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yml",
+            "a.conf",
+            "A",
+            &dirs.target_dir.join("a"),
+        );
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yaml",
+            "b.conf",
+            "B",
+            &dirs.target_dir.join("b"),
+        );
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply("bat", ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_no_such_package(
+            &events,
+            "bat",
+            selfie::package::event::NoSuchPackageReason::NotLoaded,
+        );
+    }
+
+    // An ambiguity in packages/ is the first thing to fix, ahead of a file in it
+    // that failed to parse.
+    #[tokio::test]
+    async fn a_dotfiles_namesake_is_told_of_the_ambiguity_first() {
+        let dirs = TestDirs::new();
+        spec(
+            &dirs.package_dir,
+            "bat.yml",
+            "p.conf",
+            "P",
+            &dirs.target_dir.join("p"),
+        );
+        std::fs::write(dirs.package_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yml",
+            "d.conf",
+            "D",
+            &dirs.target_dir.join("d"),
+        );
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            warning_messages(&events).contains(
+                &"Not using 'bat' from dotfiles/: packages/ has more than one spec by that name"
+                    .to_string()
+            ),
+            "{events:?}"
+        );
+    }
+
+    // A named apply's failure already names the files, so its warning is not
+    // sent as well.
+    #[tokio::test]
+    async fn a_named_apply_says_the_ambiguity_once() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("Multiple packages found")),
+            "{events:?}"
+        );
+        assert!(failure_message(&events).contains("Multiple packages found"));
+    }
+
+    // Two install-only specs of one name are install's to refuse: apply and drift
+    // would deploy and check nothing from either, so neither refuses the name.
+    #[tokio::test]
+    async fn install_only_duplicates_are_not_refused() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        assert_eq!(refused_count(&applied), 0, "{applied:?}");
+        assert_eq!(drift_summary(&drifted).2, 0, "{drifted:?}");
+        assert!(
+            !warning_messages(&applied)
+                .iter()
+                .any(|w| w.contains("Multiple packages found")),
+            "{applied:?}"
+        );
+    }
+
+    // A named apply says nothing about names it was not asked for: not another
+    // name's ambiguity, and not another spec that failed to parse.
+    #[tokio::test]
+    async fn a_named_apply_reports_nothing_about_other_names() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+        std::fs::write(dirs.package_dir.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let events =
+            collect_events(dirs.service().apply("other", ApplyOptions::default()).await).await;
+
+        assert!(warning_messages(&events).is_empty(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::SpecSkipped { .. })),
+            "{events:?}"
+        );
+        assert_eq!(refused_count(&events), 0);
+    }
+
+    // An install-only pair is still ambiguous to a run that names it, as install
+    // finds it: neither file is used, so the name fails as ambiguous rather than
+    // as missing.
+    #[tokio::test]
+    async fn a_named_apply_of_an_install_only_pair_fails_as_ambiguous() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+
+        let events =
+            collect_events(dirs.service().apply("nv", ApplyOptions::default()).await).await;
+
+        assert_no_such_package(
+            &events,
+            "nv",
+            selfie::package::event::NoSuchPackageReason::Ambiguous {
+                conflicting_paths: vec![
+                    dirs.package_dir.join("nv.yaml"),
+                    dirs.package_dir.join("nv.yml"),
+                ],
+            },
+        );
+    }
+
+    // A pair whose dotfiles are all for another environment deploys nothing here,
+    // so an apply of everything and drift refuse nothing for it.
+    #[tokio::test]
+    async fn a_pair_with_dotfiles_only_for_another_environment_is_not_refused() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n  other:\n    \
+                 install: \"echo i\"\n    dotfiles:\n      - source: \"nv.conf\"\n        \
+                 target: \"/tmp/selfie-never-written\"\n",
+            )
+            .unwrap();
+        }
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        assert_eq!(refused_count(&applied), 0, "{applied:?}");
+        assert_eq!(drift_summary(&drifted).2, 0, "{drifted:?}");
+    }
+}

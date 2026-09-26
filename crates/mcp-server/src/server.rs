@@ -654,7 +654,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\" or \"not_loaded\"; branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `warning` row reading \"an earlier `<program>` command failed; no command was run\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\", \"not_loaded\" or \"ambiguous\" (several spec files, such as bat.yml and bat.yaml, claim the name, so none is used, whatever they declare; a `conflicting_paths` field lists them); branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, or finds several spec files in one directory claiming one name where one failed to parse or declares dotfiles for this environment (none of them deploys), the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `warning` row reading \"an earlier `<program>` command failed; no command was run\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -1157,6 +1157,48 @@ mod tests {
                 && warnings[0].contains(&format!("{} does not exist", dotfiles.display())),
             "got: {}",
             warnings[0]
+        );
+    }
+
+    // A named apply's result carries no row about a name it was not asked for:
+    // not another name's ambiguity, and not another spec it could not load.
+    #[tokio::test]
+    async fn a_named_apply_reports_nothing_about_other_names() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let target = temp.path().join("t.conf");
+        std::fs::write(packages.join("t.conf"), "T").unwrap();
+        let spec = format!(
+            "name: X\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"t.conf\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(packages.join("good.yml"), spec.replace("X", "good")).unwrap();
+        std::fs::write(packages.join("nv.yml"), spec.replace("X", "nv")).unwrap();
+        std::fs::write(packages.join("nv.yaml"), spec.replace("X", "nv")).unwrap();
+        std::fs::write(packages.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let server = server_over(&packages, None);
+        let json = tool_json(
+            &server
+                .selfie_apply_dotfiles(Parameters(ApplyParam {
+                    name: Some("good".to_string()),
+                    dry_run: true,
+                    auto_accept: false,
+                }))
+                .await
+                .unwrap(),
+        );
+
+        // Matched on content, since a run may warn about its own deploy state.
+        let rows = json["data"].as_array().unwrap();
+        assert!(
+            !rows.iter().any(|row| row["type"] == "spec_skipped"
+                || row["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("'nv'") || m.contains("broken.yml"))),
+            "got: {json}"
         );
     }
 
