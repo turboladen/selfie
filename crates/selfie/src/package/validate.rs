@@ -7,7 +7,7 @@ use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssu
 
 use super::{
     DotfileEntry, EnvironmentField, Package, SpecRefusal, TopLevelKeys, UnknownEntryKey,
-    UnknownKey, unknown_key,
+    UnknownKey, dotfile_field, environment_field, unknown_key,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -125,7 +125,7 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
 
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
-                &format!("environments.{env_name}.{key}"),
+                &environment_field(env_name, key),
                 &unknown.message,
                 unknown.shadows.then_some(
                     "Anchors are legal here; only a name matching a field of this environment \
@@ -424,7 +424,7 @@ impl Package {
             if env_config.install.is_empty() {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::RequiredField,
-                    &format!("environments.{env_name}.install"),
+                    &environment_field(env_name, "install"),
                     "Install command is required",
                     Some("Add an install command like 'brew install package-name'."),
                 ));
@@ -435,7 +435,7 @@ impl Package {
                 if dep.is_empty() {
                     issues.push(ValidationIssue::error(
                         ValidationErrorCategory::InvalidValue,
-                        &format!("environments.{env_name}.dependencies[{i}]"),
+                        &environment_field(env_name, &format!("dependencies[{i}]")),
                         "Dependency name cannot be empty",
                         Some("Remove the empty dependency or provide a valid name."),
                     ));
@@ -507,20 +507,20 @@ impl Package {
 
             issues.extend(Self::validate_single_command(
                 &env_config.install,
-                &format!("environments.{env_name}.install"),
+                &environment_field(env_name, "install"),
             ));
 
             if let Some(check_cmd) = &env_config.check {
                 issues.extend(Self::validate_single_command(
                     check_cmd,
-                    &format!("environments.{env_name}.check"),
+                    &environment_field(env_name, "check"),
                 ));
             }
 
             if let Some(audit_cmd) = &env_config.audit {
                 issues.extend(Self::validate_single_command(
                     audit_cmd,
-                    &format!("environments.{env_name}.audit"),
+                    &environment_field(env_name, "audit"),
                 ));
             }
         }
@@ -612,10 +612,7 @@ impl Package {
 
         // Shared (top-level) dotfiles.
         for (i, dotfile) in self.dotfiles.iter().enumerate() {
-            issues.extend(Self::validate_dotfile_entry(
-                dotfile,
-                &format!("dotfiles[{i}]"),
-            ));
+            issues.extend(Self::validate_dotfile_entry(dotfile, &dotfile_field(i)));
         }
 
         // Environment-specific dotfiles (ADR-0001): the same structural checks,
@@ -623,7 +620,7 @@ impl Package {
         // override is surfaced rather than applied silently.
         for (env_name, env) in self.environments_sorted() {
             for (i, dotfile) in env.dotfiles().iter().enumerate() {
-                let field = format!("environments.{env_name}.dotfiles[{i}]");
+                let field = environment_field(env_name, &dotfile_field(i));
                 issues.extend(Self::validate_dotfile_entry(dotfile, &field));
 
                 if self
@@ -737,14 +734,14 @@ impl Package {
         let mut refs = Vec::new();
 
         for (i, entry) in self.dotfiles.iter().enumerate() {
-            refs.extend(reference(entry, format!("dotfiles[{i}]")));
+            refs.extend(reference(entry, dotfile_field(i)));
         }
 
         for (env_name, env) in self.environments_sorted() {
             for (i, entry) in env.dotfiles().iter().enumerate() {
                 refs.extend(reference(
                     entry,
-                    format!("environments.{env_name}.dotfiles[{i}]"),
+                    environment_field(env_name, &dotfile_field(i)),
                 ));
             }
         }
