@@ -238,11 +238,14 @@ running a command the file's author did not write — a key hiding `environments
 mapping they take that command from. Each was given one package name, so a refusal leaves them
 nothing to do.
 
-`selfie dotfiles drift` follows the same rule for a target it did not compare: a symlink, a fifo,
-socket or device node, a directory, or a target it cannot read is a refusal, and the check exits
-`1`. A dotfiles directory that exists but cannot be listed counts as one refusal for `selfie apply`
-with no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it was part of
-the run and none could be read, while the package dotfiles still deploy or are still checked.
+`selfie dotfiles drift` follows the same rule for an entry it did not compare: an entry apply would
+refuse, a source that escapes the package directory or cannot be read, and a target that is a
+symlink, a fifo, socket or device node, a directory, or that it cannot read are refusals, and the
+check exits `1`. A secret-bearing entry is not a refusal: drift reports it as not verifiable, since
+checking it would run its commands, and counts it apart. A dotfiles directory that exists but cannot
+be listed counts as one refusal for `selfie apply` with no package name, and for
+`selfie dotfiles drift`. Every standalone dotfile in it was part of the run and none could be read,
+while the package dotfiles still deploy or are still checked.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 

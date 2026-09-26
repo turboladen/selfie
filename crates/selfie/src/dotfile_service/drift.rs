@@ -11,22 +11,17 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::SelfieConfig,
     dotfile_service::{
-        deploy::{compute_checksum, resolve_source_path},
+        deploy::compute_checksum,
         state::{DeployState, DriftType},
     },
-    fs::{
-        filesystem::{FileSystem, repository_read_refusal},
-        target::{deploy_target, expand_target_path, repository_path},
-    },
+    fs::filesystem::FileSystem,
     package::{
-        ContentSource, Package,
+        Package,
         event::{EventSender, OperationResult, OperationSuccess, StepCount},
     },
-    paths::is_within,
 };
 
-use super::refusal::{guard_refusal, readable_target, refusal_warning, target_refusal};
-use super::secret::secret_origin;
+use super::classify::{Classified, Purpose, RepoRead, classify_entry, read_repo_file};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
 /// Core logic for checking drift, or `None` if the run was cancelled part way.
@@ -66,11 +61,12 @@ where
         }
     };
 
-    let mut drift_count: usize = 0;
-    let mut total_count: usize = 0;
-    // One for an unlistable dotfiles directory, as apply counts it. A drift
-    // report missing every standalone dotfile must not read as all clear.
-    let mut refused_count = usize::from(unreadable_repository);
+    // One refusal for an unlistable dotfiles directory, as apply counts it. A
+    // drift report missing every standalone dotfile must not read as all clear.
+    let mut tally = DriftTally {
+        refused: usize::from(unreadable_repository),
+        ..DriftTally::default()
+    };
 
     // Three guards, one per case, because a `for` body's first statement never runs
     // over an empty set: this one covers no packages at all, and a cancel arriving
@@ -99,7 +95,7 @@ where
             sender
                 .send_warning(format!("Skipping package '{}': {refusal}", package.name()))
                 .await;
-            refused_count += 1;
+            tally.refused += 1;
             continue;
         }
 
@@ -118,152 +114,96 @@ where
                 return None;
             }
 
-            total_count += 1;
-
-            let source = match entry.content_source() {
-                Ok(ContentSource::RepoFile(source)) => source,
-
-                // Secret-bearing entries hold no deploy state, so there is
-                // nothing to compare against, and resolving them here would run
-                // the user's commands: leaking content into a read-only
-                // operation and prompting for authentication.
+            // Refused for the same reasons apply refuses it, in the same order. A
+            // drift check that described an undeployable entry differently would
+            // send the user looking for a different problem from the one apply
+            // reports, and every refusal counts: a green result over an entry drift
+            // never examined is a false success.
+            let repo = match classify_entry(filesystem, &base_dir, entry, Purpose::Check) {
+                Ok(Classified::RepoFile(repo)) => repo,
+                // Secret-bearing entries hold no deploy state, so there is nothing
+                // to compare against, and resolving them here would run the user's
+                // commands: leaking content into a read-only operation and
+                // prompting for authentication. Classified first all the same, so
+                // an entry apply would refuse is reported as refused rather than as
+                // merely unverifiable.
                 //
-                // Reported as unverifiable rather than counted as drift.
-                // Counting them would leave `dotfiles drift` permanently dirty
-                // on any machine with one provider-sourced dotfile (ADR-0003).
-                Ok(content @ (ContentSource::Template { .. } | ContentSource::Provider(_))) => {
+                // Reported as unverifiable rather than counted as drift or as a
+                // refusal. Either would leave `dotfiles drift` permanently dirty on
+                // any machine with one provider-sourced dotfile (ADR-0003).
+                Ok(Classified::SecretBearing(secret)) => {
                     sender
                         .send_dotfile_skipped(
-                            secret_origin(&content),
-                            expand_target_path(filesystem, entry.target()).display(),
+                            &secret.origin,
+                            secret.path.display(),
                             "provider-sourced (not verifiable without resolving)",
                         )
                         .await;
+                    tally.unverified += 1;
                     continue;
                 }
-
-                // Refused for the same reasons apply refuses it, and worded the
-                // same way. A drift check that reported an undeployable entry as
-                // merely unverifiable would hide it behind the one status a user
-                // is trained to ignore.
-                Err(invalid) => {
-                    sender
-                        .send_warning(format!("Skipping '{}': {invalid}", entry.target()))
-                        .await;
+                Err(refused) => {
+                    refused.send(sender).await;
+                    tally.refused += 1;
                     continue;
                 }
             };
-
-            let source_path = resolve_source_path(&base_dir, source);
-
-            // The same rule apply applies, worded the same way through
-            // `target_refusal` -- a drift check that described an undeployable
-            // entry differently would send the user looking for a different
-            // problem from the one apply reports.
-            let target_path = match deploy_target(filesystem, entry.target()) {
-                Ok(path) => path,
-                Err(rejection) => {
-                    sender
-                        .send_warning(target_refusal(entry.target(), rejection))
-                        .await;
-                    continue;
-                }
-            };
-
-            // Same lexical guard as handle_apply — see `crate::paths::is_within`.
-            if !is_within(&source_path, &base_dir) {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{source}': source path escapes YAML base directory"
-                    ))
-                    .await;
-                continue;
-            }
-
-            // The guard apply asks, after the containment check as apply asks it, so
-            // an escaping source is refused the same way whatever is at the target,
-            // and worded identically through `refusal_warning`. Drift reads the target
-            // to checksum it, so it hangs on a fifo exactly as apply does, and reading
-            // through a link would checksum a file selfie does not manage.
-            //
-            // Refused and not examined, like an unreadable target below: a green
-            // result over a target drift never looked at is a false success.
-            if let Some(refusal) = guard_refusal(filesystem, &target_path) {
-                sender.send_warning(refusal_warning(source, &refusal)).await;
-                refused_count += 1;
-                total_count -= 1;
-                continue;
-            }
-
-            // Same guard apply applies, in the same position -- immediately ahead
-            // of the source read -- and worded identically. Drift reads the
-            // source to checksum it, so it hangs on a fifo there exactly as apply
-            // does.
-            if let Some(refusal) =
-                filesystem.irregular_target_refusal(&repository_path(&source_path))
-            {
-                sender
-                    .send_warning(format!(
-                        "Skipping '{source}': {}. Replace it with a regular file.",
-                        repository_read_refusal(&refusal)
-                    ))
-                    .await;
-                continue;
-            }
-
-            // Read source — emit warning if missing instead of silently skipping
-            let source_content = match filesystem.read_file(&source_path) {
-                Ok(content) => content,
-                Err(e) => {
-                    sender
-                        .send_warning(format!(
-                            "Cannot read source '{}' for drift check: {e}",
-                            source_path.display()
-                        ))
-                        .await;
+            let RepoRead {
+                source_content,
+                current,
+            } = match read_repo_file(filesystem, &repo) {
+                Ok(read) => read,
+                Err(refused) => {
+                    refused.send(sender).await;
+                    tally.refused += 1;
                     continue;
                 }
             };
             let source_checksum = compute_checksum(source_content.as_bytes());
-
-            let current = match readable_target(filesystem, source, &target_path) {
-                Ok(current) => current,
-                Err(warning) => {
-                    sender.send_warning(warning).await;
-                    // Refused and not examined, unlike the per-entry refusals
-                    // above it: a green "0 drifted" over a target drift could
-                    // not read is a false success, which outranks parity with
-                    // its neighbors, and `sync status` renders the total as
-                    // "N deployed".
-                    refused_count += 1;
-                    total_count -= 1;
-                    continue;
-                }
-            };
             let target_checksum = current.as_deref().map(compute_checksum).unwrap_or_default();
 
+            tally.compared += 1;
             let drift = deploy_state.detect_drift(
-                &target_path.display().to_string(),
+                &repo.target.display().to_string(),
                 &source_checksum,
                 &target_checksum,
             );
             if drift != DriftType::None {
                 sender
-                    .send_dotfile_drift_detected(target_path.display(), &drift)
+                    .send_dotfile_drift_detected(repo.target.display(), &drift)
                     .await;
-                drift_count += 1;
+                tally.drifted += 1;
             }
         }
     }
 
     Some(OperationResult::Success(
-        OperationSuccess::DotfileDriftChecked {
-            drift_count,
-            total_count,
-            refused_count,
-            unloaded_specs,
-            environment: config.environment().to_string(),
-            steps_completed: StepCount::new(total_count, total_count),
-        },
+        tally.into_success(config.environment(), unloaded_specs),
     ))
+}
+
+/// What a drift check found for each entry, counted as it goes.
+#[derive(Default)]
+struct DriftTally {
+    drifted: usize,
+    /// Entries compared against their source, and nothing else. `sync status`
+    /// renders this as the entries in place, so an entry refused or reported
+    /// unverified never reaches it.
+    compared: usize,
+    refused: usize,
+    unverified: usize,
+}
+
+impl DriftTally {
+    fn into_success(self, environment: &str, unloaded_specs: usize) -> OperationSuccess {
+        OperationSuccess::DotfileDriftChecked {
+            drift_count: self.drifted,
+            total_count: self.compared,
+            refused_count: self.refused,
+            unloaded_specs,
+            unverified_count: self.unverified,
+            environment: environment.to_string(),
+            steps_completed: StepCount::new(self.compared, self.compared),
+        }
+    }
 }

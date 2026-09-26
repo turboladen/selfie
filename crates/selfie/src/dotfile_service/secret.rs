@@ -14,29 +14,46 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::{
         port::{ConflictDetail, ConflictResolution},
-        resolve::{ResolvedContent, check_resolvable, resolve_content},
+        resolve::{ResolvedContent, resolve_content},
     },
     fs::{
         filesystem::{FileSystem, FileSystemError},
-        target::{TargetPath, deploy_target},
+        target::TargetPath,
     },
-    package::{ContentSource, DotfileEntry, event::EventSender},
+    package::{DotfileEntry, event::EventSender},
 };
 
+use super::classify::{SecretEntry, secret_target_link};
 use super::port::ApplyOptions;
 use super::refusal::{
-    Link, TargetGuard, TargetState, classify_link, directory_target_refusal, guard_target,
-    read_target_state, refusal_warning, target_refusal,
+    Link, TargetState, classify_link, directory_target_refusal, read_target_state, refusal_warning,
 };
 
-/// Identify a secret-bearing entry by what produces it, never by its content.
-///
-/// Commands and var names come from the package file and are references, not
-/// credentials, so they are safe to surface. Used as the `source` of the events
-/// this path emits; the wording lives on [`ContentSource`] so apply, `dotfiles
-/// list` and the MCP server cannot describe the same entry differently.
-pub(super) fn secret_origin(content: &ContentSource<'_>) -> String {
-    content.to_string()
+/// The program a command runs: its first word after any leading `NAME=value`
+/// assignments, as the shell reads it.
+// A full path, quoting, and a wrapper such as `sh -c` or `env` are taken as written.
+pub(super) fn program_of(command: &str) -> Option<&str> {
+    command.split_whitespace().find(|word| !is_assignment(word))
+}
+
+/// Whether `word` is a shell variable assignment, `NAME=value`.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Every program `entry` would run: its command's, or each binding's.
+pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<&str> {
+    match entry.command() {
+        Some(command) => program_of(command).into_iter().collect(),
+        None => entry
+            .vars()
+            .values()
+            .filter_map(|c| program_of(c))
+            .collect(),
+    }
 }
 
 /// A conflict summary describing shape without revealing content.
@@ -83,9 +100,13 @@ pub(super) enum SecretOutcome {
     Deployed,
     Skipped,
     Conflicted,
-    /// Resolution failed; the caller decides whether to abort based on
-    /// `stop_on_error`.
+    /// Refused or failed without a command failing; the caller decides whether
+    /// to abort based on `stop_on_error`.
     Failed,
+    /// A command the entry ran failed. Refused like `Failed`, and carries the
+    /// failed command's program so the caller can hold back that program's later
+    /// commands in this run.
+    CommandFailed(String),
 }
 
 /// A phase either lets the apply continue, or ends it with an outcome.
@@ -103,20 +124,6 @@ enum Found {
     State(TargetState),
 }
 
-/// One secret-bearing entry, with its target resolved and classified.
-struct SecretTarget<'a> {
-    entry: &'a DotfileEntry,
-    /// How the entry is named in events: the command, or the template and its
-    /// var names. A reference drawn from the package file, never a value.
-    origin: String,
-    // Absolute, checked below. Unresolved is the type's job, not a caller's.
-    path: TargetPath,
-    /// The symlink at the target, if there is one, as of the check in
-    /// `usable_target`. The deploy path re-asks before reading, because a resolve
-    /// runs in between.
-    link: Option<Link>,
-}
-
 /// Say that a symlinked target was replaced, naming the link and its destination.
 ///
 /// Worded as what happened, and sent only after the write succeeds, so it can
@@ -127,7 +134,7 @@ struct SecretTarget<'a> {
 //
 // Names the link alone when the destination could not be read. Printing "unknown"
 // would be a fact about selfie rather than about their file.
-fn replaced_link_warning(target: &SecretTarget<'_>, link: &Link) -> String {
+fn replaced_link_warning(target: &SecretEntry<'_>, link: &Link) -> String {
     let what = match link.destination() {
         Some(dest) => format!(
             "'{}', which was a symlink to '{}'",
@@ -168,35 +175,33 @@ where
     F: FileSystem,
     CR: CommandRunner,
 {
-    /// Deploy one secret-bearing entry.
+    /// Deploy one secret-bearing entry that `classify_entry` has already accepted,
+    /// so everything refusable without running a command has been refused.
     ///
-    /// Reads as the sequence it is: refuse what can be refused without running
-    /// anything, short-circuit a preview, resolve, then decide against what is
-    /// already on disk.
-    pub(super) async fn apply(&self, entry: &DotfileEntry, origin: String) -> SecretOutcome {
-        match self.run(entry, origin).await {
+    /// Short-circuits a preview, resolves, then decides against what is already
+    /// on disk.
+    pub(super) async fn apply(&self, target: &SecretEntry<'_>) -> SecretOutcome {
+        match self.run(target).await {
             Ok(outcome) | Err(outcome) => outcome,
         }
     }
 
-    async fn run(&self, entry: &DotfileEntry, origin: String) -> Phase<SecretOutcome> {
-        let target = self.usable_target(entry, origin).await?;
-        self.refuse_unresolvable(&target).await?;
-        self.short_circuit_dry_run(&target).await?;
+    async fn run(&self, target: &SecretEntry<'_>) -> Phase<SecretOutcome> {
+        self.short_circuit_dry_run(target).await?;
 
-        let resolved = self.resolve(&target).await?;
+        let resolved = self.resolve(target).await?;
         for warning in &resolved.warnings {
             self.sender.send_warning(warning).await;
         }
 
         // Both questions again, immediately before the read, because the answers
-        // taken in `usable_target` are older than the resolve that ran in between. A
+        // taken when the entry was classified are older than the resolve that ran in between. A
         // link that appeared meanwhile is replaced like any other; a fifo, socket or
         // device node that appeared, at the target or behind a new link, refuses,
         // since the read would meet it and the writer refuse it.
         let found = match self.look(target.entry.target(), &target.path).await? {
             Some(link) => Found::Link(link),
-            None => self.read_before_write(&target).await?,
+            None => self.read_before_write(target).await?,
         };
 
         // A link is replaced whatever is behind it, so there is nothing to compare and
@@ -207,20 +212,20 @@ where
         // the outcome must not depend on it (ADR-0005 decision 3).
         let current = match found {
             Found::Link(link) => {
-                let outcome = self.write(&target, &resolved).await;
+                let outcome = self.write(target, &resolved).await;
                 if matches!(outcome, SecretOutcome::Deployed) {
                     self.sender
-                        .send_warning(replaced_link_warning(&target, &link))
+                        .send_warning(replaced_link_warning(target, &link))
                         .await;
                 }
                 return Ok(outcome);
             }
             Found::State(current) => current,
         };
-        self.settle_in_sync(&target, &resolved, &current).await?;
-        self.settle_conflict(&target, &resolved, &current).await?;
+        self.settle_in_sync(target, &resolved, &current).await?;
+        self.settle_conflict(target, &resolved, &current).await?;
 
-        Ok(self.write(&target, &resolved).await)
+        Ok(self.write(target, &resolved).await)
     }
 
     /// Read the target immediately before the write, and settle what the read found:
@@ -228,7 +233,7 @@ where
     ///
     /// Never replaces a link the read found without a look confirming it is still
     /// one, so whatever took its place is compared, not written over.
-    async fn read_before_write(&self, target: &SecretTarget<'_>) -> Phase<Found> {
+    async fn read_before_write(&self, target: &SecretEntry<'_>) -> Phase<Found> {
         let source = target.entry.target();
         let state = match self.read_target(target) {
             // Planted after the last look. Looked at once more, which refuses a link
@@ -260,135 +265,17 @@ where
         Err(SecretOutcome::Failed)
     }
 
-    /// Expand the target, or refuse the entry naming the form that was refused.
-    ///
-    /// A relative target would write relative to the current directory, which is
-    /// both surprising and dangerous for a credential; a `~user/…` one names a
-    /// home directory selfie does not resolve.
-    ///
-    /// `Failed` rather than `Skipped`, and the same outcome
-    /// [`refuse_unresolvable`](Self::refuse_unresolvable) returns: both are
-    /// decided from the entry alone before anything runs, so returning different
-    /// outcomes made `stop_on_error` end the run for one and not the other, and
-    /// the documentation described the opposite. A refused entry is
-    /// not a skipped one.
-    async fn usable_target<'e>(
-        &self,
-        entry: &'e DotfileEntry,
-        origin: String,
-    ) -> Phase<SecretTarget<'e>> {
-        let path = match deploy_target(self.filesystem, entry.target()) {
-            Ok(path) => path,
-            Err(rejection) => {
-                self.sender
-                    .send_warning(target_refusal(entry.target(), rejection))
-                    .await;
-                return Err(SecretOutcome::Failed);
-            }
-        };
-
-        // Both questions, before any command runs: what a link or a fifo at the
-        // target means is decided here, not by the read after the fetch, which could
-        // only refuse either.
-        //
-        // A link is replaced whatever it points at, unless it resolves to a fifo,
-        // socket or device node, which the writer refuses. `Failed` rather than
-        // `Skipped`, for the reason given above: this is decided from the target alone
-        // before anything runs, and a refused entry is not a skipped one.
-        let link = self.look(entry.target(), &path).await?;
-
-        // The case the guard above does not cover: it excludes directories, because
-        // opening one never blocks. Nothing may run for a target that provably cannot
-        // be written, and a credential fetch can raise a biometric prompt, so this
-        // sits ahead of every command.
-        //
-        // Only for a plain target. A link is replaced whatever it points at, so the
-        // guard above -- which stats following the link -- is the whole of what
-        // refuses one.
-        if link.is_none()
-            && let Some(refusal) = self.unwritable_target_refusal(entry.target(), &path)
-        {
-            self.sender.send_warning(refusal).await;
-            return Err(SecretOutcome::Failed);
-        }
-
-        Ok(SecretTarget {
-            entry,
-            origin,
-            path,
-            link,
-        })
-    }
-
-    /// Ask both of the guard's questions of `path`: the link to replace, if there is
-    /// one, or `None` for a target that is not a link.
-    ///
-    /// A link whose destination is a fifo, socket or device node refuses the entry,
-    /// as does such a target itself, since the writer refuses both. `source` is the
-    /// target as the package file spells it, for the refusal.
+    /// Ask both of the guard's questions of `path` again, sending the refusal when
+    /// there is one: the link to replace, or `None` for a target that is not a
+    /// link. `source` is the target as the package file spells it.
     async fn look(&self, source: &str, path: &TargetPath) -> Phase<Option<Link>> {
-        match guard_target(self.filesystem, path) {
-            TargetGuard::Clear => Ok(None),
-            TargetGuard::Link { link, behind: None } => Ok(Some(link)),
-            TargetGuard::Link {
-                behind: Some(refusal),
-                ..
-            }
-            | TargetGuard::Refused(refusal) => {
-                self.sender
-                    .send_warning(refusal_warning(source, &refusal))
-                    .await;
+        match secret_target_link(self.filesystem, source, path) {
+            Ok(link) => Ok(link),
+            Err(refusal) => {
+                self.sender.send_warning(refusal).await;
                 Err(SecretOutcome::Failed)
             }
         }
-    }
-
-    /// Why a write to this target could never land, when that is the case.
-    ///
-    /// `source` is the target as the package file spells it, so the refusal names
-    /// what the user wrote rather than the expanded path.
-    ///
-    /// Asked only of a target that is not a symlink. A link is replaced whatever it
-    /// points at, because the rename lands on the link and never on the destination,
-    /// so the only thing that refuses a link is what the writer itself refuses: a
-    /// fifo, socket or device node, which
-    /// [`FileSystem::irregular_target_refusal`] has already answered for.
-    // Fails closed: an unclassifiable target refuses. Here the write really does land
-    // on the target, so "nothing is known about it" is not a license to write a
-    // credential over it.
-    //
-    // Framed like `refusal_warning` rather than by calling it: that takes a
-    // `FileSystemError`, and every variant's `Display` embeds the path, so routing
-    // this through it prints the path twice.
-    fn unwritable_target_refusal(&self, source: &str, path: &TargetPath) -> Option<String> {
-        match self.filesystem.is_directory(path) {
-            Ok(false) => None,
-            Ok(true) => Some(format!(
-                "{} No command was run.",
-                directory_target_refusal(source, path)
-            )),
-            Err(e) => Some(format!(
-                "Skipping '{source}': selfie could not determine what is at the target, so it will not write a credential there. No command was run. The check failed with: {e}"
-            )),
-        }
-    }
-
-    /// Refuse anything decidable without running a command or reading a file.
-    ///
-    /// Applied before the dry-run short-circuit for the same reason the target
-    /// check is: a preview that promises to run commands for an entry a real
-    /// apply would refuse outright is reporting something that will never happen.
-    async fn refuse_unresolvable(&self, target: &SecretTarget<'_>) -> Phase {
-        if let Err(e) = check_resolvable(target.entry, self.base_dir) {
-            self.sender
-                .send_warning(format!(
-                    "Failed to resolve '{}': {e}",
-                    target.entry.target()
-                ))
-                .await;
-            return Err(SecretOutcome::Failed);
-        }
-        Ok(())
     }
 
     /// End a dry run here, before anything is resolved.
@@ -403,7 +290,7 @@ where
     ///
     /// A symlinked target is the exception: it is replaced whatever the content
     /// turns out to be, so the outcome is known without resolving anything.
-    async fn short_circuit_dry_run(&self, target: &SecretTarget<'_>) -> Phase {
+    async fn short_circuit_dry_run(&self, target: &SecretEntry<'_>) -> Phase {
         if !self.options.dry_run {
             return Ok(());
         }
@@ -437,7 +324,7 @@ where
     }
 
     /// Run the entry's commands and produce its content.
-    async fn resolve(&self, target: &SecretTarget<'_>) -> Phase<ResolvedContent> {
+    async fn resolve(&self, target: &SecretEntry<'_>) -> Phase<ResolvedContent> {
         match resolve_content(
             target.entry,
             self.base_dir,
@@ -459,7 +346,10 @@ where
                         target.entry.target()
                     ))
                     .await;
-                Err(SecretOutcome::Failed)
+                Err(match e.failed_command(target.entry).and_then(program_of) {
+                    Some(program) => SecretOutcome::CommandFailed(program.to_string()),
+                    None => SecretOutcome::Failed,
+                })
             }
         }
     }
@@ -468,7 +358,7 @@ where
     /// device node, or unreadable.
     ///
     /// Conflating any two of those loses a credential.
-    fn read_target(&self, target: &SecretTarget<'_>) -> TargetState {
+    fn read_target(&self, target: &SecretEntry<'_>) -> TargetState {
         read_target_state(self.filesystem, &target.path)
     }
 
@@ -488,7 +378,7 @@ where
     /// unreachable.
     async fn settle_in_sync(
         &self,
-        target: &SecretTarget<'_>,
+        target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         current: &TargetState,
     ) -> Phase {
@@ -562,7 +452,7 @@ where
     /// or there was nothing at the target to begin with.
     async fn settle_conflict(
         &self,
-        target: &SecretTarget<'_>,
+        target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         current: &TargetState,
     ) -> Phase {
@@ -606,7 +496,7 @@ where
     /// guarantee.
     async fn ask_resolver(
         &self,
-        target: &SecretTarget<'_>,
+        target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         current: Option<&[u8]>,
         summary: &str,
@@ -640,7 +530,7 @@ where
     ///
     /// Owner-only and atomic: no window in which the credential is
     /// world-readable, and no interrupted write leaving a truncated one behind.
-    async fn write(&self, target: &SecretTarget<'_>, resolved: &ResolvedContent) -> SecretOutcome {
+    async fn write(&self, target: &SecretEntry<'_>, resolved: &ResolvedContent) -> SecretOutcome {
         if let Err(e) = self
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
@@ -669,6 +559,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Leading assignments are the environment, not the program, however many.
+    #[test]
+    fn a_program_is_the_first_word_after_any_assignments() {
+        assert_eq!(super::program_of("op read a"), Some("op"));
+        assert_eq!(super::program_of("OP_ACCOUNT=me op read a"), Some("op"));
+        assert_eq!(super::program_of("A=1 _B=2 gh auth token"), Some("gh"));
+        // Not an assignment: nothing before the `=`, or a name that is not one.
+        assert_eq!(super::program_of("=x op"), Some("=x"));
+        assert_eq!(super::program_of("1A=x op"), Some("1A=x"));
+    }
+
     use super::*;
 
     // selfie-ir68.21. Both sides render a line count, on the only line a user gets
@@ -727,7 +628,7 @@ mod tests {
     #[test]
     fn a_replacement_warning_omits_a_destination_it_could_not_read() {
         let entry = DotfileEntry::new("creds.tpl", "~/.config/app/creds");
-        let target = SecretTarget {
+        let target = SecretEntry {
             entry: &entry,
             origin: "command: op read x".to_string(),
             path: crate::fs::target::repository_path(std::path::Path::new(

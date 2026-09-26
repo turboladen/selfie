@@ -107,6 +107,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             refused_count,
             unloaded_specs,
             warned,
+            unverified_count: unverified,
             ..
         } => {
             display.println("");
@@ -127,8 +128,13 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 ));
             }
             if drifted_targets.is_empty() {
-                let (line, clean) =
-                    no_drift_line(*total_deployed, *refused_count, *unloaded_specs, *warned);
+                let (line, clean) = no_drift_line(
+                    *total_deployed,
+                    *refused_count,
+                    *unloaded_specs,
+                    *warned,
+                    *unverified,
+                );
                 if clean {
                     display.print_success(line);
                 } else {
@@ -137,7 +143,8 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             } else {
                 let count = drifted_targets.len();
                 display.print_warning(format!(
-                    "Dotfile drift: {count} drifted out of {total_deployed} deployed"
+                    "Dotfile drift: {count} drifted out of {}",
+                    deployed_phrase(*total_deployed, *unverified)
                 ));
                 // Show drifted file paths (shortened)
                 for target in drifted_targets {
@@ -171,30 +178,39 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 
 // The wording and the level for a run that found no drift.
 //
-// The check mark is what a reader scans for, so it may not appear over a run
-// that skipped something: "No dotfile drift" is true only of what was
-// examined. A refusal, an unloaded spec, or another relayed warning keeps the
-// line a warning that names what it covers.
+// The check mark may not appear over a run that skipped something: a refusal, an
+// unloaded spec, or another relayed warning keeps the line a warning that names
+// what it covers. A secret-bearing entry drift cannot verify is unverifiable by
+// design, so its count is named and the line stays clean.
 //
-// Split out because it is the only part of this renderer a test can see --
-// `DisplayManager` writes through a `MultiProgress`, so what reaches the
-// terminal cannot be captured.
+// Split out because it is the only part of this renderer a test can see:
+// `DisplayManager` writes through a `MultiProgress`, whose output a test cannot
+// capture.
 fn no_drift_line(
     total_deployed: usize,
     refused_count: usize,
     unloaded_specs: usize,
     warned: usize,
+    unverified: usize,
 ) -> (String, bool) {
+    let deployed = deployed_phrase(total_deployed, unverified);
     if refused_count > 0 || unloaded_specs > 0 || warned > 0 {
         (
-            format!("No drift among what could be checked ({total_deployed} deployed)"),
+            format!("No drift among what could be checked ({deployed})"),
             false,
         )
     } else {
-        (
-            format!("No dotfile drift ({total_deployed} deployed)"),
-            true,
-        )
+        (format!("No dotfile drift ({deployed})"), true)
+    }
+}
+
+// The deployed total, and beside it the entries drift could not verify, which
+// the total leaves out.
+fn deployed_phrase(total_deployed: usize, unverified: usize) -> String {
+    if unverified > 0 {
+        format!("{total_deployed} deployed, {unverified} not verifiable")
+    } else {
+        format!("{total_deployed} deployed")
     }
 }
 
@@ -256,14 +272,14 @@ mod tests {
     // removes from `dotfiles drift`, reproduced one command over.
     #[test]
     fn a_run_that_skipped_nothing_may_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 0, 0);
+        let (line, clean) = super::no_drift_line(5, 0, 0, 0, 0);
         assert!(clean, "nothing was skipped, so the check mark is earned");
         assert!(line.contains("No dotfile drift"), "got: {line}");
     }
 
     #[test]
     fn a_run_that_skipped_a_package_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 2, 0, 0);
+        let (line, clean) = super::no_drift_line(5, 2, 0, 0, 0);
         assert!(!clean, "a skipped package must not be reported as clean");
         assert!(
             line.contains("could be checked"),
@@ -273,7 +289,7 @@ mod tests {
 
     #[test]
     fn a_run_with_an_unloaded_spec_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 1, 0);
+        let (line, clean) = super::no_drift_line(5, 0, 1, 0, 0);
         assert!(!clean, "an unloaded spec must not be reported as clean");
         assert!(
             !line.contains("No dotfile drift"),
@@ -283,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_refusal_and_an_unloaded_spec_together_stay_non_clean() {
-        let (line, clean) = super::no_drift_line(5, 2, 1, 0);
+        let (line, clean) = super::no_drift_line(5, 2, 1, 0, 0);
         assert!(
             !clean,
             "a refusal and an unloaded spec together must not be reported as clean"
@@ -299,12 +315,25 @@ mod tests {
     // even if `warned` were never read.
     #[test]
     fn a_relayed_warning_alone_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 0, 1);
+        let (line, clean) = super::no_drift_line(5, 0, 0, 1, 0);
         assert!(!clean, "a relayed warning must not be reported as clean");
         assert!(
             !line.contains("No dotfile drift"),
             "the line must not claim no drift: {line}"
         );
+    }
+
+    // Entries drift could not verify, and nothing else: a machine whose dotfiles
+    // all come from providers. They are unverifiable by design, so the line stays
+    // clean and names them.
+    #[test]
+    fn an_unverified_entry_is_counted_on_a_clean_line() {
+        let (line, clean) = super::no_drift_line(1, 0, 0, 0, 2);
+        assert!(
+            clean,
+            "an unverified entry must not keep the line off the check mark"
+        );
+        assert_eq!(line, "No dotfile drift (1 deployed, 2 not verifiable)");
     }
 
     #[test]
@@ -317,6 +346,7 @@ mod tests {
             refused_count: 0,
             unloaded_specs: 0,
             warned: 0,
+            unverified_count: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -332,6 +362,7 @@ mod tests {
             refused_count: 0,
             unloaded_specs: 0,
             warned: 0,
+            unverified_count: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -347,6 +378,7 @@ mod tests {
             refused_count: 0,
             unloaded_specs: 1,
             warned: 0,
+            unverified_count: 0,
         };
 
         assert!(handle_status_event(&event, &display, false));

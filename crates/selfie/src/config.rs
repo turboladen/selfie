@@ -18,7 +18,9 @@ use std::{
 
 use serde::Deserialize;
 
-const STOP_ON_ERROR_DEFAULT: bool = true;
+// Off, so an apply reports every failure in one run rather than the first. Read
+// by both the deserializer and the builder, so the two cannot disagree.
+const STOP_ON_ERROR_DEFAULT: bool = false;
 
 /// Comprehensive application configuration that combines file config and CLI args
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +55,7 @@ fn default_command_timeout() -> NonZeroU64 {
 }
 
 fn default_stop_on_error() -> bool {
-    true
+    STOP_ON_ERROR_DEFAULT
 }
 
 /// Returns the default max concurrency, using available parallelism or falling back to 4.
@@ -129,7 +131,9 @@ impl SelfieConfig {
         self.max_concurrency
     }
 
-    /// Check if operations should stop on first error
+    /// Whether an apply stops at its first failure: an entry or package it
+    /// refused, a write that failed, or a dotfiles directory it could not read.
+    /// A conflict or a warning never stops one. Off by default.
     #[must_use]
     pub fn stop_on_error(&self) -> bool {
         self.stop_on_error
@@ -306,7 +310,9 @@ mod tests {
         assert_eq!(config.package_directory(), &PathBuf::from("/test/path"));
         assert_eq!(config.command_timeout().as_secs(), 60);
         assert!(config.max_concurrency().get() > 0); // Should be based on CPUs or default
-        assert_eq!(config.stop_on_error(), STOP_ON_ERROR_DEFAULT);
+        // The literal, not the constant: comparing against the constant passes
+        // whatever the default is.
+        assert!(!config.stop_on_error());
     }
 
     #[test]
@@ -359,7 +365,7 @@ mod tests {
         // Default values
         assert_eq!(config.command_timeout.get(), 60); // Default
         assert!(config.max_concurrency.get() > 0); // Default based on CPUs
-        assert!(config.stop_on_error); // Default
+        assert!(!config.stop_on_error); // Default
     }
 
     #[test]

@@ -511,7 +511,7 @@ mod tests {
             // Check defaults were properly applied
             assert_eq!(config.environment, "test-env");
             assert_eq!(config.package_directory, Path::new("/test/packages"));
-            assert!(config.stop_on_error); // Default
+            assert!(!config.stop_on_error); // Default
 
             // Check command_timeout has default value (60)
             assert_eq!(config.command_timeout.get(), 60);
