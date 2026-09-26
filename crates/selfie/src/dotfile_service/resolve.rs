@@ -124,6 +124,38 @@ fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError>
     })
 }
 
+/// Read a template from the package directory, refusing a fifo, socket or device
+/// node rather than opening it. `source` is the template as the package file names
+/// it, and `path` the contained path it resolves to.
+///
+/// # Errors
+///
+/// [`ResolveError::TemplateUnreadable`] for a file that is not regular or could not
+/// be read.
+pub(crate) fn read_template<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    path: &Path,
+) -> Result<String, ResolveError> {
+    // Before the read, which would block on a fifo. Nothing secret exists in scope:
+    // this reports a path and a file type, and no command has run.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(path)) {
+        return Err(ResolveError::TemplateUnreadable {
+            template: source.to_string(),
+            message: format!(
+                "{}. Replace it with a regular file.",
+                repository_read_refusal(&refusal)
+            ),
+        });
+    }
+    filesystem
+        .read_file(path)
+        .map_err(|e| ResolveError::TemplateUnreadable {
+            template: source.to_string(),
+            message: e.to_string(),
+        })
+}
+
 /// Resolve an entry's content, running any commands it declares.
 ///
 /// Commands run with their working directory set to `base_dir`, the same base
@@ -203,24 +235,7 @@ where
             // before the read, matching where apply and drift put theirs. Nothing
             // secret exists in scope yet: this reports a path and a file type, and
             // no command has run.
-            if let Some(refusal) =
-                filesystem.irregular_target_refusal(&repository_path(&template_path))
-            {
-                return Err(ResolveError::TemplateUnreadable {
-                    template: source.to_string(),
-                    message: format!(
-                        "{}. Replace it with a regular file.",
-                        repository_read_refusal(&refusal)
-                    ),
-                });
-            }
-
-            let text = filesystem.read_file(&template_path).map_err(|e| {
-                ResolveError::TemplateUnreadable {
-                    template: source.to_string(),
-                    message: e.to_string(),
-                }
-            })?;
+            let text = read_template(filesystem, source, &template_path)?;
 
             // Built fresh for this entry. Sharing or reusing a binding map across
             // entries would splice one entry's secret into another entry's file.

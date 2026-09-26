@@ -1096,6 +1096,115 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
     }
 }
 
+// `RealFileSystem` that fails the test on any following stat of `link`, for a
+// check that must answer a link without reaching what it points at, which may sit
+// on a hung mount.
+#[derive(Clone, Debug)]
+struct FollowingStatPanicsAt {
+    inner: RealFileSystem,
+    link: PathBuf,
+}
+
+impl selfie::fs::FileSystem for FollowingStatPanicsAt {
+    // Delegated: this decorator's subject is the second symlink answer, not what is at
+    // a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.symlink_refusal(path)
+    }
+
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        assert_ne!(
+            path.path(),
+            self.link,
+            "a following stat reached through the link"
+        );
+        self.inner.is_directory(path)
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+
+    fn read_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.inner.read_file_no_follow(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        assert_ne!(
+            path.path(),
+            self.link,
+            "a following stat reached through the link"
+        );
+        self.inner.irregular_target_refusal(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
+    }
+}
+
 // `RealFileSystem` that answers the second symlink question with a refusal this code
 // does not interpret, so a test can check the re-ask fails closed rather than falling
 // back to the answer taken before the resolve.
@@ -9969,9 +10078,10 @@ mod repository_writes_do_not_follow_symlinks {
 // same defect on the other side of the copy: a fifo committed into the
 // repository is read as a source, and reading one blocks until a writer arrives.
 //
-// Three reads: `read_repo_file`, which apply and drift share, `resolve_content`'s
-// `Template` arm, and `read_referenced_file`. Each runs through `within_deadline`,
-// so a read that blocks fails its test. selfie-lwv5
+// Three reads: `read_repo_file`, which apply and drift share, `read_template`,
+// which classification reaches before `resolve_content`'s `Template` arm does, and
+// `read_referenced_file`. Each runs through `within_deadline`, so a read that blocks
+// fails its test. selfie-lwv5
 mod irregular_sources {
     use super::*;
     use std::path::Path;
@@ -14115,5 +14225,291 @@ mod stop_on_error_governs_every_failure {
             "the preview must stop before the second entry: {events:?}"
         );
         assert_eq!(runner.call_count(), 0);
+    }
+}
+
+// Drift classifies a secret-bearing entry as apply does before calling it
+// unverifiable, so an entry that can never deploy is reported as refused, in
+// apply's words, rather than hidden behind the one status a user learns to
+// ignore. None of this runs a command: drift has no runner to run one with.
+mod drift_refuses_secret_entries_as_apply_does {
+    use super::*;
+
+    fn provider(dirs: &TestDirs, target: &str) {
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{target}\"\n"
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    fn skipped(events: &[PackageEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PackageEvent::DotfileSkipped { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_target_the_rule_rejects_is_refused_in_apply_s_words() {
+        let dirs = TestDirs::new();
+        provider(&dirs, "~alice/.config/creds");
+        let service = dirs.service();
+
+        let drifted = collect_events(service.check_drift().await).await;
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let (_, total, refused) = drift_summary(&drifted);
+        assert_eq!((total, refused), (0, 1), "{drifted:?}");
+        assert_eq!(
+            unverified(&drifted),
+            0,
+            "a refused entry is not unverifiable"
+        );
+        assert_eq!(skipped(&drifted), 0, "{drifted:?}");
+        let from_drift = warning_messages(&drifted);
+        assert_eq!(
+            from_drift,
+            warning_messages(&applied),
+            "drift and apply must word the refusal alike"
+        );
+        assert!(
+            from_drift.iter().any(|w| w.contains("'~user' form")),
+            "{from_drift:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_at_the_target_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("creds");
+        std::fs::create_dir(&target).unwrap();
+        provider(&dirs, target.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "{events:?}"
+        );
+    }
+
+    // Drift's half of the order test: the escape is named ahead of the directory.
+    #[tokio::test]
+    async fn a_template_escaping_with_a_directory_target_is_refused_for_the_escape() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir(&target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("escapes the package directory")),
+            "the escape is the reason: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "the directory is not the first reason: {warnings:?}"
+        );
+        assert_eq!(drift_summary(&events).2, 1);
+    }
+
+    // The control: a link is replaced on apply, so drift has nothing to refuse and
+    // the entry stays unverifiable.
+    #[tokio::test]
+    async fn a_symlink_to_a_regular_file_stays_unverifiable() {
+        let dirs = TestDirs::new();
+        let real = dirs.target_dir.join("real");
+        std::fs::write(&real, "OLD").unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 0, "{events:?}");
+        assert_eq!(unverified(&events), 1, "{events:?}");
+        assert_eq!(skipped(&events), 1);
+    }
+
+    // Apply refuses a link to a fifo, which it learns by following the link. A check
+    // does not follow a link, whose destination may sit on a hung mount, so it
+    // reports every linked secret target as unverified.
+    #[tokio::test]
+    async fn a_symlink_to_a_fifo_stays_unverifiable() {
+        let dirs = TestDirs::new();
+        let pipe = dirs.target_dir.join("pipe");
+        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&pipe, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 0, "{events:?}");
+        assert_eq!(unverified(&events), 1, "{events:?}");
+    }
+
+    // Drift writes nothing and runs nothing, so it may not say it would not write a
+    // credential, that it ran no command, or that it failed to resolve. Apply keeps
+    // those words, since it is the command that would have.
+    #[tokio::test]
+    async fn drift_words_a_secret_refusal_for_a_command_that_writes_nothing() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let dir_target = dirs.target_dir.join("creds");
+        std::fs::create_dir(&dir_target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+            dir_target.display(),
+            dirs.target_dir.join("other").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let service = dirs.service();
+
+        let drifted = warning_messages(&collect_events(service.check_drift().await).await);
+        let applied = warning_messages(
+            &collect_events(service.apply_all(ApplyOptions::default()).await).await,
+        );
+
+        assert_eq!(drifted.len(), 2, "{drifted:?}");
+        for warning in &drifted {
+            for word in ["credential", "No command was run", "Failed to resolve"] {
+                assert!(!warning.contains(word), "drift said '{word}': {warning}");
+            }
+        }
+        assert!(
+            drifted
+                .iter()
+                .any(|w| w.contains("a directory is at the target"))
+                && drifted
+                    .iter()
+                    .any(|w| w.contains("escapes the package directory")),
+            "drift must still name both refusals: {drifted:?}"
+        );
+        assert!(
+            applied.iter().any(|w| w.contains("No command was run"))
+                && applied.iter().any(|w| w.starts_with("Failed to resolve")),
+            "apply keeps its own wording: {applied:?}"
+        );
+    }
+
+    // A check reports a linked secret target as unverified whatever the link points
+    // at, so it asks nothing that follows the link. The double fails the test on
+    // any following stat of the link's path.
+    #[tokio::test]
+    async fn drift_does_not_stat_through_a_link_at_a_secret_target() {
+        let dirs = TestDirs::new();
+        let real = dirs.target_dir.join("real");
+        std::fs::write(&real, "OLD").unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+        let fs = FollowingStatPanicsAt {
+            inner: RealFileSystem,
+            link: link.clone(),
+        };
+
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .check_drift()
+                .await,
+        )
+        .await;
+
+        assert_eq!(unverified(&events), 1, "{events:?}");
+        assert_eq!(drift_summary(&events).2, 0);
+    }
+
+    // A template entry whose template no command needs to find wrong: drift, a dry
+    // run and the deploy refuse it alike, and none runs a binding.
+    async fn a_bad_template_is_refused_by_every_command(setup: impl Fn(&std::path::Path)) {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("creds");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        setup(&dirs.package_dir.join("creds.tpl"));
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"X");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let drifted = collect_events(service.check_drift().await).await;
+        let previewed = collect_events(
+            service
+                .apply_all(ApplyOptions {
+                    dry_run: true,
+                    ..Default::default()
+                })
+                .await,
+        )
+        .await;
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            (drift_summary(&drifted).2, unverified(&drifted)),
+            (1, 0),
+            "drift must refuse it: {drifted:?}"
+        );
+        assert_eq!(
+            refused_count(&previewed),
+            1,
+            "a dry run must refuse it: {previewed:?}"
+        );
+        assert_eq!(refused_count(&applied), 1, "{applied:?}");
+        assert_eq!(runner.call_count(), 0, "no binding may run");
+        assert!(
+            warning_messages(&drifted)
+                .iter()
+                .all(|w| !w.contains("Failed to resolve")),
+            "{drifted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_template_is_refused_by_every_command() {
+        a_bad_template_is_refused_by_every_command(|_| {}).await;
+    }
+
+    #[tokio::test]
+    async fn a_fifo_template_is_refused_by_every_command() {
+        a_bad_template_is_refused_by_every_command(|path| {
+            nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_template_is_refused_by_every_command() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP an_unreadable_template_is_refused_by_every_command: running as root");
+            return;
+        }
+        a_bad_template_is_refused_by_every_command(|path| {
+            std::fs::write(path, "X: {{ v }}\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        })
+        .await;
     }
 }

@@ -236,23 +236,27 @@ Test egress at the **boundary**, not by listing known paths:
   same way.** `apply`, `dotfiles drift` and `dotfiles track` all ask `refusal::guard_refusal` before
   they read the target, so a link is refused whether or not its content matches, and none of them
   reads through it to find out. Drift counts the refusal rather than reporting a drift type computed
-  from the destination. A secret-bearing entry is the exception: its link is **always replaced**,
-  whatever it points at and whatever the destination's mode, because following it would send a
-  credential where the link's author pointed and refusing would leave it undeployed. The replacement
-  lands on the link, never on the destination, which is why a directory behind a link is no
-  obstacle. What refuses before anything runs is what a write could never land on: a fifo, socket or
-  device node, at the target or behind a link alike; a directory **at** the target, since a file
-  cannot replace one; and a plain target selfie could not classify, since that is where the write
-  goes. A link present at either check is never read through, not for a comparison and not for the
-  owner-only check, which does not follow either: a link put at the target after the read is
-  replaced, never reported in sync on its destination's mode. Both questions are asked **twice**,
-  once before the provider command and once immediately before the read, because the first answers
-  are stale by the time the target is read. The read itself is `read_file_no_follow`, which opens
-  with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
-  after the last check is refused by the read rather than followed or waited on; a link it finds is
-  replaced like one a check found. The checks stay: opening a device node can have side effects, and
-  they word the refusal. The warning naming the link and its destination is sent **after** the write
-  succeeds, worded as what happened, so it can never precede a refusal or a failed write. ADR-0005
-  decision 3 records all of it. Track's refusal sits ahead of every write it performs, so nothing is
-  copied, written or recorded for a link: accepting one would copy the link's destination into the
-  dotfiles repository, where `sync push` commits it. Do not relax that ordering.
+  from the destination. Apply and drift ask all of this through `classify::classify_entry`, so drift
+  refuses a secret-bearing entry, before calling it unverifiable, wherever apply would refuse it
+  without running anything, except behind a link: drift asks `guard_refusal`, which does not follow
+  one, and reports a linked target as unverified. A secret-bearing entry is the exception: its link
+  is **always replaced**, whatever it points at and whatever the destination's mode, because
+  following it would send a credential where the link's author pointed and refusing would leave it
+  undeployed. The replacement lands on the link, never on the destination, which is why a directory
+  behind a link is no obstacle. What refuses before anything runs is what a write could never land
+  on: a fifo, socket or device node, at the target or behind a link alike; a directory **at** the
+  target, since a file cannot replace one; and a plain target selfie could not classify, since that
+  is where the write goes. A link present at either check is never read through, not for a
+  comparison and not for the owner-only check, which does not follow either: a link put at the
+  target after the read is replaced, never reported in sync on its destination's mode. Both
+  questions are asked **twice**, once before the provider command and once immediately before the
+  read, because the first answers are stale by the time the target is read. The read itself is
+  `read_file_no_follow`, which opens with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's
+  type, so a link or fifo planted after the last check is refused by the read rather than followed
+  or waited on; a link it finds is replaced like one a check found. The checks stay: opening a
+  device node can have side effects, and they word the refusal. The warning naming the link and its
+  destination is sent **after** the write succeeds, worded as what happened, so it can never precede
+  a refusal or a failed write. ADR-0005 decision 3 records all of it. Track's refusal sits ahead of
+  every write it performs, so nothing is copied, written or recorded for a link: accepting one would
+  copy the link's destination into the dotfiles repository, where `sync push` commits it. Do not
+  relax that ordering.

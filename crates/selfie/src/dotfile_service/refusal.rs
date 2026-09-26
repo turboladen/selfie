@@ -98,7 +98,7 @@ pub(super) fn guard_refusal<F: FileSystem>(
 ///
 /// A refusal other than [`FileSystemError::SymlinkedTarget`], which the caller
 /// must refuse the entry on.
-fn link_at<F: FileSystem>(
+pub(super) fn link_at<F: FileSystem>(
     filesystem: &F,
     target: &TargetPath,
 ) -> Result<Option<Link>, FileSystemError> {
