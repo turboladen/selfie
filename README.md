@@ -249,7 +249,10 @@ check exits `1`. A secret-bearing entry is not a refusal: drift reports it as no
 checking it would run its commands, and counts it apart. A dotfiles directory that exists but cannot
 be listed counts as one refusal for `selfie apply` with no package name, and for
 `selfie dotfiles drift`. Every standalone dotfile in it was part of the run and none could be read,
-while the package dotfiles still deploy or are still checked.
+while the package dotfiles still deploy or are still checked. A package file that cannot be loaded
+counts the same way, one refusal each, since nothing it declares was deployed or checked: every such
+file in the package directory, and one in the dotfiles directory unless the package directory
+already has a spec of that name, which it only warns about.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 

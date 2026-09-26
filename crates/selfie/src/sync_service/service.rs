@@ -222,7 +222,6 @@ where
                     drifted_targets: summary.drifted_targets,
                     total_deployed: summary.total_deployed,
                     refused_count: summary.refused_count,
-                    unloaded_specs: summary.unloaded_specs,
                     warned: summary.warned,
                     unverified_count: summary.unverified,
                 })
@@ -1206,8 +1205,6 @@ struct DriftSummary {
     drifted_targets: Vec<String>,
     total_deployed: usize,
     refused_count: usize,
-    /// How many specs the drift check skipped rather than loaded.
-    unloaded_specs: usize,
     /// How many relayed warnings named work the check could not complete.
     warned: usize,
     /// How many secret-bearing entries the check reported without verifying.
@@ -1243,7 +1240,6 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary.relayed.push(RelayedDriftEvent::Warning(message));
             }
             PackageEvent::SpecSkipped { error, .. } => {
-                summary.unloaded_specs += 1;
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
             }
             PackageEvent::Completed {
@@ -1902,7 +1898,6 @@ mod tests {
                     drift_count: 0,
                     total_count: 0,
                     refused_count: 0,
-                    unloaded_specs: 0,
                     unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(0, 0),
@@ -1950,7 +1945,6 @@ mod tests {
                 drift_count: 0,
                 total_count: 4,
                 refused_count: 2,
-                unloaded_specs: 0,
                 unverified_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(4, 4),
@@ -1981,7 +1975,6 @@ mod tests {
                 drift_count: 0,
                 total_count: 1,
                 refused_count: 0,
-                unloaded_specs: 0,
                 unverified_count: 3,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(1, 1),
@@ -2014,7 +2007,6 @@ mod tests {
                     drift_count: 1,
                     total_count: 3,
                     refused_count: 0,
-                    unloaded_specs: 0,
                     unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
@@ -2170,8 +2162,7 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 1,
                         unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
@@ -2305,9 +2296,9 @@ mod tests {
         );
     }
 
-    // A DotfileService whose `check_drift` skips two specs, so a test reading
-    // `unloaded_specs` proves the field counts them rather than recording that
-    // any were skipped at all.
+    // A DotfileService whose `check_drift` skips two specs and, as the real one
+    // does, counts each as a refusal, so a test counting the relayed rows proves
+    // each is relayed rather than only the first.
     #[derive(Clone)]
     struct DriftEmittingTwoSkippedSpecs;
 
@@ -2347,8 +2338,7 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 2,
                         unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
@@ -2368,7 +2358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_the_unloaded_spec_count_in_the_summary() {
+    async fn status_relays_every_skipped_spec_ahead_of_the_summary() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2387,12 +2377,20 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let unloaded_specs = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary { unloaded_specs, .. } => Some(*unloaded_specs),
+        let relayed = events
+            .iter()
+            .take_while(|e| !matches!(e, PackageEvent::SyncDriftSummary { .. }))
+            .filter(|e| matches!(e, PackageEvent::SpecSkipped { .. }))
+            .count();
+
+        assert_eq!(relayed, 2, "{events:?}");
+        // Drift counts each spec it could not load as a refusal, and the summary
+        // carries that count.
+        let refused = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { refused_count, .. } => Some(*refused_count),
             _ => None,
         });
-
-        assert_eq!(unloaded_specs, Some(2), "{events:?}");
+        assert_eq!(refused, Some(2), "{events:?}");
     }
 
     // A DotfileService whose `check_drift` emits one warning and completes
@@ -2430,7 +2428,6 @@ mod tests {
                         drift_count: 0,
                         total_count: 0,
                         refused_count: 0,
-                        unloaded_specs: 0,
                         unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
@@ -2449,12 +2446,10 @@ mod tests {
         }
     }
 
-    // A relayed warning must raise `warned` alone. An implementation that
-    // folded warnings into `unloaded_specs`, or that dropped `warned`
-    // entirely, would leave one of these two counts wrong on an event that
-    // carries no skipped spec at all.
+    // A relayed warning must raise `warned`, on an event stream that carries no
+    // skipped spec at all.
     #[tokio::test]
-    async fn status_reports_a_relayed_warning_as_warned_and_not_as_an_unloaded_spec() {
+    async fn status_reports_a_relayed_warning_as_warned() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2473,22 +2468,17 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let counts = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary {
-                warned,
-                unloaded_specs,
-                ..
-            } => Some((*warned, *unloaded_specs)),
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
             _ => None,
         });
 
-        assert_eq!(counts, Some((1, 0)), "{events:?}");
+        assert_eq!(warned, Some(1), "{events:?}");
     }
 
     // A DotfileService whose `check_drift` emits one warning and two skipped
-    // specs, so a test reading both `warned` and `unloaded_specs` proves the
-    // two counts land in the field each names rather than one leaking into
-    // the other.
+    // specs, so a test reading `warned` proves a skipped spec does not leak into
+    // it.
     #[derive(Clone)]
     struct DriftEmittingOneWarningAndTwoSkippedSpecs;
 
@@ -2532,8 +2522,7 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 2,
                         unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
@@ -2552,13 +2541,12 @@ mod tests {
         }
     }
 
-    // Pins the two counts `collect_drift_summary` keeps as independent: a
-    // warning raises only `warned`, and a skipped spec raises only
-    // `unloaded_specs`. Neither of the two tests above can catch a count
-    // leaking into the other, because each drives a stream carrying only one
-    // kind of event.
+    // A warning raises `warned` and a skipped spec does not: drift counts an
+    // unloadable spec as a refusal, and counting it as a warning too would count
+    // it twice. Neither test above can catch that, because each drives a stream
+    // carrying only one kind of event.
     #[tokio::test]
-    async fn status_counts_a_warning_and_skipped_specs_separately() {
+    async fn status_counts_a_warning_and_not_the_skipped_specs_as_warned() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2577,16 +2565,12 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let counts = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary {
-                warned,
-                unloaded_specs,
-                ..
-            } => Some((*warned, *unloaded_specs)),
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
             _ => None,
         });
 
-        assert_eq!(counts, Some((1, 2)), "{events:?}");
+        assert_eq!(warned, Some(1), "{events:?}");
     }
 }
 

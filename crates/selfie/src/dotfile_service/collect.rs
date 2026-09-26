@@ -152,6 +152,14 @@ pub(super) fn collect_packages<R: PackageRepository>(
         }
     }
     packages.retain(|pkg| !is_ambiguous(pkg, &packages_claims));
+    // Every packages/ file that failed to parse could have been used, so each is a
+    // refusal, one within an ambiguous name too: it needs its own fix.
+    refusals.extend(
+        unparsable_in_packages
+            .iter()
+            .cloned()
+            .map(CollectionRefusal::UnloadableSpec),
+    );
 
     // A name packages/ claims is settled in packages/: every dotfiles/ file of that
     // name is set aside with a warning and is never a refusal, whether it parsed,
@@ -194,6 +202,17 @@ pub(super) fn collect_packages<R: PackageRepository>(
             }
         }
     }
+    // A dotfiles/ file that failed to parse could have been used only where
+    // packages/ does not claim its name.
+    refusals.extend(
+        unparsable_in_dotfiles
+            .into_iter()
+            .filter(|path| {
+                crate::package::spec_name_of(path)
+                    .is_none_or(|name| !packages_claims.contains_key(&name))
+            })
+            .map(CollectionRefusal::UnloadableSpec),
+    );
     dotfiles_packages.retain(|pkg| {
         pkg.spec_name()
             .is_none_or(|name| !packages_claims.contains_key(&name))

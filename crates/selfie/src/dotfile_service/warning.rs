@@ -48,6 +48,10 @@ pub(super) enum CollectionRefusal {
     /// A name several spec files in one directory claim, so none of them is used.
     /// Carries the files, sorted.
     AmbiguousName { name: String, paths: Vec<PathBuf> },
+    /// A spec file that could not be loaded, where it could have been used, so
+    /// nothing it declares is looked at. Its warning travels as an
+    /// [`ApplyWarning`].
+    UnloadableSpec(PathBuf),
 }
 
 impl CollectionRefusal {
@@ -55,7 +59,7 @@ impl CollectionRefusal {
     /// does.
     pub(super) async fn send(&self, sender: &crate::package::event::EventSender) {
         match self {
-            Self::UnreadableDotfilesDirectory => {}
+            Self::UnreadableDotfilesDirectory | Self::UnloadableSpec(_) => {}
             Self::AmbiguousName { name, paths } => {
                 sender
                     .send_warning(format!(

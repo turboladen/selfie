@@ -40,7 +40,6 @@ pub(super) async fn handle_check_drift<F>(
     sender: &EventSender,
     token: &CancellationToken,
     collection_refusals: usize,
-    unloaded_specs: usize,
 ) -> Option<OperationResult>
 where
     F: FileSystem,
@@ -179,7 +178,7 @@ where
     }
 
     Some(OperationResult::Success(
-        tally.into_success(config.environment(), unloaded_specs),
+        tally.into_success(config.environment()),
     ))
 }
 
@@ -196,12 +195,11 @@ struct DriftTally {
 }
 
 impl DriftTally {
-    fn into_success(self, environment: &str, unloaded_specs: usize) -> OperationSuccess {
+    fn into_success(self, environment: &str) -> OperationSuccess {
         OperationSuccess::DotfileDriftChecked {
             drift_count: self.drifted,
             total_count: self.compared,
             refused_count: self.refused,
-            unloaded_specs,
             unverified_count: self.unverified,
             environment: environment.to_string(),
             steps_completed: StepCount::new(self.compared, self.compared),
