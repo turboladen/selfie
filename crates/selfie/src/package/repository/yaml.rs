@@ -406,7 +406,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             Some(SpecRefusal::UnknownEnvironmentKeys { environment, keys }) => {
                 let fields: Vec<String> = keys
                     .iter()
-                    .map(|key| crate::package::environment_field(&environment, key))
+                    .map(|key| crate::package::environment_field(&environment, &key.key))
                     .collect();
                 return Err(PackageRepoError::UnknownEnvironmentFields {
                     path: path.to_path_buf(),

@@ -319,11 +319,7 @@ where
         // load is skipped just above, because a recommend is soft and refusing one
         // must not fail the install its parent asked for. Clearing the entry keeps
         // a `Visited` mark off a package whose edges nothing looked at.
-        if package_blob
-            .package
-            .spec_refusal(config_environment)
-            .is_some()
-        {
+        if package_blob.package.is_refused(config_environment) {
             visit_state.remove(package_name);
             return Ok(());
         }

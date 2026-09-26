@@ -3,8 +3,7 @@
 use std::fmt;
 
 use super::{
-    DotfileEntry, DotfileField, EnvironmentField, Package, SpecOrigin, TopLevelKeys, UnknownKey,
-    describe_unknown_key_in, unknown_key,
+    DotfileEntry, EnvironmentField, Package, PackageField, SpecOrigin, TopLevelKeys, UnknownKey,
 };
 use crate::validation::ValidationIssue;
 
@@ -21,7 +20,7 @@ pub(crate) enum SpecRefusal {
     /// that carries them.
     UnknownEnvironmentKeys {
         environment: String,
-        keys: Vec<String>,
+        keys: Vec<UnknownKey>,
     },
     /// The top level could not be read back, carrying the parse failure.
     UncheckedTopLevel(String),
@@ -31,25 +30,35 @@ pub(crate) enum SpecRefusal {
     NoEnvironments(ValidationIssue),
 }
 
+impl SpecRefusal {
+    /// The field paths `selfie spec validate` reports this refusal's problems at,
+    /// one per problem, so a caller holding its issues can tell whether each is
+    /// already reported.
+    pub(crate) fn fields(&self) -> Vec<String> {
+        match self {
+            Self::UnknownTopLevelKeys(keys) => keys.iter().map(|key| key.key.clone()).collect(),
+            Self::UnknownEnvironmentKeys { environment, keys } => keys
+                .iter()
+                .map(|key| super::environment_field(environment, &key.key))
+                .collect(),
+            // Validate reports an unread top level against the package as a whole.
+            Self::UncheckedTopLevel(_) => vec!["package".to_string()],
+            Self::NoEnvironments(issue) => vec![issue.field().to_string()],
+        }
+    }
+}
+
 impl fmt::Display for SpecRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownTopLevelKeys(keys) => {
-                let described: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
-                f.write_str(&described.join("; "))
+                f.write_str(&super::describe_unknown_keys::<PackageField>(keys))
             }
-            // Described here rather than at the point the keys were collected,
-            // so the level a key is judged against is also the level it is
-            // explained against.
             Self::UnknownEnvironmentKeys { environment, keys } => {
-                let described: Vec<String> = keys
-                    .iter()
-                    .map(|key| describe_unknown_key_in::<EnvironmentField>(key))
-                    .collect();
                 write!(
                     f,
                     "in environment '{environment}': {}",
-                    described.join("; ")
+                    super::describe_unknown_keys::<EnvironmentField>(keys)
                 )
             }
             // The parse failure ends the sentence because it is several lines of
@@ -115,28 +124,18 @@ impl Package {
             .iter()
             .enumerate()
             .flat_map(|(i, entry)| entry.unknown_keys().iter().map(move |key| (i, key)))
-            // Every recorded key yields an entry. A save refuses on this list being
-            // non-empty, so dropping a key it could not word would let a rewrite
-            // delete that key instead -- the guard turning into a filter.
-            //
-            // `DotfileEntry`'s deserializer records only what
-            // `unknown_key::<DotfileField>` rejects, so the fallback is unreachable
-            // today. It is here because the failure is silent and destroys the
-            // user's text.
-            .map(|(i, key)| UnknownEntryKey {
+            // The entry recorded each key already judged, so every one yields an
+            // entry here with nothing left to word.
+            .map(|(i, unknown)| UnknownEntryKey {
                 field: {
                     let entry = super::dotfile_field(i);
                     let entry = match environment {
                         Some(environment) => super::environment_field(environment, &entry),
                         None => entry,
                     };
-                    format!("{entry}.{key}")
+                    format!("{entry}.{}", unknown.key)
                 },
-                unknown: unknown_key::<DotfileField>(key).unwrap_or_else(|| UnknownKey {
-                    key: key.clone(),
-                    message: format!("unrecognized field '{key}'"),
-                    shadows: false,
-                }),
+                unknown: unknown.clone(),
             })
             .collect()
     }
@@ -204,6 +203,20 @@ impl Package {
             .or_else(|| self.unknown_environment_keys(environment))
             .or_else(|| self.unchecked_top_level())
             .or_else(|| self.no_environments())
+    }
+
+    /// Whether [`Package::spec_refusal`] refuses this package in `environment`,
+    /// for a caller that needs only the answer: it builds no reason.
+    pub(crate) fn is_refused(&self, environment: &str) -> bool {
+        // Mirrors `spec_refusal`'s four rules; a test holds the two together.
+        matches!(self.top_level_keys(), TopLevelKeys::Checked(keys) if !keys.is_empty())
+            || self
+                .environments()
+                .get(environment)
+                .is_some_and(|env| !env.unknown_keys().is_empty())
+            || matches!(self.top_level_keys(), TopLevelKeys::Unchecked(_))
+            || (self.origin() == SpecOrigin::PackageDirectory
+                && self.validate_environments_exists().is_err())
     }
 
     // Last, so a file that is both missing an environment and carrying a bad key
@@ -291,6 +304,31 @@ mod tests {
             SpecOrigin::PackageDirectory,
         );
         package
+    }
+
+    // `is_refused` answers what `spec_refusal` does, rule by rule, for every
+    // reason it gives and for a file it accepts.
+    #[test]
+    fn is_refused_agrees_with_spec_refusal() {
+        let env = "    install: \"echo i\"\n";
+        let fixtures = [
+            format!("name: myapp\nenvironments:\n  work:\n{env}"),
+            format!("name: myapp\nconfigs: []\nenvironments:\n  work:\n{env}"),
+            format!("name: myapp\nenvironments:\n  work:\n{env}    audt: x\n"),
+            format!("name: myapp\nenvironments:\n  home:\n{env}    audt: x\n  work:\n{env}"),
+            format!("name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  work:\n{env}"),
+            "name: myapp\nenvironments: {}\n".to_string(),
+        ];
+        let mut refused = 0;
+        for yaml in &fixtures {
+            let package = package_from(yaml);
+            let expected = package.spec_refusal("work").is_some();
+            assert_eq!(package.is_refused("work"), expected, "{yaml}");
+            refused += usize::from(expected);
+        }
+        assert_eq!(refused, 4, "four fixtures, one per rule, are refused");
+        let standalone = standalone_from(TRACKED_STANDALONE);
+        assert!(!standalone.is_refused("work") && standalone.spec_refusal("work").is_none());
     }
 
     // The same file, loaded as `dotfiles track` writes it: no environments, and
@@ -570,37 +608,6 @@ environments: {}
         assert!(
             refusal.to_string().starts_with("in environment 'test':"),
             "the environment's own key must be reported first, got: {refusal}"
-        );
-    }
-
-    // A recorded key the rule cannot classify still refuses. The deserializer only
-    // records keys `unknown_key` rejects, so this drives the fallback directly: the
-    // guard must report every recorded key, because a save reads this list being
-    // non-empty and would otherwise delete the key it could not word.
-    #[test]
-    fn a_recorded_key_the_rule_cannot_word_is_still_reported() {
-        use crate::package::{DotfileField, unknown_key};
-
-        // `target` is a real field, so the rule accepts it and returns `None`.
-        // Nothing else in the crate can put such a key in `unknown_keys`.
-        assert!(
-            unknown_key::<DotfileField>("target").is_none(),
-            "fixture must be a key the rule accepts"
-        );
-
-        let yaml = "name: myapp\ndotfiles:\n  - source: a\n    target: ~/.a\n";
-        let mut package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
-        // Reaching the private field directly: this module is a child of the one
-        // that defines the type, and nothing public can record such a key.
-        package.dotfiles[0].unknown_keys.push("target".to_string());
-
-        let keys = package.unknown_entry_keys();
-        assert_eq!(keys.len(), 1, "the recorded key must still be reported");
-        assert_eq!(keys[0].field, "dotfiles[0].target");
-        assert!(
-            keys[0].unknown.message.contains("target"),
-            "the sentence must name the key it is about, got: {}",
-            keys[0].unknown.message
         );
     }
 
