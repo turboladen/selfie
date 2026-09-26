@@ -14,13 +14,11 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use super::deploy::resolve_source_path;
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::{FileSystem, repository_read_refusal};
 use crate::fs::target::repository_path;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
-use crate::paths::is_within;
 
 /// Upper bound on resolved content.
 ///
@@ -119,40 +117,11 @@ impl ResolveError {
 /// can plant a symlink can also just run an arbitrary `command:` — but the limit
 /// is worth stating rather than implying the check is stronger than it is.
 fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError> {
-    let path = resolve_source_path(base_dir, source);
-
-    if is_within(&path, base_dir) {
-        Ok(path)
-    } else {
-        Err(ResolveError::TemplateEscapesPackage {
+    super::classify::within_package(base_dir, source).ok_or_else(|| {
+        ResolveError::TemplateEscapesPackage {
             template: source.to_string(),
-        })
-    }
-}
-
-/// Everything that can be refused without running a command or reading a file.
-///
-/// Applied before a dry run reports what it would do, so a preview declines
-/// exactly what a real apply declines instead of promising to run commands for an
-/// entry that can never deploy.
-pub(crate) fn check_resolvable(entry: &DotfileEntry, base_dir: &Path) -> Result<(), ResolveError> {
-    match entry.content_source() {
-        Ok(ContentSource::Template { source, .. }) => template_path(source, base_dir).map(|_| ()),
-        // A provider has no path to contain, and a repository file is not
-        // resolved here at all.
-        Ok(ContentSource::Provider(_) | ContentSource::RepoFile(_)) => Ok(()),
-        // An entry that cannot deploy is refused by `handle_apply` before this
-        // module is reached, so there is nothing left to decide here.
-        //
-        // The variants are named rather than matched with `Err(_)` so that claim
-        // has to be re-checked when a new one appears: a reason that is *not*
-        // refused upstream would need a decision here, and `_` would silently
-        // make it "resolvable". Naming them costs a line and turns that into a
-        // build failure.
-        Err(InvalidEntry::Shape | InvalidEntry::UnknownKeys(_) | InvalidEntry::VarName(_)) => {
-            Ok(())
         }
-    }
+    })
 }
 
 /// Resolve an entry's content, running any commands it declares.
