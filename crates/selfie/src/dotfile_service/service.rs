@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::apply::{ApplyContext, handle_apply};
-use super::collect::{collect_all_packages, collect_packages};
+use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
@@ -161,6 +161,7 @@ where
                 &self.package_repository,
                 self.dotfiles_repository.as_ref(),
                 self.config.dotfiles_directory_is_expected(),
+                self.config.environment(),
             )
             .map_err(OperationFailure::PackageList),
         };
@@ -181,13 +182,12 @@ where
             sender.send_started().await;
 
             let result = match prepared {
-                Ok((packages, warnings)) => {
-                    // Applying everything carries on with the package dotfiles
-                    // and counts an unlistable dotfiles directory as a refusal.
-                    // A named apply that finds its package lost nothing to the
-                    // directory, so it counts none.
-                    let refused_repository =
-                        filter.is_none() && ApplyWarning::any_unreadable_repository(&warnings);
+                Ok(Collected {
+                    packages,
+                    warnings,
+                    refusals,
+                    unrefused_ambiguities,
+                }) => {
                     let selected: Vec<Package> = match filter.as_deref() {
                         Some(name) => {
                             let folded_name = name.to_lowercase();
@@ -204,11 +204,25 @@ where
                     let unmatched = filter
                         .as_deref()
                         .filter(|_| selected.is_empty())
-                        .map(|name| no_such_package(name, &warnings));
+                        .map(|name| {
+                            no_such_package(name, &warnings, &refusals, &unrefused_ambiguities)
+                        });
                     // Drained first, so a skipped spec's own reason precedes the
-                    // failure it explains.
+                    // failure it explains. A named apply says nothing about a name
+                    // it was not asked for, and sends no refusal: its own is the
+                    // failure, and it counts none of the others.
                     for warning in warnings {
-                        warning.send(&sender).await;
+                        if filter
+                            .as_deref()
+                            .is_none_or(|name| !warning.is_about_another_name(name))
+                        {
+                            warning.send(&sender).await;
+                        }
+                    }
+                    if filter.is_none() {
+                        for refusal in &refusals {
+                            refusal.send(&sender).await;
+                        }
                     }
                     if let Some(failure) = unmatched {
                         return sender
@@ -223,7 +237,16 @@ where
                         options: &options,
                         token: &token,
                     };
-                    handle_apply(&selected, &ctx, refused_repository).await
+                    // Applying everything carries on with what it could collect
+                    // and counts what collection refused as refusals. A named
+                    // apply that finds its package lost nothing to those, so it
+                    // counts none.
+                    let refusals = if filter.is_none() {
+                        refusals
+                    } else {
+                        Vec::new()
+                    };
+                    handle_apply(&selected, &ctx, &refusals).await
                 }
                 Err(failure) => OperationResult::Failure(failure),
             };
@@ -253,6 +276,7 @@ where
             &self.package_repository,
             self.dotfiles_repository.as_ref(),
             self.config.dotfiles_directory_is_expected(),
+            self.config.environment(),
         );
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -272,11 +296,14 @@ where
             sender.send_started().await;
 
             let outcome = match collected {
-                Ok((packages, warnings)) => {
-                    // Carries on with the package dotfiles, and
-                    // `handle_check_drift` counts the unlistable directory as a
-                    // refusal.
-                    let unreadable_repository = ApplyWarning::any_unreadable_repository(&warnings);
+                Ok(Collected {
+                    packages,
+                    warnings,
+                    refusals,
+                    ..
+                }) => {
+                    // Carries on with what it could collect, and
+                    // `handle_check_drift` counts what collection refused.
                     // Counted here rather than from the relayed events: this is
                     // where the collection reports what it could not load, so
                     // the count and the warnings cannot disagree.
@@ -287,13 +314,16 @@ where
                     for warning in warnings {
                         warning.send(&sender).await;
                     }
+                    for refusal in &refusals {
+                        refusal.send(&sender).await;
+                    }
                     handle_check_drift(
                         &packages,
                         &fs,
                         &config,
                         &sender,
                         &token,
-                        unreadable_repository,
+                        refusals.len(),
                         unloaded_specs,
                     )
                     .await
@@ -323,6 +353,7 @@ where
             self.dotfiles_repository.as_ref(),
             NameCollision::KeepBoth,
             self.config.dotfiles_directory_is_expected(),
+            self.config.environment(),
         );
         let config = self.config.clone();
 
@@ -338,7 +369,9 @@ where
             sender.send_started().await;
 
             let result = match collected {
-                Ok((packages, warnings)) => {
+                Ok(Collected {
+                    packages, warnings, ..
+                }) => {
                     // A directory selfie found and could not list is fatal HERE.
                     // Apply and drift still have the package dotfiles to act on,
                     // so they count it as a refusal and carry on. A listing has

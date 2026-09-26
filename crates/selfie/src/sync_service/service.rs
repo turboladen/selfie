@@ -4,7 +4,7 @@
 //! Uses [`GitSyncProvider`] for git operations and [`DotfileService`] for
 //! drift checking during `sync status`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
@@ -696,22 +696,9 @@ fn group_name_collisions<I>(names: I) -> Vec<(String, Vec<String>)>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    for file_name in names {
-        let Some(name) = crate::package::spec_name_from_file_name(&file_name) else {
-            continue;
-        };
-        by_name.entry(name).or_default().push(file_name);
-    }
-
-    by_name
+    crate::package::group_by_spec_name(names, |name: &String| Some(name.as_str()))
         .into_iter()
         .filter(|(_, names)| names.len() > 1)
-        .map(|(name, mut names)| {
-            names.sort();
-            (name, names)
-        })
         .collect()
 }
 
