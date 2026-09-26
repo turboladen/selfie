@@ -36,6 +36,16 @@ use super::secret::{SecretApply, SecretOutcome, programs_of};
 use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
 use super::warning::CollectionRefusal;
 
+/// What an apply covers.
+pub(super) enum Scope {
+    /// Every package. Carries what collecting them refused, each counted as one
+    /// refusal before any package is looked at.
+    All(Vec<CollectionRefusal>),
+    /// Packages asked for by name. Collection's refusals are no part of it, and a
+    /// package with nothing to apply here is worth saying so.
+    Named,
+}
+
 /// Why an apply stopped before its last entry.
 ///
 /// Each cause is worded once, in `Display`, so no two sites that stop a run can
@@ -175,12 +185,11 @@ pub(super) struct ApplyContext<'a, F, CR> {
 
 /// Core logic for applying config files
 ///
-/// Applies every package in `packages`. `refusals` are what collecting them
-/// refused, each counted as one refusal before any package is looked at.
+/// Applies every package in `packages`, over the scope `scope` says.
 pub(super) async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
-    refusals: &[CollectionRefusal],
+    scope: Scope,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -247,6 +256,10 @@ where
     // Known before any package is looked at, so under `stop_on_error` the run
     // stops before it deploys anything: no package is walked once `stopped` is set
     // here.
+    let refusals = match &scope {
+        Scope::All(refusals) => refusals.as_slice(),
+        Scope::Named => &[],
+    };
     for refusal in refusals {
         stopped = tally.refuse(config, token, Stop::Collection(refusal.clone()));
         if stopped.is_some() {
@@ -288,6 +301,20 @@ where
         let dotfiles = package.dotfiles_for_environment(config.environment());
 
         if dotfiles.is_empty() {
+            // A named package with nothing for this environment would otherwise
+            // complete with every count at zero, which reads as "already up to
+            // date". The run says so instead, and does not fail: on a machine
+            // where the package declares nothing, nothing to apply is the right
+            // answer.
+            if matches!(scope, Scope::Named) {
+                sender
+                    .send_warning(format!(
+                        "Package '{}' has no dotfiles for environment '{}'; nothing to apply",
+                        package.name(),
+                        config.environment()
+                    ))
+                    .await;
+            }
             continue;
         }
 
