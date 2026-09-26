@@ -6,8 +6,8 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, EnvironmentField, Package, SpecRefusal, TopLevelKeys, UnknownEntryKey,
-    UnknownKey, unknown_key,
+    DotfileEntry, DotfileField, EnvironmentField, KnownFields, Package, PackageField, SpecRefusal,
+    TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field, environment_field,
 };
 
 /// A templated dotfile entry whose file has still to be read.
@@ -79,6 +79,11 @@ pub fn unreadable_template_issue(
     )
 }
 
+/// `F`'s anchor advice as a suggestion, for a key named like one of `F`'s fields.
+fn anchor_suggestion<F: KnownFields>(unknown: &UnknownKey) -> Option<String> {
+    unknown.shadows.then(|| format!("{}.", F::ANCHOR_ADVICE))
+}
+
 /// Report the top-level keys apply and the writer already found unrecognized.
 ///
 /// Takes them rather than re-reading the file, so `selfie spec validate` cannot
@@ -93,11 +98,7 @@ fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
                 ValidationErrorCategory::InvalidValue,
                 &unknown.key,
                 &unknown.message,
-                unknown.shadows.then_some(
-                    "Anchors are legal here; only a name matching a top-level field is \
-                     refused, because it cannot be told apart from a misspelling of that \
-                     field.",
-                ),
+                anchor_suggestion::<PackageField>(unknown).as_deref(),
             )
         })
         .collect()
@@ -115,23 +116,12 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
 
     for (env_name, env) in package.environments_sorted() {
-        for key in env.unknown_keys() {
-            // `EnvironmentConfig`'s deserializer records only what
-            // `unknown_key::<EnvironmentField>` rejects, so this `else` cannot
-            // fire. The call stays because it is what words the key.
-            let Some(unknown) = unknown_key::<EnvironmentField>(key) else {
-                continue;
-            };
-
+        for unknown in env.unknown_keys() {
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
-                &format!("environments.{env_name}.{key}"),
+                &environment_field(env_name, &unknown.key),
                 &unknown.message,
-                unknown.shadows.then_some(
-                    "Anchors are legal here; only a name matching a field of this environment \
-                     is refused, because it cannot be told apart from a misspelling of that \
-                     field.",
-                ),
+                anchor_suggestion::<EnvironmentField>(unknown).as_deref(),
             ));
         }
     }
@@ -149,18 +139,15 @@ fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
     // unknown -- it may have been named deliberately -- and which remedy applies
     // depends on which the user meant, so the suggestion explains the rule rather
     // than prescribing one fix.
-    let suggestion = if entry_key.unknown.shadows {
-        "Anchors are legal here; only a name matching a field of this entry is refused, because \
-         it cannot be told apart from a misspelling of that field."
-    } else {
-        "This entry is skipped by 'selfie apply' until the key is corrected or removed."
-    };
+    let suggestion = anchor_suggestion::<DotfileField>(&entry_key.unknown).unwrap_or_else(|| {
+        "This entry is skipped by 'selfie apply' until the key is corrected or removed.".to_string()
+    });
 
     ValidationIssue::error(
         ValidationErrorCategory::InvalidValue,
         &entry_key.field,
         &entry_key.unknown.message,
-        Some(suggestion),
+        Some(&suggestion),
     )
 }
 
@@ -267,11 +254,10 @@ impl Package {
     /// dotfiles at all. `target` is not a top-level field, so the
     /// documented `_target: &target …` anchor is unaffected.
     ///
-    /// Reporting it here is only half the fix. Apply does not run validation, so
-    /// the refusal that matters is `handle_apply`'s, which reads
-    /// `Package::top_level_keys`. This is what `selfie spec validate`
-    /// says about the same file, worded identically through
-    /// [`describe_unknown_key_in`](super::describe_unknown_key_in).
+    /// Apply does not run validation; it refuses the package through
+    /// `Package::spec_refusal`, which reads the same recorded keys. This is what
+    /// `selfie spec validate` says about the same file, worded identically from
+    /// those keys.
     pub(crate) fn validate_unknown_fields(&self) -> Vec<ValidationIssue> {
         // No YAML at all means a programmatically built package, which has no
         // keys a user could misspell. An empty *file* is a different case and
@@ -297,10 +283,9 @@ impl Package {
             // therefore: anything milder calls a file valid that apply, drift and a
             // rewrite all decline.
             //
-            // Worded by the refusal itself. `sync push` appends apply's refusal
-            // unless the same text is already reported, so two wordings for one
-            // problem arrive as two. The clause must survive the prefix, which is
-            // what the dedup matches on.
+            // Worded by the refusal itself, so the two commands say the same thing.
+            // `sync push` skips apply's refusal when an error is reported at the
+            // field `SpecRefusal::fields` names for it, `package`.
             TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 "package",
@@ -424,7 +409,7 @@ impl Package {
             if env_config.install.is_empty() {
                 issues.push(ValidationIssue::error(
                     ValidationErrorCategory::RequiredField,
-                    &format!("environments.{env_name}.install"),
+                    &environment_field(env_name, "install"),
                     "Install command is required",
                     Some("Add an install command like 'brew install package-name'."),
                 ));
@@ -435,7 +420,7 @@ impl Package {
                 if dep.is_empty() {
                     issues.push(ValidationIssue::error(
                         ValidationErrorCategory::InvalidValue,
-                        &format!("environments.{env_name}.dependencies[{i}]"),
+                        &environment_field(env_name, &format!("dependencies[{i}]")),
                         "Dependency name cannot be empty",
                         Some("Remove the empty dependency or provide a valid name."),
                     ));
@@ -507,20 +492,20 @@ impl Package {
 
             issues.extend(Self::validate_single_command(
                 &env_config.install,
-                &format!("environments.{env_name}.install"),
+                &environment_field(env_name, "install"),
             ));
 
             if let Some(check_cmd) = &env_config.check {
                 issues.extend(Self::validate_single_command(
                     check_cmd,
-                    &format!("environments.{env_name}.check"),
+                    &environment_field(env_name, "check"),
                 ));
             }
 
             if let Some(audit_cmd) = &env_config.audit {
                 issues.extend(Self::validate_single_command(
                     audit_cmd,
-                    &format!("environments.{env_name}.audit"),
+                    &environment_field(env_name, "audit"),
                 ));
             }
         }
@@ -612,10 +597,7 @@ impl Package {
 
         // Shared (top-level) dotfiles.
         for (i, dotfile) in self.dotfiles.iter().enumerate() {
-            issues.extend(Self::validate_dotfile_entry(
-                dotfile,
-                &format!("dotfiles[{i}]"),
-            ));
+            issues.extend(Self::validate_dotfile_entry(dotfile, &dotfile_field(i)));
         }
 
         // Environment-specific dotfiles (ADR-0001): the same structural checks,
@@ -623,7 +605,7 @@ impl Package {
         // override is surfaced rather than applied silently.
         for (env_name, env) in self.environments_sorted() {
             for (i, dotfile) in env.dotfiles().iter().enumerate() {
-                let field = format!("environments.{env_name}.dotfiles[{i}]");
+                let field = environment_field(env_name, &dotfile_field(i));
                 issues.extend(Self::validate_dotfile_entry(dotfile, &field));
 
                 if self
@@ -737,14 +719,14 @@ impl Package {
         let mut refs = Vec::new();
 
         for (i, entry) in self.dotfiles.iter().enumerate() {
-            refs.extend(reference(entry, format!("dotfiles[{i}]")));
+            refs.extend(reference(entry, dotfile_field(i)));
         }
 
         for (env_name, env) in self.environments_sorted() {
             for (i, entry) in env.dotfiles().iter().enumerate() {
                 refs.extend(reference(
                     entry,
-                    format!("environments.{env_name}.dotfiles[{i}]"),
+                    environment_field(env_name, &dotfile_field(i)),
                 ));
             }
         }
@@ -930,7 +912,8 @@ impl Package {
 mod tests {
     use crate::{
         package::{
-            DotfileEntry, EnvironmentConfig, KnownFields, PackageField, builder::PackageBuilder,
+            DotfileEntry, EnvironmentConfig, EnvironmentField, KnownFields, PackageField,
+            builder::PackageBuilder,
         },
         validation::ValidationLevel,
     };

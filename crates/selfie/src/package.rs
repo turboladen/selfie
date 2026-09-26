@@ -153,8 +153,7 @@ impl std::fmt::Display for ContentSource<'_> {
 /// dotfile that never deploys and no diagnostic. Each consumer has a test for that.
 ///
 /// Carries the reason, so a caller can name the key or var at fault. Borrows from
-/// the entry: describing a refusal must not allocate, and the strings outlive the
-/// call.
+/// the entry, so the refusal itself costs no allocation; rendering it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidEntry<'a> {
     /// Neither `source` nor `command` is set, both are, or `command` is
@@ -162,11 +161,24 @@ pub enum InvalidEntry<'a> {
     Shape,
     /// The entry carries keys this type does not model — a misspelling such as
     /// `var:` for `vars:`, or an anchor definition whose name collides with a
-    /// real field. See [`DotfileEntry::unknown_keys`].
-    UnknownKeys(&'a [String]),
+    /// real field.
+    UnknownKeys(&'a [UnknownKey]),
     /// A `vars` name that [`template::render`](crate::dotfile_service) can never
     /// substitute, so the placeholder would deploy verbatim.
     VarName(&'a str),
+}
+
+impl InvalidEntry<'_> {
+    /// Why the entry has no content source, without the anchor advice an
+    /// unrecognized key may carry: for a narrow place, such as a table cell, where
+    /// the full sentence is too long. The `Display` form carries the advice.
+    #[must_use]
+    pub fn brief(&self) -> String {
+        match self {
+            Self::UnknownKeys(keys) => unknown_key_messages(keys),
+            Self::Shape | Self::VarName(_) => self.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for InvalidEntry<'_> {
@@ -175,13 +187,7 @@ impl std::fmt::Display for InvalidEntry<'_> {
             Self::Shape => f.write_str(
                 "set exactly one of 'source' or 'command', with 'vars' only alongside 'source'",
             ),
-            Self::UnknownKeys(keys) => {
-                let described: Vec<String> = keys
-                    .iter()
-                    .map(|k| describe_unknown_key_in::<DotfileField>(k))
-                    .collect();
-                f.write_str(&described.join("; "))
-            }
+            Self::UnknownKeys(keys) => f.write_str(&describe_unknown_keys::<DotfileField>(keys)),
             Self::VarName(name) => write!(
                 f,
                 "dotfile var name '{name}' cannot be substituted, so the placeholder would deploy \
@@ -274,17 +280,69 @@ where
     groups
 }
 
-/// An unrecognized key, already worded for the level it was found at.
-#[derive(Debug, Clone)]
-pub(crate) struct UnknownKey {
-    /// The key as the file spelled it, for a caller that lists names rather than
-    /// sentences.
+/// The dotted path naming `field` inside environment `environment`, such as
+/// `environments.work.install`, as diagnostics name it.
+pub(crate) fn environment_field(environment: &str, field: &str) -> String {
+    format!("environments.{environment}.{field}")
+}
+
+/// The path segment naming the dotfile entry at `index` in a `dotfiles` list, such
+/// as `dotfiles[0]`, as diagnostics name it.
+pub(crate) fn dotfile_field(index: usize) -> String {
+    format!("dotfiles[{index}]")
+}
+
+/// An unrecognized key, already judged and worded for the level it was found at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    /// The key as the file spelled it, for a caller naming its path.
     pub(crate) key: String,
     /// What is wrong with it and what to do about it.
     pub(crate) message: String,
-    /// Whether the name collides with a real field of this level, which needs
-    /// different advice from a plain misspelling.
+    /// Whether the name collides with a real field of its level, which earns the
+    /// level's [`KnownFields::ANCHOR_ADVICE`].
     pub(crate) shadows: bool,
+}
+
+/// `keys` as [`describe_unknown_keys`] words them, without the anchor advice.
+pub(crate) fn unknown_key_messages(keys: &[UnknownKey]) -> String {
+    join_messages(keys.iter())
+}
+
+fn join_messages<'a>(keys: impl Iterator<Item = &'a UnknownKey>) -> String {
+    let messages: Vec<&str> = keys.map(|key| key.message.as_str()).collect();
+    messages.join("; ")
+}
+
+/// `keys`, found at level `F`: the keys named like a real field, then `F`'s anchor
+/// advice, then the plain misspellings, so the advice sits beside the keys it is
+/// about. Ends without a period, like every other reason selfie gives.
+pub(crate) fn describe_unknown_keys<F: KnownFields>(keys: &[UnknownKey]) -> String {
+    let (shadowing, plain): (Vec<&UnknownKey>, Vec<&UnknownKey>) =
+        keys.iter().partition(|key| key.shadows);
+    let mut sentences = Vec::new();
+    if !shadowing.is_empty() {
+        let messages = join_messages(shadowing.into_iter());
+        sentences.push(format!("{messages}. {}", F::ANCHOR_ADVICE));
+    }
+    if !plain.is_empty() {
+        let messages = join_messages(plain.into_iter());
+        // A second sentence starts with a capital; every message starts with a
+        // lowercase word or a quote.
+        sentences.push(if sentences.is_empty() {
+            messages
+        } else {
+            capitalize(&messages)
+        });
+    }
+    sentences.join(". ")
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// Judge one key against level `F`, returning `None` when it is accepted.
@@ -310,24 +368,17 @@ pub(crate) fn unknown_key<F: KnownFields>(key: &str) -> Option<UnknownKey> {
     })
 }
 
-/// Say what is wrong with one unrecognized key, and what to do about it.
-///
-/// The one wording for an unrecognized key at level `F`, so no two surfaces can
-/// describe the same key differently. Prefer [`unknown_key`], which decides
-/// membership and wording together; reach for this directly only where the key is
-/// already known to be unrecognized.
-///
-/// The collision message must hold for **both** readings of the key, because
-/// selfie cannot tell them apart — that ambiguity is the entire reason the key is
-/// refused. In particular it must not say the colliding field is unset: that is
-/// true of a misspelling, and false of a genuine `_target: &t` anchor aliased by
-/// `target: *t`, whose author would be told something untrue about their own file.
-/// So it names the ambiguity and gives the remedy for each reading: rename it if
-/// it is an anchor, spell it correctly if it is not.
-///
-/// `F`'s field names appear in the message, so the reader is told which
-/// namespace they are in.
-pub(crate) fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
+/// Say what is wrong with one unrecognized key at level `F`, and what to do about
+/// it, naming `F`'s fields.
+fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
+    // The one wording for an unrecognized key at a level, reached through
+    // `unknown_key`, so no two surfaces describe the same key differently.
+    //
+    // The collision message must hold for both readings of the key, because selfie
+    // cannot tell them apart; that ambiguity is why the key is refused. It must
+    // not say the colliding field is unset: true of a misspelling, false of a
+    // `_target: &t` anchor aliased by `target: *t`. So it names the ambiguity and
+    // gives the remedy for each reading.
     if let Some(field) = key.strip_prefix('_').filter(|_| shadows_field::<F>(key)) {
         format!(
             "'{key}' cannot be told apart from a misspelling of the '{field}' field; \
@@ -425,8 +476,8 @@ fn top_level_keys(raw_yaml: &str) -> TopLevelKeys {
 /// `source`. [`content_source`](Self::content_source) is the abstraction over
 /// them.
 ///
-/// An unrecognized key is recorded in [`unknown_keys`](Self::unknown_keys) rather
-/// than dropped, which makes `content_source` report
+/// An unrecognized key is recorded rather than dropped, which makes
+/// `content_source` report
 /// [`InvalidEntry::UnknownKeys`] so apply refuses the entry.
 // The fields stay `Option`s rather than collapsing into an enum because `Package`
 // is deserialized straight from YAML, and validation has to observe "both set"
@@ -458,7 +509,7 @@ pub struct DotfileEntry {
     /// written from the struct, so an unknown key is dropped rather than
     /// round-tripped back into the file.
     #[serde(skip)]
-    unknown_keys: Vec<String>,
+    unknown_keys: Vec<UnknownKey>,
 }
 
 /// One level's set of accepted keys.
@@ -469,6 +520,10 @@ pub struct DotfileEntry {
 pub(crate) trait KnownFields: strum::VariantNames + std::str::FromStr {
     /// Every accepted key, in declaration order, for an "expected one of" list.
     const NAMES: &'static [&'static str] = Self::VARIANTS;
+
+    /// Which anchors this level refuses, for a key named like one of its fields.
+    /// A clause without a closing period, so a caller can join it.
+    const ANCHOR_ADVICE: &'static str;
 
     /// Whether `key` is one of them.
     fn accepts(key: &str) -> bool {
@@ -540,11 +595,20 @@ pub(crate) enum EnvironmentField {
     Dotfiles,
 }
 
-// Both members have default bodies built from the strum supertraits, so a level
-// is declared by naming its enum here.
-impl KnownFields for DotfileField {}
-impl KnownFields for PackageField {}
-impl KnownFields for EnvironmentField {}
+// `NAMES` and `accepts` have default bodies built from the strum supertraits, so a
+// level is declared by naming its enum here with its anchor advice.
+impl KnownFields for DotfileField {
+    const ANCHOR_ADVICE: &'static str =
+        "Anchors are legal here; only a name matching a field of this entry is refused";
+}
+impl KnownFields for PackageField {
+    const ANCHOR_ADVICE: &'static str =
+        "Anchors are legal here; only a name matching a top-level field is refused";
+}
+impl KnownFields for EnvironmentField {
+    const ANCHOR_ADVICE: &'static str =
+        "Anchors are legal here; only a name matching a field of this environment is refused";
+}
 
 /// Hand-written so unrecognized keys can be *recorded* rather than rejected.
 ///
@@ -629,8 +693,8 @@ impl<'de> Deserialize<'de> for DotfileEntry {
                             // Asked of `unknown_key`. This arm is reached only when
                             // the key did not parse, so `accepts` is false and the
                             // answer turns on the anchor rule alone.
-                            if unknown_key::<DotfileField>(&key).is_some() {
-                                unknown_keys.push(key);
+                            if let Some(unknown) = unknown_key::<DotfileField>(&key) {
+                                unknown_keys.push(unknown);
                             }
                         }
                     }
@@ -682,7 +746,7 @@ impl DotfileEntry {
     /// Empty for a programmatically built entry. `_`-prefixed anchor definitions
     /// are not included — they are legal — unless the name collides with a field
     /// of this entry, which is indistinguishable from a misspelling of it.
-    pub fn unknown_keys(&self) -> &[String] {
+    pub(crate) fn unknown_keys(&self) -> &[UnknownKey] {
         &self.unknown_keys
     }
 
@@ -930,8 +994,8 @@ impl PartialEq for Package {
 
 /// Configuration for a specific environment
 ///
-/// An unrecognized key is recorded in [`unknown_keys`](Self::unknown_keys)
-/// rather than rejected, so one typo does not fail the whole package file.
+/// An unrecognized key is recorded rather than rejected, so one typo does not fail
+/// the whole package file.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EnvironmentConfig {
     /// Command to install the package
@@ -969,7 +1033,7 @@ pub struct EnvironmentConfig {
     /// it is available to `selfie apply` and to the writer, neither of which has
     /// the raw YAML in hand.
     #[serde(skip)]
-    pub(crate) unknown_keys: Vec<String>,
+    pub(crate) unknown_keys: Vec<UnknownKey>,
 }
 
 impl<'de> Deserialize<'de> for EnvironmentConfig {
@@ -1022,8 +1086,8 @@ impl<'de> Deserialize<'de> for EnvironmentConfig {
                         Ok(EnvironmentField::Dotfiles) => once!(dotfiles, "dotfiles"),
                         Err(_) => {
                             map.next_value::<IgnoredAny>()?;
-                            if unknown_key::<EnvironmentField>(&key).is_some() {
-                                unknown_keys.push(key);
+                            if let Some(unknown) = unknown_key::<EnvironmentField>(&key) {
+                                unknown_keys.push(unknown);
                             }
                         }
                     }
@@ -1071,7 +1135,7 @@ impl EnvironmentConfig {
     /// Empty for a programmatically built environment, which has no text a user
     /// could misspell.
     #[must_use]
-    pub fn unknown_keys(&self) -> &[String] {
+    pub(crate) fn unknown_keys(&self) -> &[UnknownKey] {
         &self.unknown_keys
     }
 
@@ -1423,7 +1487,7 @@ mod package_tests {
         let env: EnvironmentConfig =
             crate::yaml::parse("install: \"echo i\"\naudt: \"echo a\"\n").unwrap();
 
-        assert_eq!(env.unknown_keys(), ["audt"]);
+        assert_eq!(key_names(env.unknown_keys()), ["audt"]);
         assert_eq!(env.install(), "echo i");
     }
 
@@ -1441,7 +1505,7 @@ mod package_tests {
 
         let shadowing: EnvironmentConfig =
             crate::yaml::parse("install: \"echo i\"\n_check: \"x\"\n").unwrap();
-        assert_eq!(shadowing.unknown_keys(), ["_check"]);
+        assert_eq!(key_names(shadowing.unknown_keys()), ["_check"]);
     }
 
     // A programmatically built environment has no text to misspell.
@@ -1470,6 +1534,23 @@ mod package_tests {
     use crate::package::port::PackageError;
 
     use super::*;
+
+    // Each level names its own fields in its anchor advice, so a top-level key is
+    // not told it names a field of an environment.
+    #[test]
+    fn a_shadowing_key_s_advice_names_its_own_level() {
+        fn advice<F: KnownFields>(key: &str) -> String {
+            describe_unknown_keys::<F>(&[unknown_key::<F>(key).unwrap()])
+        }
+        assert!(advice::<PackageField>("_dotfiles").contains("a top-level field"));
+        assert!(advice::<EnvironmentField>("_check").contains("a field of this environment"));
+        assert!(advice::<DotfileField>("_vars").contains("a field of this entry"));
+    }
+
+    // The names of `keys`, for comparing what a parse recorded.
+    fn key_names(keys: &[UnknownKey]) -> Vec<&str> {
+        keys.iter().map(|key| key.key.as_str()).collect()
+    }
 
     fn entry_from_yaml(yaml: &str) -> DotfileEntry {
         crate::yaml::parse(yaml).expect("dotfile entry should parse")
@@ -1588,10 +1669,12 @@ vars: {}
             "source: creds.tpl\ntarget: ~/.gem/credentials\nvar:\n  api_key: op read x\n",
         );
 
-        assert_eq!(entry.unknown_keys(), ["var"]);
+        assert_eq!(key_names(entry.unknown_keys()), ["var"]);
         assert_eq!(
             entry.content_source(),
-            Err(InvalidEntry::UnknownKeys(&["var".to_string()])),
+            Err(InvalidEntry::UnknownKeys(std::slice::from_ref(
+                &unknown_key::<DotfileField>("var").unwrap()
+            ))),
             "a misspelled key must not leave a deployable-looking entry"
         );
     }
@@ -1630,14 +1713,12 @@ vars: {}
                 "{key}: &a creds.tpl\nsource: creds.tpl\ntarget: ~/.gem/credentials\n"
             ));
 
-            assert_eq!(
-                entry.unknown_keys(),
-                std::slice::from_ref(&key),
-                "for {key}"
-            );
+            assert_eq!(key_names(entry.unknown_keys()), [key.as_str()], "for {key}");
             assert_eq!(
                 entry.content_source(),
-                Err(InvalidEntry::UnknownKeys(std::slice::from_ref(&key))),
+                Err(InvalidEntry::UnknownKeys(std::slice::from_ref(
+                    &unknown_key::<DotfileField>(&key).unwrap()
+                ))),
                 "an anchor colliding with '{field}' must not leave a deployable entry"
             );
             assert!(

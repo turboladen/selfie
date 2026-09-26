@@ -403,10 +403,13 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                     fields: fields.join(", "),
                 });
             }
-            Some(SpecRefusal::UnknownEnvironmentKeys { environment, keys }) => {
-                let fields: Vec<String> = keys
+            Some(SpecRefusal::UnknownEnvironmentKeys(environments)) => {
+                let fields: Vec<String> = environments
                     .iter()
-                    .map(|key| format!("environments.{environment}.{key}"))
+                    .flat_map(|(environment, keys)| {
+                        keys.iter()
+                            .map(|key| crate::package::environment_field(environment, &key.key))
+                    })
                     .collect();
                 return Err(PackageRepoError::UnknownEnvironmentFields {
                     path: path.to_path_buf(),
@@ -2023,6 +2026,28 @@ environments:
         );
     }
 
+    // Every environment carrying a key is named, so the user fixes both in one
+    // pass. The two keys differ, so a refusal naming one twice cannot pass.
+    #[test]
+    fn save_package_names_every_environment_carrying_an_unrecognized_key() {
+        let package = loaded(
+            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\n    audt: \"x\"\n  \
+             home:\n    install: \"echo i\"\n    chk: \"x\"\n",
+        );
+        let (repo, package_path) = refusing_repo();
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("a package with unrecognized environment keys must not be rewritten");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("environments.home.chk")
+                && rendered.contains("environments.work.audt"),
+            "got: {rendered}"
+        );
+    }
+
     // The fixture must carry its raw YAML, as a loaded package does. Without
     // `set_source` the top-level check has nothing to read and goes quiet, which
     // hid the guard ordering below entirely.
@@ -2089,7 +2114,7 @@ environments:
     // clean, so only a walk reaching `work` refuses.
     //
     // Name order is pinned separately, by
-    // `a_listing_names_the_offending_environment_in_name_order`, which covers the
+    // `a_listing_names_every_offending_environment_in_name_order`, which covers the
     // walk this path reads.
     #[test]
     fn save_package_refuses_a_key_in_an_environment_that_does_not_sort_first() {
