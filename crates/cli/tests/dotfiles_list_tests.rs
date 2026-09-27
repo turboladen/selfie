@@ -140,3 +140,32 @@ fn an_unreadable_dotfiles_directory_fails_the_listing() {
         "must say the listing is incomplete; stderr was: {stderr}"
     );
 }
+
+// A refused entry's cell gives the key's message and not the anchor advice, which
+// is too long for a table; apply and drift carry the advice.
+#[test]
+fn a_shadowing_key_s_cell_gives_the_message_without_the_advice() {
+    let base = setup_default_test_config();
+    let packages = base.path().join("packages");
+    std::fs::create_dir_all(&packages).unwrap();
+    std::fs::write(
+        packages.join("anchor.yaml"),
+        format!(
+            "name: anchor\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.conf\"\n    target: \"~/.a.conf\"\n    _target: \"x\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&base)
+        .args(["dotfiles", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("'_target' cannot be told apart"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Anchors are legal"), "{stdout}");
+}

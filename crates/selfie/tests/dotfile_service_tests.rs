@@ -157,6 +157,17 @@ fn drift_summary(events: &[PackageEvent]) -> (usize, usize, usize) {
     }
 }
 
+// `unverified_count` of a drift check's completion.
+fn unverified(events: &[PackageEvent]) -> usize {
+    match get_operation_result(events) {
+        Some(OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+            unverified_count,
+            ..
+        })) => *unverified_count,
+        other => panic!("expected a drift completion, got: {other:?}"),
+    }
+}
+
 // Run `work` on a thread and runtime of its own, and give up after `deadline`:
 // `None` for a timeout, and a panic in `work` raised again here.
 //
@@ -251,6 +262,8 @@ struct TestDirs {
     // What every service built from these dirs believes about its privilege,
     // and whether `--allow-sudo` was passed.
     sudo_policy: SudoPolicy<RunningAs>,
+    // `stop_on_error` for every service built from these dirs.
+    stop_on_error: bool,
 }
 
 impl TestDirs {
@@ -271,7 +284,15 @@ impl TestDirs {
             target_dir,
             state_dir,
             sudo_policy: SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
+            stop_on_error: false,
         }
+    }
+
+    // Build every subsequent service with `stop_on_error` set to `on`. A test about
+    // stopping sets it rather than relying on the default.
+    fn stopping_on_error(mut self, on: bool) -> Self {
+        self.stop_on_error = on;
+        self
     }
 
     // Build every subsequent service as though the process were at `elevation`.
@@ -331,6 +352,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let repo = YamlPackageRepository::new(
             fs,
@@ -356,46 +378,10 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let repo = YamlPackageRepository::new(
             RealFileSystem,
-            config.package_directory().clone(),
-            SpecOrigin::PackageDirectory,
-        );
-        DotfileServiceImpl::new(
-            repo,
-            fs,
-            runner,
-            config,
-            CancellationToken::new(),
-            self.sudo_policy,
-        )
-    }
-
-    // A packages-only service whose `stop_on_error` is set explicitly.
-    //
-    // The flag decides whether a refused entry ends the run, so a test about
-    // that has to set both sides rather than rely on the default.
-    fn service_with_runner_and_stop_on_error(
-        &self,
-        runner: FakeCommandRunner,
-        stop_on_error: bool,
-    ) -> DotfileServiceImpl<
-        YamlPackageRepository<RealFileSystem>,
-        RealFileSystem,
-        FakeCommandRunner,
-        RunningAs,
-    > {
-        let fs = RealFileSystem;
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory(&self.package_dir)
-            .dotfiles_directory(self.dotfiles_dir.clone())
-            .state_directory(self.state_dir.clone())
-            .stop_on_error(stop_on_error)
-            .build();
-        let repo = YamlPackageRepository::new(
-            fs,
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
@@ -424,6 +410,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         let package_repo = YamlPackageRepository::new(
             fs,
@@ -461,6 +448,7 @@ impl TestDirs {
             .environment("test")
             .package_directory(&self.package_dir)
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         assert_eq!(
             config.dotfiles_directory(),
@@ -510,6 +498,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         DotfileServiceImpl::new(
             YamlPackageRepository::new(
@@ -536,6 +525,7 @@ impl TestDirs {
             .package_directory(&self.package_dir)
             .dotfiles_directory(self.dotfiles_dir.clone())
             .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
             .build();
         DotfileServiceImpl::new(
             YamlPackageRepository::new(
@@ -1068,6 +1058,115 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.irregular_target_refusal(path)
+    }
+
+    fn is_owner_only(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        self.inner.is_owner_only(path)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.remove_file(path)
+    }
+
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        self.inner.path_exists(path)
+    }
+
+    fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.expand_path(path)
+    }
+
+    fn list_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, selfie::fs::FileSystemError> {
+        self.inner.list_directory(path)
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.canonicalize(path)
+    }
+
+    fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+        self.inner.config_dir()
+    }
+}
+
+// `RealFileSystem` that fails the test on any following stat of `link`, for a
+// check that must answer a link without reaching what it points at, which may sit
+// on a hung mount.
+#[derive(Clone, Debug)]
+struct FollowingStatPanicsAt {
+    inner: RealFileSystem,
+    link: PathBuf,
+}
+
+impl selfie::fs::FileSystem for FollowingStatPanicsAt {
+    // Delegated: this decorator's subject is the second symlink answer, not what is at
+    // a directory path.
+    fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        self.inner.directory_state(path)
+    }
+
+    fn symlink_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.symlink_refusal(path)
+    }
+
+    fn is_directory(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<bool, selfie::fs::FileSystemError> {
+        assert_ne!(
+            path.path(),
+            self.link,
+            "a following stat reached through the link"
+        );
+        self.inner.is_directory(path)
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
+        self.inner.read_file(path)
+    }
+
+    fn read_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
+        self.inner.read_file_no_follow(path)
+    }
+
+    fn write_file_private(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data)
+    }
+
+    fn write_file_no_follow(
+        &self,
+        path: &selfie::fs::TargetPath,
+        data: &[u8],
+    ) -> Result<(), selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data)
+    }
+
+    fn irregular_target_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        assert_ne!(
+            path.path(),
+            self.link,
+            "a following stat reached through the link"
+        );
         self.inner.irregular_target_refusal(path)
     }
 
@@ -2609,9 +2708,9 @@ async fn one_source_deployed_to_two_targets_records_both() {
     }
 }
 
-// A spec the collection could not parse leaves part of the check undone, and
-// `unloaded_specs` is what a caller reads to learn that. The count comes from
-// the same warnings the run relays, so the two cannot disagree.
+// A spec the collection could not parse leaves part of the check undone, so it
+// counts as one refusal and fails the check, as apply counts it. The count comes
+// from the same warnings the run relays, so the two cannot disagree.
 #[tokio::test]
 async fn check_drift_counts_a_spec_it_could_not_load() {
     let dirs = TestDirs::new();
@@ -2634,15 +2733,12 @@ async fn check_drift_counts_a_spec_it_could_not_load() {
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
         OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-            unloaded_specs,
             refused_count,
+            total_count,
             ..
         }) => {
-            assert_eq!(*unloaded_specs, 1, "events: {events:?}");
-            // Not a refusal: nothing declined to act here, and the remedy is
-            // the user's to apply to the file, so conflating the two would
-            // point a caller at the wrong fix.
-            assert_eq!(*refused_count, 0, "events: {events:?}");
+            assert_eq!(*refused_count, 1, "events: {events:?}");
+            assert_eq!(*total_count, 1, "the loadable spec is still compared");
         }
         other => panic!("Expected DotfileDriftChecked success, got: {other:?}"),
     }
@@ -4351,7 +4447,7 @@ mod secret_bearing {
 
     // A link that appears while the provider command is running.
     //
-    // The check in `usable_target` runs before the resolve, so its answer is stale by
+    // The check in `classify_entry` runs before the resolve, so its answer is stale by
     // the time the target is read. The second look, immediately before the read,
     // finds the new link and the entry replaces it; the read, which refuses a link
     // itself, is the layer behind that look.
@@ -4871,17 +4967,17 @@ mod secret_bearing {
     // to a fifo is refused by the guard ahead of this on both paths already.
     #[tokio::test]
     async fn a_dry_run_over_a_bare_directory_at_a_secret_target_refuses() {
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(false);
         let target = dirs.target_dir.join("credentials");
         std::fs::create_dir_all(&target).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let counted = runner.clone();
-        // `stop_on_error` is on by default and a refusal would abort the run before
-        // the summary, leaving nothing to read the counts off. The counts are what
-        // this test is about.
-        let service = dirs.service_with_runner_and_stop_on_error(runner, false);
+        // Set explicitly: with `stop_on_error` on, a refusal would abort the run
+        // before the summary, leaving nothing to read the counts off. The counts are
+        // what this test is about.
+        let service = dirs.service_with_runner(runner);
 
         let options = ApplyOptions {
             dry_run: true,
@@ -4999,7 +5095,7 @@ mod secret_bearing {
 
     #[tokio::test]
     async fn a_failing_provider_stops_the_apply_when_stop_on_error_is_set() {
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(true);
         let target = dirs.target_dir.join("credentials");
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
@@ -5013,7 +5109,7 @@ mod secret_bearing {
                 get_operation_result(&events),
                 Some(OperationResult::Failure(_))
             ),
-            "stop_on_error defaults to true, so a failed resolve aborts"
+            "stop_on_error is set, so a failed resolve aborts"
         );
         assert!(!target.exists());
     }
@@ -5564,16 +5660,10 @@ mod secret_bearing {
             format!("{events:?}").contains("is not absolute"),
             "a dry run should report the same refusal a real apply would, got: {events:?}"
         );
-        // The refusal is a failure, not a skip, so `stop_on_error` (default true)
-        // ends the preview here — which is what `docs/package-files.md` promises
-        // and what nothing asserted before (selfie-m5dv).
-        assert!(
-            matches!(
-                get_operation_result(&events).expect("no Completed event"),
-                OperationResult::Failure(_)
-            ),
-            "got: {events:?}"
-        );
+        // The refusal is counted as one, not as a skip. `stop_on_error` is off
+        // by default, so the preview carries on and lists every refusal a real
+        // apply would make.
+        assert_eq!(refused_count(&events), 1, "got: {events:?}");
         assert!(
             !format!("{events:?}").contains("would run"),
             "must not claim it would run commands for an entry that can never deploy"
@@ -5623,7 +5713,7 @@ mod secret_bearing {
         // An abort must not discard the deploy state for files already written in
         // the same run: the files are on disk, so dropping their record would make
         // the next drift check report correctly-deployed files as untracked.
-        let dirs = TestDirs::new();
+        let dirs = TestDirs::new().stopping_on_error(true);
 
         // Relies on packages being enumerated in sorted path order, so "aaa"
         // is processed before "zzz" and the ordinary dotfile deploys before the
@@ -6415,7 +6505,8 @@ mod secret_bearing {
         // explicitly, so it cannot show the window closed when it is not.
         #[tokio::test]
         async fn a_cancellation_between_two_bindings_is_reported_honestly() {
-            let dirs = TestDirs::new();
+            // Set, so blaming stop_on_error for the cancellation could show here.
+            let dirs = TestDirs::new().stopping_on_error(true);
             let target = dirs.target_dir.join("credentials");
             template_package(
                 &dirs.package_dir,
@@ -6518,15 +6609,15 @@ mod secret_bearing {
 
         // A command killed by Ctrl+C must not be blamed on the package file.
         //
-        // `stop_on_error` defaults to **true**, and a cancelled command fails —
-        // so the failure arm reaches `stop_on_error`'s explanation first and the
-        // run reports "Stopped after failing to apply dotfile 'X' (stop_on_error
-        // is enabled)". That names the user's own interrupt as a spec problem
-        // and sends them looking for one. The between-entries guard cannot help
+        // `stop_on_error` is set here, and a cancelled command fails -- so a
+        // refusal that asked `stop_on_error` before the token would report
+        // "Stopped after failing to apply dotfile 'X' (stop_on_error is enabled)".
+        // That names the user's own interrupt as a spec problem and sends them
+        // looking for one. Without the setting this passes whatever the order. The between-entries guard cannot help
         // here: the break happens in the same iteration the command died in.
         #[tokio::test]
         async fn a_command_killed_by_cancellation_is_not_reported_as_a_spec_failure() {
-            let dirs = TestDirs::new();
+            let dirs = TestDirs::new().stopping_on_error(true);
             let target = dirs.target_dir.join("credentials");
             provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
@@ -7120,7 +7211,7 @@ mod symlinked_targets {
     // The writer refuses on its own, with the hoisted check taken out of the way.
     //
     // This is the TOCTOU defense, and the half of the fix nothing else observes:
-    // with the `handle_apply` check in place, reverting `perform_deploy` to a
+    // with `classify_entry`'s check in place, reverting `perform_deploy` to a
     // following write fails no other test in the workspace. Without this test a
     // reader can find the writer redundant, delete it, and see a green suite.
     //
@@ -8053,7 +8144,7 @@ mod target_rule {
     #[tokio::test]
     async fn a_refused_target_stops_the_run_like_an_escaping_template_does() {
         async fn run(stop_on_error: bool) -> (Vec<PackageEvent>, PathBuf, TestDirs) {
-            let dirs = TestDirs::new();
+            let dirs = TestDirs::new().stopping_on_error(stop_on_error);
             let second = dirs.target_dir.join("second-credentials");
             let yaml = format!(
                 "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
@@ -8066,7 +8157,7 @@ mod target_rule {
             let runner = FakeCommandRunner::new()
                 .succeeding("op read first", b"FIRST")
                 .succeeding("op read second", b"SECOND");
-            let service = dirs.service_with_runner_and_stop_on_error(runner, stop_on_error);
+            let service = dirs.service_with_runner(runner);
             let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
             (events, second, dirs)
         }
@@ -8648,9 +8739,9 @@ dotfiles:
 
     // A conflict the user accepted, which selfie then could not write.
     //
-    // This is `perform_deploy`'s *second* failure site — the one inside the
-    // conflict branch, which looks identical to the first and was missed when
-    // this fix was planned as "six sites". A readable, owner read-only target
+    // The accepted-conflict route to the write, as against a plain `Deploy`
+    // decision, which `an_earlier_copy_survives_a_failed_overwrite` covers. Both
+    // routes must count a failed write as refused. A readable, owner read-only target
     // reaches it: the target differs, so the entry is a `Conflict`; `auto_accept`
     // settles it; and the in-place write then fails with `EACCES`. An unreadable
     // target would not do, because it is refused before the decision.
@@ -9984,9 +10075,10 @@ mod repository_writes_do_not_follow_symlinks {
 // same defect on the other side of the copy: a fifo committed into the
 // repository is read as a source, and reading one blocks until a writer arrives.
 //
-// Four reads, not one: `handle_apply`, `handle_check_drift`, `resolve_content`'s
-// `Template` arm, and `read_referenced_file`. Each runs through `within_deadline`,
-// so a read that blocks fails its test. selfie-lwv5
+// Three reads: `read_repo_file`, which apply and drift share, `read_template`,
+// which classification reaches before `resolve_content`'s `Template` arm does, and
+// `read_referenced_file`. Each runs through `within_deadline`, so a read that blocks
+// fails its test. selfie-lwv5
 mod irregular_sources {
     use super::*;
     use std::path::Path;
@@ -10996,7 +11088,7 @@ mod target_classification {
             warnings.iter().any(|w| w.contains(DIRECTORY)),
             "the refusal must name the directory: {warnings:?}"
         );
-        // A failure, which `stop_on_error` (on by default) turns into a stopped run.
+        // A refusal, so nothing is written.
         assert!(
             !events
                 .iter()
@@ -11414,8 +11506,8 @@ mod target_reads_never_follow {
         make_fifo(&fifo);
         let plain = dirs.target_dir.join("plain.toml");
         std::fs::write(&plain, "OTHER").unwrap();
-        // One package, the plain entry first: the refused secret entry stops the run
-        // under the default `stop_on_error`, and the control has to be read before.
+        // One package, the plain entry first, so the control is read before the
+        // refused secret entry whatever `stop_on_error` says.
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
         std::fs::write(dirs.package_dir.join("myapp/plain.toml"), "FROM REPO").unwrap();
         let yaml = format!(
@@ -13534,5 +13626,1602 @@ mod an_already_tracked_target_selfie_cannot_write {
             "an ordinary already-tracked file warned: {:?}",
             warning_messages(&events)
         );
+    }
+}
+
+// Apply, drift and the secret-bearing path ask their checks in one order: the
+// target rule, then containment, then what is at the target. An entry failing more
+// than one gets the same first reason whichever command the user ran, so fixing
+// what one command named does not produce a different complaint from the other.
+mod one_order_of_checks {
+    use super::*;
+
+    // The first warning that names `target` or reports an escaping source.
+    fn reason_for(events: &[PackageEvent], target: &str) -> String {
+        warning_messages(events)
+            .into_iter()
+            .find(|w| w.contains(target) || w.contains("escapes"))
+            .unwrap_or_else(|| panic!("no warning about '{target}': {events:?}"))
+    }
+
+    #[tokio::test]
+    async fn an_entry_failing_the_target_rule_and_containment_gets_one_reason_from_apply_and_drift()
+    {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.toml"), "OUTSIDE").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("../outside.toml", "~alice/.config/app.toml")],
+        );
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        let from_apply = reason_for(&applied, "~alice/.config/app.toml");
+        let from_drift = reason_for(&drifted, "~alice/.config/app.toml");
+        assert_eq!(
+            from_apply, from_drift,
+            "apply and drift must name one reason"
+        );
+        assert!(
+            from_apply.contains("'~user' form"),
+            "the target rule comes first: {from_apply}"
+        );
+        assert!(
+            !from_apply.contains("escapes"),
+            "containment is not the first reason: {from_apply}"
+        );
+    }
+
+    // A source that cannot be read is refused in one sentence by both commands, so
+    // the user does not meet two wordings for one missing file.
+    #[tokio::test]
+    async fn an_unreadable_source_is_worded_alike_by_apply_and_drift() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("app.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/missing.toml", target.to_str().unwrap())],
+        );
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        let reason = |events: &[PackageEvent]| {
+            warning_messages(events)
+                .into_iter()
+                .find(|w| w.starts_with("Cannot read source"))
+                .unwrap_or_else(|| panic!("no source-read warning: {events:?}"))
+        };
+        let from_drift = reason(&drifted);
+        assert_eq!(
+            reason(&applied),
+            from_drift,
+            "apply and drift must word it alike"
+        );
+        assert!(
+            !from_drift.contains("for drift check"),
+            "drift must not word it differently: {from_drift}"
+        );
+    }
+
+    // A directory at the target is refused before any command runs, and so is an
+    // escaping template; the escape is named because it is decided from the entry
+    // alone, ahead of anything that looks at the file system.
+    #[tokio::test]
+    async fn a_template_escaping_with_a_directory_target_is_refused_for_the_escape() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir(&target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"value");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "nothing may run for a refused entry"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("escapes the package directory")),
+            "the escape is the reason: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "the directory is not the first reason: {warnings:?}"
+        );
+    }
+}
+
+// Drift counts an entry once: compared, refused, or unverified. `total_count` holds
+// only the compared ones, since `sync status` renders it as the entries in place,
+// and every refusal apply would also make reaches `refused_count`.
+mod drift_counts_each_entry_once {
+    use super::*;
+
+    fn had_refusals(events: &[PackageEvent]) -> bool {
+        match get_operation_result(events) {
+            Some(OperationResult::Success(success)) => success.had_refusals(),
+            other => panic!("expected a success, got: {other:?}"),
+        }
+    }
+
+    // One entry of each refusal drift makes before it reads a target, beside one
+    // clean entry. Each refusal is a different kind, so dropping the count from any
+    // one arm moves the refused total, and the clean entry is what `total_count`
+    // may hold.
+    #[tokio::test]
+    async fn drift_counts_each_refused_entry_and_totals_only_compared_ones() {
+        let dirs = TestDirs::new();
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("clean.toml"), "CLEAN").unwrap();
+        std::fs::write(dirs._temp.path().join("outside.toml"), "OUTSIDE").unwrap();
+        nix::unistd::mkfifo(&app.join("pipe.toml"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let t = |name: &str| dirs.target_dir.join(name).display().to_string();
+
+        write_package_yaml(
+            &dirs.package_dir,
+            "myapp",
+            &format!(
+                r#"name: myapp
+environments:
+  test:
+    install: "echo installed"
+dotfiles:
+  - source: "myapp/clean.toml"
+    target: "{clean}"
+  - source: "myapp/typo.toml"
+    target: "{invalid}"
+    var: oops
+  - source: "myapp/clean.toml"
+    target: "relative/target.toml"
+  - source: "../outside.toml"
+    target: "{escaping}"
+  - source: "myapp/pipe.toml"
+    target: "{fifo}"
+  - source: "myapp/missing.toml"
+    target: "{missing}"
+"#,
+                clean = t("clean.toml"),
+                invalid = t("invalid.toml"),
+                escaping = t("escaping.toml"),
+                fifo = t("fifo.toml"),
+                missing = t("missing.toml"),
+            ),
+        );
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let (_, total, refused) = drift_summary(&events);
+        assert_eq!(refused, 5, "every refused entry must count: {events:?}");
+        assert_eq!(
+            total, 1,
+            "only the compared entry is in the total: {events:?}"
+        );
+        assert_eq!(unverified(&events), 0);
+        assert!(had_refusals(&events), "a refusal must fail the drift check");
+    }
+
+    // Provider-sourced entries are reported as unverifiable, which is neither a
+    // refusal nor a comparison, so a machine whose dotfiles all come from providers
+    // passes a drift check: counting them as refused would fail every such run.
+    #[tokio::test]
+    async fn drift_over_provider_entries_alone_exits_clean() {
+        let dirs = TestDirs::new();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read a\"\n    target: \"{}\"\n  \
+             - command: \"op read b\"\n    target: \"{}\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("b").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let (drifted, total, refused) = drift_summary(&events);
+        assert_eq!((drifted, total, refused), (0, 0, 0), "{events:?}");
+        assert_eq!(unverified(&events), 2, "{events:?}");
+        assert!(
+            !had_refusals(&events),
+            "an unverified entry is not a refusal"
+        );
+    }
+}
+
+// `stop_on_error` governs every failure an apply counts as refused, and nothing
+// else: a conflict never stops a run. Each test puts a deployable entry after the
+// failure, because a run that stopped and one that carried on are told apart only
+// by whether that later entry deployed.
+mod stop_on_error_governs_every_failure {
+    use super::*;
+
+    // Two repository-file entries in one package: `first` from `first_source`, and
+    // a deployable `second`. Returns `second`'s target.
+    fn two_entries(dirs: &TestDirs, first_source: &str, first: &std::path::Path) -> PathBuf {
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("second.toml"), "SECOND").unwrap();
+        let second = dirs.target_dir.join("second.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                (first_source, first.to_str().unwrap()),
+                ("myapp/second.toml", second.to_str().unwrap()),
+            ],
+        );
+        second
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_repository_source_stops_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let first = dirs.target_dir.join("first.toml");
+        let second = two_entries(&dirs, "myapp/missing.toml", &first);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains(&format!(
+                "Stopped after failing to apply dotfile '{}'",
+                first.display()
+            )),
+            "the stop must name the entry: {message}"
+        );
+        assert!(
+            !second.exists(),
+            "the run must stop before the second entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_stops_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let first = locked.join("first.toml");
+        std::fs::write(dirs.package_dir.join("first.toml"), "FIRST").unwrap();
+        let second = two_entries(&dirs, "first.toml", &first);
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP a_failed_write_stops_the_run: mode bits do not bite");
+            return;
+        };
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("Stopped after failing to apply dotfile"),
+            "a failed write must stop the run: {message}"
+        );
+        assert!(!first.exists(), "control: the write really failed");
+        assert!(
+            !second.exists(),
+            "the run must stop before the second entry"
+        );
+    }
+
+    // Packages are applied in sorted path order, so `aaa` is refused before `zzz`
+    // is reached.
+    #[tokio::test]
+    async fn a_package_refused_whole_stops_the_run_naming_the_package() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        write_package_yaml(
+            &dirs.package_dir,
+            "aaa",
+            "name: aaa\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
+        );
+        std::fs::write(dirs.package_dir.join("zzz.toml"), "ZZZ").unwrap();
+        let later = dirs.target_dir.join("zzz.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "zzz",
+            &[("zzz.toml", later.to_str().unwrap())],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let message = failure_message(&events);
+        assert_eq!(
+            message,
+            "Stopped after refusing package 'aaa' (stop_on_error is enabled)"
+        );
+        assert!(!later.exists(), "the run must stop before the next package");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_dotfiles_directory_stops_the_run_before_any_package() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new().stopping_on_error(true);
+        std::fs::write(dirs.package_dir.join("bat.conf"), "theme = dark").unwrap();
+        let target = dirs.target_dir.join("bat.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat.conf", target.to_str().unwrap())],
+        );
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let _restore = RestoreMode(dirs.dotfiles_dir.clone(), 0o700);
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            eprintln!("SKIP an_unreadable_dotfiles_directory_stops_the_run: mode bits do not bite");
+            return;
+        }
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(
+            message.contains("Stopped before applying anything")
+                && message.contains("standalone dotfiles directory"),
+            "the stop must name the directory: {message}"
+        );
+        assert!(!target.exists(), "no package may deploy after the stop");
+    }
+
+    // A conflict is the designed answer to a target that differs, not a failure.
+    #[tokio::test]
+    async fn a_conflict_does_not_stop_the_run() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let first = dirs.target_dir.join("first.toml");
+        std::fs::write(dirs.package_dir.join("first.toml"), "FROM REPO").unwrap();
+        std::fs::write(&first, "HAND EDITED").unwrap();
+        let second = two_entries(&dirs, "first.toml", &first);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::DotfilesApplied {
+                        conflict_count: 1,
+                        ..
+                    }
+                ))
+            ),
+            "a conflict must be counted and the run completed: {events:?}"
+        );
+        assert!(second.exists(), "the run must carry on past a conflict");
+    }
+
+    // Off, which is the default: every failure is reported and counted in one run.
+    #[tokio::test]
+    async fn with_stop_on_error_off_every_failure_is_reported() {
+        let dirs = TestDirs::new();
+        let app = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("third.toml"), "THIRD").unwrap();
+        let third = dirs.target_dir.join("third.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                (
+                    "myapp/missing-one.toml",
+                    dirs.target_dir.join("one").to_str().unwrap(),
+                ),
+                (
+                    "myapp/missing-two.toml",
+                    dirs.target_dir.join("two").to_str().unwrap(),
+                ),
+                ("myapp/third.toml", third.to_str().unwrap()),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 2, "both failures must be counted");
+        assert!(third.exists(), "the run must reach the deployable entry");
+    }
+
+    // What ran after the first entry of `cutoff_package`: how many later `op`
+    // commands, how many `gh` ones, and whether the repository file deployed.
+    struct AfterFirst {
+        op_after: usize,
+        gh: usize,
+        plain_deployed: bool,
+        events: Vec<PackageEvent>,
+    }
+
+    // A package whose first entry is `first` (YAML for one list item), followed by
+    // a later `op` provider, a `gh` provider, and a repository file, applied with
+    // `runner`. The cutoff should hold back the later `op` command and nothing else.
+    async fn cutoff_package(first: &str, runner: FakeCommandRunner) -> AfterFirst {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("plain.toml"), "PLAIN").unwrap();
+        std::fs::write(dirs.package_dir.join("creds.tpl"), "t={{ t }}\n").unwrap();
+        let plain = dirs.target_dir.join("plain.toml");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n{first}  \
+             - command: \"op read b\"\n    target: \"{}\"\n  \
+             - command: \"gh auth token\"\n    target: \"{}\"\n  \
+             - source: \"plain.toml\"\n    target: \"{}\"\n",
+            dirs.target_dir.join("b").display(),
+            dirs.target_dir.join("gh").display(),
+            plain.display(),
+        )
+        .replace("TARGET_DIR", dirs.target_dir.to_str().unwrap());
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = runner
+            .succeeding("op read b", b"B")
+            .succeeding("gh auth token", b"GH");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let calls: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        AfterFirst {
+            op_after: calls.iter().filter(|c| c.as_str() == "op read b").count(),
+            gh: calls.iter().filter(|c| c.starts_with("gh ")).count(),
+            plain_deployed: plain.exists(),
+            events,
+        }
+    }
+
+    const PROVIDER_A: &str = "  - command: \"op read a\"\n    target: \"TARGET_DIR/a\"\n";
+
+    // A failed command holds back that program's later commands, whatever
+    // `stop_on_error` says, and nothing else: another program's entry and a
+    // repository file still deploy.
+    #[tokio::test]
+    async fn a_failed_command_holds_back_only_that_program() {
+        let after = cutoff_package(
+            PROVIDER_A,
+            FakeCommandRunner::new().failing("op read a", b"vault is locked"),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1, "a `gh` command must still run");
+        assert!(after.plain_deployed, "a repository file needs no command");
+        assert!(
+            warning_messages(&after.events)
+                .iter()
+                .any(|w| w.ends_with("an earlier `op` command failed; no command was run")),
+            "{:?}",
+            after.events
+        );
+        assert_eq!(refused_count(&after.events), 2, "{:?}", after.events);
+    }
+
+    // A template's binding is a command like any other: its failure holds back
+    // that binding's program.
+    #[tokio::test]
+    async fn a_failed_binding_holds_back_its_program() {
+        let first = "  - source: \"creds.tpl\"\n    target: \"TARGET_DIR/t\"\n    vars:\n      t: \"op read t\"\n";
+        let after = cutoff_package(
+            first,
+            FakeCommandRunner::new().failing("op read t", b"locked"),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1, "a `gh` command must still run");
+    }
+
+    // Output that cannot be told from the shell's is the command's failure too.
+    #[tokio::test]
+    async fn an_unseparable_output_holds_back_its_program() {
+        let runner = FakeCommandRunner::new().erroring(
+            "op read a",
+            selfie::commands::CommandError::ContentMarkersAbsent {
+                command: "op read a".to_string(),
+                working_directory: PathBuf::from("."),
+            },
+        );
+        let after = cutoff_package(PROVIDER_A, runner).await;
+
+        assert_eq!(after.op_after, 0, "the later `op` command must not run");
+        assert_eq!(after.gh, 1);
+    }
+
+    // A later template is held back when any of its bindings runs a failed
+    // program, and none of its bindings runs, not even the one for another program.
+    #[tokio::test]
+    async fn a_failed_command_holds_back_a_template_that_runs_its_program() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("later.tpl"), "a={{ a }} b={{ b }}\n").unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read a\"\n    target: \"{}\"\n  \
+             - source: \"later.tpl\"\n    target: \"{}\"\n    vars:\n      \
+             a: \"gh auth token\"\n      b: \"op read c\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("later").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new()
+            .failing("op read a", b"vault is locked")
+            .succeeding("gh auth token", b"GH")
+            .succeeding("op read c", b"C");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let calls: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(calls, vec!["op read a".to_string()], "no binding may run");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains(&format!(
+                    "Skipping '{}': an earlier `op` command failed; no command was run",
+                    dirs.target_dir.join("later").display()
+                ))),
+            "{events:?}"
+        );
+        assert_eq!(refused_count(&events), 2, "{events:?}");
+    }
+
+    // The control: a command that succeeded with nothing to deploy did not fail,
+    // so the same program's later commands still run.
+    #[tokio::test]
+    async fn empty_output_holds_back_nothing() {
+        let after = cutoff_package(
+            PROVIDER_A,
+            FakeCommandRunner::new().succeeding("op read a", b""),
+        )
+        .await;
+
+        assert_eq!(after.op_after, 1, "an empty output is not a failed command");
+        assert_eq!(after.gh, 1);
+    }
+
+    // A dry run stops where the real run would, so the preview describes the run
+    // about to be performed.
+    #[tokio::test]
+    async fn a_dry_run_ends_at_the_first_refusal_when_stop_on_error_is_set() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let yaml = "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                    - command: \"op read a\"\n    target: \"relative/one\"\n  \
+                    - command: \"op read b\"\n    target: \"relative/two\"\n";
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new();
+        let service = dirs.service_with_runner(runner.clone());
+        let options = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            "Stopped after failing to apply dotfile 'relative/one' (stop_on_error is enabled)"
+        );
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("relative/two")),
+            "the preview must stop before the second entry: {events:?}"
+        );
+        assert_eq!(runner.call_count(), 0);
+    }
+}
+
+// Drift classifies a secret-bearing entry as apply does before calling it
+// unverifiable, so an entry that can never deploy is reported as refused, in
+// apply's words, rather than hidden behind the one status a user learns to
+// ignore. None of this runs a command: drift has no runner to run one with.
+mod drift_refuses_secret_entries_as_apply_does {
+    use super::*;
+
+    fn provider(dirs: &TestDirs, target: &str) {
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{target}\"\n"
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+    }
+
+    fn skipped(events: &[PackageEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PackageEvent::DotfileSkipped { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_target_the_rule_rejects_is_refused_in_apply_s_words() {
+        let dirs = TestDirs::new();
+        provider(&dirs, "~alice/.config/creds");
+        let service = dirs.service();
+
+        let drifted = collect_events(service.check_drift().await).await;
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        let (_, total, refused) = drift_summary(&drifted);
+        assert_eq!((total, refused), (0, 1), "{drifted:?}");
+        assert_eq!(
+            unverified(&drifted),
+            0,
+            "a refused entry is not unverifiable"
+        );
+        assert_eq!(skipped(&drifted), 0, "{drifted:?}");
+        let from_drift = warning_messages(&drifted);
+        assert_eq!(
+            from_drift,
+            warning_messages(&applied),
+            "drift and apply must word the refusal alike"
+        );
+        assert!(
+            from_drift.iter().any(|w| w.contains("'~user' form")),
+            "{from_drift:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_at_the_target_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("creds");
+        std::fs::create_dir(&target).unwrap();
+        provider(&dirs, target.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "{events:?}"
+        );
+    }
+
+    // Drift's half of the order test: the escape is named ahead of the directory.
+    #[tokio::test]
+    async fn a_template_escaping_with_a_directory_target_is_refused_for_the_escape() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::create_dir(&target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("escapes the package directory")),
+            "the escape is the reason: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("a directory is at the target")),
+            "the directory is not the first reason: {warnings:?}"
+        );
+        assert_eq!(drift_summary(&events).2, 1);
+    }
+
+    // The control: a link is replaced on apply, so drift has nothing to refuse and
+    // the entry stays unverifiable.
+    #[tokio::test]
+    async fn a_symlink_to_a_regular_file_stays_unverifiable() {
+        let dirs = TestDirs::new();
+        let real = dirs.target_dir.join("real");
+        std::fs::write(&real, "OLD").unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 0, "{events:?}");
+        assert_eq!(unverified(&events), 1, "{events:?}");
+        assert_eq!(skipped(&events), 1);
+    }
+
+    // Apply refuses a link to a fifo, which it learns by following the link. A check
+    // does not follow a link, whose destination may sit on a hung mount, so it
+    // reports every linked secret target as unverified.
+    #[tokio::test]
+    async fn a_symlink_to_a_fifo_stays_unverifiable() {
+        let dirs = TestDirs::new();
+        let pipe = dirs.target_dir.join("pipe");
+        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&pipe, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 0, "{events:?}");
+        assert_eq!(unverified(&events), 1, "{events:?}");
+    }
+
+    // Drift writes nothing and runs nothing, so it may not say it would not write a
+    // credential, that it ran no command, or that it failed to resolve. Apply keeps
+    // those words, since it is the command that would have.
+    #[tokio::test]
+    async fn drift_words_a_secret_refusal_for_a_command_that_writes_nothing() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs._temp.path().join("outside.tpl"), "X: {{ v }}\n").unwrap();
+        let dir_target = dirs.target_dir.join("creds");
+        std::fs::create_dir(&dir_target).unwrap();
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n  \
+             - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+            dir_target.display(),
+            dirs.target_dir.join("other").display(),
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        let service = dirs.service();
+
+        let drifted = warning_messages(&collect_events(service.check_drift().await).await);
+        let applied = warning_messages(
+            &collect_events(service.apply_all(ApplyOptions::default()).await).await,
+        );
+
+        assert_eq!(drifted.len(), 2, "{drifted:?}");
+        for warning in &drifted {
+            for word in ["credential", "No command was run", "Failed to resolve"] {
+                assert!(!warning.contains(word), "drift said '{word}': {warning}");
+            }
+        }
+        assert!(
+            drifted
+                .iter()
+                .any(|w| w.contains("a directory is at the target"))
+                && drifted
+                    .iter()
+                    .any(|w| w.contains("escapes the package directory")),
+            "drift must still name both refusals: {drifted:?}"
+        );
+        assert!(
+            applied.iter().any(|w| w.contains("No command was run"))
+                && applied.iter().any(|w| w.starts_with("Failed to resolve")),
+            "apply keeps its own wording: {applied:?}"
+        );
+    }
+
+    // A check reports a linked secret target as unverified whatever the link points
+    // at, so it asks nothing that follows the link. The double fails the test on
+    // any following stat of the link's path.
+    #[tokio::test]
+    async fn drift_does_not_stat_through_a_link_at_a_secret_target() {
+        let dirs = TestDirs::new();
+        let real = dirs.target_dir.join("real");
+        std::fs::write(&real, "OLD").unwrap();
+        let link = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        provider(&dirs, link.to_str().unwrap());
+        let fs = FollowingStatPanicsAt {
+            inner: RealFileSystem,
+            link: link.clone(),
+        };
+
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .check_drift()
+                .await,
+        )
+        .await;
+
+        assert_eq!(unverified(&events), 1, "{events:?}");
+        assert_eq!(drift_summary(&events).2, 0);
+    }
+
+    // A template entry whose template no command needs to find wrong: drift, a dry
+    // run and the deploy refuse it alike, and none runs a binding.
+    async fn a_bad_template_is_refused_by_every_command(setup: impl Fn(&std::path::Path)) {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("creds");
+        let yaml = format!(
+            "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"creds.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read x\"\n",
+            target.display()
+        );
+        std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
+        setup(&dirs.package_dir.join("creds.tpl"));
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"X");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let drifted = collect_events(service.check_drift().await).await;
+        let previewed = collect_events(
+            service
+                .apply_all(ApplyOptions {
+                    dry_run: true,
+                    ..Default::default()
+                })
+                .await,
+        )
+        .await;
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            (drift_summary(&drifted).2, unverified(&drifted)),
+            (1, 0),
+            "drift must refuse it: {drifted:?}"
+        );
+        assert_eq!(
+            refused_count(&previewed),
+            1,
+            "a dry run must refuse it: {previewed:?}"
+        );
+        assert_eq!(refused_count(&applied), 1, "{applied:?}");
+        assert_eq!(runner.call_count(), 0, "no binding may run");
+        assert!(
+            warning_messages(&drifted)
+                .iter()
+                .all(|w| !w.contains("Failed to resolve")),
+            "{drifted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_template_is_refused_by_every_command() {
+        a_bad_template_is_refused_by_every_command(|_| {}).await;
+    }
+
+    #[tokio::test]
+    async fn a_fifo_template_is_refused_by_every_command() {
+        a_bad_template_is_refused_by_every_command(|path| {
+            nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_template_is_refused_by_every_command() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP an_unreadable_template_is_refused_by_every_command: running as root");
+            return;
+        }
+        a_bad_template_is_refused_by_every_command(|path| {
+            std::fs::write(path, "X: {{ v }}\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        })
+        .await;
+    }
+}
+
+// Several spec files in one directory claiming one name are refused, as install
+// refuses them, rather than all deployed (the last overwriting the rest) or one
+// picked by enumeration order.
+mod folded_names_are_refused {
+    use super::*;
+    use std::path::Path;
+
+    // Write `file_name` in `dir` as a spec deploying `source`, holding `content`,
+    // to `target`.
+    fn spec(dir: &std::path::Path, file_name: &str, source: &str, content: &str, target: &Path) {
+        std::fs::write(dir.join(source), content).unwrap();
+        let yaml = format!(
+            "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"{source}\"\n    target: \"{}\"\n",
+            target.display()
+        );
+        std::fs::write(dir.join(file_name), yaml).unwrap();
+    }
+
+    // bat.yml and bat.yaml with different sources and targets, so deploying either
+    // one shows, and a third package that deploys.
+    fn two_bats(dirs: &TestDirs) -> (PathBuf, PathBuf, PathBuf) {
+        let yml = dirs.target_dir.join("from-yml");
+        let yaml = dirs.target_dir.join("from-yaml");
+        spec(&dirs.package_dir, "bat.yml", "yml.conf", "YML", &yml);
+        spec(&dirs.package_dir, "bat.yaml", "yaml.conf", "YAML", &yaml);
+        std::fs::write(dirs.package_dir.join("other.conf"), "OTHER").unwrap();
+        let other = dirs.target_dir.join("other.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "other",
+            &[("other.conf", other.to_str().unwrap())],
+        );
+        (yml, yaml, other)
+    }
+
+    #[tokio::test]
+    async fn apply_all_deploys_neither_file_and_counts_one_refusal() {
+        let dirs = TestDirs::new();
+        let (yml, yaml, other) = two_bats(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            !yml.exists() && !yaml.exists(),
+            "neither may deploy: {events:?}"
+        );
+        assert!(other.exists(), "an unrelated package still deploys");
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")
+                    && w.contains("bat.yaml, bat.yml")
+                    && w.contains("Rename or remove all but one")),
+            "the warning must be install's, naming both files: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_apply_fails_as_ambiguous() {
+        let dirs = TestDirs::new();
+        let (yml, yaml, _) = two_bats(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert_no_such_package(
+            &events,
+            "bat",
+            selfie::package::event::NoSuchPackageReason::Ambiguous {
+                conflicting_paths: vec![
+                    dirs.package_dir.join("bat.yaml"),
+                    dirs.package_dir.join("bat.yml"),
+                ],
+            },
+        );
+        assert!(!yml.exists() && !yaml.exists());
+    }
+
+    #[tokio::test]
+    async fn drift_counts_one_refusal() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(drift_summary(&events).2, 1, "{events:?}");
+    }
+
+    // A file that failed to parse still claims its name, so the one that parsed is
+    // not deployed in its place.
+    #[tokio::test]
+    async fn an_unparsable_file_still_makes_the_name_ambiguous() {
+        let dirs = TestDirs::new();
+        let yml = dirs.target_dir.join("from-yml");
+        spec(&dirs.package_dir, "bat.yml", "yml.conf", "YML", &yml);
+        std::fs::write(dirs.package_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(!yml.exists(), "the parsed file must not deploy: {events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")),
+            "{events:?}"
+        );
+        // Two refusals: the ambiguity, and the file that failed to parse, which
+        // needs its own fix whichever file is kept.
+        assert_eq!(refused_count(&events), 2, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_name_repeated_within_dotfiles_is_refused() {
+        let dirs = TestDirs::new();
+        let yml = dirs.target_dir.join("from-yml");
+        let yaml = dirs.target_dir.join("from-yaml");
+        spec(&dirs.dotfiles_dir, "bat.yml", "yml.conf", "YML", &yml);
+        spec(&dirs.dotfiles_dir, "bat.yaml", "yaml.conf", "YAML", &yaml);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            !yml.exists() && !yaml.exists(),
+            "neither may deploy: {events:?}"
+        );
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+    }
+
+    // An ambiguous packages/ name still claims the name, so a dotfiles/ spec of
+    // the same name is not deployed in its place.
+    #[tokio::test]
+    async fn an_ambiguous_packages_name_keeps_its_dotfiles_namesake_out() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+        let namesake = dirs.target_dir.join("from-dotfiles");
+        spec(&dirs.dotfiles_dir, "bat.yml", "dot.conf", "DOT", &namesake);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            !namesake.exists(),
+            "the dotfiles/ copy must not deploy: {events:?}"
+        );
+        assert!(
+            warning_messages(&events).iter().any(|w| w
+                == "Not using 'bat' from dotfiles/: packages/ has more than one spec by that name"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_name_stops_the_run_under_stop_on_error() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let (_, _, other) = two_bats(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            "Stopped before applying anything: several spec files claim the name 'bat' \
+             (stop_on_error is enabled)"
+        );
+        assert!(!other.exists(), "nothing may deploy after the stop");
+    }
+
+    // A name packages/ claims is settled there: dotfiles/ files of that name are
+    // set aside with the collision warning, and two of them that fail to parse are
+    // no refusal, since neither could have been used.
+    #[tokio::test]
+    async fn dotfiles_files_under_a_packages_name_are_never_a_refusal() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("from-packages");
+        spec(&dirs.package_dir, "bat.yml", "p.conf", "P", &target);
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "name: [unclosed\n").unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(target.exists(), "the packages/ spec deploys: {events:?}");
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Skipping package 'bat'")),
+            "{events:?}"
+        );
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.starts_with("Duplicate name 'bat'")),
+            "{events:?}"
+        );
+    }
+
+    // The reason for a named apply names what to fix in packages/, which claims
+    // the name even when its spec did not parse, not an ambiguity in dotfiles/.
+    #[tokio::test]
+    async fn a_named_apply_names_what_to_fix_in_packages() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("bat.yml"), "name: [unclosed\n").unwrap();
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yml",
+            "a.conf",
+            "A",
+            &dirs.target_dir.join("a"),
+        );
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yaml",
+            "b.conf",
+            "B",
+            &dirs.target_dir.join("b"),
+        );
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply("bat", ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_no_such_package(
+            &events,
+            "bat",
+            selfie::package::event::NoSuchPackageReason::NotLoaded,
+        );
+    }
+
+    // An ambiguity in packages/ is the first thing to fix, ahead of a file in it
+    // that failed to parse.
+    #[tokio::test]
+    async fn a_dotfiles_namesake_is_told_of_the_ambiguity_first() {
+        let dirs = TestDirs::new();
+        spec(
+            &dirs.package_dir,
+            "bat.yml",
+            "p.conf",
+            "P",
+            &dirs.target_dir.join("p"),
+        );
+        std::fs::write(dirs.package_dir.join("bat.yaml"), "name: [unclosed\n").unwrap();
+        spec(
+            &dirs.dotfiles_dir,
+            "bat.yml",
+            "d.conf",
+            "D",
+            &dirs.target_dir.join("d"),
+        );
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            warning_messages(&events).contains(
+                &"Not using 'bat' from dotfiles/: packages/ has more than one spec by that name"
+                    .to_string()
+            ),
+            "{events:?}"
+        );
+    }
+
+    // A named apply's failure already names the files, so its warning is not
+    // sent as well.
+    #[tokio::test]
+    async fn a_named_apply_says_the_ambiguity_once() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert!(
+            !warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("Multiple packages found")),
+            "{events:?}"
+        );
+        assert!(failure_message(&events).contains("Multiple packages found"));
+    }
+
+    // Two install-only specs of one name are install's to refuse: apply and drift
+    // would deploy and check nothing from either, so neither refuses the name.
+    #[tokio::test]
+    async fn install_only_duplicates_are_not_refused() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        assert_eq!(refused_count(&applied), 0, "{applied:?}");
+        assert_eq!(drift_summary(&drifted).2, 0, "{drifted:?}");
+        assert!(
+            !warning_messages(&applied)
+                .iter()
+                .any(|w| w.contains("Multiple packages found")),
+            "{applied:?}"
+        );
+    }
+
+    // A named apply says nothing about names it was not asked for: not another
+    // name's ambiguity, and not another spec that failed to parse.
+    #[tokio::test]
+    async fn a_named_apply_reports_nothing_about_other_names() {
+        let dirs = TestDirs::new();
+        two_bats(&dirs);
+        std::fs::write(dirs.package_dir.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let events =
+            collect_events(dirs.service().apply("other", ApplyOptions::default()).await).await;
+
+        assert!(warning_messages(&events).is_empty(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::SpecSkipped { .. })),
+            "{events:?}"
+        );
+        assert_eq!(refused_count(&events), 0);
+    }
+
+    // An install-only pair is still ambiguous to a run that names it, as install
+    // finds it: neither file is used, so the name fails as ambiguous rather than
+    // as missing.
+    #[tokio::test]
+    async fn a_named_apply_of_an_install_only_pair_fails_as_ambiguous() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+
+        let events =
+            collect_events(dirs.service().apply("nv", ApplyOptions::default()).await).await;
+
+        assert_no_such_package(
+            &events,
+            "nv",
+            selfie::package::event::NoSuchPackageReason::Ambiguous {
+                conflicting_paths: vec![
+                    dirs.package_dir.join("nv.yaml"),
+                    dirs.package_dir.join("nv.yml"),
+                ],
+            },
+        );
+    }
+
+    // A pair whose dotfiles are all for another environment deploys nothing here,
+    // so an apply of everything and drift refuse nothing for it.
+    #[tokio::test]
+    async fn a_pair_with_dotfiles_only_for_another_environment_is_not_refused() {
+        let dirs = TestDirs::new();
+        for file in ["nv.yml", "nv.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n  other:\n    \
+                 install: \"echo i\"\n    dotfiles:\n      - source: \"nv.conf\"\n        \
+                 target: \"/tmp/selfie-never-written\"\n",
+            )
+            .unwrap();
+        }
+        let service = dirs.service();
+
+        let applied = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(service.check_drift().await).await;
+
+        assert_eq!(refused_count(&applied), 0, "{applied:?}");
+        assert_eq!(drift_summary(&drifted).2, 0, "{drifted:?}");
+    }
+}
+
+// A spec that could not be loaded is one refusal in an apply of everything, as an
+// unreadable dotfiles directory is, and so falls under `stop_on_error`.
+mod an_unloadable_spec_is_a_refusal {
+    use super::*;
+
+    // An unparsable `aaa.yml` and a deployable `zzz`, which sorts after it.
+    fn broken_then_good(dirs: &TestDirs) -> PathBuf {
+        std::fs::write(dirs.package_dir.join("aaa.yml"), "environments: {oops\n").unwrap();
+        std::fs::write(dirs.package_dir.join("zzz.toml"), "ZZZ").unwrap();
+        let target = dirs.target_dir.join("zzz.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "zzz",
+            &[("zzz.toml", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    #[tokio::test]
+    async fn apply_all_counts_it_and_still_deploys_the_rest() {
+        let dirs = TestDirs::new();
+        let target = broken_then_good(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(target.exists(), "a loadable package still deploys");
+    }
+
+    // The control: a named apply is not held to account for an unrelated file.
+    #[tokio::test]
+    async fn a_named_apply_of_another_spec_does_not_count_it() {
+        let dirs = TestDirs::new();
+        broken_then_good(&dirs);
+
+        let events =
+            collect_events(dirs.service().apply("zzz", ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn it_stops_the_run_under_stop_on_error() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let target = broken_then_good(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            failure_message(&events),
+            format!(
+                "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
+                 is enabled)",
+                dirs.package_dir.join("aaa.yml").display()
+            )
+        );
+        assert!(!target.exists(), "nothing may deploy after the stop");
+    }
+
+    // A dotfiles/ file that failed to parse under a name packages/ claims could
+    // never have been used, so it is no refusal.
+    #[tokio::test]
+    async fn one_in_dotfiles_under_a_packages_name_is_not_counted() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("bat.conf"), "BAT").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat.conf", dirs.target_dir.join("bat").to_str().unwrap())],
+        );
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+    }
+
+    // The control: one in dotfiles/ under a name nothing else claims is counted.
+    #[tokio::test]
+    async fn one_in_dotfiles_under_its_own_name_is_counted() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.dotfiles_dir.join("bat.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+    }
+
+    // An ambiguity in one directory does not hide a file that failed to parse in
+    // the other: each needs its own fix, so each is counted. `zzz` declares a
+    // dotfile, so its ambiguity matters to the run; nothing is written, since
+    // neither file deploys.
+    #[tokio::test]
+    async fn an_ambiguity_in_one_directory_does_not_hide_one_in_the_other() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.dotfiles_dir.join("aaa.yml"), "environments: {oops\n").unwrap();
+        for file in ["zzz.yml", "zzz.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"z.conf\"\n    target: \"/tmp/selfie-never-written\"\n",
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&events), 2, "{events:?}");
+    }
+}
+
+// A named package with dotfiles only for another environment says it has nothing
+// to apply here, rather than completing with every count at zero, and is not a
+// failure.
+#[tokio::test]
+async fn a_named_package_with_nothing_for_this_environment_says_so() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("rg.conf"), "RG").unwrap();
+    let target = dirs.target_dir.join("rg.conf");
+    write_package_yaml(
+        &dirs.package_dir,
+        "ripgrep",
+        &format!(
+            "name: ripgrep\nenvironments:\n  test:\n    install: \"echo i\"\n  other:\n    \
+             install: \"echo i\"\n    dotfiles:\n      - source: \"rg.conf\"\n        target: \
+             \"{}\"\n",
+            target.display()
+        ),
+    );
+    let service = dirs.service();
+
+    let named = collect_events(service.apply("ripgrep", ApplyOptions::default()).await).await;
+    let all = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert!(
+        warning_messages(&named).contains(
+            &"Package 'ripgrep' has no dotfiles for environment 'test'; nothing to apply"
+                .to_string()
+        ),
+        "{named:?}"
+    );
+    assert_eq!(refused_count(&named), 0, "not a failure: {named:?}");
+    assert!(!target.exists());
+    // Control: an apply of everything names no one package, so says nothing.
+    assert!(
+        !warning_messages(&all)
+            .iter()
+            .any(|w| w.contains("nothing to apply")),
+        "{all:?}"
+    );
+}
+
+// An entry key named like a real field gets the same advice from apply and drift
+// as from `selfie spec validate`: why that anchor is refused where others are
+// legal. A plain misspelling gets none, since no anchor is involved.
+#[tokio::test]
+async fn an_anchor_named_like_an_entry_field_gets_validate_s_advice() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "myapp",
+        &format!(
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    _target: \"x\"\n  \
+             - source: \"b.toml\"\n    target: \"{}\"\n    audt: \"x\"\n",
+            dirs.target_dir.join("a").display(),
+            dirs.target_dir.join("b").display(),
+        ),
+    );
+    let service = dirs.service();
+
+    for events in [
+        collect_events(service.apply_all(ApplyOptions::default()).await).await,
+        collect_events(service.check_drift().await).await,
+    ] {
+        let warnings = warning_messages(&events);
+        let shadowing = warnings
+            .iter()
+            .find(|w| w.contains("'_target'"))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        let misspelled = warnings
+            .iter()
+            .find(|w| w.contains("'audt'"))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        assert!(shadowing.contains("Anchors are legal here"), "{shadowing}");
+        assert!(!misspelled.contains("Anchors"), "{misspelled}");
+    }
+}
+
+// A top-level key and an environment key named like a real field carry their
+// level's advice too, as validate gives it.
+#[tokio::test]
+async fn a_shadowing_top_level_or_environment_key_gets_its_level_s_advice() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "top",
+        "name: top\nenvironments:\n  test:\n    install: \"echo i\"\n_dotfiles: []\n",
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "env",
+        "name: env\nenvironments:\n  test:\n    install: \"echo i\"\n    _check: \"x\"\n",
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    let find = |package: &str| {
+        warnings
+            .iter()
+            .find(|w| w.starts_with(&format!("Skipping package '{package}'")))
+            .unwrap_or_else(|| panic!("{warnings:?}"))
+    };
+    assert!(find("top").ends_with("only a name matching a top-level field is refused"));
+    assert!(find("env").ends_with("only a name matching a field of this environment is refused"));
+}
+
+// Two keys needing the same advice get it once, after the last key, and the
+// sentence never runs a period into a semicolon.
+#[tokio::test]
+async fn two_shadowing_keys_get_the_advice_once() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "myapp",
+        &format!(
+            "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    _target: \"x\"\n    _vars: \"y\"\n",
+            dirs.target_dir.join("a").display(),
+        ),
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    let warning = warnings
+        .iter()
+        .find(|w| w.contains("'_target'") && w.contains("'_vars'"))
+        .unwrap_or_else(|| panic!("{warnings:?}"));
+    assert_eq!(
+        warning.matches("Anchors are legal here").count(),
+        1,
+        "{warning}"
+    );
+    assert!(!warning.contains(".;"), "{warning}");
+    assert!(warning.ends_with("is refused"), "{warning}");
+}
+
+// At a level holding both kinds of key, the advice follows the keys named like a
+// real field and precedes the plain misspellings, so it never reads as advice
+// about a misspelling. Each file lists the misspelling first.
+#[tokio::test]
+async fn the_advice_follows_the_shadowing_keys_at_every_level() {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "entry",
+        &format!(
+            "name: entry\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"a.toml\"\n    target: \"{}\"\n    audt: \"y\"\n    _target: \"x\"\n",
+            dirs.target_dir.join("a").display(),
+        ),
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "top",
+        "name: top\nconfigs: []\n_dotfiles: []\nenvironments:\n  test:\n    install: \"echo i\"\n",
+    );
+    write_package_yaml(
+        &dirs.package_dir,
+        "env",
+        "name: env\nenvironments:\n  test:\n    install: \"echo i\"\n    audt: \"x\"\n    \
+         _check: \"y\"\n",
+    );
+
+    let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+    let warnings = warning_messages(&events);
+    for (shadowing, plain) in [
+        ("'_target'", "'audt'"),
+        ("'_dotfiles'", "'configs'"),
+        ("'_check'", "'audt'"),
+    ] {
+        let warning = warnings
+            .iter()
+            .find(|w| w.contains(shadowing))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        let at = |text: &str| warning.find(text).unwrap_or_else(|| panic!("{warning}"));
+        assert!(
+            at(shadowing) < at("Anchors are legal") && at("Anchors are legal") < at(plain),
+            "{warning}"
+        );
+        assert!(warning.contains("is refused. Unknown field"), "{warning}");
     }
 }

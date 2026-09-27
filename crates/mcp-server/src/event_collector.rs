@@ -17,11 +17,21 @@ fn failure_json(failure: &OperationFailure) -> Value {
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
     if let OperationFailure::NoSuchPackage { reason, .. } = failure {
+        // The files to rename or remove, so an assistant need not parse them out of
+        // `error`.
+        if let NoSuchPackageReason::Ambiguous { conflicting_paths } = reason {
+            payload["conflicting_paths"] = conflicting_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .into();
+        }
         payload["reason"] = Value::from(match reason {
             NoSuchPackageReason::NotFound => "not_found",
             NoSuchPackageReason::MaybeInUnlistableDirectory => "maybe_in_unlistable_directory",
             NoSuchPackageReason::MaybeInUncheckableDirectory => "maybe_in_uncheckable_directory",
             NoSuchPackageReason::NotLoaded => "not_loaded",
+            NoSuchPackageReason::Ambiguous { .. } => "ambiguous",
         });
     }
     payload
@@ -43,7 +53,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
         }
     }
 
-    let (success, result_data) = match final_result {
+    let (success, mut result_data) = match &final_result {
         // An operation that completed while refusing part of its work is
         // reported as an error result, the same call the CLI answers with exit
         // code 1. The payload's `status` moves in step with the envelope: a
@@ -65,12 +75,20 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
             true,
             serde_json::json!({ "status": "success", "message": format!("{s}") }),
         ),
-        Some(OperationResult::Failure(f)) => (false, failure_json(&f)),
+        Some(OperationResult::Failure(f)) => (false, failure_json(f)),
         None => (
             false,
             serde_json::json!({ "status": "unknown", "error": "No completion event received" }),
         ),
     };
+    // A structured field for the same reason `refused` is one: an assistant should
+    // not have to parse a count out of `message`. Informational, so it leaves
+    // `status` alone.
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let Some(count) = s.unverified_count()
+    {
+        result_data["unverified_count"] = count.into();
+    }
 
     EventCollectorResult {
         success,
@@ -441,16 +459,16 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             drifted_targets,
             total_deployed,
             refused_count,
-            unloaded_specs,
             warned,
+            unverified_count,
             ..
         } => Some(serde_json::json!({
             "type": "sync_drift_summary",
             "drifted_targets": drifted_targets,
             "total_deployed": total_deployed,
             "refused_count": refused_count,
-            "unloaded_specs": unloaded_specs,
             "warned": warned,
+            "unverified_count": unverified_count,
         })),
         PackageEvent::SyncCommitCreated {
             package_name,
@@ -673,7 +691,7 @@ mod tests {
                 drift_count: 0,
                 total_count: 0,
                 refused_count: 1,
-                unloaded_specs: 0,
+                unverified_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(0, 0),
             }),
@@ -743,34 +761,8 @@ mod tests {
         assert_eq!(result.data["result"]["status"], "success");
     }
 
-    // An assistant reading `sync_drift_summary` needs the same count the CLI
-    // warns about, so it can tell a run that skipped specs from one that
-    // checked everything.
-    #[tokio::test]
-    async fn sync_drift_summary_carries_the_unloaded_spec_count() {
-        let events = vec![
-            PackageEvent::SyncDriftSummary {
-                operation_info: test_op_info(),
-                drifted_targets: vec![],
-                total_deployed: 3,
-                refused_count: 0,
-                unloaded_specs: 2,
-                warned: 0,
-            },
-            PackageEvent::Completed {
-                operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
-            },
-        ];
-
-        let result = collect_events(Box::pin(stream::iter(events))).await;
-
-        assert_eq!(result.data["data"][0]["unloaded_specs"], 2);
-    }
-
-    // An assistant reading `sync_drift_summary` needs to tell a relayed
-    // warning from an unloaded spec, because only the spec count also names
-    // which specs it is.
+    // An assistant reading `sync_drift_summary` needs the count of relayed
+    // warnings as a field, not only as the rows above it.
     #[tokio::test]
     async fn sync_drift_summary_carries_the_warned_count() {
         let events = vec![
@@ -779,8 +771,8 @@ mod tests {
                 drifted_targets: vec![],
                 total_deployed: 3,
                 refused_count: 0,
-                unloaded_specs: 0,
                 warned: 1,
+                unverified_count: 0,
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -791,6 +783,53 @@ mod tests {
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         assert_eq!(result.data["data"][0]["warned"], 1);
+    }
+
+    // A drift check whose entries are only unverified succeeds, and says how many
+    // in a field of its own.
+    #[tokio::test]
+    async fn a_drift_result_carries_the_unverified_count_and_stays_a_success() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 1,
+                refused_count: 0,
+                unverified_count: 2,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success, "an unverified entry is not a failure");
+        assert_eq!(result.data["result"]["status"], "success");
+        assert_eq!(result.data["result"]["unverified_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn sync_drift_summary_carries_the_unverified_count() {
+        let events = vec![
+            PackageEvent::SyncDriftSummary {
+                operation_info: test_op_info(),
+                drifted_targets: vec![],
+                total_deployed: 1,
+                refused_count: 0,
+                warned: 0,
+                unverified_count: 2,
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(result.data["data"][0]["unverified_count"], 2);
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load
@@ -810,6 +849,34 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.data["result"]["status"], "failure");
         assert_eq!(result.data["result"]["reason"], "not_loaded");
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_package_name_carries_its_reason() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Failure(OperationFailure::NoSuchPackage {
+                name: "bat".to_string(),
+                reason: NoSuchPackageReason::Ambiguous {
+                    conflicting_paths: vec!["/p/bat.yaml".into(), "/p/bat.yml".into()],
+                },
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(result.data["result"]["reason"], "ambiguous");
+        assert_eq!(
+            result.data["result"]["conflicting_paths"],
+            serde_json::json!(["/p/bat.yaml", "/p/bat.yml"])
+        );
+        assert!(
+            result.data["result"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("bat.yaml, bat.yml")),
+            "{}",
+            result.data
+        );
     }
 
     // A failed command's output must not reach the JSON an assistant reads.

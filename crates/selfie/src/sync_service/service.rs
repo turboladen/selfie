@@ -4,7 +4,7 @@
 //! Uses [`GitSyncProvider`] for git operations and [`DotfileService`] for
 //! drift checking during `sync status`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
@@ -210,10 +210,14 @@ where
                 return;
             }
 
+            // Counted with the relayed warnings, which it is one of: a summary
+            // under a failed check must not read as a clean run.
+            let mut warned = summary.warned;
             if let Some(error_msg) = summary.error {
                 sender
                     .send_warning(format!("Drift check failed: {error_msg}"))
                     .await;
+                warned += 1;
             }
 
             sender
@@ -222,8 +226,8 @@ where
                     drifted_targets: summary.drifted_targets,
                     total_deployed: summary.total_deployed,
                     refused_count: summary.refused_count,
-                    unloaded_specs: summary.unloaded_specs,
-                    warned: summary.warned,
+                    warned,
+                    unverified_count: summary.unverified,
                 })
                 .await;
 
@@ -695,22 +699,9 @@ fn group_name_collisions<I>(names: I) -> Vec<(String, Vec<String>)>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    for file_name in names {
-        let Some(name) = crate::package::spec_name_from_file_name(&file_name) else {
-            continue;
-        };
-        by_name.entry(name).or_default().push(file_name);
-    }
-
-    by_name
+    crate::package::group_by_spec_name(names, |name: &String| Some(name.as_str()))
         .into_iter()
         .filter(|(_, names)| names.len() > 1)
-        .map(|(name, mut names)| {
-            names.sort();
-            (name, names)
-        })
         .collect()
 }
 
@@ -905,25 +896,9 @@ fn validate_changed_packages(
         // level says how bad a file is, and what push needs to know is whether it
         // will apply.
         //
-        // Appended only when nothing with the same identity is already reported.
-        // Rules that reach push as validation errors arrive twice otherwise --
-        // once in the validator's words and once in apply's -- and a reader
-        // cannot tell that both name one problem.
         let mut issues = issues;
         if let Some(refusal) = package.spec_refusal(environment) {
-            let category = "ApplyRefusal".to_string();
-            let already = issues
-                .iter()
-                .any(|i| i.category == category || i.message.contains(&refusal.to_string()));
-            if !already {
-                issues.push(PackageValidationIssue {
-                    level: "ERROR".to_string(),
-                    category,
-                    field: "-".to_string(),
-                    message: format!("'selfie apply' would refuse this package: {refusal}"),
-                    location: None,
-                });
-            }
+            issues.extend(apply_refusal_issue(&refusal, &issues));
         }
 
         if !issues.is_empty() {
@@ -939,6 +914,35 @@ fn validate_changed_packages(
     } else {
         Err(SyncError::ValidationFailed { failures })
     }
+}
+
+// Apply's refusal as a push issue, unless the validator already reported every
+// problem in it. Rules that reach push as validation errors arrive twice
+// otherwise, once in the validator's words and once in apply's, and a reader
+// cannot tell that both name one problem.
+//
+// Matched on the field each problem sits at, not on wording: the two describe
+// one key differently (the validator gives the anchor advice as a suggestion),
+// and a refusal covering several keys has no single validator message to match.
+fn apply_refusal_issue(
+    refusal: &crate::package::SpecRefusal,
+    issues: &[super::port::PackageValidationIssue],
+) -> Option<super::port::PackageValidationIssue> {
+    let reported = |field: &String| {
+        issues
+            .iter()
+            .any(|issue| issue.level == "ERROR" && issue.field == *field)
+    };
+    if refusal.fields().iter().all(reported) {
+        return None;
+    }
+    Some(super::port::PackageValidationIssue {
+        level: "ERROR".to_string(),
+        category: "ApplyRefusal".to_string(),
+        field: "-".to_string(),
+        message: format!("'selfie apply' would refuse this package: {refusal}"),
+        location: None,
+    })
 }
 
 /// Collect all changed files from a [`RepoStatus`] into a unified list.
@@ -1218,10 +1222,10 @@ struct DriftSummary {
     drifted_targets: Vec<String>,
     total_deployed: usize,
     refused_count: usize,
-    /// How many specs the drift check skipped rather than loaded.
-    unloaded_specs: usize,
     /// How many relayed warnings named work the check could not complete.
     warned: usize,
+    /// How many secret-bearing entries the check reported without verifying.
+    unverified: usize,
     /// The failure message, when the check failed.
     error: Option<String>,
     /// Why the check was cancelled, when it was.
@@ -1235,15 +1239,20 @@ struct DriftSummary {
 
 /// Collect drift information from a DotfileService event stream.
 ///
-/// Assumes the stream emits exactly one `Completed` event (either success or
-/// failure), matching the `check_drift()` contract.
+/// A stream that ends without a `Completed` or `Canceled` event is summarized as
+/// a failed check, never a clean one.
 async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
     use futures::StreamExt;
 
     let mut summary = DriftSummary::default();
+    let mut finished = false;
 
     futures::pin_mut!(stream);
     while let Some(event) = stream.next().await {
+        finished |= matches!(
+            event,
+            PackageEvent::Completed { .. } | PackageEvent::Canceled { .. }
+        );
         match event {
             PackageEvent::DotfileDriftDetected { target, .. } => {
                 summary.drifted_targets.push(target);
@@ -1253,7 +1262,6 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary.relayed.push(RelayedDriftEvent::Warning(message));
             }
             PackageEvent::SpecSkipped { error, .. } => {
-                summary.unloaded_specs += 1;
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
             }
             PackageEvent::Completed {
@@ -1262,12 +1270,14 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                         drift_count: _,
                         total_count,
                         refused_count,
+                        unverified_count,
                         ..
                     }),
                 ..
             } => {
                 summary.total_deployed = total_count;
                 summary.refused_count = refused_count;
+                summary.unverified = unverified_count;
             }
             PackageEvent::Completed {
                 result: OperationResult::Failure(failure),
@@ -1286,6 +1296,12 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             // the summary says needs an arm of its own above.
             _ => {}
         }
+    }
+
+    // A stream that ends without saying how the check went, as it does when the
+    // task running the check panics, is a check that failed, never a clean one.
+    if !finished {
+        summary.error = Some("the drift check ended without reporting a result".to_string());
     }
 
     summary
@@ -1879,6 +1895,18 @@ mod tests {
         assert_eq!(summary.error.as_deref(), Some("permission denied"));
     }
 
+    // A stream that ends with no completion is a check that never finished, as
+    // when the task running it panics.
+    #[tokio::test]
+    async fn collect_drift_summary_counts_a_stream_that_just_ends_as_failed() {
+        let summary = collect_drift_summary(events_to_stream(Vec::new())).await;
+
+        assert!(
+            summary.error.is_some(),
+            "a check that never finished must not read as clean"
+        );
+    }
+
     // What drift warned about and the specs it skipped limit its summary, and
     // both travel in the order drift reported them rather than grouped by
     // kind: an implementation that relayed every skipped spec ahead of every
@@ -1910,7 +1938,7 @@ mod tests {
                     drift_count: 0,
                     total_count: 0,
                     refused_count: 0,
-                    unloaded_specs: 0,
+                    unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(0, 0),
                 }),
@@ -1957,7 +1985,7 @@ mod tests {
                 drift_count: 0,
                 total_count: 4,
                 refused_count: 2,
-                unloaded_specs: 0,
+                unverified_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(4, 4),
             }),
@@ -1977,6 +2005,34 @@ mod tests {
         assert!(summary.error.is_none());
     }
 
+    // The unverified count differs from every other count in the fixture, so
+    // taking it from the wrong field fails here.
+    #[tokio::test]
+    async fn collect_drift_summary_carries_the_unverified_count() {
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_operation_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 1,
+                refused_count: 0,
+                unverified_count: 3,
+                environment: "test".to_string(),
+                steps_completed: crate::package::event::StepCount::new(1, 1),
+            }),
+        }];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(
+            summary.unverified, 3,
+            "the unverified count must reach status"
+        );
+        assert_eq!(
+            summary.total_deployed, 1,
+            "the deployed total must not absorb the entries it did not verify"
+        );
+    }
+
     #[tokio::test]
     async fn collect_drift_summary_returns_none_on_success() {
         let events = vec![
@@ -1991,7 +2047,7 @@ mod tests {
                     drift_count: 1,
                     total_count: 3,
                     refused_count: 0,
-                    unloaded_specs: 0,
+                    unverified_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
                 }),
@@ -2146,8 +2202,8 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 1,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2280,9 +2336,9 @@ mod tests {
         );
     }
 
-    // A DotfileService whose `check_drift` skips two specs, so a test reading
-    // `unloaded_specs` proves the field counts them rather than recording that
-    // any were skipped at all.
+    // A DotfileService whose `check_drift` skips two specs and, as the real one
+    // does, counts each as a refusal, so a test counting the relayed rows proves
+    // each is relayed rather than only the first.
     #[derive(Clone)]
     struct DriftEmittingTwoSkippedSpecs;
 
@@ -2322,8 +2378,8 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 2,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2342,7 +2398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_the_unloaded_spec_count_in_the_summary() {
+    async fn status_relays_every_skipped_spec_ahead_of_the_summary() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2361,12 +2417,20 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let unloaded_specs = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary { unloaded_specs, .. } => Some(*unloaded_specs),
+        let relayed = events
+            .iter()
+            .take_while(|e| !matches!(e, PackageEvent::SyncDriftSummary { .. }))
+            .filter(|e| matches!(e, PackageEvent::SpecSkipped { .. }))
+            .count();
+
+        assert_eq!(relayed, 2, "{events:?}");
+        // Drift counts each spec it could not load as a refusal, and the summary
+        // carries that count.
+        let refused = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { refused_count, .. } => Some(*refused_count),
             _ => None,
         });
-
-        assert_eq!(unloaded_specs, Some(2), "{events:?}");
+        assert_eq!(refused, Some(2), "{events:?}");
     }
 
     // A DotfileService whose `check_drift` emits one warning and completes
@@ -2404,7 +2468,7 @@ mod tests {
                         drift_count: 0,
                         total_count: 0,
                         refused_count: 0,
-                        unloaded_specs: 0,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2422,12 +2486,80 @@ mod tests {
         }
     }
 
-    // A relayed warning must raise `warned` alone. An implementation that
-    // folded warnings into `unloaded_specs`, or that dropped `warned`
-    // entirely, would leave one of these two counts wrong on an event that
-    // carries no skipped spec at all.
+    // A DotfileService whose `check_drift` fails outright, a state no run of the
+    // binary reaches today: discovery or the git status step fails first.
+    #[derive(Clone)]
+    struct DriftCheckFailing;
+
+    impl DotfileService for DriftCheckFailing {
+        async fn list(&self) -> EventStream {
+            unreachable!("status() does not list dotfiles")
+        }
+
+        async fn apply_all(&self, _: crate::dotfile_service::port::ApplyOptions) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn apply(
+            &self,
+            _: &str,
+            _: crate::dotfile_service::port::ApplyOptions,
+        ) -> EventStream {
+            unreachable!("status() does not apply dotfiles")
+        }
+
+        async fn check_drift(&self) -> EventStream {
+            let events = vec![PackageEvent::Completed {
+                operation_info: test_operation_info(),
+                result: OperationResult::Failure(OperationFailure::Generic(
+                    "could not collect packages".to_string(),
+                )),
+            }];
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn track_standalone(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+
+        async fn track_for_package(&self, _: &str, _: &str) -> EventStream {
+            unreachable!("status() does not track dotfiles")
+        }
+    }
+
+    // The failed check's warning counts in `warned`, so the summary under it
+    // cannot read as a clean run.
     #[tokio::test]
-    async fn status_reports_a_relayed_warning_as_warned_and_not_as_an_unloaded_spec() {
+    async fn status_counts_a_failed_drift_check_as_warned() {
+        use futures::StreamExt;
+
+        let service = SyncServiceImpl::new(
+            GitReachingDrift,
+            DriftCheckFailing,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory("/tmp/selfie-packages")
+                .build(),
+            SudoPolicy::new(
+                crate::sync_service::service::credential_egress_tests::RunningAs(
+                    crate::privilege::Elevation::Unprivileged,
+                ),
+            ),
+        );
+
+        let events: Vec<PackageEvent> = service.status().await.collect().await;
+
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
+            _ => None,
+        });
+        assert_eq!(warned, Some(1), "{events:?}");
+    }
+
+    // A relayed warning must raise `warned`, on an event stream that carries no
+    // skipped spec at all.
+    #[tokio::test]
+    async fn status_reports_a_relayed_warning_as_warned() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2446,22 +2578,17 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let counts = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary {
-                warned,
-                unloaded_specs,
-                ..
-            } => Some((*warned, *unloaded_specs)),
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
             _ => None,
         });
 
-        assert_eq!(counts, Some((1, 0)), "{events:?}");
+        assert_eq!(warned, Some(1), "{events:?}");
     }
 
     // A DotfileService whose `check_drift` emits one warning and two skipped
-    // specs, so a test reading both `warned` and `unloaded_specs` proves the
-    // two counts land in the field each names rather than one leaking into
-    // the other.
+    // specs, so a test reading `warned` proves a skipped spec does not leak into
+    // it.
     #[derive(Clone)]
     struct DriftEmittingOneWarningAndTwoSkippedSpecs;
 
@@ -2505,8 +2632,8 @@ mod tests {
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
                         drift_count: 0,
                         total_count: 0,
-                        refused_count: 0,
-                        unloaded_specs: 0,
+                        refused_count: 2,
+                        unverified_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2524,13 +2651,12 @@ mod tests {
         }
     }
 
-    // Pins the two counts `collect_drift_summary` keeps as independent: a
-    // warning raises only `warned`, and a skipped spec raises only
-    // `unloaded_specs`. Neither of the two tests above can catch a count
-    // leaking into the other, because each drives a stream carrying only one
-    // kind of event.
+    // A warning raises `warned` and a skipped spec does not: drift counts an
+    // unloadable spec as a refusal, and counting it as a warning too would count
+    // it twice. Neither test above can catch that, because each drives a stream
+    // carrying only one kind of event.
     #[tokio::test]
-    async fn status_counts_a_warning_and_skipped_specs_separately() {
+    async fn status_counts_a_warning_and_not_the_skipped_specs_as_warned() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
@@ -2549,16 +2675,12 @@ mod tests {
 
         let events: Vec<PackageEvent> = service.status().await.collect().await;
 
-        let counts = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary {
-                warned,
-                unloaded_specs,
-                ..
-            } => Some((*warned, *unloaded_specs)),
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
             _ => None,
         });
 
-        assert_eq!(counts, Some((1, 2)), "{events:?}");
+        assert_eq!(warned, Some(1), "{events:?}");
     }
 }
 
@@ -3214,27 +3336,52 @@ mod name_collision_tests {
     }
 
     // Push asks apply's question, so it cannot ship a file the receiving machine
-    // will refuse. An unknown environment key is the case where that consult is
-    // observable: the validator reports the key per field, apply's refusal names
-    // the environment as well, and the two wordings do not match, so the appended
-    // entry survives the deduplication below.
-    //
-    // The assertion is on that appended entry, not on the push failing: the
-    // validator reports `audt` itself, so this file is refused either way. Weaken
-    // this to `is_err()` and the consult can be deleted with every test green.
+    // will refuse. Every rule apply refuses on is also a validation error today,
+    // so no file makes the consult observable; this asks the helper directly, with
+    // nothing reported, whether it would append the refusal.
     #[test]
-    fn a_push_carrying_a_spec_apply_would_refuse_is_refused() {
-        let spec = "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    audt: \
-                    \"echo a\"\n";
-
-        let Err(error) = push_result(spec) else {
-            panic!("a push carrying a spec apply would refuse must be refused");
-        };
-        let rendered = format!("{error:?}");
-        assert!(
-            rendered.contains("ApplyRefusal"),
-            "the refusal must reach the push report: {rendered}"
+    fn a_refusal_the_validator_did_not_report_is_appended() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
         );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("configs is refused");
+
+        let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported it yet");
+        assert_eq!(issue.category, "ApplyRefusal");
+    }
+
+    // Errors only: a missing section also draws a warning about the current
+    // environment, which is a different problem.
+    fn error_count(spec: &str) -> usize {
+        let Err(super::SyncError::ValidationFailed { failures }) = push_result(spec) else {
+            panic!("the spec must be refused");
+        };
+        failures
+            .iter()
+            .flat_map(|f| &f.issues)
+            .filter(|issue| issue.level == "ERROR")
+            .count()
+    }
+
+    // Each problem is reported once however many keys the refusal covers, and
+    // for an environment key and a missing environment as for a top-level key.
+    #[test]
+    fn a_push_reports_each_refused_problem_once() {
+        let two_keys = "name: myapp\n_dotfiles: []\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        assert_eq!(error_count(two_keys), 2, "two keys, two problems");
+
+        let environment_key =
+            "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    audt: \"x\"\n";
+        assert_eq!(error_count(environment_key), 1, "one environment key");
+
+        let no_environments = "name: myapp\nenvironments: {}\n";
+        assert_eq!(error_count(no_environments), 1, "one missing section");
     }
 
     // A top level selfie could not read back is reported once, not twice.

@@ -1056,9 +1056,13 @@ it bounds what selfie compares and writes, **not** what the command produces. Th
 output is buffered before the check can run — as it already is for every install and check command —
 so this is not a memory bound against a genuinely unbounded provider.
 
-A failing command respects `stop_on_error`, which defaults to true, so by default a failure aborts
-the apply. When a binding fails, the error names that binding and the remaining bindings for that
-entry are not run.
+A failing command counts as a refusal. `stop_on_error`, which defaults to false, decides whether it
+also ends the apply; if it does, no later entry is reached. If it does not, every later entry whose
+command or template binding runs the same program is refused with "an earlier `op` command failed;
+no command was run", naming the program, and none of its commands runs: the cause of one failure,
+such as a locked vault, usually fails that program's other commands too. Entries running another
+program, and repository files, still deploy. When a binding fails, the error names that binding and
+the remaining bindings for that entry are not run.
 
 Ctrl+C during `selfie apply` cancels a provider command that is still running, as it does during
 `install` and `check` — so a command waiting on a biometric or password prompt can be escaped
@@ -1089,7 +1093,12 @@ Consequences worth knowing before you adopt this:
   cache would be a secret at rest.
 - `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
   checking them. Checking would mean resolving, which would run your commands from a read-only
-  command.
+  command. They are counted as not verifiable, apart from the entries drift compared, and are not
+  refusals, so they do not make the check exit `1`. An entry `selfie apply` would refuse without
+  running anything — a target it will not write to, a template escaping the package directory or
+  missing, unreadable or a fifo, a directory or a fifo at the target — is reported by drift as that
+  same refusal, worded for a check that writes and runs nothing, and does make it exit `1`. A
+  symlink at the target is reported as unverifiable whatever it points at: drift does not follow it.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
@@ -1134,7 +1143,7 @@ itself** is refused too, because a file cannot replace a directory — but a dir
 is not, since the replacement lands on the link. A plain target selfie cannot classify at all — one
 it has no permission to look at — is refused rather than written over.
 
-`stop_on_error` is on by default, so any of these refusals stops the rest of the run.
+With `stop_on_error` set, any of these refusals stops the rest of the run.
 
 #### What is shown, and what is not
 
@@ -1182,11 +1191,9 @@ nothing.
 
 A dry run does still apply every check that can be made without running anything — a target selfie
 will not deploy to, whether it is not absolute or names another user's home with `~user/`; a
-template escaping the package directory — and reports the same refusal a real apply would. Because
-those refusals are failures for a secret-bearing entry, `stop_on_error` (default `true`) ends the
-preview at the first one rather than listing every remaining problem entry. That is deliberate: a
-preview that continued past an error a real apply would stop on would be describing a different run
-from the one you are about to perform. Set `stop_on_error: false` to see them all.
+template escaping the package directory — and reports the same refusal a real apply would. A dry run
+stops where a real run would: by default it carries on and lists every refusal, and with
+`stop_on_error` set it ends at the first one, as the apply you are about to perform would.
 
 #### Diagnostics do not carry line numbers
 
@@ -1368,8 +1375,10 @@ rewrite the file refuse to save it. See [Unrecognized keys](#unrecognized-keys).
 The fix depends on which you meant, and selfie says so rather than guessing:
 
 ```
-'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'
+'_vars' cannot be told apart from a misspelling of the 'vars' field; rename it, or correct it to 'vars'. Anchors are legal here; only a name matching a field of this entry is refused
 ```
+
+`selfie dotfiles list` shows the first sentence only, since a table cell has no room for the second.
 
 **Rename the anchor** — `_creds: &v` works exactly as well — or, if you meant the field, drop the
 underscore. Only these four names are affected inside a dotfile entry:
@@ -1401,11 +1410,10 @@ Both cases bite the same way. The keys selfie reads are not the ones you wrote, 
 has less to deploy than the file appears to describe — and with `_dotfiles:` as the only dotfiles
 key, **nothing at all** to deploy, a run that looks completely successful and did nothing.
 
-`selfie apply` therefore **refuses the whole package** and names the key:
+`selfie apply` therefore **refuses the whole package** and names every such key:
 
 ```
-⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'
-⚠ Skipping package 'myapp': unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
+⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'. Anchors are legal here; only a name matching a top-level field is refused. Unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
 ```
 
 The refusal covers the package rather than a single entry, because the problem is in the file's top

@@ -774,10 +774,14 @@ pub enum OperationSuccess {
     /// Dotfile drift check operation completed
     DotfileDriftChecked {
         drift_count: usize,
+        /// How many entries drift compared against their source. Refused and
+        /// unverified entries are counted apart and never here.
         total_count: usize,
-        /// What drift could not check: a package apply would refuse whole; an
-        /// entry whose target is a symlink, a fifo, socket or device node, a
-        /// directory, or could not be read; or a dotfiles directory that exists
+        /// What drift refused to check, each for a reason apply would refuse it
+        /// too: a spec that could not be loaded; a name several spec files claim;
+        /// a package refused whole; an entry that cannot deploy, whose target
+        /// selfie will not write to or cannot read, or whose source escapes the
+        /// package directory or cannot be read; or a dotfiles directory that exists
         /// and could not be listed.
         ///
         /// Its own field rather than part of `total_count`: `sync status`
@@ -786,14 +790,12 @@ pub enum OperationSuccess {
         /// does include its refusals, because that one feeds a step count and
         /// records outcomes rather than entries.
         refused_count: usize,
-        /// How many specs the check skipped rather than loaded.
-        ///
-        /// Separate from `refused_count` because the two have different
-        /// remedies: a refusal is selfie declining to act, while an unloaded
-        /// spec is a file the user has to fix. Both mean the same thing to a
-        /// caller deciding whether the check was complete, and neither is
-        /// counted in `total_count`, which covers only what was examined.
-        unloaded_specs: usize,
+        /// Secret-bearing entries drift reported without checking, since their
+        /// content comes from running commands. Not a refusal, and not a sign the
+        /// check is incomplete: such an entry is unverifiable by design.
+        // Counting one as a refusal would fail every drift check on a machine that
+        // has one (ADR-0003).
+        unverified_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -871,7 +873,7 @@ pub enum OperationFailure {
 }
 
 /// Why a named package could not be found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoSuchPackageReason {
     /// No spec file has the name.
     NotFound,
@@ -889,6 +891,12 @@ pub enum NoSuchPackageReason {
     MaybeInUncheckableDirectory,
     /// A spec file has the name and could not be loaded.
     NotLoaded,
+    /// More than one spec file in one directory claims the name, so none is
+    /// used.
+    Ambiguous {
+        /// The files claiming it, sorted.
+        conflicting_paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// Command execution failure details
@@ -983,6 +991,9 @@ impl std::fmt::Display for OperationFailure {
                 NoSuchPackageReason::NotLoaded => write!(
                     f,
                     "Package '{name}' could not be loaded, so nothing was applied"
+                ),
+                NoSuchPackageReason::Ambiguous { conflicting_paths } => f.write_str(
+                    &crate::package::port::ambiguous_files_sentence(name, conflicting_paths),
                 ),
             },
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
@@ -1240,14 +1251,14 @@ impl std::fmt::Display for OperationSuccess {
                 drift_count,
                 total_count,
                 refused_count,
-                unloaded_specs,
+                unverified_count,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused, {unloaded_specs} not loaded {steps_completed}"
+                     {refused_count} refused, {unverified_count} not verifiable {steps_completed}"
                 )
             }
             OperationSuccess::DotfileTracked {
@@ -1677,6 +1688,39 @@ impl OperationSuccess {
             OperationSuccess::DotfilesApplied { refused_count, .. }
             | OperationSuccess::DotfileDriftChecked { refused_count, .. } => Some(*refused_count),
             OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => None,
+        }
+    }
+
+    /// How many entries a drift check reported without verifying, for the one
+    /// operation that counts them. `None` for every other operation.
+    #[must_use]
+    pub fn unverified_count(&self) -> Option<usize> {
+        match self {
+            OperationSuccess::DotfileDriftChecked {
+                unverified_count, ..
+            } => Some(*unverified_count),
+            // Every variant listed, as in `refused_count`, so a variant that comes to
+            // count unverified entries is a compile error here rather than a silent
+            // `None`.
+            OperationSuccess::DotfilesApplied { .. }
+            | OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
@@ -2248,31 +2292,26 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         drifted_targets: Vec<String>,
         total_deployed: usize,
-        /// What the drift run could not check at all: packages, or a dotfiles
+        /// What the drift run could not check at all: specs it could not load,
+        /// names several spec files claim, packages, entries, or a dotfiles
         /// directory that exists and could not be listed.
         ///
         /// Without it this summary reports a clean run for a package `apply`
         /// refuses, which is the answer that sends a reader to run the command
         /// that will not run.
         refused_count: usize,
-        /// How many specs the drift check could not load, so nothing they
-        /// declare was checked.
-        ///
-        /// Its own field rather than part of `refused_count`, which counts work
-        /// selfie refused, and rather than part of `total_deployed`, which this
-        /// summary renders as entries that are in place. A reader told only a
-        /// deployed total would take a run that skipped half the repository for
-        /// a clean one.
-        unloaded_specs: usize,
-        /// How many warnings the drift check relayed about work it could not
-        /// complete, such as a configured dotfiles directory that does not
-        /// exist or a deploy state file it could not read.
-        ///
-        /// Its own field rather than part of `refused_count`, which counts work
-        /// selfie refused, or `unloaded_specs`, which counts specs that would
-        /// not load. Without it this summary reports a clean run under a
-        /// warning that named a problem neither count captures.
+        /// How many warnings named work the drift check could not complete: each
+        /// one the check relayed, such as a configured dotfiles directory that
+        /// does not exist or a deploy state file it could not read, and the
+        /// warning status itself sends when the check failed outright.
+        // Its own field, apart from `refused_count`, which counts work selfie
+        // refused: without it this summary reports a clean run under a warning
+        // that named a problem the count does not capture.
         warned: usize,
+        /// How many secret-bearing entries the drift check reported without
+        /// verifying, since checking one would run its commands. Not counted in
+        /// `total_deployed` or `refused_count`.
+        unverified_count: usize,
     },
 
     /// A commit was created during sync push

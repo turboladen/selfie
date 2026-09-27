@@ -101,10 +101,11 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
                 // A refused entry is shown as the reason it was refused rather
                 // than omitted: it is in the package file, `selfie apply` will
                 // report skipping it, and a listing that hid it would leave the
-                // user looking for a dotfile the table says does not exist.
+                // user looking for a dotfile the table says does not exist. The
+                // brief form, since a cell cannot hold the anchor advice.
                 entry
                     .content_source()
-                    .map_or_else(|invalid| invalid.to_string(), |source| source.to_string()),
+                    .map_or_else(|invalid| invalid.brief(), |source| source.to_string()),
                 shorten_path(entry.target()),
             ]);
             total += 1;

@@ -16,6 +16,8 @@
 //! - [`track`] — Taking a file the user already has under management
 //! - `backup` — Copies of what a target held before an apply overwrote it
 //! - [`deploy`] — Pure decision logic: checksums, path resolution, deploy-vs-skip-vs-conflict
+//! - `classify` — Whether an entry may go on to be deployed or compared, asked alike by apply and drift
+//! - `collect` — Collecting the packages an operation covers from both directories
 //! - `deploy_entry` — Writing one entry to its target and recording what was written
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
 //! - [`diff`] — Unified diff generation for conflict display
@@ -30,6 +32,8 @@
 
 mod apply;
 mod backup;
+mod classify;
+mod collect;
 pub mod deploy;
 mod deploy_entry;
 pub mod diff;

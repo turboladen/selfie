@@ -14,13 +14,11 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use super::deploy::resolve_source_path;
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::{FileSystem, repository_read_refusal};
 use crate::fs::target::repository_path;
 use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
-use crate::paths::is_within;
 
 /// Upper bound on resolved content.
 ///
@@ -81,6 +79,29 @@ pub(crate) enum ResolveError {
     TemplateEscapesPackage { template: String },
 }
 
+impl ResolveError {
+    /// The command whose failure this is, when a command the entry ran failed:
+    /// the provider's own command, or for a binding, that binding's command in
+    /// `entry`. `None` for content that was produced and could not be used, and
+    /// for a check made without running anything.
+    pub(crate) fn failed_command<'a>(&'a self, entry: &'a DotfileEntry) -> Option<&'a str> {
+        match self {
+            Self::CommandFailed { command, .. } | Self::UnseparableOutput { command } => {
+                Some(command)
+            }
+            Self::BindingFailed { name, .. } | Self::UnseparableBinding { name } => {
+                entry.vars().get(name).map(String::as_str)
+            }
+            Self::EmptyOutput { .. }
+            | Self::EmptyBinding { .. }
+            | Self::TooLarge
+            | Self::TemplateUnreadable { .. }
+            | Self::NotSecretBearing { .. }
+            | Self::TemplateEscapesPackage { .. } => None,
+        }
+    }
+}
+
 /// Resolve a template entry's path, refusing one that escapes `base_dir`.
 ///
 /// The same runtime containment check the repository-file path applies, and it
@@ -96,40 +117,43 @@ pub(crate) enum ResolveError {
 /// can plant a symlink can also just run an arbitrary `command:` — but the limit
 /// is worth stating rather than implying the check is stronger than it is.
 fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError> {
-    let path = resolve_source_path(base_dir, source);
-
-    if is_within(&path, base_dir) {
-        Ok(path)
-    } else {
-        Err(ResolveError::TemplateEscapesPackage {
+    super::classify::within_package(base_dir, source).ok_or_else(|| {
+        ResolveError::TemplateEscapesPackage {
             template: source.to_string(),
-        })
-    }
+        }
+    })
 }
 
-/// Everything that can be refused without running a command or reading a file.
+/// Read a template from the package directory, refusing a fifo, socket or device
+/// node rather than opening it. `source` is the template as the package file names
+/// it, and `path` the contained path it resolves to.
 ///
-/// Applied before a dry run reports what it would do, so a preview declines
-/// exactly what a real apply declines instead of promising to run commands for an
-/// entry that can never deploy.
-pub(crate) fn check_resolvable(entry: &DotfileEntry, base_dir: &Path) -> Result<(), ResolveError> {
-    match entry.content_source() {
-        Ok(ContentSource::Template { source, .. }) => template_path(source, base_dir).map(|_| ()),
-        // A provider has no path to contain, and a repository file is not
-        // resolved here at all.
-        Ok(ContentSource::Provider(_) | ContentSource::RepoFile(_)) => Ok(()),
-        // An entry that cannot deploy is refused by `handle_apply` before this
-        // module is reached, so there is nothing left to decide here.
-        //
-        // The variants are named rather than matched with `Err(_)` so that claim
-        // has to be re-checked when a new one appears: a reason that is *not*
-        // refused upstream would need a decision here, and `_` would silently
-        // make it "resolvable". Naming them costs a line and turns that into a
-        // build failure.
-        Err(InvalidEntry::Shape | InvalidEntry::UnknownKeys(_) | InvalidEntry::VarName(_)) => {
-            Ok(())
-        }
+/// # Errors
+///
+/// [`ResolveError::TemplateUnreadable`] for a file that is not regular or could not
+/// be read.
+pub(crate) fn read_template<F: FileSystem>(
+    filesystem: &F,
+    source: &str,
+    path: &Path,
+) -> Result<String, ResolveError> {
+    // Before the read, which would block on a fifo. Nothing secret exists in scope:
+    // this reports a path and a file type, and no command has run.
+    if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(path)) {
+        return Err(ResolveError::TemplateUnreadable {
+            template: source.to_string(),
+            message: format!(
+                "{}. Replace it with a regular file.",
+                repository_read_refusal(&refusal)
+            ),
+        });
     }
+    filesystem
+        .read_file(path)
+        .map_err(|e| ResolveError::TemplateUnreadable {
+            template: source.to_string(),
+            message: e.to_string(),
+        })
 }
 
 /// Resolve an entry's content, running any commands it declares.
@@ -211,24 +235,7 @@ where
             // before the read, matching where apply and drift put theirs. Nothing
             // secret exists in scope yet: this reports a path and a file type, and
             // no command has run.
-            if let Some(refusal) =
-                filesystem.irregular_target_refusal(&repository_path(&template_path))
-            {
-                return Err(ResolveError::TemplateUnreadable {
-                    template: source.to_string(),
-                    message: format!(
-                        "{}. Replace it with a regular file.",
-                        repository_read_refusal(&refusal)
-                    ),
-                });
-            }
-
-            let text = filesystem.read_file(&template_path).map_err(|e| {
-                ResolveError::TemplateUnreadable {
-                    template: source.to_string(),
-                    message: e.to_string(),
-                }
-            })?;
+            let text = read_template(filesystem, source, &template_path)?;
 
             // Built fresh for this entry. Sharing or reusing a binding map across
             // entries would splice one entry's secret into another entry's file.

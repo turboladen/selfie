@@ -23,6 +23,7 @@ serde_json.workspace = true
 serde-saphyr.workspace = true
 sha2.workspace = true
 shellexpand.workspace = true
+shlex = "2.0"
 similar.workspace = true
 strum.workspace = true
 tempfile.workspace = true
