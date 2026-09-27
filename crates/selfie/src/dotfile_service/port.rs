@@ -31,7 +31,8 @@ pub enum ConflictResolution {
 pub enum ConflictDetail<'a> {
     /// A rendered unified diff, and the repository path it came from.
     ///
-    /// May be empty if the files are binary or unreadable.
+    /// Empty when the two sides decode to the same text, which two different
+    /// binary files can.
     Diff { source: &'a str, diff: &'a str },
     /// The two candidate contents, plus a non-revealing structural summary.
     ///

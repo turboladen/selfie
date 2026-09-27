@@ -51,8 +51,8 @@ pub trait PackageRepository: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if the file does not exist, cannot be read, or
-    /// is not valid UTF-8.
+    /// Returns [`FileSystemError`] if the file does not exist, cannot be read, is
+    /// not valid UTF-8, or names a path outside the package directory.
     fn read_referenced_file(
         &self,
         package_path: &Path,
