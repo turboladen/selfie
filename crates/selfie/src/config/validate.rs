@@ -4,7 +4,7 @@
 //! ensuring that configuration values are valid and complete before use.
 
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use thiserror::Error;
 
@@ -18,26 +18,14 @@ use super::SelfieConfig;
 /// Maximum recommended command timeout in seconds before a warning is emitted.
 const MAX_RECOMMENDED_TIMEOUT_SECS: u64 = 600;
 
-/// Result of configuration validation
-///
-/// Contains the path to the configuration file that was validated
-/// and any validation issues that were found during the process.
+/// Holds the issues validating a configuration found.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationResult {
-    /// The config file path that was validated
-    pub(crate) config_file_path: Option<PathBuf>,
-
     /// List of validation issues found during validation
     pub(crate) issues: ValidationIssues,
 }
 
 impl ValidationResult {
-    /// Get the path to the configuration file that was validated
-    #[must_use]
-    pub fn config_file_path(&self) -> Option<&PathBuf> {
-        self.config_file_path.as_ref()
-    }
-
     /// Get the validation issues found during validation
     #[must_use]
     pub fn issues(&self) -> &ValidationIssues {
@@ -75,7 +63,6 @@ impl SelfieConfig {
         }
 
         ValidationResult {
-            config_file_path: Some(self.package_directory().clone()),
             issues: issues.into(),
         }
     }
@@ -799,18 +786,6 @@ mod tests {
             .map(|i| i.category)
             .collect();
         assert!(categories.contains(&ValidationErrorCategory::RequiredField));
-    }
-
-    #[test]
-    fn validation_result_accessors_work() {
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory("/tmp")
-            .build();
-
-        let result = config.validate(&crate::fs::RealFileSystem);
-        assert!(result.config_file_path().is_some());
-        assert!(!result.issues().has_issues());
     }
 
     // --- ConfigValidationError display tests ---
