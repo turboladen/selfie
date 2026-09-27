@@ -565,7 +565,10 @@ pub enum PackageError {
 ///
 /// Contains the results of attempting to load all packages from the repository.
 /// This includes both successfully loaded packages and any parse errors that
-/// occurred, allowing callers to handle partial failures gracefully.
+/// occurred, allowing callers to handle partial failures gracefully. Every
+/// package that failed to parse is included whatever environment is
+/// selected, because a spec that failed to parse has no environment list to
+/// filter on.
 #[derive(Debug)]
 pub struct ListPackagesOutput(pub(crate) Vec<Result<Package, PackageParseError>>);
 
