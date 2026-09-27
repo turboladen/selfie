@@ -357,6 +357,19 @@ where
                 return;
             }
 
+            // Ahead of the staging below, which writes the index and blob objects:
+            // refused at the commit alone, a failed push would still leave its first
+            // group staged for a manual `git commit` to pick up. Pushing commits that
+            // already exist makes none, so an empty list still goes through.
+            if !commits.is_empty() {
+                sender
+                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
+                        GitSyncError::CommitDisabled.to_string(),
+                    )))
+                    .await;
+                return;
+            }
+
             let repo_info = match blocking_git("discover_repo", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
@@ -2965,12 +2978,9 @@ mod credential_egress_tests {
     // `{"status":"failure","error": <this>}`.
     #[tokio::test]
     async fn a_failed_push_keeps_the_credential_out_of_every_event() {
-        let stream = service(FailAt::Push)
-            .execute_push(vec![ConfirmedCommit {
-                files: vec![PathBuf::from("starship.yml")],
-                message: "chore(starship): update package spec".to_string(),
-            }])
-            .await;
+        // No new commits: a push that would make one is refused before git runs,
+        // and this is about the push step's own failure.
+        let stream = service(FailAt::Push).execute_push(vec![]).await;
 
         let events: Vec<PackageEvent> = stream.collect().await;
         assert!(!events.is_empty(), "the scan must have something to scan");
@@ -3002,6 +3012,47 @@ mod credential_egress_tests {
         );
     }
 
+    // Committing is disabled, so a push that would create commits is refused before
+    // git is reached: the fake panics on any call, including the staging a later
+    // refusal would leave behind.
+    mod commits_disabled {
+        use super::running_under_sudo::GitThatMustNotRun;
+        use super::*;
+
+        #[tokio::test]
+        async fn a_push_that_would_commit_is_refused_before_anything_is_staged() {
+            let service = SyncServiceImpl::new(
+                GitThatMustNotRun,
+                UnusedDotfileService,
+                crate::config::SelfieConfigBuilder::default()
+                    .environment("test-env")
+                    .package_directory("/tmp/selfie-packages")
+                    .build(),
+                SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
+            );
+
+            let events: Vec<PackageEvent> = service
+                .execute_push(vec![ConfirmedCommit {
+                    files: vec![PathBuf::from("starship.yml")],
+                    message: "chore(starship): update package spec".to_string(),
+                }])
+                .await
+                .collect()
+                .await;
+
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    PackageEvent::Completed {
+                        result: OperationResult::Failure(OperationFailure::Generic(message)),
+                        ..
+                    } if message.contains("sync push is disabled")
+                )),
+                "expected the disabled refusal: {events:?}"
+            );
+        }
+    }
+
     // selfie-adsm. Sync was not covered by selfie-tcu2's refusal: it holds a
     // `DotfileService` that carries the gate, but only ever calls `check_drift`,
     // which is correctly ungated -- so nothing in the sync path consulted it.
@@ -3016,7 +3067,7 @@ mod credential_egress_tests {
         // result. Asserting on the returned error alone would not: a gate placed
         // after the git work returns the same error.
         #[derive(Clone)]
-        struct GitThatMustNotRun;
+        pub(super) struct GitThatMustNotRun;
 
         const NEVER: &str = "git must not be reached when the run is refused";
 

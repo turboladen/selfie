@@ -3,6 +3,10 @@
 Selfie can sync your package specs and dotfiles across machines using git. The `selfie sync`
 commands are thin wrappers around git that generate useful per-package commits automatically.
 
+> **`selfie sync push` is disabled.** Its commit could record every tracked file as deleted, so it
+> refuses before staging anything. Commit and push the repository with `git` until this is fixed.
+> `sync status` and `sync pull` are unaffected.
+
 ## Prerequisites
 
 Your package directory must be inside a git repository with a configured remote. Selfie discovers
@@ -59,6 +63,10 @@ separately, as in `No dotfile drift (3 deployed, 2 not verifiable)`. That is inf
 entry is unverifiable by design, so it does not keep the line from reading as clean.
 
 ### `selfie sync push`
+
+**Disabled** (see the note at the top of this page): with changes to commit, it refuses before
+staging anything. With nothing new to commit, it still pushes commits that already exist. What
+follows describes the command once it is re-enabled.
 
 Groups changed files by package and generates conventional commit messages:
 
@@ -126,9 +134,9 @@ If dotfile source files changed, suggests redeploying:
 ## Typical Workflow
 
 ```bash
-# On machine A: make changes, push
+# On machine A: make changes, commit and push with git while `sync push` is disabled
 selfie sync status        # See what changed
-selfie sync push -y       # Commit and push
+git add -A && git commit -m "update specs" && git push
 
 # On machine B: pull and apply
 selfie sync pull          # Get latest specs
@@ -142,11 +150,11 @@ The MCP server exposes three sync tools for AI assistant integration:
 | Tool                 | Parameters                                          | Notes                   |
 | -------------------- | --------------------------------------------------- | ----------------------- |
 | `selfie_sync_status` | none                                                | Returns structured JSON |
-| `selfie_sync_push`   | `batch`, `message`, `messages`, `include_ungrouped` | Per-package by default  |
+| `selfie_sync_push`   | `batch`, `message`, `messages`, `include_ungrouped` | Disabled; see top       |
 | `selfie_sync_pull`   | none                                                | Returns what changed    |
 
-The `messages` parameter on `selfie_sync_push` is a map of package name to custom commit message,
-allowing AI assistants to provide meaningful messages without interactive prompting.
+Once re-enabled, the `messages` parameter on `selfie_sync_push` is a map of package name to custom
+commit message, allowing AI assistants to provide meaningful messages without interactive prompting.
 
 ## Two files claiming one package name
 

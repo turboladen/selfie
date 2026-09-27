@@ -30,6 +30,13 @@ pub enum GitSyncError {
     #[error("remote has diverged — resolve manually with git")]
     Diverged,
 
+    /// Committing is disabled, so no commit was created.
+    #[error(
+        "sync push is disabled: its commit can record every tracked file as deleted. \
+         Commit and push the repository with git until this is fixed"
+    )]
+    CommitDisabled,
+
     /// A git operation failed. Both fields are redacted and bounded by their
     /// [`GitMessage`] type rather than by convention.
     // `message` is the one that matters: it carries git's stderr, which a

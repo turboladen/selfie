@@ -371,80 +371,10 @@ impl GitSyncProvider for GixGitAdapter {
         Ok(())
     }
 
-    fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
-        let repo = open_repo(repo_root)?;
-        let index = repo
-            .open_index()
-            .map_err(|e| git_sync_err("open index", e))?;
-
-        // Build a tree from the current index by starting from HEAD's tree
-        // (or the empty tree for the first commit) and upserting every entry.
-        let head_tree_id = repo
-            .head_tree_id_or_empty()
-            .map_err(|e| git_sync_err("head tree", e))?;
-        let mut editor = repo
-            .edit_tree(head_tree_id)
-            .map_err(|e| git_sync_err("edit tree", e))?;
-
-        // Collect HEAD tree entries so we can detect deletions.
-        let head_entries: HashSet<String> = repo
-            .find_tree(head_tree_id)
-            .ok()
-            .map(|tree| {
-                tree.traverse()
-                    .breadthfirst
-                    .files()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|r| r.filepath.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Upsert all index entries into the tree.
-        let index_paths: HashSet<String> = index
-            .entries()
-            .iter()
-            .map(|e| e.path(&index).to_string())
-            .collect();
-
-        for entry in index.entries() {
-            let path = entry.path(&index);
-            let kind = match entry.mode {
-                gix::index::entry::Mode::FILE_EXECUTABLE => {
-                    gix::object::tree::EntryKind::BlobExecutable
-                }
-                gix::index::entry::Mode::SYMLINK => gix::object::tree::EntryKind::Link,
-                _ => gix::object::tree::EntryKind::Blob,
-            };
-            editor
-                .upsert(path.to_owned(), kind, entry.id)
-                .map_err(|e| git_sync_err("upsert tree entry", e))?;
-        }
-
-        // Remove entries that were in HEAD but are no longer in the index.
-        for path in &head_entries {
-            if !index_paths.contains(path) {
-                let bpath: &gix::bstr::BStr = path.as_str().into();
-                editor
-                    .remove(bpath.to_owned())
-                    .map_err(|e| git_sync_err("remove tree entry", e))?;
-            }
-        }
-
-        let tree_id = editor.write().map_err(|e| git_sync_err("write tree", e))?;
-
-        // Determine parent(s).
-        let parents: Vec<gix::ObjectId> = repo
-            .head_id()
-            .map(|id| vec![id.detach()])
-            .unwrap_or_default();
-
-        let commit_id = repo
-            .commit("HEAD", message, tree_id, parents)
-            .map_err(|e| git_sync_err("commit", e))?;
-
-        Ok(CommitId(commit_id.to_string()))
+    fn commit(&self, _repo_root: &Path, _message: &str) -> Result<CommitId, GitSyncError> {
+        // commit_tree can build a tree that deletes every tracked file (seen on
+        // a nested path, selfie-ugf9.6). Refused until that is fixed and tested.
+        Err(GitSyncError::CommitDisabled)
     }
 
     fn push(&self, repo_root: &Path) -> Result<(), GitSyncError> {
@@ -542,6 +472,89 @@ impl GixGitAdapter {
             Err(_) => (0, 0), // No upstream configured
         }
     }
+}
+
+// The commit implementation sync push used before it was disabled. It can
+// build a tree that deletes every tracked file; kept, with its test, for the
+// fix to start from.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "commit is disabled until the tree bug is fixed")
+)]
+fn commit_tree(repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
+    let repo = open_repo(repo_root)?;
+    let index = repo
+        .open_index()
+        .map_err(|e| git_sync_err("open index", e))?;
+
+    // Build a tree from the current index by starting from HEAD's tree
+    // (or the empty tree for the first commit) and upserting every entry.
+    let head_tree_id = repo
+        .head_tree_id_or_empty()
+        .map_err(|e| git_sync_err("head tree", e))?;
+    let mut editor = repo
+        .edit_tree(head_tree_id)
+        .map_err(|e| git_sync_err("edit tree", e))?;
+
+    // Collect HEAD tree entries so we can detect deletions.
+    let head_entries: HashSet<String> = repo
+        .find_tree(head_tree_id)
+        .ok()
+        .map(|tree| {
+            tree.traverse()
+                .breadthfirst
+                .files()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.filepath.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Upsert all index entries into the tree.
+    let index_paths: HashSet<String> = index
+        .entries()
+        .iter()
+        .map(|e| e.path(&index).to_string())
+        .collect();
+
+    for entry in index.entries() {
+        let path = entry.path(&index);
+        let kind = match entry.mode {
+            gix::index::entry::Mode::FILE_EXECUTABLE => {
+                gix::object::tree::EntryKind::BlobExecutable
+            }
+            gix::index::entry::Mode::SYMLINK => gix::object::tree::EntryKind::Link,
+            _ => gix::object::tree::EntryKind::Blob,
+        };
+        editor
+            .upsert(path.to_owned(), kind, entry.id)
+            .map_err(|e| git_sync_err("upsert tree entry", e))?;
+    }
+
+    // Remove entries that were in HEAD but are no longer in the index.
+    for path in &head_entries {
+        if !index_paths.contains(path) {
+            let bpath: &gix::bstr::BStr = path.as_str().into();
+            editor
+                .remove(bpath.to_owned())
+                .map_err(|e| git_sync_err("remove tree entry", e))?;
+        }
+    }
+
+    let tree_id = editor.write().map_err(|e| git_sync_err("write tree", e))?;
+
+    // Determine parent(s).
+    let parents: Vec<gix::ObjectId> = repo
+        .head_id()
+        .map(|id| vec![id.detach()])
+        .unwrap_or_default();
+
+    let commit_id = repo
+        .commit("HEAD", message, tree_id, parents)
+        .map_err(|e| git_sync_err("commit", e))?;
+
+    Ok(CommitId(commit_id.to_string()))
 }
 
 #[cfg(test)]
@@ -702,8 +715,33 @@ mod tests {
             .stage_files(&path, &[PathBuf::from("test.yml")])
             .unwrap();
 
-        let result = GixGitAdapter.commit(&path, "test commit");
+        let result = commit_tree(&path, "test commit");
         assert!(result.is_ok(), "commit should succeed: {result:?}");
+    }
+
+    // A tree that deletes every tracked file was recorded on a nested path, so
+    // committing is refused, and nothing is written, until that is fixed.
+    #[test]
+    fn commit_is_refused_and_writes_nothing() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::create_dir_all(path.join("packages/foo")).unwrap();
+        fs::write(path.join("packages/foo.yml"), "name: foo\n").unwrap();
+        fs::write(path.join("packages/foo/rc"), "a\n").unwrap();
+        run_git(&path, &["add", "-A"]).unwrap();
+        run_git(&path, &["commit", "-m", "init"]).unwrap();
+        let before = run_git(&path, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+        GixGitAdapter
+            .stage_files(&path, &[PathBuf::from("packages/foo/rc")])
+            .unwrap();
+
+        let result = GixGitAdapter.commit(&path, "chore(foo): update dotfile");
+
+        assert!(
+            matches!(result, Err(GitSyncError::CommitDisabled)),
+            "commit must be refused: {result:?}"
+        );
+        assert_eq!(run_git(&path, &["rev-parse", "HEAD"]).unwrap(), before);
     }
 
     #[test]
