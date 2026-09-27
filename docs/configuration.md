@@ -532,6 +532,10 @@ missing one is a warning that it is not there yet, since selfie creates it on fi
 the path may be a typo. Anything else in its way, or a path selfie could not check, is an error,
 because every command that records a deploy refuses to run over it.
 
+When `dotfiles_directory` or `state_directory` is not set, the default the commands use is checked
+the same way. Nothing at an unset default is not reported, since that is the ordinary state of a
+setup with no standalone dotfiles, or of a first run.
+
 ## Troubleshooting
 
 ### Ignored Configuration Keys

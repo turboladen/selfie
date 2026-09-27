@@ -50,23 +50,29 @@ impl SelfieConfig {
 
         issues.extend(validate_package_directory(fs, &self.package_directory));
 
-        if let Some(ref path) = self.dotfiles_directory {
-            issues.extend(validate_optional_directory(
+        // An unset directory setting is checked at the default the commands use,
+        // since they read it there.
+        match self.dotfiles_directory {
+            Some(ref path) => issues.extend(validate_optional_directory(
                 fs,
                 "dotfiles_directory",
                 path,
                 Setting::Read,
-            ));
+            )),
+            None => issues.extend(default_dotfiles_directory_issue(
+                fs,
+                &self.dotfiles_directory(),
+            )),
         }
 
-        if let Some(ref path) = self.state_directory {
-            // selfie creates the state directory when it first records a deploy.
-            issues.extend(validate_optional_directory(
+        match self.state_directory {
+            Some(ref path) => issues.extend(validate_optional_directory(
                 fs,
                 "state_directory",
                 path,
                 Setting::State,
-            ));
+            )),
+            None => issues.extend(default_state_directory_issue(fs)),
         }
 
         if let Some(issue) = validate_command_timeout(self.command_timeout) {
@@ -318,6 +324,51 @@ fn state_directory_issue(
         StateDirectoryVerdict::Refused(failure) => Some(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             field_name,
+            &failure.to_string(),
+            None,
+        )),
+    }
+}
+
+/// What to report about the dotfiles directory at `path`, the default an unset
+/// `dotfiles_directory` takes.
+fn default_dotfiles_directory_issue(fs: &impl FileSystem, path: &Path) -> Option<ValidationIssue> {
+    // A relative package directory is already reported, and its sibling default
+    // names nothing to classify.
+    if !path.is_absolute() {
+        return None;
+    }
+    match fs.directory_state(path) {
+        // Nothing at an unset default is the ordinary state of a setup with no
+        // standalone dotfiles, and the commands say nothing about it either.
+        DirectoryState::Absent(AbsentReason::Empty) => None,
+        state => read_directory_issue("dotfiles_directory", path, state),
+    }
+}
+
+/// What to report about the default state directory an unset
+/// `state_directory` takes.
+fn default_state_directory_issue(fs: &impl FileSystem) -> Option<ValidationIssue> {
+    use crate::dotfile_service::state_file::{StateDirectoryVerdict, state_directory_verdict};
+
+    let directory = match crate::fs::target::state_directory(fs, None) {
+        Ok(directory) => directory,
+        Err(error) => {
+            return Some(ValidationIssue::warning(
+                ValidationErrorCategory::Advisory,
+                "state_directory",
+                &format!("The default `state_directory` could not be checked: {error}"),
+                None,
+            ));
+        }
+    };
+    // The run's own verdict. A default that is not there yet is its ordinary
+    // first run, and the typo it may be applies only to a path the user typed.
+    match state_directory_verdict(&directory, fs.directory_state(&directory)) {
+        StateDirectoryVerdict::InUse | StateDirectoryVerdict::NotThereYet => None,
+        StateDirectoryVerdict::Refused(failure) => Some(ValidationIssue::error(
+            ValidationErrorCategory::PathFormat,
+            "state_directory",
             &failure.to_string(),
             None,
         )),
@@ -1033,6 +1084,7 @@ mod tests {
             .environment("linux")
             .package_directory("/nowhere/packages")
             .dotfiles_directory(PathBuf::from("~/dotfiles"))
+            .state_directory(PathBuf::from("/nowhere/state"))
             .build();
 
         let result = config.validate(&fs);
@@ -1060,6 +1112,7 @@ mod tests {
                 .environment("linux")
                 .package_directory("/nowhere/packages")
                 .dotfiles_directory(PathBuf::from(setting))
+                .state_directory(PathBuf::from("/nowhere/state"))
                 .build();
 
             let result = config.validate(&fs);
@@ -1088,6 +1141,7 @@ mod tests {
             .environment("linux")
             .package_directory("/nowhere/packages")
             .dotfiles_directory(PathBuf::from("~/dotfiles"))
+            .state_directory(PathBuf::from("/nowhere/state"))
             .build();
 
         let result = config.validate(&fs);
@@ -1120,5 +1174,79 @@ mod tests {
             "{:?}",
             result.issues()
         );
+    }
+
+    // An unset directory setting is checked at the default the commands read,
+    // so what is wrong there is reported as for a configured path. Nothing at an
+    // unset default is the ordinary state and is not reported.
+    fn default_directory_issues(
+        dotfiles_default: DirectoryState,
+        state_default: DirectoryState,
+    ) -> Vec<ValidationIssue> {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path()
+            .withf(|path| path == std::path::Path::new("~"))
+            .returning(|_| Ok(PathBuf::from("/home/me")));
+        fs.expect_directory_state()
+            .withf(|path| path == std::path::Path::new("/nowhere/dotfiles"))
+            .returning(move |_| dotfiles_default.clone());
+        fs.expect_directory_state()
+            .withf(|path| path == std::path::Path::new("/home/me/.local/state/selfie"))
+            .returning(move |_| state_default.clone());
+        fs.mock_directories_exist();
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .build();
+
+        config
+            .validate(&fs)
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "dotfiles_directory" || i.field == "state_directory")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_file_at_the_default_dotfiles_directory_is_reported() {
+        let issues = default_directory_issues(
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+            DirectoryState::Directory,
+        );
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "dotfiles_directory");
+        assert_eq!(issues[0].level, ValidationLevel::Error);
+        assert!(
+            issues[0].message.contains("/nowhere/dotfiles"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_link_at_the_default_state_directory_is_an_error() {
+        let issues = default_directory_issues(DirectoryState::Directory, dangling());
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "state_directory");
+        assert_eq!(issues[0].level, ValidationLevel::Error);
+        assert!(
+            issues[0].message.contains("Cannot use the deploy state"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn missing_unset_defaults_are_not_reported() {
+        let issues = default_directory_issues(
+            DirectoryState::Absent(AbsentReason::Empty),
+            DirectoryState::Absent(AbsentReason::Empty),
+        );
+
+        assert!(issues.is_empty(), "{issues:?}");
     }
 }

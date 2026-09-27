@@ -133,11 +133,18 @@ mod tests {
         "#;
         fs.mock_config_file(config_dir, config_yaml);
         fs.mock_expand_path("/test/packages", "/test/packages");
-        // The report resolves the default state directory under the home
-        // directory when the file names none.
-        fs.mock_expand_path("~", "/home/test");
+        // The report and the validation both resolve the default state
+        // directory under the home directory when the file names none.
+        mock_home(&mut fs);
         fs.mock_directories_exist();
         fs
+    }
+
+    // A home directory that answers however many times it is asked.
+    fn mock_home(fs: &mut MockFileSystem) {
+        fs.expect_expand_path()
+            .withf(|path| path == Path::new("~"))
+            .returning(|_| Ok(std::path::PathBuf::from("/home/test")));
     }
 
     #[test]
@@ -181,6 +188,7 @@ mod tests {
         "#;
         fs.mock_config_file(config_dir, config_yaml);
         fs.mock_expand_path("/test/packages", "/test/packages");
+        mock_home(&mut fs);
         fs.mock_directories_exist();
 
         let result = handle_validate(&display, &fs);
