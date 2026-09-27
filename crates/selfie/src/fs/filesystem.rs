@@ -88,6 +88,22 @@ pub enum AbsentReason {
     },
 }
 
+impl DirectoryState {
+    /// What is at the path, as a clause that follows the path: "does not exist",
+    /// "could not be listed: …".
+    #[must_use]
+    pub fn clause(&self) -> String {
+        // Shared so every sentence about one directory describes it in the same
+        // words.
+        match self {
+            Self::Directory => "is a directory".to_string(),
+            Self::Absent(reason) => reason.clause(),
+            Self::Unlistable(error) => format!("could not be listed: {error}"),
+            Self::Unknown(error) => format!("could not be checked: {error}"),
+        }
+    }
+}
+
 impl AbsentReason {
     /// What is at the path instead of a directory, as a clause that follows the
     /// directory's name: "does not exist", "is a regular file".
@@ -427,7 +443,8 @@ pub trait FileSystem: Send + Sync {
     /// unknown.
     ///
     /// A dangling symlink is absent with a reason of its own rather than as an empty
-    /// path, and a symlink loop is unknown.
+    /// path, and a symlink loop is unknown. A trailing slash does not change the
+    /// answer.
     ///
     /// Never returns [`Unlistable`](DirectoryState::Unlistable): discovering that needs
     /// a listing, and a caller that has listed gets there through

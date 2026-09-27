@@ -24,7 +24,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     };
 
     // Covers the ignored keys as well as the settings.
-    let result = loaded.validate();
+    let result = loaded.validate(fs);
 
     // `main` suppresses notices for this command, so both halves are reported
     // here. They print as notices because only the library builds a
@@ -136,6 +136,7 @@ mod tests {
         // The report resolves the default state directory under the home
         // directory when the file names none.
         fs.mock_expand_path("~", "/home/test");
+        fs.mock_directories_exist();
         fs
     }
 
@@ -180,6 +181,7 @@ mod tests {
         "#;
         fs.mock_config_file(config_dir, config_yaml);
         fs.mock_expand_path("/test/packages", "/test/packages");
+        fs.mock_directories_exist();
 
         let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);

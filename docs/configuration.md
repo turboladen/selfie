@@ -144,7 +144,8 @@ package_directory: /home/user/my-packages
 package_directory: ~/dev-packages
 ```
 
-A leading `~` is expanded; environment variables are not.
+A leading `~` or `~/` is expanded to your home directory. `~user` and environment variables are not
+expanded.
 
 ## Optional Settings
 
@@ -518,6 +519,12 @@ This checks:
 - Required fields presence
 - Path accessibility
 - Environment name validity
+
+Each directory setting is reported as the commands that read it treat it. A path holding a regular
+file, or a fifo, socket or device node, is an error, since no directory can be created there. Every
+other way the path fails to hold a directory is a warning: nothing there, a symlink to nothing, a
+path running through something that is not a directory, or a path selfie could not check. A missing
+directory is offered a correction of the setting if the path is a typo, or a `mkdir -p` command.
 
 ## Troubleshooting
 

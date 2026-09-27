@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use config::FileFormat;
 
-use crate::{config::SelfieConfig, fs::FileSystem};
+use crate::{
+    config::SelfieConfig,
+    fs::{FileSystem, FileSystemError},
+};
 
 use super::{
     diagnostics::{FRONTEND_SECTIONS, LoadedConfig, library_ignored_keys},
@@ -126,12 +129,12 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // These directories may not exist yet (especially state_directory on first run),
         // so canonicalize() would fail. Instead, resolve just "~" and join the rest.
         if let Some(ref dotfiles_dir) = selfie_config.dotfiles_directory
-            && let Some(expanded) = expand_tilde_only(self.fs, dotfiles_dir)
+            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, dotfiles_dir)
         {
             selfie_config.dotfiles_directory = Some(expanded);
         }
         if let Some(ref state_dir) = selfie_config.state_directory
-            && let Some(expanded) = expand_tilde_only(self.fs, state_dir)
+            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, state_dir)
         {
             selfie_config.state_directory = Some(expanded);
         }
@@ -178,23 +181,34 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     }
 }
 
-/// Expand `~` in a path without canonicalizing. Returns the expanded path if the
-/// input starts with `~`, or `None` if it doesn't need expansion. This avoids
-/// the failure mode of `expand_path` (which canonicalizes) when the target
-/// directory doesn't exist yet.
-fn expand_tilde_only(fs: &impl FileSystem, path: &Path) -> Option<PathBuf> {
+/// Expand a leading `~` or `~/` to the home directory without canonicalizing,
+/// so a directory that does not exist yet still expands.
+///
+/// `Ok(None)` when the path has no such prefix and is used as written: `~user/x`,
+/// `~typo` and `~//x` are not expanded.
+///
+/// # Errors
+///
+/// The [`FileSystemError`] from resolving the home directory, when the path
+/// needs it and it cannot be resolved.
+pub(super) fn expand_tilde_only(
+    fs: &impl FileSystem,
+    path: &Path,
+) -> Result<Option<PathBuf>, FileSystemError> {
     let path_str = path.to_string_lossy();
-    if !path_str.starts_with('~') {
-        return None;
-    }
-    // Expand just "~" to get the home directory, then join the remainder
-    let home = fs.expand_path(&PathBuf::from("~")).ok()?;
-    let rest = path_str.strip_prefix("~/").unwrap_or(&path_str[1..]);
-    if rest.is_empty() {
-        Some(home)
-    } else {
-        Some(home.join(rest))
-    }
+    let rest = match path_str.strip_prefix('~') {
+        Some("") => None,
+        Some(rest) => match rest.strip_prefix('/') {
+            Some(rest) if !rest.starts_with('/') => Some(rest.to_string()),
+            _ => return Ok(None),
+        },
+        None => return Ok(None),
+    };
+    let home = fs.expand_path(&PathBuf::from("~"))?;
+    Ok(Some(match rest {
+        Some(rest) if !rest.is_empty() => home.join(rest),
+        _ => home,
+    }))
 }
 
 #[cfg(test)]
@@ -1002,6 +1016,46 @@ mod tests {
                     .contains("Multiple configuration files found")
             );
             assert!(multiple_error.to_string().contains("config1.yaml"));
+        }
+    }
+
+    // Only `~` and `~/` name the home directory. `~user` is another user's, which
+    // this does not look up, and `~typo` and `~//x` are not the home directory
+    // either, so each is left as written.
+    mod expand_tilde_only {
+        use std::path::{Path, PathBuf};
+
+        use crate::fs::filesystem::MockFileSystem;
+
+        fn home() -> MockFileSystem {
+            let mut fs = MockFileSystem::default();
+            fs.mock_expand_path("~", "/home/me");
+            fs
+        }
+
+        #[test]
+        fn expands_the_home_directory_and_a_path_below_it() {
+            assert_eq!(
+                super::super::expand_tilde_only(&home(), Path::new("~/x")).unwrap(),
+                Some(PathBuf::from("/home/me/x"))
+            );
+            assert_eq!(
+                super::super::expand_tilde_only(&home(), Path::new("~")).unwrap(),
+                Some(PathBuf::from("/home/me"))
+            );
+        }
+
+        #[test]
+        fn leaves_another_user_a_typo_and_a_double_slash_as_written() {
+            // No expansion is mocked here, so asking the port would fail.
+            let fs = MockFileSystem::default();
+            for path in ["~user/x", "~typo", "~//x"] {
+                assert_eq!(
+                    super::super::expand_tilde_only(&fs, Path::new(path)).unwrap(),
+                    None,
+                    "{path}"
+                );
+            }
         }
     }
 }

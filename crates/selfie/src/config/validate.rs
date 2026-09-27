@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
+use crate::{
+    fs::{AbsentReason, DirectoryState, FileSystem},
+    validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues},
+};
 
 use super::SelfieConfig;
 
@@ -47,23 +50,24 @@ impl SelfieConfig {
     /// the optional directories, and the command timeout.
     ///
     /// The [`ValidationResult`] separates errors, which stop the configuration
-    /// being used, from warnings, which flag a potential problem.
+    /// being used, from warnings, which flag a potential problem. `fs` answers
+    /// what is at each directory path.
     #[must_use]
-    pub fn validate(&self) -> ValidationResult {
+    pub fn validate(&self, fs: &impl FileSystem) -> ValidationResult {
         let mut issues = Vec::new();
 
         if let Some(issue) = validate_environment(&self.environment) {
             issues.push(issue);
         }
 
-        issues.extend(validate_package_directory(&self.package_directory));
+        issues.extend(validate_package_directory(fs, &self.package_directory));
 
         if let Some(ref path) = self.dotfiles_directory {
-            issues.extend(validate_optional_directory("dotfiles_directory", path));
+            issues.extend(validate_optional_directory(fs, "dotfiles_directory", path));
         }
 
         if let Some(ref path) = self.state_directory {
-            issues.extend(validate_optional_directory("state_directory", path));
+            issues.extend(validate_optional_directory(fs, "state_directory", path));
         }
 
         if let Some(issue) = validate_command_timeout(self.command_timeout) {
@@ -81,10 +85,11 @@ impl super::diagnostics::LoadedConfig {
     /// Validate the settings **and** report anything in the file selfie ignored.
     ///
     /// Ignored keys are warnings rather than errors: the file still describes a
-    /// usable configuration, but it is not valid.
+    /// usable configuration, but it is not valid. `fs` answers what is at each
+    /// directory path.
     #[must_use]
-    pub fn validate(&self) -> ValidationResult {
-        let mut result = self.config().validate();
+    pub fn validate(&self, fs: &impl FileSystem) -> ValidationResult {
+        let mut result = self.config().validate(fs);
 
         let mut issues = result.issues.all_issues().to_vec();
         issues.extend(self.ignored_keys().iter().map(|ignored| {
@@ -134,11 +139,12 @@ fn validate_environment(environment: &str) -> Option<ValidationIssue> {
     })
 }
 
-/// Validate the package directory path
-///
-/// Ensures the package directory path is not empty and can be resolved
-/// to an absolute path. Also warns if the directory doesn't exist on disk.
-fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> {
+/// Validate the package directory path: it must be set, absolute after `~`
+/// expansion, and a directory, as [`validate_directory_path`] reports.
+fn validate_package_directory(
+    fs: &impl FileSystem,
+    package_directory: &Path,
+) -> Vec<ValidationIssue> {
     if package_directory.as_os_str().is_empty() {
         return vec![ValidationIssue::error(
             ValidationErrorCategory::RequiredField,
@@ -150,14 +156,18 @@ fn validate_package_directory(package_directory: &Path) -> Vec<ValidationIssue> 
         )];
     }
 
-    validate_directory_path("package_directory", package_directory)
+    validate_directory_path(fs, "package_directory", package_directory)
         .into_iter()
         .collect()
 }
 
-/// Validate an optional directory path: check for empty value, check it's
-/// absolute after tilde expansion, and warn if it doesn't exist on disk.
-fn validate_optional_directory(field_name: &str, path: &Path) -> Vec<ValidationIssue> {
+/// Validate an optional directory path: it must not be empty, and it is
+/// checked as [`validate_directory_path`] checks a directory.
+fn validate_optional_directory(
+    fs: &impl FileSystem,
+    field_name: &str,
+    path: &Path,
+) -> Vec<ValidationIssue> {
     if path.as_os_str().is_empty() {
         return vec![ValidationIssue::error(
             ValidationErrorCategory::RequiredField,
@@ -169,17 +179,32 @@ fn validate_optional_directory(field_name: &str, path: &Path) -> Vec<ValidationI
         )];
     }
 
-    validate_directory_path(field_name, path)
+    validate_directory_path(fs, field_name, path)
         .into_iter()
         .collect()
 }
 
-/// Validate a directory path: check it's absolute after tilde expansion,
-/// check it exists and is a directory (not a file).
-fn validate_directory_path(field_name: &str, path: &Path) -> Option<ValidationIssue> {
-    let path_str = path.to_string_lossy();
-    let expanded = shellexpand::tilde(&path_str);
-    let expanded_path = Path::new(expanded.as_ref());
+/// Validate a directory path: `~` is expanded through `fs`, the result must be
+/// absolute, and what `fs` finds at it is reported when that is not a directory.
+fn validate_directory_path(
+    fs: &impl FileSystem,
+    field_name: &str,
+    path: &Path,
+) -> Option<ValidationIssue> {
+    let expanded_path = match super::yaml::expand_tilde_only(fs, path) {
+        Ok(expanded) => expanded.unwrap_or_else(|| path.to_path_buf()),
+        // Nothing is wrong with the setting itself, so this is no error.
+        Err(error) => {
+            return Some(ValidationIssue::warning(
+                ValidationErrorCategory::Advisory,
+                field_name,
+                &format!(
+                    "The `{field_name}` path could not be checked: could not resolve ~: {error}"
+                ),
+                None,
+            ));
+        }
+    };
 
     if !expanded_path.is_absolute() {
         return Some(ValidationIssue::error(
@@ -190,31 +215,72 @@ fn validate_directory_path(field_name: &str, path: &Path) -> Option<ValidationIs
         ));
     }
 
-    if expanded_path.exists() && !expanded_path.is_dir() {
-        return Some(ValidationIssue::error(
+    read_directory_issue(
+        field_name,
+        &expanded_path,
+        fs.directory_state(&expanded_path),
+    )
+}
+
+/// What to report about a directory setting whose state is `state`.
+fn read_directory_issue(
+    field_name: &str,
+    path: &Path,
+    state: DirectoryState,
+) -> Option<ValidationIssue> {
+    // Only a path something else occupies is an error, since nothing can be
+    // created there. Every other state warns, as a command reading the directory
+    // warns and carries on.
+    match state {
+        DirectoryState::Directory => None,
+        DirectoryState::Absent(AbsentReason::Occupied { .. }) => Some(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             field_name,
             &format!(
-                "The path for `{field_name}` is not a directory: {}",
-                expanded_path.display()
+                "The `{field_name}` path {} {}",
+                path.display(),
+                state.clause()
             ),
             Some("Provide a path to a directory, not a file"),
-        ));
-    }
-
-    if !expanded_path.exists() {
-        return Some(ValidationIssue::warning(
+        )),
+        DirectoryState::Absent(AbsentReason::Empty) => Some(ValidationIssue::warning(
             ValidationErrorCategory::PathFormat,
             field_name,
             &format!(
-                "The directory at `{field_name}` does not exist: {}",
-                expanded_path.display()
+                "The `{field_name}` path {} {}",
+                path.display(),
+                state.clause()
             ),
-            Some("Create the directory or update the path"),
-        ));
+            Some(&format!(
+                "Correct the setting if the path is a typo, or create it with: mkdir -p -- {}",
+                crate::fs::shell_quote(path)
+            )),
+        )),
+        DirectoryState::Absent(_) => Some(ValidationIssue::warning(
+            ValidationErrorCategory::PathFormat,
+            field_name,
+            &format!(
+                "The `{field_name}` path {} {}",
+                path.display(),
+                state.clause()
+            ),
+            Some("Update the path to name a directory"),
+        )),
+        // `Unlistable` needs a listing to discover, and this answer comes from a
+        // stat, so it is grouped in to keep the match total.
+        DirectoryState::Unlistable(_) | DirectoryState::Unknown(_) => {
+            Some(ValidationIssue::warning(
+                ValidationErrorCategory::Advisory,
+                field_name,
+                &format!(
+                    "The `{field_name}` path {} {}",
+                    path.display(),
+                    state.clause()
+                ),
+                Some("Check the path and each directory above it"),
+            ))
+        }
     }
-
-    None
 }
 
 /// Validate the command timeout value
@@ -254,7 +320,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let env_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -272,7 +338,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let env_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -296,7 +362,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let dir_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -314,7 +380,7 @@ mod tests {
             .package_directory("")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let dir_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -337,7 +403,7 @@ mod tests {
             .package_directory("packages")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let path_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -358,7 +424,7 @@ mod tests {
             .package_directory("~/packages")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let dir_errors: Vec<_> = result
             .issues()
             .errors()
@@ -379,7 +445,7 @@ mod tests {
             .package_directory(&nonexistent)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -403,7 +469,7 @@ mod tests {
             .package_directory(&file_path)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -425,7 +491,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -444,7 +510,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("relative/dotfiles"))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -464,7 +530,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("/tmp"))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -486,7 +552,7 @@ mod tests {
             .dotfiles_directory(nonexistent)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -507,7 +573,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from(""))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -527,7 +593,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("~/dotfiles"))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -547,7 +613,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -566,7 +632,7 @@ mod tests {
             .state_directory(PathBuf::from("relative/state"))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -586,7 +652,7 @@ mod tests {
             .state_directory(PathBuf::from("/tmp"))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -608,7 +674,7 @@ mod tests {
             .state_directory(nonexistent)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -629,7 +695,7 @@ mod tests {
             .state_directory(PathBuf::from(""))
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -650,7 +716,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -669,7 +735,7 @@ mod tests {
             .command_timeout_unchecked(600)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -688,7 +754,7 @@ mod tests {
             .command_timeout_unchecked(601)
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -709,7 +775,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         assert!(!result.issues().has_issues());
         assert!(result.issues().is_valid());
     }
@@ -721,7 +787,7 @@ mod tests {
             .package_directory("")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         // At minimum: empty environment + empty package_directory + non-absolute path
         assert!(result.issues().has_errors());
         assert!(result.issues().all_issues().len() >= 2);
@@ -742,7 +808,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate();
+        let result = config.validate(&crate::fs::RealFileSystem);
         assert!(result.config_file_path().is_some());
         assert!(!result.issues().has_issues());
     }
@@ -759,5 +825,207 @@ mod tests {
             invalid.to_string(),
             "Invalid package directory: not absolute"
         );
+    }
+
+    // --- directory state, as the file system port reports it ---
+
+    use crate::{
+        fs::{AbsentReason, DirectoryState, MockFileSystem},
+        validation::{ValidationIssue, ValidationLevel},
+    };
+
+    // The one issue `validate` reports for `field` when the port answers `state`
+    // for every directory. The paths exist nowhere on disk, so a check that
+    // asked the disk instead of the port would answer differently.
+    fn directory_issue(field: &str, state: DirectoryState) -> Option<ValidationIssue> {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(state);
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .dotfiles_directory(PathBuf::from("/nowhere/dotfiles"))
+            .state_directory(PathBuf::from("/nowhere/state"))
+            .build();
+
+        let result = config.validate(&fs);
+        let mut issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == field)
+            .cloned()
+            .collect();
+        assert!(issues.len() <= 1, "{issues:?}");
+        issues.pop()
+    }
+
+    fn suggestion(issue: &ValidationIssue) -> &str {
+        issue.suggestion.as_deref().unwrap_or_default()
+    }
+
+    fn dangling() -> DirectoryState {
+        DirectoryState::Absent(AbsentReason::DanglingSymlink {
+            points_to: Some(PathBuf::from("/gone")),
+        })
+    }
+
+    fn unknown() -> DirectoryState {
+        DirectoryState::Unknown(std::sync::Arc::new(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )))
+    }
+
+    #[test]
+    fn a_directory_the_port_reports_is_not_an_issue() {
+        assert_eq!(
+            directory_issue("dotfiles_directory", DirectoryState::Directory),
+            None
+        );
+        assert_eq!(
+            directory_issue("state_directory", DirectoryState::Directory),
+            None
+        );
+    }
+
+    #[test]
+    fn a_path_a_file_occupies_is_an_error() {
+        let issue = directory_issue(
+            "dotfiles_directory",
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+        )
+        .expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Error);
+        assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
+        assert!(issue.message.contains("it is a regular file"), "{issue:?}");
+    }
+
+    // A dotfiles directory that is not there leaves a command without standalone
+    // specs, which it warns about and carries on. Only an empty path is offered
+    // `mkdir -p`, which fails against a dangling link.
+    #[test]
+    fn a_dangling_symlink_is_a_warning_naming_it_without_mkdir() {
+        let issue = directory_issue("dotfiles_directory", dangling()).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert!(issue.message.contains("symlink to nothing"), "{issue:?}");
+        assert!(!suggestion(&issue).contains("mkdir"), "{issue:?}");
+    }
+
+    #[test]
+    fn an_empty_path_is_a_warning_offering_the_correction_then_mkdir() {
+        let issue = directory_issue(
+            "dotfiles_directory",
+            DirectoryState::Absent(AbsentReason::Empty),
+        )
+        .expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
+        assert!(issue.message.contains("does not exist"), "{issue:?}");
+        assert!(
+            suggestion(&issue).starts_with(
+                "Correct the setting if the path is a typo, or create it with: mkdir -p --"
+            ),
+            "{issue:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_could_not_be_checked_is_an_advisory_warning() {
+        let issue = directory_issue("dotfiles_directory", unknown()).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert_eq!(issue.category, ValidationErrorCategory::Advisory);
+        assert!(issue.message.contains("could not be checked"), "{issue:?}");
+        assert_eq!(
+            suggestion(&issue),
+            "Check the path and each directory above it"
+        );
+    }
+
+    // `~` is expanded through the port, the way the loader expands it.
+    #[test]
+    fn a_leading_tilde_is_expanded_through_the_port() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_expand_path("~", "/home/me");
+        fs.expect_directory_state()
+            .withf(|path| path == std::path::Path::new("/home/me/dotfiles"))
+            .returning(|_| DirectoryState::Directory);
+        fs.expect_directory_state()
+            .returning(|_| DirectoryState::Directory);
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .dotfiles_directory(PathBuf::from("~/dotfiles"))
+            .build();
+
+        let result = config.validate(&fs);
+
+        assert!(
+            result
+                .issues()
+                .all_issues()
+                .iter()
+                .all(|i| i.field != "dotfiles_directory"),
+            "{:?}",
+            result.issues()
+        );
+    }
+
+    // Only `~` and `~/` are the home directory. `~user` and `~typo` are left as
+    // written, and so are relative. The mock has no expansion, so asking it would
+    // fail the test.
+    #[test]
+    fn a_tilde_naming_a_user_or_a_typo_is_relative() {
+        for setting in ["~user/dotfiles", "~typo"] {
+            let mut fs = MockFileSystem::default();
+            fs.mock_directories_exist();
+            let config = SelfieConfigBuilder::default()
+                .environment("linux")
+                .package_directory("/nowhere/packages")
+                .dotfiles_directory(PathBuf::from(setting))
+                .build();
+
+            let result = config.validate(&fs);
+
+            assert!(
+                result
+                    .issues()
+                    .errors()
+                    .iter()
+                    .any(|i| i.field == "dotfiles_directory" && i.message.contains("relative")),
+                "{setting}: {:?}",
+                result.issues()
+            );
+        }
+    }
+
+    // A home directory selfie cannot resolve says nothing about the setting, so
+    // it is reported as a warning rather than as a relative path.
+    #[test]
+    fn a_home_directory_that_cannot_be_resolved_is_a_warning() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path()
+            .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
+        fs.mock_directories_exist();
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .dotfiles_directory(PathBuf::from("~/dotfiles"))
+            .build();
+
+        let result = config.validate(&fs);
+
+        let issue = result
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "dotfiles_directory")
+            .expect("an issue");
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
     }
 }
