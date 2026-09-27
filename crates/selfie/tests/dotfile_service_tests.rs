@@ -122,6 +122,14 @@ impl selfie::dotfile_service::port::ConflictResolver for Counting {
     }
 }
 
+// Options whose only setting is a `Counting` resolver that adds to `asked`.
+fn counting_resolver(asked: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> ApplyOptions {
+    ApplyOptions {
+        conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(asked)))),
+        ..Default::default()
+    }
+}
+
 // Every warning a run emitted.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
@@ -10833,10 +10841,7 @@ mod unreadable_targets {
         };
 
         let asked = Arc::new(AtomicUsize::new(0));
-        let options = ApplyOptions {
-            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
-            ..Default::default()
-        };
+        let options = counting_resolver(&asked);
         let events = collect_events(dirs.service().apply_all(options).await).await;
 
         assert_eq!(
@@ -11323,10 +11328,7 @@ mod target_classification {
         let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN-VALUE");
         let counted = runner.clone();
         let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let options = ApplyOptions {
-            conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(&asked)))),
-            ..Default::default()
-        };
+        let options = counting_resolver(&asked);
         let events = collect_events(
             dirs.service_with_fs(
                 RecordsTargetReads::new().blind_to_directory_at(&target),
@@ -11404,13 +11406,6 @@ mod target_reads_never_follow {
             target.display()
         );
         std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
-    }
-
-    fn counting_resolver(asked: &Arc<AtomicUsize>) -> ApplyOptions {
-        ApplyOptions {
-            conflict_resolver: Some(Arc::new(Counting(Arc::clone(asked)))),
-            ..Default::default()
-        }
     }
 
     // A link that appears after the secret path's second look. The read finds it,
