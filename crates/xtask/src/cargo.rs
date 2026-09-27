@@ -1,8 +1,11 @@
-//! Reading cargo's output: whether a crate was actually built.
+//! Reading cargo's output: whether a crate was actually built, and which
+//! tests ran.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
+use anyhow::{Context, Result};
 use regex::Regex;
 
 use crate::proc::Outcome;
@@ -86,6 +89,70 @@ pub fn scrub_env(cmd: &mut Command) -> &mut Command {
         .env("CARGO_TERM_QUIET", "false")
 }
 
+/// How libtest reported one test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestStatus {
+    /// The test passed.
+    Ok,
+    /// The test failed.
+    Failed,
+    /// The test was ignored and did not run.
+    Ignored,
+}
+
+/// Every `test <path> ... <status>` line in `log`, keyed by the test's path
+/// exactly as libtest printed it: `module::name` for a test in a module, and
+/// the bare name for one at the root of its target.
+pub fn test_results(log: &str) -> HashMap<String, TestStatus> {
+    let line = Regex::new(r"^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)")
+        .expect("the pattern is a literal");
+    let mut results = HashMap::new();
+    // libtest reprints each failing test's captured output after `failures:`,
+    // at column 0, up to its `test result:` line. A line there that looks
+    // like a result is test output and must not overwrite a real one.
+    let mut in_failures = false;
+    for text in log.lines() {
+        if text == "failures:" {
+            in_failures = true;
+        } else if text.starts_with("test result:") {
+            in_failures = false;
+        } else if !in_failures && let Some(c) = line.captures(text) {
+            let status = match &c[2] {
+                "ok" => TestStatus::Ok,
+                "FAILED" => TestStatus::Failed,
+                _ => TestStatus::Ignored,
+            };
+            results.insert(c[1].to_owned(), status);
+        }
+    }
+    results
+}
+
+/// Every source file rustc recorded in the dep-info files under
+/// `target_dir`'s `debug/deps`, as rustc wrote each path: relative to the
+/// workspace root for a workspace member, absolute otherwise.
+///
+/// # Errors
+///
+/// Fails when the directory cannot be read.
+pub fn compiled_sources(target_dir: &Path) -> Result<HashSet<String>> {
+    let deps = target_dir.join("debug").join("deps");
+    let mut sources = HashSet::new();
+    for entry in
+        std::fs::read_dir(&deps).with_context(|| format!("could not read {}", deps.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "d") {
+            let text = String::from_utf8_lossy(&std::fs::read(&path)?).into_owned();
+            sources.extend(
+                text.split_whitespace()
+                    .map(|token| token.trim_end_matches(':').to_owned()),
+            );
+        }
+    }
+    Ok(sources)
+}
+
 /// Points `cmd`'s cargo at `dir` for both its final and its intermediate
 /// artifacts, so nothing from another build can be reused.
 pub fn isolate<'a>(cmd: &'a mut Command, dir: &Path) -> &'a mut Command {
@@ -145,5 +212,35 @@ mod tests {
     fn the_line_must_start_a_line() {
         let log = "note: Compiling selfie v0.1.0 was mentioned in passing\n";
         assert_eq!(build(log, "selfie"), Build::NotStarted);
+    }
+
+    #[test]
+    fn test_lines_are_keyed_by_the_path_libtest_prints() {
+        let log = "test track::tests::refuses_it ... FAILED\n\
+                   test top_level ... ok\n\
+                   test m::panics - should panic ... ok\n\
+                   test m::skipped ... ignored\n\
+                   ---- track::tests::refuses_it stdout ----\n";
+        let results = test_results(log);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results["track::tests::refuses_it"], TestStatus::Failed);
+        assert_eq!(results["top_level"], TestStatus::Ok);
+        assert_eq!(results["m::panics"], TestStatus::Ok);
+        assert_eq!(results["m::skipped"], TestStatus::Ignored);
+        // A bare name never stands in for a qualified one.
+        assert!(!results.contains_key("refuses_it"));
+    }
+
+    #[test]
+    fn a_test_line_must_start_a_line() {
+        assert!(test_results("note: test a::b ... ok\n").is_empty());
+    }
+
+    #[test]
+    fn output_reprinted_under_failures_is_not_a_result() {
+        let log = "test a::x ... FAILED\n\nfailures:\n\n---- a::x stdout ----\n\
+                   test a::x ... ok\n\nfailures:\n    a::x\n\n\
+                   test result: FAILED. 0 passed; 1 failed\n";
+        assert_eq!(test_results(log)["a::x"], TestStatus::Failed);
     }
 }
