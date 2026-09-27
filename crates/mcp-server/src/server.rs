@@ -308,18 +308,6 @@ impl SelfieServer {
             ),
         );
 
-        // Validate package name to prevent path traversal (e.g. "../outside")
-        if params.package.contains('/')
-            || params.package.contains('\\')
-            || params.package.contains("..")
-            || params.package.is_empty()
-        {
-            return Err(McpError::invalid_params(
-                format!("Invalid package name: '{}'", params.package),
-                None,
-            ));
-        }
-
         // Check for namespace conflicts across packages/ and dotfiles/ directories
         let pkg_repo = YamlPackageRepository::new(
             RealFileSystem,
@@ -1019,6 +1007,52 @@ mod tests {
             CancellationToken::new(),
         );
         SelfieServer::new(service, config, Vec::new())
+    }
+
+    // `selfie_spec_create` for `name`, with an inert install command.
+    async fn create(server: &SelfieServer, name: &str) -> serde_json::Value {
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": name,
+            "install": "true",
+            "environment": "test",
+        }))
+        .unwrap();
+        tool_json(&server.spec_create(Parameters(params)).await.unwrap())
+    }
+
+    // The name rule is the library's, so the tool refuses what the loader would
+    // refuse, a path that climbs out included, and admits what it would load.
+    #[tokio::test]
+    async fn spec_create_follows_the_spec_name_rule() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+
+        // A file really is there outside the package directory, so a lookup
+        // would answer "already taken"; the name rule must answer first.
+        let outside = temp.path().join("outside.yml");
+        std::fs::write(&outside, "keep").unwrap();
+
+        for name in ["my tool", "../outside", ".hidden"] {
+            let json = create(&server, name).await;
+            assert!(
+                json.to_string().contains("not a valid spec name"),
+                "{name}: got {json}"
+            );
+            assert!(
+                !json.to_string().contains("already taken"),
+                "{name}: got {json}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+
+        let json = create(&server, "node@20").await;
+        assert!(
+            packages.join("node@20.yml").exists(),
+            "a legal name must be created: {json}"
+        );
     }
 
     // The JSON a tool returned.

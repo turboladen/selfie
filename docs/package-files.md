@@ -59,7 +59,8 @@ packages named `python3.11`, `node@20` and `g++`. The same rule covers the `name
 `selfie spec validate` reports, and the file name, which selfie checks as it loads the directory. A
 file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded: every command that
 lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
-`invalid_name`), and it deploys and installs nothing until it is renamed.
+`invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
+the MCP server's `selfie_spec_create` refuse such a name rather than write the file.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one

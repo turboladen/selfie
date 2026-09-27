@@ -6,7 +6,7 @@ use crate::{
     config::SelfieConfig,
     package::{
         Package,
-        event::{EventSender, OperationResult, OperationSuccess},
+        event::{EventSender, OperationFailure, OperationResult, OperationSuccess},
         port::{PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
@@ -23,6 +23,18 @@ where
     PR: PackageRepository,
 {
     let package_name = package.name().to_string();
+
+    // The spec-name rule the loader applies to a file's stem, so create never
+    // writes a spec that every later command refuses to load. One check here
+    // serves every adapter. First, before any lookup: a name such as
+    // `../../x/y` would otherwise have the guards below report whether a file
+    // exists outside the package directory.
+    if !crate::package::is_valid_spec_name(&package_name) {
+        return OperationResult::Failure(OperationFailure::Generic(format!(
+            "Refusing to create '{package_name}': it is not a valid spec name. Rename it: {}.",
+            crate::package::SPEC_NAME_RULE
+        )));
+    }
 
     // Step 1: Check if package already exists
     progress
@@ -276,6 +288,37 @@ mod tests {
             matches!(result, OperationResult::Success(_)),
             "a package with no file must still be created, got: {result:?}"
         );
+    }
+
+    // Every adapter creates through here, so this one check keeps both the CLI
+    // and the MCP server from writing a spec the loader then refuses.
+    #[tokio::test]
+    async fn create_refuses_a_name_the_loader_would_refuse() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("my tool")
+            .environment("test", |b| b.install("true"))
+            .path(temp.path().join("my tool.yml"))
+            .build();
+
+        // Nothing is asked of the repository at all: not written, and not
+        // looked up either, so a name cannot probe the file system.
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().times(0);
+        repo.expect_path_is_occupied().times(0);
+        repo.expect_save_package().times(0);
+
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        match result {
+            OperationResult::Failure(OperationFailure::Generic(message)) => {
+                assert!(message.contains("'my tool'"), "got: {message}");
+                assert!(message.contains("'@' and '+'"), "got: {message}");
+            }
+            other => panic!("expected the create to be refused, got: {other:?}"),
+        }
     }
 
     // The second control. A package directory that does not exist yet holds
