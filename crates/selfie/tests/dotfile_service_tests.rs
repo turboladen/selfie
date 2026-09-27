@@ -16085,3 +16085,101 @@ environments:
         assert_eq!(hinted, 2, "got: {warnings:?}");
     }
 }
+
+// The package each deploy-state record names, which is what lets `apply <name>`
+// tell its own records from another package's.
+mod recorded_package {
+    use super::*;
+
+    pub(super) fn state_in(dirs: &TestDirs) -> DeployState {
+        let written =
+            std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).expect("state file");
+        selfie::yaml::parse(&written).expect("state file parses")
+    }
+
+    // Recorded by the spec's file name with case folded, the name `apply <name>`
+    // matches on, and not by the `name:` field.
+    #[tokio::test]
+    async fn apply_records_the_folded_spec_name_of_the_package() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/rc"), "x").unwrap();
+        let target = dirs.target_dir.join("rc");
+        write_package_yaml(
+            &dirs.package_dir,
+            "MyApp",
+            &format!(
+                "name: something-else\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: app/rc\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+
+        let state = state_in(&dirs);
+        let entry = state
+            .get(&target.display().to_string())
+            .expect("the target is recorded");
+        assert_eq!(entry.package(), Some("myapp"));
+    }
+
+    // Two packages deploying one content to one target: only the one that wrote
+    // it can be recorded, since nothing afterwards can tell which of the two did.
+    #[tokio::test]
+    async fn apply_records_the_package_that_wrote_a_shared_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("shared");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(dirs.package_dir.join(name)).unwrap();
+            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                name,
+                &[(&format!("{name}/shared"), target.to_str().unwrap())],
+            );
+        }
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+
+        let state = state_in(&dirs);
+        let package = state
+            .get(&target.display().to_string())
+            .expect("the target is recorded")
+            .package();
+        assert!(
+            matches!(package, Some("alpha" | "beta")),
+            "recorded {package:?}"
+        );
+    }
+
+    // Track is given the name as typed, which may carry capitals; what it
+    // records must match what apply records for the spec it wrote.
+    #[tokio::test]
+    async fn track_records_the_folded_spec_name_not_the_name_as_typed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("StarShip", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+
+        let state = state_in(&dirs);
+        let entry = state
+            .get(&target.display().to_string())
+            .expect("the target is recorded");
+        assert_eq!(entry.package(), Some("starship"));
+    }
+}

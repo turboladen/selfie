@@ -304,6 +304,7 @@ where
         }
 
         let dotfiles = package.effective_dotfiles(Some(config.environment()));
+        let package_name = package.spec_name();
         let collisions = PackageCollisions::of(package, &home, config.environment());
 
         if dotfiles.is_empty() {
@@ -434,6 +435,7 @@ where
                     source_content: &source_content,
                     source_checksum: &source_checksum,
                     source,
+                    package: package_name.as_deref(),
                     backups: backups_root.as_deref(),
                 };
 

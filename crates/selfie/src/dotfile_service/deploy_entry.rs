@@ -29,6 +29,9 @@ pub(super) struct DeployUnit<'a> {
     pub(super) source_checksum: &'a str,
     /// The entry's `source` as the spec names it, recorded beside the checksum.
     pub(super) source: &'a str,
+    /// The spec name of the package the entry belongs to, recorded beside the
+    /// checksum. `None` for a package with no spec file behind it.
+    pub(super) package: Option<&'a str>,
     /// Where copies of overwritten targets go, or `None` if there is nowhere to
     /// put one. `Some` does not mean a copy will be made.
     // A dry run has a root here and writes nothing: `perform_deploy` returns on
@@ -300,9 +303,12 @@ pub(super) async fn record_and_save<F: FileSystem>(
     unit: &DeployUnit<'_>,
 ) -> Option<String> {
     let loaded = loaded.as_mut()?;
-    loaded
-        .state_mut()
-        .record_deployment(unit.target_key, unit.source, unit.source_checksum);
+    loaded.state_mut().record_deployment(
+        unit.target_key,
+        unit.source,
+        unit.source_checksum,
+        unit.package,
+    );
     let Err(e) = save_deploy_state(filesystem, loaded) else {
         return None;
     };
