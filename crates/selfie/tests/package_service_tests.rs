@@ -1111,6 +1111,10 @@ mod recommends_after_the_root_stops_loading {
     }
 
     impl PackageRepository for RootStopsLoading {
+        fn resolved_directory(&self) -> Option<PathBuf> {
+            self.inner.resolved_directory()
+        }
+
         fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
             if name == "root"
                 && self

@@ -15416,3 +15416,144 @@ async fn the_advice_follows_the_shadowing_keys_at_every_level() {
         assert!(warning.contains("is refused. Unknown field"), "{warning}");
     }
 }
+
+// `dotfiles_directory` and `package_directory` naming one directory, the first
+// through a symlink so the two settings differ as strings. The directory is read
+// once, through the package repository.
+mod one_directory_configured_as_both {
+    use super::*;
+
+    // One package with one dotfile, in a package directory the dotfiles
+    // directory is a symlink to. Returns the dirs and the dotfile's target.
+    fn shared() -> (TestDirs, PathBuf) {
+        let dirs = TestDirs::new();
+        std::fs::remove_dir(&dirs.dotfiles_dir).unwrap();
+        std::os::unix::fs::symlink(&dirs.package_dir, &dirs.dotfiles_dir).unwrap();
+        let source_dir = dirs.package_dir.join("myapp");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("config.toml"), "key = 1").unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        (dirs, target)
+    }
+
+    fn duplicate_warnings(events: &[PackageEvent]) -> Vec<String> {
+        warning_messages(events)
+            .into_iter()
+            .filter(|message| message.contains("Duplicate name") || message.contains("myapp"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_shows_each_entry_once() {
+        let (dirs, _target) = shared();
+
+        let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+        let listed = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+                _ => None,
+            })
+            .expect("the listing must be emitted");
+        let names: Vec<&str> = listed
+            .packages
+            .iter()
+            .map(selfie::package::Package::name)
+            .collect();
+        assert_eq!(names, ["myapp"]);
+        assert_eq!(listed.packages[0].origin(), SpecOrigin::PackageDirectory);
+        assert!(duplicate_warnings(&events).is_empty(), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn apply_deploys_once_and_warns_about_no_name() {
+        let (dirs, target) = shared();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(duplicate_warnings(&events).is_empty(), "{events:?}");
+        match get_operation_result(&events) {
+            Some(OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                refused_count,
+                ..
+            })) => assert_eq!((*deployed_count, *refused_count), (1, 0)),
+            other => panic!("expected an apply completion, got: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "key = 1");
+    }
+
+    #[tokio::test]
+    async fn drift_warns_about_no_name() {
+        let (dirs, _target) = shared();
+
+        let events = collect_events(dirs.service_with_dotfiles().check_drift().await).await;
+
+        assert!(duplicate_warnings(&events).is_empty(), "{events:?}");
+        assert_eq!(drift_summary(&events).2, 0, "nothing is refused");
+    }
+
+    // A standalone spec written there would be read as a package spec and
+    // refused by apply, so track refuses before writing one, naming both
+    // remedies.
+    #[tokio::test]
+    async fn track_standalone_refuses_before_writing() {
+        let (dirs, _target) = shared();
+        let tracked = dirs.target_dir.join(".gemrc");
+        std::fs::write(&tracked, "x").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", tracked.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let message = failure_message(&events);
+        assert!(message.contains("is the package directory"), "{message}");
+        assert!(message.contains("selfie track"), "{message}");
+        assert!(message.contains("dotfiles_directory"), "{message}");
+        assert!(!dirs.package_dir.join("gemrc.yml").exists());
+    }
+
+    // A dangling link resolves to nothing, so it is not the package directory,
+    // and it is reported the way any dotfiles directory with nothing behind it
+    // is. The package directory is still read once.
+    #[tokio::test]
+    async fn a_dangling_dotfiles_directory_is_not_the_package_directory() {
+        let dirs = TestDirs::new();
+        std::fs::remove_dir(&dirs.dotfiles_dir).unwrap();
+        std::os::unix::fs::symlink(dirs.package_dir.join("gone"), &dirs.dotfiles_dir).unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "bat",
+            "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: \
+             bat.conf\n    target: ~/.config/bat/config\n",
+        );
+
+        let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+        let listed = events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+                _ => None,
+            })
+            .expect("the listing must be emitted");
+        assert_eq!(listed.packages.len(), 1);
+        let warnings = dotfiles_directory_warnings(&events);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("symlink to nothing"), "{warnings:?}");
+    }
+}

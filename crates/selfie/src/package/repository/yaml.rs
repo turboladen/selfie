@@ -223,6 +223,12 @@ fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError
 }
 
 impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
+    // A configured repository directory, never a deploy target, so resolving its
+    // links is what the answer is for.
+    fn resolved_directory(&self) -> Option<PathBuf> {
+        self.fs.canonicalize(&self.package_dir).ok()
+    }
+
     fn read_referenced_file(
         &self,
         package_path: &Path,

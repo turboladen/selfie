@@ -88,34 +88,41 @@ pub(super) fn collect_packages<R: PackageRepository>(
     let mut unparsable_in_dotfiles = Vec::new();
     let mut refusals = Vec::new();
 
-    match dotfiles_repo.list_packages() {
-        Ok(output) => {
-            note_unparsable(&output, &mut warnings);
-            unparsable_in_dotfiles = unparsable_paths(&output);
-            dotfiles_packages = output.valid_packages().cloned().collect();
+    // One directory configured as both settings is read once, through the
+    // package repository, so its files load as package specs. Reading it twice
+    // lists every entry twice and makes every name collide with itself.
+    let same_directory = same_directory(package_repo, dotfiles_repo);
+
+    if !same_directory {
+        match dotfiles_repo.list_packages() {
+            Ok(output) => {
+                note_unparsable(&output, &mut warnings);
+                unparsable_in_dotfiles = unparsable_paths(&output);
+                dotfiles_packages = output.valid_packages().cloned().collect();
+            }
+            Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
+                error,
+                dotfiles_directory_is_expected,
+            ) {
+                super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
+                super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
+                    warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
+                }
+                // Both refuse the run, because neither can claim the collection
+                // is complete. They are pushed as different warnings so the
+                // sentence a user reads says which one happened: one asserts a
+                // directory is there and unreadable, the other cannot say even
+                // that.
+                super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
+                    warnings.push(ApplyWarning::UnreadableRepository(error));
+                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
+                }
+                super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
+                    warnings.push(ApplyWarning::UncheckableRepository(error));
+                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
+                }
+            },
         }
-        Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
-            error,
-            dotfiles_directory_is_expected,
-        ) {
-            super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
-            super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
-                warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
-            }
-            // Both refuse the run, because neither can claim the collection
-            // is complete. They are pushed as different warnings so the
-            // sentence a user reads says which one happened: one asserts a
-            // directory is there and unreadable, the other cannot say even
-            // that.
-            super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
-                warnings.push(ApplyWarning::UnreadableRepository(error));
-                refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
-            }
-            super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
-                warnings.push(ApplyWarning::UncheckableRepository(error));
-                refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
-            }
-        },
     }
 
     if collision == NameCollision::KeepBoth {
@@ -226,6 +233,17 @@ pub(super) fn collect_packages<R: PackageRepository>(
     })
 }
 
+/// Whether `packages` and `dotfiles` read one directory.
+pub(super) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -> bool {
+    // The directories are compared as the file system resolves them, since a
+    // symlink or a different spelling names the same one. A directory that
+    // cannot be resolved matches nothing: it is not shown to be the other one.
+    matches!(
+        (packages.resolved_directory(), dotfiles.resolved_directory()),
+        (Some(packages), Some(dotfiles)) if packages == dotfiles
+    )
+}
+
 /// The spec files in `output` that failed to parse.
 fn unparsable_paths(output: &crate::package::port::ListPackagesOutput) -> Vec<PathBuf> {
     output
@@ -265,4 +283,72 @@ fn is_ambiguous(pkg: &Package, claims: &BTreeMap<String, Vec<PathBuf>>) -> bool 
     pkg.spec_name()
         .and_then(|name| claims.get(&name))
         .is_some_and(|paths| paths.len() > 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::package::{
+        PackageBuilder,
+        port::{ListPackagesOutput, MockPackageRepository},
+    };
+
+    // A repository holding one spec at `path`, resolving its directory to
+    // `resolved`.
+    fn repo_holding(path: &str, resolved: Option<&str>) -> MockPackageRepository {
+        let package = PackageBuilder::default()
+            .name("spec")
+            .environment("test", |b| b.install("true"))
+            .path(PathBuf::from(path))
+            .build();
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(package.clone())])));
+        repo.expect_resolved_directory()
+            .return_const(resolved.map(PathBuf::from));
+        repo
+    }
+
+    fn collected_paths(
+        packages: &MockPackageRepository,
+        dotfiles: &MockPackageRepository,
+    ) -> Vec<PathBuf> {
+        let collected =
+            collect_packages(packages, dotfiles, NameCollision::KeepBoth, false, "test").unwrap();
+        collected
+            .packages
+            .iter()
+            .map(|pkg| pkg.path().to_path_buf())
+            .collect()
+    }
+
+    #[test]
+    fn one_resolved_directory_is_read_once() {
+        let packages = repo_holding("/packages/spec.yml", Some("/real"));
+        let dotfiles = repo_holding("/dotfiles/spec.yml", Some("/real"));
+
+        assert_eq!(
+            collected_paths(&packages, &dotfiles),
+            [PathBuf::from("/packages/spec.yml")]
+        );
+    }
+
+    // Neither directory resolves, so neither is shown to be the other, and both
+    // are read. Treating two unknowns as equal would drop the dotfiles directory
+    // whenever resolution failed on both sides.
+    #[test]
+    fn two_unresolved_directories_are_both_read() {
+        let packages = repo_holding("/packages/spec.yml", None);
+        let dotfiles = repo_holding("/dotfiles/spec.yml", None);
+
+        assert_eq!(
+            collected_paths(&packages, &dotfiles),
+            [
+                PathBuf::from("/packages/spec.yml"),
+                PathBuf::from("/dotfiles/spec.yml")
+            ]
+        );
+    }
 }

@@ -420,6 +420,11 @@ where
 
     async fn track_standalone(&self, name: &str, target_path: &str) -> EventStream {
         let refusal = self.sudo_refusal();
+        // A directory configured as both is read as the package directory, so a
+        // standalone spec written there declares no environment and apply
+        // refuses it. The track is refused before anything is written.
+        let shared_directory =
+            super::collect::same_directory(&self.package_repository, &self.dotfiles_repository);
         let dotfiles_repo = self.dotfiles_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -438,6 +443,16 @@ where
 
             let result = match refusal {
                 Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
+                None if shared_directory => {
+                    OperationResult::Failure(OperationFailure::Generic(format!(
+                        "Cannot track a standalone dotfile: the dotfiles directory {} is the \
+                         package directory, so selfie reads a spec there as a package spec, and \
+                         `selfie apply` refuses one that declares no environment. Track the file \
+                         into a package with `selfie track` or `selfie package track-dotfile`, or \
+                         set `dotfiles_directory` to a directory of its own.",
+                        config.dotfiles_directory().display()
+                    )))
+                }
                 None => {
                     handle_track_standalone(
                         &name,
