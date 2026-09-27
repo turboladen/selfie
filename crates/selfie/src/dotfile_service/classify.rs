@@ -14,9 +14,11 @@ use crate::{
         filesystem::{
             AbsentReason, DirectoryState, FileSystem, FileSystemError, repository_read_refusal,
         },
-        target::{TargetPath, deploy_target, repository_path},
+        target::{HomeDir, TargetPath, deploy_target, repository_path},
     },
-    package::{ContentSource, DotfileEntry, event::EventSender},
+    package::{
+        ContentSource, DotfileEntry, Package, ScopedEntry, TargetCollision, event::EventSender,
+    },
     paths::is_within,
 };
 
@@ -83,16 +85,72 @@ pub(super) enum Purpose {
     Check,
 }
 
+/// The home directory, looked up once for a whole run.
+pub(super) struct ResolvedHome(Option<PathBuf>);
+
+impl ResolvedHome {
+    /// Ask `home` now, and answer every later question with what it said.
+    pub(super) fn of<H: HomeDir + ?Sized>(home: &H) -> Self {
+        Self(home.home().ok())
+    }
+}
+
+impl HomeDir for ResolvedHome {
+    fn home(&self) -> Result<PathBuf, FileSystemError> {
+        self.0.clone().ok_or(FileSystemError::HomeDirNotFound)
+    }
+}
+
+/// A package's entries that share a target in the environment in use, which
+/// [`classify_entry`] refuses.
+pub(super) struct PackageCollisions<'p> {
+    package: &'p str,
+    groups: Vec<TargetCollision<'p>>,
+}
+
+impl<'p> PackageCollisions<'p> {
+    /// The collisions in `package` for `environment`.
+    pub(super) fn of(package: &'p Package, home: &ResolvedHome, environment: &str) -> Self {
+        Self {
+            package: package.name(),
+            groups: package.target_collisions(home, Some(environment)),
+        }
+    }
+}
+
 /// Classify `entry` for `purpose`, or refuse it with the warning it calls for.
 ///
 /// Reads what is at the target and, for a template entry, the template; runs no
-/// command. `base_dir` is the directory of the package file the entry came from.
+/// command. `base_dir` is the directory of the package file the entry came from,
+/// and an entry among `collisions` is refused.
 pub(super) fn classify_entry<'e, F: FileSystem>(
     filesystem: &F,
     base_dir: &Path,
-    entry: &'e DotfileEntry,
+    scoped: ScopedEntry<'e>,
+    collisions: &PackageCollisions<'_>,
     purpose: Purpose,
 ) -> Result<Classified<'e>, Refused> {
+    let entry = scoped.entry;
+
+    // First, so every entry sharing the target is refused with the same reason
+    // whatever else is wrong with one of them, and none of them runs a command.
+    // Refusing all of them, rather than deploying one, leaves nothing for the
+    // deploy state to flip between: which entry would win depends only on list
+    // order, which is not something the user chose.
+    if let Some(collision) = collisions.groups.iter().find(|c| c.contains(&scoped)) {
+        let consequence = match purpose {
+            Purpose::Deploy => "so none of them is applied",
+            Purpose::Check => "so drift cannot compare them",
+        };
+        return Err(Refused(format!(
+            "Skipping '{}' in package '{}': {}, {consequence}. {}",
+            entry.target(),
+            collisions.package,
+            collision.describe(),
+            collision.remedy()
+        )));
+    }
+
     // Refused before anything runs. For a template that means the binding
     // commands -- real credential fetches, which can raise a biometric prompt --
     // never execute for a file that provably cannot be rendered.

@@ -6,9 +6,25 @@ use serde_saphyr::Location;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, DotfileField, EnvironmentField, KnownFields, Package, PackageField, SpecRefusal,
-    TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field, environment_field,
+    DotfileEntry, DotfileField, EnvironmentField, KnownFields, Package, PackageField, ScopedEntry,
+    SpecRefusal, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field,
+    environment_field,
 };
+
+/// A home directory that cannot be determined, so `~` stays literal.
+///
+/// Validation has no file system, so it compares targets with `~` unexpanded.
+/// That still matches identical spellings and ones that differ only lexically,
+/// such as `~/a/../b` and `~/b`.
+// What it cannot match is `~/x` against the absolute path of the same file.
+// Apply compares against the real home and refuses that pair as well.
+struct NoHome;
+
+impl crate::fs::target::HomeDir for NoHome {
+    fn home(&self) -> Result<PathBuf, crate::fs::filesystem::FileSystemError> {
+        Err(crate::fs::filesystem::FileSystemError::HomeDirNotFound)
+    }
+}
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -590,6 +606,7 @@ impl Package {
     /// - Target path using the `~user/…` form, which selfie does not resolve (error)
     pub(crate) fn validate_dotfiles(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
+        let collisions = self.every_target_collision();
 
         // Shared (top-level) dotfiles.
         for (i, dotfile) in self.dotfiles.iter().enumerate() {
@@ -598,16 +615,20 @@ impl Package {
 
         // Environment-specific dotfiles (ADR-0001): the same structural checks,
         // plus a warning when an entry overrides a shared entry's target, so the
-        // override is surfaced rather than applied silently.
+        // override is surfaced rather than applied silently. An entry in a
+        // collision gets the collision's error instead: calling it allowed would
+        // contradict the error beside it.
         for (env_name, env) in self.environments_sorted() {
             for (i, dotfile) in env.dotfiles().iter().enumerate() {
                 let field = environment_field(env_name, &dotfile_field(i));
                 issues.extend(Self::validate_dotfile_entry(dotfile, &field));
 
+                let scoped = ScopedEntry::environment(env_name, i, dotfile);
                 if self
                     .dotfiles
                     .iter()
                     .any(|shared| shared.target() == dotfile.target())
+                    && !collisions.iter().any(|c| c.contains(&scoped))
                 {
                     issues.push(ValidationIssue::warning(
                         ValidationErrorCategory::InvalidValue,
@@ -624,9 +645,52 @@ impl Package {
             }
         }
 
+        issues.extend(collisions.iter().map(|collision| {
+            let first = collision.members[0];
+            ValidationIssue::error_at(
+                ValidationErrorCategory::InvalidValue,
+                &format!("{}.target", first.field()),
+                &format!(
+                    "Dotfile entries {}, so apply deploys none of them",
+                    collision.describe()
+                ),
+                Some(collision.remedy()),
+                location_string(first.entry.target_location()),
+            )
+        }));
         issues.extend(self.report_apply_time_commands());
 
         issues
+    }
+
+    /// Every group of entries that deploy to one target in some environment,
+    /// which apply refuses whole, each group once.
+    fn every_target_collision(&self) -> Vec<TargetCollision<'_>> {
+        // What apply asks in each environment, plus the shared list alone, which
+        // an environment declaring no dotfiles deploys. A group is merged by
+        // target within an environment, and one found identically in several
+        // environments, such as two shared entries, is kept once.
+        //
+        // Shared entries A and B on one target, overridden in one environment,
+        // are reported through the shared list. In that environment the
+        // override replaces both and deploys once, so it is no collision.
+        let environments = self.environments_sorted();
+        let contexts =
+            std::iter::once(None).chain(environments.iter().map(|(name, _)| Some(*name)));
+
+        let mut collisions: Vec<TargetCollision<'_>> = Vec::new();
+        for collision in contexts.flat_map(|context| self.target_collisions(&NoHome, context)) {
+            let mut key = collision.fields();
+            key.sort();
+            if !collisions.iter().any(|seen| {
+                let mut seen_key = seen.fields();
+                seen_key.sort();
+                seen_key == key
+            }) {
+                collisions.push(collision);
+            }
+        }
+        collisions
     }
 
     /// Note how many commands `selfie apply` will run for this package's
@@ -1186,6 +1250,252 @@ mod tests {
                 .any(|i| i.field.contains("_brew")),
             "an ordinary anchor must not be flagged, got: {:?}",
             result.issues()
+        );
+    }
+
+    // The errors `validate_dotfiles` reports about entries sharing a target.
+    fn collision_errors(yaml: &str) -> Vec<ValidationIssue> {
+        package_from_yaml(yaml)
+            .validate_dotfiles()
+            .into_iter()
+            .filter(|i| i.level() == ValidationLevel::Error && i.message().contains("deploy to"))
+            .collect()
+    }
+
+    #[test]
+    fn two_shared_entries_on_one_target_are_an_error_naming_both() {
+        let errors = collision_errors(
+            r"
+name: x
+dotfiles:
+  - source: a/one
+    target: ~/.x
+  - source: a/two
+    target: ~/.x
+environments:
+  work:
+    install: echo
+",
+        );
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        let message = errors[0].message();
+        assert!(
+            message.contains("dotfiles[0] and dotfiles[1]"),
+            "got: {message}"
+        );
+        assert!(message.contains("'~/.x'"), "got: {message}");
+        assert_eq!(errors[0].field(), "dotfiles[0].target");
+        assert!(
+            errors[0].location().is_some(),
+            "the error must point at the file"
+        );
+    }
+
+    // The two spellings differ as strings, so this is not an override; they
+    // expand to one path, so both would deploy. The hint says how to make it the
+    // override it probably was.
+    #[test]
+    fn a_shared_and_an_environment_entry_equal_only_after_expansion_are_an_error() {
+        let errors = collision_errors(
+            r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: ~/.x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: ~/./.x
+",
+        );
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        assert!(
+            errors[0]
+                .message()
+                .contains("dotfiles[0] and environments.work.dotfiles[0]"),
+            "got: {}",
+            errors[0].message()
+        );
+        let suggestion = errors[0].suggestion().expect("a remedy").as_str();
+        assert!(
+            suggestion.contains("write the target exactly as the shared entry does"),
+            "got: {suggestion}"
+        );
+    }
+
+    #[test]
+    fn two_entries_in_one_environment_on_one_target_are_an_error() {
+        let errors = collision_errors(
+            r"
+name: x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/one
+        target: ~/.x
+      - source: a/two
+        target: ~/.x
+",
+        );
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        assert!(
+            errors[0]
+                .message()
+                .contains("environments.work.dotfiles[0] and environments.work.dotfiles[1]"),
+            "got: {}",
+            errors[0].message()
+        );
+        assert_eq!(
+            errors[0].suggestion().map(String::as_str),
+            Some("Keep one entry per target.")
+        );
+    }
+
+    // Both environment entries override the same shared target. The effective
+    // set keeps the first and drops the second without a word, so only a check
+    // of the environment's own list sees the pair.
+    #[test]
+    fn two_environment_overrides_of_one_shared_target_are_an_error() {
+        let errors = collision_errors(
+            r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: ~/.x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/one
+        target: ~/.x
+      - source: a/two
+        target: ~/.x
+",
+        );
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        assert!(
+            errors[0]
+                .message()
+                .contains("environments.work.dotfiles[0] and environments.work.dotfiles[1]"),
+            "got: {}",
+            errors[0].message()
+        );
+    }
+
+    // Three environment entries on one file: E1 and E2 spelled like the shared
+    // target, E3 spelled differently. The effective set holds E1 and E3, and the
+    // environment's own list holds all three; the two groups share a target, so
+    // they are one error naming all three. None of the three is told its
+    // override is allowed.
+    #[test]
+    fn groups_on_one_target_in_one_environment_are_one_error() {
+        let yaml = r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: ~/.x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/one
+        target: ~/.x
+      - source: a/two
+        target: ~/.x
+      - source: a/three
+        target: ~/./.x
+";
+        let errors = collision_errors(yaml);
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        let message = errors[0].message();
+        for field in [
+            "environments.work.dotfiles[0]",
+            "environments.work.dotfiles[1]",
+            "environments.work.dotfiles[2]",
+        ] {
+            assert!(message.contains(field), "{field} missing from: {message}");
+        }
+        assert!(message.contains("all deploy to"), "got: {message}");
+
+        let issues = package_from_yaml(yaml).validate_dotfiles();
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.message().contains("overrides the shared dotfile")),
+            "an entry in a collision was told its override is allowed: {}",
+            messages(&issues)
+        );
+    }
+
+    // An override spelled exactly like the shared target is allowed, and keeps
+    // its warning. Distinct targets are no collision at all.
+    #[test]
+    fn an_exact_override_and_distinct_targets_are_not_collisions() {
+        let yaml = r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: ~/.x
+  - source: a/other
+    target: ~/.y
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: ~/.x
+";
+        assert!(
+            collision_errors(yaml).is_empty(),
+            "{}",
+            messages(&collision_errors(yaml))
+        );
+        let issues = package_from_yaml(yaml).validate_dotfiles();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message().contains("overrides the shared dotfile")),
+            "the override warning must stay: {}",
+            messages(&issues)
+        );
+    }
+
+    // Shared A and B on one target, overridden in `work` by E. Work's effective
+    // set holds E once, so apply deploys it once there. The pair is still an
+    // error, found through the shared list.
+    #[test]
+    fn two_shared_entries_overridden_by_one_environment_entry_are_reported_once() {
+        let yaml = r"
+name: x
+dotfiles:
+  - source: a/one
+    target: ~/.x
+  - source: a/two
+    target: ~/.x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: ~/.x
+";
+        let package = package_from_yaml(yaml);
+        let effective = package.effective_dotfiles(Some("work"));
+        assert_eq!(
+            effective.iter().map(ScopedEntry::field).collect::<Vec<_>>(),
+            vec!["environments.work.dotfiles[0]"]
+        );
+        assert!(super::super::target_collisions(&super::NoHome, &[effective]).is_empty());
+
+        let errors = collision_errors(yaml);
+        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+        assert!(
+            errors[0].message().contains("dotfiles[0] and dotfiles[1]"),
+            "got: {}",
+            errors[0].message()
         );
     }
 

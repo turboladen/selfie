@@ -201,6 +201,16 @@ environments:
         target: ~/.config/zscaler/config
 ```
 
+An override has to spell its `target` exactly as the shared entry does. Any other pair of entries
+that deploy to the same file in one environment is an error: two shared entries, two entries in one
+environment, or a shared and an environment entry whose targets differ as written but name the same
+file, such as `~/.x` and `~/./.x`. Deploying either would leave the other reported as drifted on
+every run, so `selfie apply` refuses every entry in the group, writes none of them, counts each one
+it would have deployed as a refusal and exits non-zero; `selfie dotfiles drift` refuses the same
+entries. `selfie spec validate` reports the group as an error naming each entry. Validation compares
+targets without knowing your home directory, so `~/.x` and `/home/you/.x` pass it, while `apply` and
+`drift` still refuse the pair.
+
 There is intentionally no way to _exclude_ a shared entry from a single environment: a config that
 is not universal belongs in the relevant `environments.<name>.dotfiles` lists rather than the shared
 list. Per-machine differences that a single portable file can express — `~`-relative paths, runtime

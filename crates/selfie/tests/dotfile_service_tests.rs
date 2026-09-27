@@ -15630,3 +15630,323 @@ mod one_directory_configured_as_both {
         assert!(warnings[0].contains("symlink to nothing"), "{warnings:?}");
     }
 }
+
+// Two entries in one package deploying to one target. Deploying either would
+// have the deploy state flip between their checksums on every run, and drift
+// report the loser as changed each time, so both are refused and neither is
+// written. The two spell the target differently -- `~/.x` and its absolute
+// form -- so the refusal has to compare expanded paths.
+mod duplicate_targets {
+    use super::*;
+    use std::path::Path;
+
+    fn deploy_state_of(events: &[PackageEvent]) -> (usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                refused_count,
+                ..
+            }) => (*deployed_count, *refused_count),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    // A package with two entries on `<home>/.x` and a third, unrelated entry,
+    // which must still deploy. Returns the colliding target and the other one.
+    fn colliding_package(dirs: &TestDirs, home: &Path) -> (PathBuf, PathBuf) {
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("one"), "one").unwrap();
+        std::fs::write(sources.join("two"), "two").unwrap();
+        std::fs::write(sources.join("three"), "three").unwrap();
+
+        let target = home.join(".x");
+        let other = home.join(".other");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "dup",
+            &[
+                ("dup/one", "~/.x"),
+                ("dup/two", target.to_str().unwrap()),
+                ("dup/three", other.to_str().unwrap()),
+            ],
+        );
+        (target, other)
+    }
+
+    // Each refusal names the package, both entries and the target, so the user
+    // can find them without counting list items, and says what the command did
+    // about them in that command's own terms.
+    fn assert_names_the_pair(warnings: &[String], target: &Path, consequence: &str) {
+        let collisions: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("dotfiles[0] and dotfiles[1] both deploy to"))
+            .collect();
+        assert_eq!(collisions.len(), 2, "one refusal per entry: {warnings:?}");
+        for warning in collisions {
+            assert!(
+                warning.contains(&format!("'{}'", target.display())),
+                "the refusal must name the expanded target: {warning}"
+            );
+            assert!(
+                warning.contains("in package 'dup'"),
+                "the refusal must name the package: {warning}"
+            );
+            assert!(
+                warning.contains(consequence),
+                "the refusal must say what happened: {warning}"
+            );
+        }
+    }
+
+    // Default options: `stop_on_error` would end the run at the first refusal,
+    // and the second entry and the unrelated one would never be reached.
+    #[tokio::test]
+    async fn apply_refuses_both_entries_and_deploys_the_rest() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let (target, other) = colliding_package(&dirs, &home);
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (1, 2));
+        assert!(!target.exists(), "a colliding entry was deployed");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "three");
+        assert_names_the_pair(
+            &warning_messages(&events),
+            &target,
+            "none of them is applied",
+        );
+    }
+
+    // Drift classifies through the same function, so it refuses the same two
+    // entries and compares only the third.
+    #[tokio::test]
+    async fn drift_refuses_the_entries_apply_refuses() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let (target, _other) = colliding_package(&dirs, &home);
+
+        let events = collect_events(dirs.service_with_home(&home).check_drift().await).await;
+
+        let (_drift, total, refused) = drift_summary(&events);
+        assert_eq!((total, refused), (1, 2));
+        let warnings = warning_messages(&events);
+        assert_names_the_pair(&warnings, &target, "so drift cannot compare them");
+        assert!(
+            !warnings.iter().any(|w| w.contains("applied")),
+            "drift applies nothing: {warnings:?}"
+        );
+    }
+
+    // Two environment entries overriding one shared target, spelled exactly as
+    // it is. Only the first reaches the environment's effective set, so apply
+    // would deploy it and drop the second unreported. The first is refused
+    // instead, naming both; the second never deploys in any case, so it is not
+    // counted a second time.
+    #[tokio::test]
+    async fn apply_refuses_two_overrides_of_one_shared_target() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["shared", "one", "two"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/one
+        target: "~/.x"
+      - source: dup/two
+        target: "~/.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 1));
+        assert!(!home.join(".x").exists(), "an override was deployed");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains(
+                "environments.test.dotfiles[0] and environments.test.dotfiles[1] both deploy to"
+            )),
+            "got: {warnings:?}"
+        );
+    }
+
+    // Two shared entries on one target, both overridden by one environment
+    // entry. The override replaces both and deploys once: a second deploy would
+    // run a provider command a second time. The shared pair is validate's to
+    // report; in this environment neither of them deploys.
+    #[tokio::test]
+    async fn one_override_of_two_shared_entries_deploys_once() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["one", "two", "work"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/one
+    target: "~/.x"
+  - source: dup/two
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/work
+        target: "~/.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let deploying = events
+            .iter()
+            .filter(|e| matches!(e, PackageEvent::DotfileDeploying { .. }))
+            .count();
+        assert_eq!(deploying, 1, "the override must be deployed once");
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                skipped_count,
+                refused_count,
+                ..
+            }) => assert_eq!((*deployed_count, *skipped_count, *refused_count), (1, 0, 0)),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".x")).unwrap(), "work");
+    }
+
+    // The two overrides plus a third entry spelled `~/./.x`. The effective set
+    // holds the first override and the third, and the environment's own list
+    // holds all three; both refusals name every one of them, so the user sees
+    // the whole group from either warning.
+    #[tokio::test]
+    async fn every_refusal_names_the_whole_group_for_its_target() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["shared", "one", "two", "three"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/one
+        target: "~/.x"
+      - source: dup/two
+        target: "~/.x"
+      - source: dup/three
+        target: "~/./.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 2));
+        let warnings = warning_messages(&events);
+        let naming_all = warnings
+            .iter()
+            .filter(|w| {
+                w.contains(
+                    "environments.test.dotfiles[0], environments.test.dotfiles[1] and \
+                     environments.test.dotfiles[2] all deploy to",
+                )
+            })
+            .count();
+        assert_eq!(naming_all, 2, "got: {warnings:?}");
+    }
+
+    // A shared entry and an environment entry spelled differently for one file.
+    // Spelled identically it would be an override; spelled this way both deploy
+    // in that environment, so both are refused, with the hint about spelling.
+    #[tokio::test]
+    async fn apply_refuses_an_environment_entry_that_matches_a_shared_one_only_by_expansion() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("shared"), "shared").unwrap();
+        std::fs::write(sources.join("work"), "work").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/work
+        target: "~/./.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 2));
+        assert!(!home.join(".x").exists(), "a colliding entry was deployed");
+        let warnings = warning_messages(&events);
+        let hinted = warnings
+            .iter()
+            .filter(|w| {
+                w.contains("dotfiles[0] and environments.test.dotfiles[0] both deploy to")
+                    && w.contains("write the target exactly as the shared entry does")
+            })
+            .count();
+        assert_eq!(hinted, 2, "got: {warnings:?}");
+    }
+}

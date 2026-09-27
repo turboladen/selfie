@@ -27,7 +27,10 @@ use crate::{
     },
 };
 
-use super::classify::{Classified, Purpose, RepoFile, RepoRead, classify_entry, read_repo_file};
+use super::classify::{
+    Classified, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome, classify_entry,
+    read_repo_file,
+};
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
 };
@@ -276,6 +279,9 @@ where
     // repository files still deploy. A dry run runs no command, so never adds one.
     let mut failed_programs: BTreeSet<String> = BTreeSet::new();
 
+    // Asked once, so every package compares targets against the same home.
+    let home = ResolvedHome::of(filesystem);
+
     'packages: for package in packages {
         // Refuse the whole package before asking what dotfiles it has, through
         // the one function that answers whether apply refuses a package at all.
@@ -298,7 +304,8 @@ where
             continue;
         }
 
-        let dotfiles = package.dotfiles_for_environment(config.environment());
+        let dotfiles = package.effective_dotfiles(Some(config.environment()));
+        let collisions = PackageCollisions::of(package, &home, config.environment());
 
         if dotfiles.is_empty() {
             // A named package with nothing for this environment would otherwise
@@ -336,7 +343,8 @@ where
             token,
         };
 
-        for entry in &dotfiles {
+        for scoped in &dotfiles {
+            let entry = scoped.entry;
             // Between entries: refuse to start another entry's commands once the
             // user has asked to stop. The *mid-command* case cannot be caught
             // here: a killed command fails, and `ApplyTally::refuse` reports the
@@ -352,8 +360,13 @@ where
             // Settled once for the entry, and tallied once below, so every way an
             // entry can end reports, counts and stops through one place.
             let outcome = 'entry: {
-                let classified = match classify_entry(filesystem, &base_dir, entry, Purpose::Deploy)
-                {
+                let classified = match classify_entry(
+                    filesystem,
+                    &base_dir,
+                    *scoped,
+                    &collisions,
+                    Purpose::Deploy,
+                ) {
                     Ok(classified) => classified,
                     Err(refused) => {
                         refused.send(sender).await;
