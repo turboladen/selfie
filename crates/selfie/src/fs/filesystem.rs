@@ -391,22 +391,6 @@ pub trait FileSystem: Send + Sync {
     /// reads must still handle the read's own error.
     fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
-    /// Whether a directory is at `path`.
-    ///
-    /// Symlinks are followed, so it reports on what the path resolves to. `false`
-    /// when nothing is there, so an absent target is not an error.
-    ///
-    /// Answered with a stat rather than a listing, and a directory never blocks the
-    /// way a fifo does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FileSystemError`] when the stat fails for any reason other than
-    /// the path not existing — a parent that cannot be traversed, most often. A
-    /// caller cannot treat that as "no directory": nothing is known about the
-    /// path, and a write there may still land on one.
-    fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
-
     /// Whether a file is readable only by its owner
     ///
     /// Companion to [`write_file_private`](FileSystem::write_file_private), for

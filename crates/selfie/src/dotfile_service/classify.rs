@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use crate::{
     dotfile_service::{deploy::resolve_source_path, resolve::read_template},
     fs::{
-        filesystem::{FileSystem, repository_read_refusal},
+        filesystem::{
+            AbsentReason, DirectoryState, FileSystem, FileSystemError, repository_read_refusal,
+        },
         target::{TargetPath, deploy_target, repository_path},
     },
     package::{ContentSource, DotfileEntry, event::EventSender},
@@ -19,8 +21,9 @@ use crate::{
 };
 
 use super::refusal::{
-    Link, TargetGuard, directory_target_refusal, guard_refusal, guard_target, link_at,
-    readable_target, refusal_warning, target_refusal, unreadable_target_refusal,
+    Link, TargetGuard, below_non_directory_refusal, directory_target_refusal, guard_refusal,
+    guard_target, link_at, readable_target, refusal_warning, target_refusal,
+    unreadable_target_refusal,
 };
 
 /// An entry refused before it was deployed or compared, with the warning that
@@ -259,8 +262,9 @@ pub(super) fn secret_target_link<F: FileSystem>(
 }
 
 /// Why selfie refuses a secret deploy to this target before running any command,
-/// when it does, worded for `purpose`: a directory at the target, a target that
-/// exists and will not open for reading, or one selfie could not classify.
+/// when it does, worded for `purpose`: a directory at the target, a component above
+/// it that is not a directory, a target that exists and will not open for reading,
+/// or one selfie could not classify.
 ///
 /// `source` is the target as the package file spells it, so the refusal names
 /// what the user wrote rather than the expanded path. Asked only of a target that
@@ -283,27 +287,35 @@ fn pre_command_refusal<F: FileSystem>(
     // says it did not.
     let (unwritten, unrun) = match purpose {
         Purpose::Deploy => (
-            ", so it will not write a credential there",
+            ", so selfie will not write a credential there",
             " No command was run.",
         ),
         Purpose::Check => ("", ""),
     };
-    match filesystem.is_directory(path) {
-        // The target is absent or is not a directory, so the only question left is
-        // whether it opens.
-        Ok(false) => filesystem.open_for_read_refusal(path).map(|error| {
+    // One question, so a directory that appears between two stats cannot be missed.
+    // Its absent reasons tell an empty path from one below a regular file or a
+    // dangling link, where nothing can be and no write can land.
+    match filesystem.directory_state(path.path()) {
+        DirectoryState::Directory | DirectoryState::Unlistable(_) => {
+            Some(format!("{}{unrun}", directory_target_refusal(source, path)))
+        }
+        DirectoryState::Absent(reason @ AbsentReason::ParentNotADirectory { .. }) => Some(format!(
+            "{}{unwritten}.{unrun}",
+            below_non_directory_refusal(source, path, &reason)
+        )),
+        DirectoryState::Absent(_) => filesystem.open_for_read_refusal(path).map(|error| {
             let refusal = unreadable_target_refusal(source, path, &error);
-            // The error ends its sentence without a period, so one goes before the
-            // next sentence.
+            // The error ends its sentence without a period, so one goes before
+            // the next sentence.
             if unrun.is_empty() {
                 refusal
             } else {
                 format!("{refusal}.{unrun}")
             }
         }),
-        Ok(true) => Some(format!("{}{unrun}", directory_target_refusal(source, path))),
-        Err(e) => Some(format!(
-            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.{unrun} The check failed with: {e}"
+        DirectoryState::Unknown(error) => Some(format!(
+            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.{unrun} The check failed with: {}",
+            FileSystemError::IoError(error)
         )),
     }
 }

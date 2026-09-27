@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::fs::{
-    filesystem::{FileSystem, FileSystemError, TargetRead},
+    filesystem::{AbsentReason, FileSystem, FileSystemError, TargetRead},
     target::{TargetPath, TargetRejection},
 };
 
@@ -214,6 +214,21 @@ pub(super) fn directory_at_target(target: &TargetPath) -> String {
 /// Why an entry whose target is a directory is refused.
 pub(super) fn directory_target_refusal(source: &str, target: &TargetPath) -> String {
     format!("Skipping '{source}': {}", directory_at_target(target))
+}
+
+/// Why an entry whose target lies below a component that is not a directory is
+/// refused, naming that component. The sentence ends without a period, so a
+/// caller can extend it.
+pub(super) fn below_non_directory_refusal(
+    source: &str,
+    target: &TargetPath,
+    reason: &AbsentReason,
+) -> String {
+    format!(
+        "Skipping '{source}': the target '{}' {}",
+        target.display(),
+        reason.clause()
+    )
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the

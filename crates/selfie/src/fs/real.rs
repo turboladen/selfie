@@ -495,18 +495,6 @@ impl FileSystem for RealFileSystem {
             .map(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
-    fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
-        // A following stat, like `irregular_target_refusal`'s, so it answers for what
-        // a write would land on rather than for a link in the way.
-        match fs::metadata(path.path()) {
-            Ok(metadata) => Ok(metadata.is_dir()),
-            // Nothing there is not an error: an absent target is the ordinary case
-            // for a first deploy, and a write creates it.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(FileSystemError::IoError(Arc::new(e))),
-        }
-    }
-
     // A non-following stat, like `symlink_refusal`'s: a link put at the target after
     // it was read must not lend the file that replaces it its destination's mode.
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {

@@ -615,13 +615,6 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.irregular_target_refusal(path)
     }
 
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.0.is_directory(path)
-    }
-
     fn is_owner_only(
         &self,
         path: &selfie::fs::TargetPath,
@@ -671,7 +664,7 @@ struct RecordsTargetReads {
     inner: RealFileSystem,
     reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
-    blind_to_directories: bool,
+    blind_to_directory_at: Option<PathBuf>,
     blind_to_open_refusals: bool,
     blind_to_symlinks: bool,
     symlinks_blind_for: Option<(
@@ -694,7 +687,7 @@ impl RecordsTargetReads {
             inner: RealFileSystem,
             reads: std::sync::Arc::default(),
             staged_read: None,
-            blind_to_directories: false,
+            blind_to_directory_at: None,
             blind_to_open_refusals: false,
             blind_to_symlinks: false,
             symlinks_blind_for: None,
@@ -765,10 +758,10 @@ impl RecordsTargetReads {
         self
     }
 
-    // `is_directory` answers `false` everywhere: a directory put in place after the
-    // secret path's pre-command check.
-    fn blind_to_directories(mut self) -> Self {
-        self.blind_to_directories = true;
+    // `directory_state` answers "nothing there" for `path`: a directory put in place
+    // after the secret path's pre-command check.
+    fn blind_to_directory_at(mut self, path: &std::path::Path) -> Self {
+        self.blind_to_directory_at = Some(path.to_path_buf());
         self
     }
 
@@ -798,6 +791,9 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
     }
 
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        if self.blind_to_directory_at.as_deref() == Some(path) {
+            return selfie::fs::DirectoryState::Absent(selfie::fs::AbsentReason::Empty);
+        }
         self.inner.directory_state(path)
     }
 
@@ -869,16 +865,6 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.irregular_target_refusal(path)
     }
 
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        if self.blind_to_directories {
-            return Ok(false);
-        }
-        self.inner.is_directory(path)
-    }
-
     fn is_owner_only(
         &self,
         path: &selfie::fs::TargetPath,
@@ -934,13 +920,6 @@ impl selfie::fs::FileSystem for HomeAt {
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
         self.0.open_for_read_refusal(path)
-    }
-
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.0.is_directory(path)
     }
 
     // Delegated: this decorator's subject is the home directory, not directory state.
@@ -1028,7 +1007,7 @@ impl selfie::fs::FileSystem for HomeAt {
 struct SymlinkAppearsAfterFirstLook {
     inner: RealFileSystem,
     looks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    dir_checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    plain_checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
@@ -1036,6 +1015,8 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         &self,
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
+        self.plain_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.open_for_read_refusal(path)
     }
 
@@ -1043,15 +1024,6 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
     // what is at a directory path.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
         self.inner.directory_state(path)
-    }
-
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.dir_checks
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.is_directory(path)
     }
 
     fn symlink_refusal(
@@ -1151,9 +1123,10 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         self.inner.open_for_read_refusal(path)
     }
 
-    // Delegated: this decorator's subject is the second symlink answer, not what is at
-    // a directory path.
+    // `directory_state` follows a link it finds, so asking it of the link is a
+    // following stat.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        assert_ne!(path, self.link, "a following stat reached through the link");
         self.inner.directory_state(path)
     }
 
@@ -1162,18 +1135,6 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
         self.inner.symlink_refusal(path)
-    }
-
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        assert_ne!(
-            path.path(),
-            self.link,
-            "a following stat reached through the link"
-        );
-        self.inner.is_directory(path)
     }
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
@@ -1287,13 +1248,6 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         })
     }
 
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.inner.is_directory(path)
-    }
-
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
     }
@@ -1379,13 +1333,6 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
         self.inner.open_for_read_refusal(path)
-    }
-
-    fn is_directory(
-        &self,
-        path: &selfie::fs::TargetPath,
-    ) -> Result<bool, selfie::fs::FileSystemError> {
-        self.inner.is_directory(path)
     }
 
     // Delegated: this decorator's subject is a failing write, not directory state.
@@ -4526,11 +4473,11 @@ mod secret_bearing {
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let looks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let dir_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plain_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fs = SymlinkAppearsAfterFirstLook {
             inner: RealFileSystem,
             looks: looks.clone(),
-            dir_checks: dir_checks.clone(),
+            plain_checks: plain_checks.clone(),
         };
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_fs(fs, runner);
@@ -4557,12 +4504,12 @@ mod secret_bearing {
             "the target must have been asked about twice, once before the resolve and \
              once before the read"
         );
-        // A witness that the first answer really was "plain": the directory question is
+        // A witness that the first answer really was "plain": the open-only probe is
         // asked only of a plain target, so a link seen on the first pass would never
         // reach it. Without this, a double that reported the link both times would
         // still satisfy the count above.
         assert!(
-            dir_checks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            plain_checks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "the first pass must have classified the target as plain"
         );
 
@@ -4895,6 +4842,80 @@ mod secret_bearing {
             warnings.iter().any(|w| w.starts_with("Skipping '")
                 && w.contains("could not determine what is at the target")),
             "got: {warnings:?}"
+        );
+    }
+
+    // selfie-ir68.36. A target below a regular file can hold nothing, so nothing
+    // runs for it, and the refusal names the file in the way rather than saying
+    // selfie could not tell what is there. Drift asks the same question and must
+    // name it too.
+    #[tokio::test]
+    async fn a_secret_target_below_a_regular_file_names_the_file_and_runs_nothing() {
+        let dirs = TestDirs::new();
+        let file = dirs.target_dir.join("afile");
+        std::fs::write(&file, "x").unwrap();
+        let target = file.join("config.toml");
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(calls, 0, "no command may run: {warnings:?}");
+        let names_the_file = |w: &String| {
+            w.starts_with("Skipping '")
+                && w.contains(&format!(
+                    "is below {}, which is not a directory",
+                    file.display()
+                ))
+                && !w.contains("could not determine")
+        };
+        assert!(
+            warnings
+                .iter()
+                .any(|w| names_the_file(w) && w.contains("No command was run")),
+            "got: {warnings:?}"
+        );
+
+        let drift = warning_messages(&collect_events(dirs.service().check_drift().await).await);
+        assert!(drift.iter().any(names_the_file), "drift: {drift:?}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x");
+    }
+
+    // A dangling link above the target holds the path as a regular file does: the
+    // stat of the target fails with `ENOENT`, as it would for an empty path, and
+    // only the link above tells the two apart. Nothing can be at the target, so
+    // nothing runs, and the refusal names the link.
+    #[tokio::test]
+    async fn a_secret_target_below_a_dangling_link_names_the_link_and_runs_nothing() {
+        let dirs = TestDirs::new();
+        let link = dirs.target_dir.join("gone");
+        std::os::unix::fs::symlink(dirs.target_dir.join("nowhere"), &link).unwrap();
+        let target = link.join("config.toml");
+
+        let (calls, warnings) = calls_for_target(&dirs, &target).await;
+
+        assert_eq!(calls, 0, "no command may run: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.starts_with("Skipping '")
+                && w.contains(&format!(
+                    "is below {}, which is not a directory",
+                    link.display()
+                ))
+                && w.contains("No command was run")),
+            "got: {warnings:?}"
+        );
+        assert!(
+            !dirs.target_dir.join("nowhere").exists(),
+            "nothing may be created behind the link"
+        );
+
+        // Drift refuses it too, since apply refuses it without running anything.
+        let drift = collect_events(dirs.service().check_drift().await).await;
+        assert_eq!(drift_summary(&drift).2, 1, "counted refused: {drift:?}");
+        assert!(
+            warning_messages(&drift).iter().any(|w| w.contains(&format!(
+                "is below {}, which is not a directory",
+                link.display()
+            ))),
+            "drift: {drift:?}"
         );
     }
 
@@ -7239,10 +7260,6 @@ mod symlinked_targets {
                 path: &selfie::fs::TargetPath,
             ) -> Option<selfie::fs::FileSystemError> {
                 self.0.open_for_read_refusal(path)
-            }
-
-            fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
-                self.0.is_directory(path)
             }
 
             // Delegated: this decorator blinds the symlink check only.
@@ -11201,9 +11218,12 @@ mod target_classification {
             ..Default::default()
         };
         let events = collect_events(
-            dirs.service_with_fs(RecordsTargetReads::new().blind_to_directories(), runner)
-                .apply_all(options)
-                .await,
+            dirs.service_with_fs(
+                RecordsTargetReads::new().blind_to_directory_at(&target),
+                runner,
+            )
+            .apply_all(options)
+            .await,
         )
         .await;
 

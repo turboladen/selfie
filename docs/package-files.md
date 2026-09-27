@@ -1095,10 +1095,10 @@ Consequences worth knowing before you adopt this:
   command. They are counted as not verifiable, apart from the entries drift compared, and are not
   refusals, so they do not make the check exit `1`. An entry `selfie apply` would refuse without
   running anything — a target it will not write to, a template escaping the package directory or
-  missing, unreadable or a fifo, a directory or a fifo at the target, a target it cannot read — is
-  reported by drift as that same refusal, worded for a check that writes and runs nothing, and does
-  make it exit `1`. A symlink at the target is reported as unverifiable whatever it points at: drift
-  does not follow it.
+  missing, unreadable or a fifo, a directory or a fifo at the target, a target it cannot read, a
+  target below a regular file or a dangling symlink — is reported by drift as that same refusal,
+  worded for a check that writes and runs nothing, and does make it exit `1`. A symlink at the
+  target is reported as unverifiable whatever it points at: drift does not follow it.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
@@ -1145,6 +1145,8 @@ deploy that would only be refused:
   refuses one either way.
 - A **directory at the target itself**, because a file cannot replace a directory. A directory
   _behind a link_ is not refused, since the replacement lands on the link.
+- A target below a regular file or a dangling symlink, where nothing can be. The warning names what
+  is in the way.
 - A target that exists and cannot be opened for reading. A rename could often still replace it, but
   selfie will not overwrite a credential it cannot see.
 - A plain target selfie cannot classify at all, such as one it has no permission to look at.
