@@ -245,18 +245,23 @@ Test egress at the **boundary**, not by listing known paths:
   undeployed. The replacement lands on the link, never on the destination, which is why a directory
   behind a link is no obstacle. What refuses before anything runs is what a write could never land
   on: a fifo, socket or device node, at the target or behind a link alike; a directory **at** the
-  target, since a file cannot replace one; and a plain target selfie could not classify, since that
-  is where the write goes. A link present at either check is never read through, not for a
-  comparison and not for the owner-only check, which does not follow either: a link put at the
+  target, since a file cannot replace one; a target below a regular file or a dangling link, where
+  nothing can be created; and a plain target selfie could not classify, since that is where the
+  write goes. An existing target selfie cannot read is refused there too, as a repository-file
+  entry's is: `FileSystem::open_for_read_refusal` opens it without reading a byte, never follows a
+  final link and never waits on a fifo, so no provider command runs, and no prompt appears, for a
+  target that would then be refused. The resolver never sees an unreadable target, so a conflict
+  reveal can never show one as empty. A link present at either check is never read through, not for
+  a comparison and not for the owner-only check, which does not follow either: a link put at the
   target after the read is replaced, never reported in sync on its destination's mode. Both
   questions are asked **twice**, once before the provider command and once immediately before the
-  read, because the first answers are stale by the time the target is read. The read itself is
-  `read_file_no_follow`, which opens with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's
-  type, so a link or fifo planted after the last check is refused by the read rather than followed
-  or waited on; a link it finds is replaced like one a check found. The checks stay: opening a
-  device node can have side effects, and they word the refusal. The warning naming the link and its
-  destination is sent **after** the write succeeds, worded as what happened, so it can never precede
-  a refusal or a failed write. ADR-0005 decision 3 records all of it. Track's refusal sits ahead of
-  every write it performs, so nothing is copied, written or recorded for a link: accepting one would
-  copy the link's destination into the dotfiles repository, where `sync push` commits it. Do not
-  relax that ordering.
+  read, because the first answers are stale by the time the target is read, and the read refuses a
+  target that became unreadable in between. The read itself is `read_file_no_follow`, which opens
+  with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
+  after the last check is refused by the read rather than followed or waited on; a link it finds is
+  replaced like one a check found. The checks stay: opening a device node can have side effects, and
+  they word the refusal. The warning naming the link and its destination is sent **after** the write
+  succeeds, worded as what happened, so it can never precede a refusal or a failed write. ADR-0005
+  decision 3 records all of it. Track's refusal sits ahead of every write it performs, so nothing is
+  copied, written or recorded for a link: accepting one would copy the link's destination into the
+  dotfiles repository, where `sync push` commits it. Do not relax that ordering.

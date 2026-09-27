@@ -71,7 +71,8 @@ Before every commit (unless instructed otherwise), run `just check` and fix any 
 `fmt`, `typos`, `clippy`, `build`, `test` and `docs-check`, in that order, stopping at the first
 failure. It leaves out `hack`, which tests selfie with and without its one feature and is the
 slowest step; CI runs it, and `just hack` runs it locally when a change touches a feature gate.
-`Justfile` is the source of truth for these gates — do not retype the commands.
+`Justfile` is the source of truth for these gates — do not retype the commands. Its `fmt` step
+rewrites files, so commit after it runs, then check `git status` for its output.
 
 It needs `typos` on `PATH` (`cargo install typos-cli`), and `just hack` needs `cargo-hack`; the
 recipes fail with that instruction when either is missing. Passing it means every CI job's command
@@ -85,6 +86,8 @@ differ; match CI's version rather than rewording the sentence.
 - **`/code-review` forks with the _session's_ cwd, not the worktree you are thinking about.** Put
   the checkout on the target branch first, or pass an explicit target; with `--fix` it edits
   whatever tree it landed in. It once reviewed an already-merged branch 42 commits behind `main`.
+- **A `/code-review` launched by a teammate reports to the lead's session, not the teammate.** The
+  lead relays the findings; a teammate waiting on its own notification waits forever.
 - **CI's toolchain runs ahead of local.** `main` can go red with no code change. Run
   `rustup update stable`, then check clippy against a pristine `git archive` of `origin/main` to
   tell a toolchain break from your own.
@@ -115,9 +118,10 @@ silently.
 
 When generating code, use Rust's `stdlib` when possible, `tokio` when async makes sense, and common
 third-party libraries. Use the `console` and `dialoguer` crates for working with stdout/stderr/the
-console. Use the `tracing` crate for logging. Use `clap` for CLI and argument parsing. Use `anyhow`
-and `thiserror` for error handling. Use `assert_cmd` and `mockall` for testing. Always use the
-latest versions of Rust and libraries.
+console. Use the `tracing` crate for logging. Use `clap` for CLI and argument parsing. Use `shlex`
+(`split`, `try_quote`) for shell words and quoting; do not hand-roll either. Use `anyhow` and
+`thiserror` for error handling. Use `assert_cmd` and `mockall` for testing. Always use the latest
+versions of Rust and libraries.
 
 Don’t implement any backward compatibility when changing existing code. Reuse existing code when
 possible. Keep the codebase DRY and lean toward following the KISS principle. Lean towards using
