@@ -359,20 +359,28 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
     })
 }
 
+/// What to tell the user when the package directory would not list.
+///
+/// Unlike the dotfiles directory, the package directory is always expected, so
+/// every state earns a warning.
+fn package_listing_warning(error: &PackageListError) -> String {
+    // The error's own sentence starts with the path, so it is not named twice.
+    format!(
+        "The package directory {error}, so its specs were not checked for an entry that already tracks this file"
+    )
+}
+
 /// Check if a file is already tracked by any package or standalone dotfile.
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
 /// entry whose target matches the given file path. Returns the name of the
 /// package that tracks it and the entry's own target, or `None`, paired with a
-/// warning for every spec it could not read and for a dotfiles directory it could
-/// not read or write a new entry into.
+/// warning for every spec it could not read, for a package directory it could not
+/// list, and for a dotfiles directory it could not read or write a new entry into.
 ///
 /// A caller that ignores the second list is treating "nothing selfie could read
 /// tracks this file" as "nothing tracks it", and a spec it could not read may
 /// already carry the entry.
-///
-/// The package directory is not among those warnings: it is read again immediately
-/// afterwards, and that read's failure ends the run with an error naming it.
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
@@ -390,25 +398,26 @@ fn find_existing_tracker(
         config.selfie_config().package_directory().to_path_buf(),
         SpecOrigin::PackageDirectory,
     );
-    // Each repository is carried with the directory it reads, so a run told one of
-    // them could not be listed knows which one to go and look at. The path is left
-    // to the error, which already carries it.
-    // Only the dotfiles directory earns a warning when it will not list. The package
-    // directory is read again immediately after this scan, and that read's failure ends
-    // the run with an error naming it, so a warning here would be a quieter duplicate.
-    let repos = [(&package_repo, false), (dotfiles_repo, true)];
+    // Each repository is carried with which directory it reads, so a run told one
+    // of them could not be listed knows which one to go and look at.
+    //
+    // The package directory warns too, although `handle_track` reads it again
+    // straight after this scan and ends the run if that fails: this function's
+    // answer has to be honest about what it did not check for any caller, not
+    // only for the one that happens to re-read the directory.
+    let repos = [(&package_repo, true), (dotfiles_repo, false)];
 
-    for (repo, warn_when_unlisted) in repos {
+    for (repo, is_package_directory) in repos {
         // A spec selfie could not read may already track this file, and so may
         // every spec in a directory it could not list, so both are reported.
         let output = match repo.list_packages() {
             Ok(output) => output,
             Err(error) => {
-                if warn_when_unlisted
-                    && let Some(warning) = dotfiles_absence_warning(config, &error)
-                {
-                    skipped.push(warning);
-                }
+                skipped.extend(if is_package_directory {
+                    Some(package_listing_warning(&error))
+                } else {
+                    dotfiles_absence_warning(config, &error)
+                });
                 continue;
             }
         };
@@ -535,6 +544,43 @@ mod tests {
 
         assert!(found.is_none());
         assert!(skipped.is_empty(), "got: {skipped:?}");
+    }
+
+    // The package directory is always expected, so one that will not list is a
+    // place the scan could not check, and the answer says so.
+    #[test]
+    fn find_existing_tracker_warns_about_a_package_directory_that_is_not_there() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let dotfiles_repo =
+            YamlPackageRepository::new(RealFileSystem, dotfiles, SpecOrigin::DotfilesDirectory);
+
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages.clone())
+                .build(),
+        );
+
+        let (found, skipped) =
+            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+
+        assert!(found.is_none());
+        assert_eq!(skipped.len(), 1, "got: {skipped:?}");
+        assert!(
+            skipped[0].starts_with("The package directory /"),
+            "got: {}",
+            skipped[0]
+        );
+        assert!(
+            skipped[0].matches(&packages.display().to_string()).count() == 1,
+            "the warning must name the directory once: {}",
+            skipped[0]
+        );
     }
 
     // A dotfiles directory that is not there holds no spec that could track the
