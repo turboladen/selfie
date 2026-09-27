@@ -1538,6 +1538,13 @@ environments on purpose: it deploys from the shared `dotfiles` list on every mac
 environment would have nothing to say about it. If you want a dotfile deployed without an install
 command, that is where it belongs.
 
+`selfie spec validate --all` checks those specs as well, with every rule except the two about
+environments, and `selfie spec validate <name>` finds one when the package directory has no spec by
+that name. It reads the two directories as `selfie apply` does. A dotfiles spec whose name a package
+spec also claims is not used, so it is reported with a warning and not validated. A name that
+several files in one directory claim fails the run and neither file is validated. A dotfiles
+directory that cannot be listed fails the run, since it may hold specs that were never checked.
+
 ## Common Patterns
 
 ### Package Managers

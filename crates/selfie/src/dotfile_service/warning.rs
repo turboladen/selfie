@@ -14,7 +14,7 @@ use crate::package::event::OperationFailure;
 /// Two kinds travel together because they are produced in one pass, and they are
 /// kept apart because they leave as different events: a skipped spec is reported
 /// whole so each adapter can render it, and everything else is already prose.
-pub(super) enum ApplyWarning {
+pub(crate) enum ApplyWarning {
     /// A package file that could not be parsed.
     SkippedSpec(crate::package::port::PackageParseError),
     /// A repository that exists and could not be listed, so the collection is
@@ -41,7 +41,7 @@ pub(super) enum ApplyWarning {
 /// A refusal counted before any package is looked at, because collecting the
 /// packages found it.
 #[derive(Clone)]
-pub(super) enum CollectionRefusal {
+pub(crate) enum CollectionRefusal {
     /// A dotfiles directory that exists and could not be listed, or whose path
     /// could not be classified. Its warning travels as an [`ApplyWarning`].
     UnreadableDotfilesDirectory,
@@ -57,7 +57,7 @@ pub(super) enum CollectionRefusal {
 impl CollectionRefusal {
     /// Send the warning naming this refusal, when no [`ApplyWarning`] already
     /// does.
-    pub(super) async fn send(&self, sender: &crate::package::event::EventSender) {
+    pub(crate) async fn send(&self, sender: &crate::package::event::EventSender) {
         match self {
             Self::UnreadableDotfilesDirectory | Self::UnloadableSpec(_) => {}
             Self::AmbiguousName { name, paths } => {
@@ -117,7 +117,7 @@ impl ApplyWarning {
     /// The two kinds leave differently on purpose: a skipped spec travels typed so
     /// each adapter renders it, and everything else is already a sentence. Written
     /// once here rather than at each drain, so three call sites cannot disagree.
-    pub(super) async fn send(self, sender: &crate::package::event::EventSender) {
+    pub(crate) async fn send(self, sender: &crate::package::event::EventSender) {
         match self {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error).await,
             Self::UnreadableRepository(e) => {

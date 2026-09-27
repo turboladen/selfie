@@ -47,6 +47,11 @@ fn service(temp: &TempDir, runner: FakeCommandRunner) -> impl PackageService {
 
     PackageServiceImpl::new(
         YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory),
+        YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        ),
         runner,
         GixGitStatusProvider,
         config,

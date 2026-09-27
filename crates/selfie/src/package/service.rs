@@ -222,6 +222,9 @@ pub trait PackageService: Send + Sync {
 pub struct PackageServiceImpl<R, CR, G> {
     /// Repository for loading and managing package definitions
     package_repository: R,
+    /// Repository for the standalone dotfile specs, which spec validation reads
+    /// alongside the package definitions
+    dotfiles_repository: R,
     /// Command runner for executing system commands
     command_runner: CR,
     /// Git status provider for annotating specs with git state
@@ -238,10 +241,15 @@ where
     CR: CommandRunner + Clone + 'static,
     G: GitStatusProvider + Clone + 'static,
 {
-    /// Create a package service over the given repository, command runner and git
-    /// status provider.
+    /// Create a package service over the package repository, the standalone
+    /// dotfiles repository, a command runner and a git status provider.
+    ///
+    /// The two repositories share a type, so pass them in this order: spec
+    /// validation reads the second as the standalone dotfile specs, which are
+    /// exempt from the rules about environments.
     pub fn new(
         package_repository: R,
+        dotfiles_repository: R,
         command_runner: CR,
         git_provider: G,
         config: SelfieConfig,
@@ -249,6 +257,7 @@ where
     ) -> Self {
         Self {
             package_repository,
+            dotfiles_repository,
             command_runner,
             git_provider,
             config,
@@ -366,6 +375,7 @@ where
         };
 
         let package_name_owned = package_name.to_string();
+        let dotfiles_repo = self.dotfiles_repository.clone();
         self.execute_operation_with_deps(
             OperationType::PackageValidate,
             package_name,
@@ -375,6 +385,7 @@ where
                 validate::handle_validate(
                     &package_name_owned,
                     &repo,
+                    &dotfiles_repo,
                     &config,
                     &sender,
                     &mut progress,
@@ -484,13 +495,21 @@ where
     }
 
     async fn validate_all(&self) -> EventStream {
+        let dotfiles_repo = self.dotfiles_repository.clone();
         self.execute_operation_with_deps(
             OperationType::SpecValidateAll,
             "",
             OperationContext::default(),
             2, // Load packages + validate each
             move |repo, _, config, sender, mut progress, _token| async move {
-                validate_all::handle_validate_all(&repo, &config, &sender, &mut progress).await
+                validate_all::handle_validate_all(
+                    &repo,
+                    &dotfiles_repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
             },
         )
     }

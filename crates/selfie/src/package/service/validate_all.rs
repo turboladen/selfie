@@ -4,7 +4,12 @@
 
 use crate::{
     config::SelfieConfig,
+    dotfile_service::{
+        collect::{Collected, collect_all_packages},
+        warning::CollectionRefusal,
+    },
     package::{
+        Package, SpecOrigin,
         event::{
             EventSender, OperationResult, OperationSuccess, ValidationResultData, ValidationStatus,
         },
@@ -15,6 +20,7 @@ use crate::{
 
 pub(super) async fn handle_validate_all<PR>(
     repo: &PR,
+    dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -25,26 +31,60 @@ where
     // Step 1: Load all packages
     progress.next(sender, "Loading specs").await;
 
-    let list_output = match repo.list_packages() {
-        Ok(output) => {
+    // The collection apply makes, so the standalone specs it deploys are
+    // validated too, and a file it would not use is reported for the reason it
+    // would not use it: a name several files claim, a dotfiles copy a package
+    // spec shadows, or a dotfiles directory it could not list.
+    let Collected {
+        packages,
+        warnings,
+        refusals,
+        unrefused_ambiguities,
+    } = match collect_all_packages(
+        repo,
+        dotfiles_repo,
+        config.dotfiles_directory_is_expected(),
+        config.environment(),
+    ) {
+        Ok(collected) => {
             sender.send_debug("Successfully loaded package list").await;
-            output
+            collected
         }
         Err(err) => {
             return OperationResult::Failure(err.into());
         }
     };
 
-    let valid_packages: Vec<_> = list_output
-        .valid_packages()
-        .filter(|p| p.environments().contains_key(config.environment()))
-        .collect();
-    let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
-
-    // Emit warnings for invalid (unparsable) package files
-    for invalid in &invalid_packages {
-        sender.send_spec_skipped((*invalid).clone()).await;
+    // Every unparsable file is reported, but only the ones apply could have used
+    // are errors: a dotfiles copy a package spec shadows is not one, as it is not
+    // one for apply. Collection refuses exactly those, one refusal per file.
+    for warning in warnings {
+        warning.send(sender).await;
     }
+
+    // Anything else collection refused is an error here: an ambiguous name is one
+    // install refuses too, and an unlistable dotfiles directory may hide specs
+    // this run never saw. An ambiguity collection let through, because no file of
+    // it deploys here, is still one install refuses.
+    let mut unparsable = 0;
+    let mut uncollected = 0;
+    let unrefused = unrefused_ambiguities
+        .into_iter()
+        .map(|(name, paths)| CollectionRefusal::AmbiguousName { name, paths });
+    for refusal in refusals.into_iter().chain(unrefused) {
+        if matches!(refusal, CollectionRefusal::UnloadableSpec(_)) {
+            unparsable += 1;
+        } else {
+            uncollected += 1;
+            refusal.send(sender).await;
+        }
+    }
+
+    let environment = config.environment();
+    let valid_packages: Vec<&Package> = packages
+        .iter()
+        .filter(|package| is_validated_here(package, environment))
+        .collect();
 
     // Step 2: Validate each package
     progress.next(sender, "Validating packages").await;
@@ -53,7 +93,14 @@ where
     let mut warning_count: usize = 0;
 
     for package in &valid_packages {
-        let issues = &super::validate::all_issues(package, repo, config.environment());
+        // A spec is read through the repository that loaded it, which is the one
+        // that reads the files it refers to.
+        let source = if package.origin() == SpecOrigin::DotfilesDirectory {
+            dotfiles_repo
+        } else {
+            repo
+        };
+        let issues = &super::validate::all_issues(package, source, environment);
         let validation_issues = super::validate::issue_payload(issues);
 
         let status = if issues.has_errors() {
@@ -68,7 +115,7 @@ where
 
         let validation_result = ValidationResultData {
             package_name: package.name().to_string(),
-            environment: config.environment().to_string(),
+            environment: environment.to_string(),
             status,
             issues: validation_issues,
         };
@@ -76,15 +123,16 @@ where
         sender.send_validation_result(validation_result).await;
     }
 
-    let total_errors = error_count + invalid_packages.len();
+    let total_errors = error_count + unparsable + uncollected;
 
     if total_errors > 0 {
         OperationResult::Failure(
             format!(
-                "Validation failed: {} package(s) with errors, {} with warnings, {} unparsable (completed {}/{} steps)",
+                "Validation failed: {} package(s) with errors, {} with warnings, {} unparsable, {} ambiguous or unlistable (completed {}/{} steps)",
                 error_count,
                 warning_count,
-                invalid_packages.len(),
+                unparsable,
+                uncollected,
                 progress.current_step(),
                 progress.total_steps()
             )
@@ -95,10 +143,22 @@ where
             valid_packages.len(),
             0,
             warning_count,
-            config.environment().to_string(),
+            environment.to_string(),
             (progress.current_step(), progress.total_steps()).into(),
         ))
     }
+}
+
+/// Whether `--all` validates `package` in `environment`.
+///
+/// A package spec declaring another environment only is left out, as it is from
+/// the run. One apply refuses here is validated whatever it declares, since the
+/// mapping that would leave it out is what cannot be trusted. A standalone
+/// dotfile spec declares no environment and deploys everywhere.
+fn is_validated_here(package: &Package, environment: &str) -> bool {
+    package.origin() == SpecOrigin::DotfilesDirectory
+        || package.is_refused(environment)
+        || package.environments().contains_key(environment)
 }
 
 #[cfg(test)]
@@ -120,6 +180,15 @@ mod tests {
             crate::package::event::OperationContext::default(),
         );
         (sender, rx)
+    }
+
+    // A dotfiles directory holding nothing, which no test here is about.
+    fn empty_dotfiles() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_resolved_directory().return_const(None);
+        repo.expect_list_packages()
+            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
+        repo
     }
 
     // A fixture value, never a real credential. High-entropy and not path-shaped:
@@ -162,7 +231,15 @@ mod tests {
         });
 
         let (sender, mut rx) = test_sender();
-        let _ = handle_validate_all(&repo, &config, &sender, &mut ProgressTracker::new(1)).await;
+        repo.expect_resolved_directory().return_const(None);
+        let _ = handle_validate_all(
+            &repo,
+            &empty_dotfiles(),
+            &config,
+            &sender,
+            &mut ProgressTracker::new(1),
+        )
+        .await;
         drop(sender);
 
         let mut skipped = 0;
@@ -212,7 +289,15 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        let result = handle_validate_all(&mock_repo, &config, &sender, &mut progress).await;
+        mock_repo.expect_resolved_directory().return_const(None);
+        let result = handle_validate_all(
+            &mock_repo,
+            &empty_dotfiles(),
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
 
         assert!(matches!(result, OperationResult::Success(_)));
 
@@ -263,7 +348,15 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        let result = handle_validate_all(&mock_repo, &config, &sender, &mut progress).await;
+        mock_repo.expect_resolved_directory().return_const(None);
+        let result = handle_validate_all(
+            &mock_repo,
+            &empty_dotfiles(),
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
         assert!(matches!(result, OperationResult::Success(_)));
 
         drop(sender);

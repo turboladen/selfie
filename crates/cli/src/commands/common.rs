@@ -372,6 +372,7 @@ pub(crate) fn create_package_service(
     let command_runner = create_command_runner(config);
     PackageServiceImpl::new(
         repo,
+        create_dotfiles_repository(config),
         command_runner,
         GixGitStatusProvider,
         config.selfie_config().clone(),

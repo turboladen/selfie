@@ -223,8 +223,16 @@ impl Package {
                 .get(environment)
                 .is_some_and(|env| !env.unknown_keys().is_empty())
             || matches!(self.top_level_keys(), TopLevelKeys::Unchecked(_))
-            || (self.origin() == SpecOrigin::PackageDirectory
-                && self.validate_environments_exists().is_err())
+            || (self.requires_environments() && self.validate_environments_exists().is_err())
+    }
+
+    /// Whether this spec must declare at least one environment: every spec does
+    /// except a standalone dotfile spec, which deploys on every machine.
+    pub(crate) fn requires_environments(&self) -> bool {
+        // Keyed away from the dotfiles directory, so a spec built in memory, such
+        // as one a caller is about to save as a package, is held to the rule
+        // apply will hold its file to.
+        self.origin() != SpecOrigin::DotfilesDirectory
     }
 
     // Last, so a file that is both missing an environment and carrying a bad key
@@ -238,7 +246,7 @@ impl Package {
     // in this workspace fails when it does -- the rule is keyed on the origin
     // for that reason and not as a convenience.
     fn no_environments(&self) -> Option<SpecRefusal> {
-        if self.origin() != SpecOrigin::PackageDirectory {
+        if !self.requires_environments() {
             return None;
         }
         self.validate_environments_exists()

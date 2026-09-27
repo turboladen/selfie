@@ -9,18 +9,18 @@ use crate::package::{Package, port::PackageRepository};
 use super::warning::{ApplyWarning, CollectionRefusal, NameCollision};
 
 /// What collecting the packages an operation covers found.
-pub(super) struct Collected {
-    pub(super) packages: Vec<Package>,
+pub(crate) struct Collected {
+    pub(crate) packages: Vec<Package>,
     /// What is worth saying, in the order it was found.
-    pub(super) warnings: Vec<ApplyWarning>,
+    pub(crate) warnings: Vec<ApplyWarning>,
     /// What collection refused, in the order it found them. Each is one refusal
     /// for an operation over every package.
-    pub(super) refusals: Vec<CollectionRefusal>,
+    pub(crate) refusals: Vec<CollectionRefusal>,
     /// Names several files in one directory claim that matter to no operation over
     /// every package, since none of them declares dotfiles here. Not refusals, but
     /// none of the files is used, so a run asking for one by name still fails as
     /// ambiguous, as install does. Each with its files, sorted.
-    pub(super) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
+    pub(crate) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
 }
 
 /// Collect packages from both the main package repository and the dotfiles
@@ -30,7 +30,7 @@ pub(super) struct Collected {
 /// Warnings are returned rather than emitted because collection happens before
 /// the event channel exists. Each caller sends them once its stream is up, and
 /// [`ApplyWarning`] is what tells it which event each one is.
-pub(super) fn collect_all_packages<R: PackageRepository>(
+pub(crate) fn collect_all_packages<R: PackageRepository>(
     package_repo: &R,
     dotfiles_repo: &R,
     dotfiles_directory_is_expected: bool,
