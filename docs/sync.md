@@ -74,7 +74,8 @@ selfie sync push --include-ungrouped  # Include non-package files
 
 - YAML files (`*.yml` / `*.yaml`) -> package name is the file stem (`starship.yml` -> `starship`)
 - Files in a subdirectory -> package name is the directory name (`starship/starship.toml` ->
-  `starship`)
+  `starship`), when a spec in the package directory, or in a dotfiles directory inside the
+  repository, has that name
 - Files that don't match either pattern are "ungrouped" and skipped unless `--include-ungrouped` is
   used
 
@@ -87,6 +88,13 @@ selfie sync push --include-ungrouped  # Include non-package files
 | Deleted YAML          | `chore(old-tool): remove package spec`      |
 | Dotfile source only   | `chore(starship): update dotfile`           |
 | Both YAML and dotfile | `chore(starship): update spec and dotfiles` |
+
+Before proposing commits, push validates every changed spec in the package directory and in the
+dotfiles directory, and refuses to push one with errors or warnings. The dotfiles directory counts
+only when it is inside the repository, since push carries nothing outside it. A spec there is
+checked as a standalone dotfile spec, which declares no environments, unless a package spec has its
+name: `selfie apply` does not use it then, so push neither checks it nor scans its name for
+collisions.
 
 When prompting, the generated message is the default — press Enter to accept or type a new message.
 
@@ -150,9 +158,10 @@ allowing AI assistants to provide meaningful messages without interactive prompt
 
 ## Two files claiming one package name
 
-`selfie sync push` refuses to push a package directory holding two specs that resolve to the same
-package name. A name is the filename without its extension, compared ignoring case, so all of these
-are one package:
+`selfie sync push` refuses to push a package directory, or a dotfiles directory inside the
+repository, holding two specs that resolve to the same package name, unless the package directory
+has a spec by that name, which the dotfiles copies do not replace. A name is the filename without
+its extension, compared ignoring case, so all of these are one package:
 
 - `Neovim.yml` and `neovim.yml` — the capitalization differs
 - `neovim.yml` and `neovim.yaml` — the extension differs
