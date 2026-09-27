@@ -118,3 +118,24 @@ fn deploying_to_a_new_target_announces_no_copy() {
         "no copy may be written for a target that did not exist"
     );
 }
+
+// A skipped entry is reported by where it would have gone. The target is the
+// file a user is asking about when they read apply's output; the source alone
+// sends them into the packages repository to work it out.
+#[test]
+fn a_skipped_dotfile_names_its_target() {
+    let (temp, _target) = one_dotfile("same", Some("same"));
+
+    let output = sandboxed_command(&temp)
+        .args(["apply", "--yes"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+
+    let skipped: Vec<&str> = stdout.lines().filter(|line| line.contains('⊘')).collect();
+    assert_eq!(skipped.len(), 1, "one entry, one skip line:\n{stdout}");
+    assert!(
+        skipped[0].contains("→ ~/target/config.toml skipped:"),
+        "the skip line must name the target:\n{stdout}"
+    );
+}

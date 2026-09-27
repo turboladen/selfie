@@ -383,10 +383,17 @@ impl EventProcessor {
                 }
             }
 
-            PackageEvent::DotfileSkipped { source, reason, .. } => {
+            PackageEvent::DotfileSkipped {
+                source,
+                target,
+                reason,
+                ..
+            } => {
                 let short_source = crate::display_manager::shorten_path(&source);
-                self.display
-                    .print_info(format!("  ⊘ {short_source} skipped: {reason}"));
+                let short_target = crate::display_manager::shorten_path(&target);
+                self.display.print_info(format!(
+                    "  ⊘ {short_source} → {short_target} skipped: {reason}"
+                ));
             }
 
             PackageEvent::DotfileConflict {
