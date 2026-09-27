@@ -234,8 +234,10 @@ impl Package {
             issues.push(issue);
         }
 
-        // Check environments
-        if let Err(issue) = self.validate_environments_exists() {
+        // The rule apply refuses on, so the two cannot disagree about a spec.
+        if self.requires_environments()
+            && let Err(issue) = self.validate_environments_exists()
+        {
             issues.push(issue);
         }
 
@@ -392,8 +394,12 @@ impl Package {
     pub(crate) fn validate_environments_contents(&self, current_env: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
-        // Check if current environment is configured
-        if !current_env.is_empty() && !self.environments.value.contains_key(current_env) {
+        // Check if current environment is configured, in a spec that must
+        // declare environments at all.
+        if !current_env.is_empty()
+            && self.requires_environments()
+            && !self.environments.value.contains_key(current_env)
+        {
             issues.push(ValidationIssue::warning(
                 ValidationErrorCategory::Environment,
                 "environments",
@@ -1635,6 +1641,24 @@ dotfiles:
 
         let issues = package.validate_urls();
         assert_eq!(issues.len(), 0);
+    }
+
+    // One rule decides whether a spec must declare an environment, and it holds
+    // for every spec except a standalone one. A package built in memory is held
+    // to it, so validation agrees with the refusal apply gives the saved file.
+    #[test]
+    fn a_package_built_in_memory_is_told_it_lacks_an_environment() {
+        let package = PackageBuilder::default().name("test-package").build();
+
+        assert!(package.spec_refusal("test-env").is_some());
+        assert!(
+            package
+                .validate_required_fields()
+                .iter()
+                .any(|issue| issue.field == "environments"),
+            "{:?}",
+            package.validate_required_fields()
+        );
     }
 
     #[test]

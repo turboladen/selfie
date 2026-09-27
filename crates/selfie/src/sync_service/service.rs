@@ -292,6 +292,7 @@ where
         validate_changed_packages(
             &repo_info.root,
             self.config.package_directory(),
+            &self.config.dotfiles_directory(),
             &all_changed,
             environment,
         )?;
@@ -313,13 +314,13 @@ where
             });
         }
 
-        // From the package directory, not the repo root. The repository loads
-        // specs from there, and the repo is discovered by walking up from it,
-        // so the two are the same directory only in the flat layout. Built from
-        // the root, this set is empty whenever specs live in a subdirectory,
-        // and every dotfile source is reported ungrouped instead of committed
-        // with its package.
-        let spec_names = spec_names_in(self.config.package_directory());
+        // From the spec directories, not the repo root. The repositories load
+        // specs from there, and the repo is discovered by walking up from the
+        // package directory, so the two are the same directory only in the flat
+        // layout. Built from the root, this set is empty whenever specs live in a
+        // subdirectory, and every dotfile source is reported ungrouped instead of
+        // committed with its package.
+        let spec_names = spec_names(&self.config, &repo_info.root);
         let (commits, warnings) = group_changes_by_package(all_changed, options, &spec_names);
 
         Ok(PrepareResult {
@@ -623,8 +624,8 @@ where
                         }
                     };
 
-                    // One read of the package directory for both consumers.
-                    let spec_names = spec_names_in(config.package_directory());
+                    // One read of the spec directories for both consumers.
+                    let spec_names = spec_names(&config, &repo_info.root);
 
                     let (packages_updated, packages_added, packages_removed) =
                         categorize_pull_changes(&changed_files, &spec_names);
@@ -746,9 +747,10 @@ fn name_collision_message(names: &[String]) -> String {
 /// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
 /// if any have errors.
 ///
-/// Only non-deleted specs in `package_dir` are validated — deleted files are
-/// obviously not parseable, and neither a dotfile source nor YAML belonging to
-/// some other tool has this schema to validate against.
+/// Only non-deleted specs in `package_dir` or `dotfiles_dir` are validated —
+/// deleted files are obviously not parseable, and neither a dotfile source nor
+/// YAML belonging to some other tool has this schema to validate against. A
+/// spec in `dotfiles_dir` is validated as a standalone dotfile spec.
 ///
 /// Informational notices are excluded. This is a gate on pushing, and an `Info`
 /// issue is by definition not a defect — a package with a provider-sourced
@@ -757,6 +759,7 @@ fn name_collision_message(names: &[String]) -> String {
 fn validate_changed_packages(
     repo_root: &Path,
     package_dir: &Path,
+    dotfiles_dir: &Path,
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
@@ -764,43 +767,61 @@ fn validate_changed_packages(
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
-    // Both spellings resolved before either is compared. The two arrive by
-    // different routes -- the git adapter canonicalizes the root it discovers,
-    // while a package directory named with `--package-directory` is stored
-    // exactly as typed -- so one symlinked path, or a `/tmp` that resolves to
-    // `/private/tmp`, makes the same directory compare unequal to itself. Every
-    // changed file then fails the test below, and the per-file gate, credential
-    // egress included, stops running with nothing said.
-    let resolve = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let repo_root = resolve(repo_root);
-    let package_dir = resolve(package_dir);
+    let SpecDirectories {
+        repo_root,
+        package_dir,
+        dotfiles_dir,
+    } = SpecDirectories::resolve(repo_root, package_dir, dotfiles_dir);
 
-    // A spec is a direct child of the package directory, which is where the
-    // repository loads them from and how deep it looks. Anything else ending in
-    // `.yml` belongs to someone else -- a CI workflow, a linter config, a
-    // Compose file -- and parsing one as a package refuses the push over fields
-    // it was never going to have.
-    let names_a_spec = |path: &Path| {
-        is_spec_file(path) && repo_root.join(path).parent() == Some(package_dir.as_path())
+    // A spec is a direct child of the package directory or the dotfiles
+    // directory, which is where the repositories load them from and how deep they
+    // look. Anything else ending in `.yml` belongs to someone else -- a CI
+    // workflow, a linter config, a Compose file -- and parsing one as a package
+    // refuses the push over fields it was never going to have. The package
+    // directory is asked first, so a directory configured as both holds package
+    // specs, as apply reads it. A dotfiles spec whose name a package spec claims
+    // is one apply does not use, so it is not checked, as validate skips it.
+    let package_spec_names = spec_names_in(&package_dir);
+    let spec_origin = |path: &Path| {
+        let full = repo_root.join(path);
+        let parent = full.parent()?;
+        if !is_spec_file(path) {
+            None
+        } else if parent == package_dir {
+            Some(crate::package::SpecOrigin::PackageDirectory)
+        } else if dotfiles_dir.as_deref() == Some(parent) {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(crate::package::spec_name_from_file_name)?;
+            (!package_spec_names.contains(&name))
+                .then_some(crate::package::SpecOrigin::DotfilesDirectory)
+        } else {
+            None
+        }
     };
 
-    // The package directory is scanned whether or not a spec in it changed. A
-    // collision is a property of the directory, not of any one file, so the
+    // The spec directories are scanned whether or not a spec in them changed. A
+    // collision is a property of a directory, not of any one file, so the
     // per-file loop below cannot see it: each colliding file is individually
     // valid, and a push carrying nothing but dotfile sources touches none of
-    // them at all.
-    //
-    // Only that directory. The repo root is a different one whenever the
-    // package directory sits inside a larger dotfiles repository, and scanning
-    // it would report two unrelated YAML files there as one package.
-    //
-    // Refusing the push is the only place the damage can still be prevented.
-    // The machine that loses a spec is the one that pulls, and by then the file
-    // is gone with nothing left to warn about.
-    for (_name, names) in colliding_specs(&package_dir) {
-        let relative = package_dir
-            .strip_prefix(&repo_root)
-            .unwrap_or(package_dir.as_path());
+    // them. Refusing the push is the only place the damage can still be
+    // prevented, since the machine that loses a spec is the one that pulls.
+    // Scanning the repo root instead would report two unrelated YAML files as one
+    // package. A dotfiles name the package directory claims is one apply does not
+    // use, so its files are not scanned, as they are not validated.
+    let dotfiles_collisions = dotfiles_dir.iter().flat_map(|dir| {
+        colliding_specs(dir)
+            .into_iter()
+            .filter(|(name, _)| !package_spec_names.contains(name))
+            .map(move |collision| (dir.as_path(), collision))
+    });
+    for (dir, (_name, names)) in colliding_specs(&package_dir)
+        .into_iter()
+        .map(|collision| (package_dir.as_path(), collision))
+        .chain(dotfiles_collisions)
+    {
+        let relative = dir.strip_prefix(&repo_root).unwrap_or(dir);
         failures.push(PackageValidationFailure {
             path: relative.join(&names[0]).display().to_string(),
             issues: vec![PackageValidationIssue {
@@ -814,9 +835,12 @@ fn validate_changed_packages(
     }
 
     for (path, kind) in changes {
-        if *kind == FileChangeKind::Deleted || !names_a_spec(path) {
+        if *kind == FileChangeKind::Deleted {
             continue;
         }
+        let Some(origin) = spec_origin(path) else {
+            continue;
+        };
 
         let abs_path = repo_root.join(path);
         let path_str = path.display().to_string();
@@ -862,13 +886,7 @@ fn validate_changed_packages(
                 continue;
             }
         };
-        // Every file reaching here is a direct child of the package directory --
-        // that is what `names_a_spec` above tests -- so these are package specs.
-        package.set_source(
-            abs_path,
-            content,
-            crate::package::SpecOrigin::PackageDirectory,
-        );
+        package.set_source(abs_path, content, origin);
 
         let result = package.validate(environment);
         let issues: Vec<PackageValidationIssue> = result
@@ -1166,11 +1184,59 @@ fn is_spec_file(path: &Path) -> bool {
         .is_some()
 }
 
-/// The folded names of every spec sitting directly in `spec_dir`.
+/// The folded names of every spec the repository at `repo_root` carries: the
+/// package specs and, when the dotfiles directory is inside it, the standalone
+/// dotfile specs.
 ///
-/// That is the package directory, not the repo root: the repository loads specs
-/// from there, and the repo is discovered by walking up from it. Callers pass
-/// the configured package directory.
+/// A standalone spec's sources sit in a directory named for it, as a package's
+/// do, so a change to one is grouped with its spec and announced on pull.
+fn spec_names(config: &SelfieConfig, repo_root: &Path) -> BTreeSet<String> {
+    let directories = SpecDirectories::resolve(
+        repo_root,
+        config.package_directory(),
+        &config.dotfiles_directory(),
+    );
+    let mut names = spec_names_in(&directories.package_dir);
+    if let Some(dotfiles_dir) = &directories.dotfiles_dir {
+        names.extend(spec_names_in(dotfiles_dir));
+    }
+    names
+}
+
+/// The directories a push carries specs from, resolved.
+struct SpecDirectories {
+    repo_root: PathBuf,
+    package_dir: PathBuf,
+    /// The dotfiles directory, when it is another directory inside the
+    /// repository. One outside it holds nothing a push carries, and one that is
+    /// the package directory holds package specs.
+    dotfiles_dir: Option<PathBuf>,
+}
+
+impl SpecDirectories {
+    fn resolve(repo_root: &Path, package_dir: &Path, dotfiles_dir: &Path) -> Self {
+        // Every path is resolved before any is compared. They arrive by different
+        // routes -- the git adapter canonicalizes the root it discovers, while a
+        // package directory named with `--package-directory` is stored exactly as
+        // typed -- so one symlinked path, or a `/tmp` that resolves to
+        // `/private/tmp`, makes the same directory compare unequal to itself, and
+        // the per-file gate, credential egress included, stops running.
+        let resolve =
+            |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let repo_root = resolve(repo_root);
+        let package_dir = resolve(package_dir);
+        let dotfiles_dir = Some(resolve(dotfiles_dir))
+            .filter(|dir| *dir != package_dir && dir.starts_with(&repo_root));
+        Self {
+            repo_root,
+            package_dir,
+            dotfiles_dir,
+        }
+    }
+}
+
+/// The folded names of every spec sitting directly in `spec_dir`, a directory a
+/// repository loads specs from rather than the repo root.
 ///
 /// Built once per operation. Grouping consults it for each changed file, so
 /// reading the directory inside that loop would cost one `read_dir` per change.
@@ -2724,6 +2790,7 @@ mod push_validation_tests {
         let result = validate_changed_packages(
             temp.path(),
             temp.path(),
+            std::path::Path::new("/nonexistent/dotfiles"),
             &[(relative, FileChangeKind::Modified)],
             "test",
         );
@@ -2748,6 +2815,7 @@ mod push_validation_tests {
         let result = validate_changed_packages(
             temp.path(),
             temp.path(),
+            std::path::Path::new("/nonexistent/dotfiles"),
             &[(relative, FileChangeKind::Modified)],
             "test",
         );
@@ -2775,6 +2843,7 @@ mod push_validation_tests {
         let result = validate_changed_packages(
             temp.path(),
             temp.path(),
+            std::path::Path::new("/nonexistent/dotfiles"),
             &[(relative, FileChangeKind::Modified)],
             "test",
         );
@@ -3383,7 +3452,13 @@ mod name_collision_tests {
             PathBuf::from("packages/myapp.yml"),
             FileChangeKind::Modified,
         )];
-        validate_changed_packages(root.path(), &packages, &changes, "test-env")
+        validate_changed_packages(
+            root.path(),
+            &packages,
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        )
     }
 
     // Push asks apply's question, so it cannot ship a file the receiving machine
@@ -3514,7 +3589,13 @@ mod name_collision_tests {
         )];
         // `packages`, not the root: that is where this fixture puts the specs,
         // and the scan looks where the repository loads them from.
-        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            &packages,
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -3608,8 +3689,13 @@ mod name_collision_tests {
             PathBuf::from("packages/neovim.yml"),
             FileChangeKind::Modified,
         )];
-        let result =
-            validate_changed_packages(&repo_root, &linked_root.join("packages"), &changes, "test");
+        let result = validate_changed_packages(
+            &repo_root,
+            &linked_root.join("packages"),
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test",
+        );
 
         let Err(error) = result else {
             panic!("a spec defining no environment must be refused however its directory is named");
@@ -3647,7 +3733,13 @@ mod name_collision_tests {
             PathBuf::from(".github/workflows/ci.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            &packages,
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         assert!(
             result.is_ok(),
@@ -3675,7 +3767,13 @@ mod name_collision_tests {
             PathBuf::from("packages/starship/config.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            &packages,
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         assert!(
             result.is_ok(),
@@ -3739,7 +3837,13 @@ mod name_collision_tests {
         );
 
         let changes = vec![(PathBuf::from("neovim.yml"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            root.path(),
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         let Err(error) = result else {
             panic!("a push carrying two extensions of one name must be refused");
@@ -3839,7 +3943,13 @@ mod name_collision_tests {
             PathBuf::from("starship/starship.toml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(root.path(), root.path(), &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            root.path(),
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         let Err(error) = result else {
             panic!("a push carrying a case collision must be refused");
@@ -3867,7 +3977,13 @@ mod name_collision_tests {
 
         std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
         let changes = vec![(PathBuf::from("README.md"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(root.path(), &packages, &changes, "test-env");
+        let result = validate_changed_packages(
+            root.path(),
+            &packages,
+            std::path::Path::new("/nonexistent/dotfiles"),
+            &changes,
+            "test-env",
+        );
 
         let Err(error) = result else {
             panic!("a push must be refused over a collision in the package directory");
@@ -3894,5 +4010,162 @@ mod name_collision_tests {
         assert!(is_spec_file(Path::new("neovim.yaml")));
         assert!(!is_spec_file(Path::new("neovim.toml")));
         assert!(!is_spec_file(Path::new("neovim")));
+    }
+}
+
+// Standalone dotfile specs live in the dotfiles directory, and a push carries
+// them as it carries package specs: they are validated as standalone specs, their
+// names group their sources, and two files claiming one name are refused.
+#[cfg(test)]
+mod standalone_specs {
+    use std::path::{Path, PathBuf};
+
+    use super::{FileChangeKind, spec_names, validate_changed_packages};
+
+    // A repository holding `packages/` and `dotfiles/`.
+    fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let dotfiles = root.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        (root, packages, dotfiles)
+    }
+
+    // As `dotfiles track` writes one: no environments.
+    const STANDALONE: &str = "name: gemrc\ndotfiles:\n  - source: gemrc/rc\n    target: ~/.gemrc\n";
+
+    fn push(root: &Path, packages: &Path, dotfiles: &Path, changed: &str) -> String {
+        let changes = vec![(PathBuf::from(changed), FileChangeKind::Modified)];
+        match validate_changed_packages(root, packages, dotfiles, &changes, "test") {
+            Ok(()) => String::new(),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    #[test]
+    fn a_clean_standalone_spec_passes() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
+
+        assert!(error.is_empty(), "{error}");
+    }
+
+    #[test]
+    fn a_broken_standalone_spec_fails_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(
+            dotfiles.join("gemrc.yml"),
+            format!("{STANDALONE}    extra: x\n"),
+        )
+        .unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
+
+        assert!(error.contains("dotfiles/gemrc.yml"), "{error}");
+        assert!(error.contains("extra"), "{error}");
+    }
+
+    // A directory configured as both holds package specs, as apply reads it, so a
+    // spec there declaring no environment fails as a package spec would.
+    #[test]
+    fn a_shared_directory_holds_package_specs() {
+        let (root, packages, _dotfiles) = repo();
+        std::fs::write(packages.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &packages, "packages/gemrc.yml");
+
+        assert!(error.contains("environment"), "{error}");
+    }
+
+    #[test]
+    fn two_files_claiming_one_standalone_name_fail_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yaml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "README.md");
+
+        assert!(error.contains("NameCollision"), "{error}");
+        assert!(error.contains("dotfiles/gemrc"), "{error}");
+    }
+
+    // Apply does not use a dotfiles name the package directory claims, so two
+    // dotfiles files claiming it do not stop the push either.
+    #[test]
+    fn two_files_claiming_a_name_the_package_directory_holds_do_not_fail_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(
+            packages.join("gemrc.yml"),
+            "name: gemrc\nenvironments:\n  test:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yaml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "README.md");
+
+        assert!(error.is_empty(), "{error}");
+    }
+
+    #[test]
+    fn spec_names_include_the_standalone_specs() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("bat.yml"), "name: bat\n").unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&packages)
+            .dotfiles_directory(dotfiles)
+            .build();
+
+        let names = spec_names(&config, root.path());
+
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            ["bat".to_string(), "gemrc".to_string()]
+        );
+    }
+
+    // A dotfiles directory outside the repository holds nothing a change in it
+    // could belong to, so its names group nothing.
+    #[test]
+    fn spec_names_leave_out_a_dotfiles_directory_outside_the_repository() {
+        let (root, packages, _dotfiles) = repo();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(packages.join("bat.yml"), "name: bat\n").unwrap();
+        std::fs::write(elsewhere.path().join("gemrc.yml"), STANDALONE).unwrap();
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&packages)
+            .dotfiles_directory(elsewhere.path().to_path_buf())
+            .build();
+
+        let names = spec_names(&config, root.path());
+
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["bat".to_string()]);
+    }
+
+    // Apply does not use a dotfiles spec whose name a package spec claims, so
+    // push does not check it either, as `spec validate --all` does not.
+    #[test]
+    fn a_standalone_spec_a_package_spec_shadows_is_not_checked() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(
+            packages.join("gemrc.yml"),
+            "name: gemrc\nenvironments:\n  test:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dotfiles.join("gemrc.yml"),
+            format!("{STANDALONE}    extra: x\n"),
+        )
+        .unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
+
+        assert!(error.is_empty(), "{error}");
     }
 }

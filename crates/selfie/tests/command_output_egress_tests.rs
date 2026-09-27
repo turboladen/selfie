@@ -59,6 +59,11 @@ fn failing_check_service(temp: &TempDir) -> impl PackageService {
 
     PackageServiceImpl::new(
         YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory),
+        YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        ),
         runner,
         GixGitStatusProvider,
         config,

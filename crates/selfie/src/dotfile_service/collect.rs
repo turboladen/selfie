@@ -9,30 +9,30 @@ use crate::package::{Package, port::PackageRepository};
 use super::warning::{ApplyWarning, CollectionRefusal, NameCollision};
 
 /// What collecting the packages an operation covers found.
-pub(super) struct Collected {
-    pub(super) packages: Vec<Package>,
+pub(crate) struct Collected {
+    pub(crate) packages: Vec<Package>,
     /// What is worth saying, in the order it was found.
-    pub(super) warnings: Vec<ApplyWarning>,
+    pub(crate) warnings: Vec<ApplyWarning>,
     /// What collection refused, in the order it found them. Each is one refusal
     /// for an operation over every package.
-    pub(super) refusals: Vec<CollectionRefusal>,
+    pub(crate) refusals: Vec<CollectionRefusal>,
     /// Names several files in one directory claim that matter to no operation over
     /// every package, since none of them declares dotfiles here. Not refusals, but
     /// none of the files is used, so a run asking for one by name still fails as
     /// ambiguous, as install does. Each with its files, sorted.
-    pub(super) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
+    pub(crate) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
 }
 
-/// Collect packages from both the main package repository and the optional
-/// dotfiles repository, returning a combined list, what is worth saying, and what
+/// Collect packages from both the main package repository and the dotfiles
+/// repository, returning a combined list, what is worth saying, and what
 /// was refused.
 ///
 /// Warnings are returned rather than emitted because collection happens before
 /// the event channel exists. Each caller sends them once its stream is up, and
 /// [`ApplyWarning`] is what tells it which event each one is.
-pub(super) fn collect_all_packages<R: PackageRepository>(
+pub(crate) fn collect_all_packages<R: PackageRepository>(
     package_repo: &R,
-    dotfiles_repo: Option<&R>,
+    dotfiles_repo: &R,
     dotfiles_directory_is_expected: bool,
     environment: &str,
 ) -> Result<Collected, crate::package::port::PackageListError> {
@@ -57,7 +57,7 @@ pub(super) fn collect_all_packages<R: PackageRepository>(
 /// name several files claim matters to a deploying caller.
 pub(super) fn collect_packages<R: PackageRepository>(
     package_repo: &R,
-    dotfiles_repo: Option<&R>,
+    dotfiles_repo: &R,
     collision: NameCollision,
     dotfiles_directory_is_expected: bool,
     environment: &str,
@@ -88,8 +88,13 @@ pub(super) fn collect_packages<R: PackageRepository>(
     let mut unparsable_in_dotfiles = Vec::new();
     let mut refusals = Vec::new();
 
-    if let Some(dotfiles) = dotfiles_repo {
-        match dotfiles.list_packages() {
+    // One directory configured as both settings is read once, through the
+    // package repository, so its files load as package specs. Reading it twice
+    // lists every entry twice and makes every name collide with itself.
+    let same_directory = same_directory(package_repo, dotfiles_repo);
+
+    if !same_directory {
+        match dotfiles_repo.list_packages() {
             Ok(output) => {
                 note_unparsable(&output, &mut warnings);
                 unparsable_in_dotfiles = unparsable_paths(&output);
@@ -228,6 +233,17 @@ pub(super) fn collect_packages<R: PackageRepository>(
     })
 }
 
+/// Whether `packages` and `dotfiles` read one directory.
+pub(super) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -> bool {
+    // The directories are compared as the file system resolves them, since a
+    // symlink or a different spelling names the same one. A directory that
+    // cannot be resolved matches nothing: it is not shown to be the other one.
+    matches!(
+        (packages.resolved_directory(), dotfiles.resolved_directory()),
+        (Some(packages), Some(dotfiles)) if packages == dotfiles
+    )
+}
+
 /// The spec files in `output` that failed to parse.
 fn unparsable_paths(output: &crate::package::port::ListPackagesOutput) -> Vec<PathBuf> {
     output
@@ -267,4 +283,72 @@ fn is_ambiguous(pkg: &Package, claims: &BTreeMap<String, Vec<PathBuf>>) -> bool 
     pkg.spec_name()
         .and_then(|name| claims.get(&name))
         .is_some_and(|paths| paths.len() > 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::package::{
+        PackageBuilder,
+        port::{ListPackagesOutput, MockPackageRepository},
+    };
+
+    // A repository holding one spec at `path`, resolving its directory to
+    // `resolved`.
+    fn repo_holding(path: &str, resolved: Option<&str>) -> MockPackageRepository {
+        let package = PackageBuilder::default()
+            .name("spec")
+            .environment("test", |b| b.install("true"))
+            .path(PathBuf::from(path))
+            .build();
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(package.clone())])));
+        repo.expect_resolved_directory()
+            .return_const(resolved.map(PathBuf::from));
+        repo
+    }
+
+    fn collected_paths(
+        packages: &MockPackageRepository,
+        dotfiles: &MockPackageRepository,
+    ) -> Vec<PathBuf> {
+        let collected =
+            collect_packages(packages, dotfiles, NameCollision::KeepBoth, false, "test").unwrap();
+        collected
+            .packages
+            .iter()
+            .map(|pkg| pkg.path().to_path_buf())
+            .collect()
+    }
+
+    #[test]
+    fn one_resolved_directory_is_read_once() {
+        let packages = repo_holding("/packages/spec.yml", Some("/real"));
+        let dotfiles = repo_holding("/dotfiles/spec.yml", Some("/real"));
+
+        assert_eq!(
+            collected_paths(&packages, &dotfiles),
+            [PathBuf::from("/packages/spec.yml")]
+        );
+    }
+
+    // Neither directory resolves, so neither is shown to be the other, and both
+    // are read. Treating two unknowns as equal would drop the dotfiles directory
+    // whenever resolution failed on both sides.
+    #[test]
+    fn two_unresolved_directories_are_both_read() {
+        let packages = repo_holding("/packages/spec.yml", None);
+        let dotfiles = repo_holding("/dotfiles/spec.yml", None);
+
+        assert_eq!(
+            collected_paths(&packages, &dotfiles),
+            [
+                PathBuf::from("/packages/spec.yml"),
+                PathBuf::from("/dotfiles/spec.yml")
+            ]
+        );
+    }
 }

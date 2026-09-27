@@ -80,6 +80,7 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
+    dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -90,7 +91,21 @@ where
     // Step 1: Fetch package
     progress.next(sender, "Loading package definition").await;
 
-    let package_blob = match repo.get_package(package_name) {
+    // A name the package directory does not hold may be a standalone dotfile
+    // spec, which apply deploys too. The package directory is asked first, and
+    // wins a name both hold, as it does for apply. The dotfiles directory's
+    // answer is given only when it found the spec, or a file by that name it
+    // could not use. Otherwise the package directory's is, since any other
+    // failure says nothing about a name the user may simply have mistyped.
+    let (found, source) = match repo.get_package(package_name) {
+        Err(err) if err.means_no_such_package() => match dotfiles_repo.get_package(package_name) {
+            Ok(found) => (Ok(found), dotfiles_repo),
+            Err(other) if other.names_an_unusable_spec() => (Err(other), dotfiles_repo),
+            Err(_) => (Err(err), repo),
+        },
+        from_packages => (from_packages, repo),
+    };
+    let package_blob = match found {
         Ok(pkg) => {
             sender
                 .send_debug(format!("Successfully loaded package: {package_name}"))
@@ -105,7 +120,7 @@ where
     // Step 2: Validate the package for the current environment
     progress.next(sender, "Validating package definition").await;
 
-    let issues = &all_issues(&package_blob.package, repo, config.environment());
+    let issues = &all_issues(&package_blob.package, source, config.environment());
 
     // Step 3: Process validation results
     progress.next(sender, "Processing validation results").await;

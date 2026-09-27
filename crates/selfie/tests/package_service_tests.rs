@@ -1111,6 +1111,10 @@ mod recommends_after_the_root_stops_loading {
     }
 
     impl PackageRepository for RootStopsLoading {
+        fn resolved_directory(&self) -> Option<PathBuf> {
+            self.inner.resolved_directory()
+        }
+
         fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
             if name == "root"
                 && self
@@ -1206,11 +1210,21 @@ mod recommends_after_the_root_stops_loading {
             ),
             runner: runner.clone(),
         };
+        let config = service_test_config_with_dir(&package_dir);
+        let dotfiles_repo = RootStopsLoading {
+            inner: YamlPackageRepository::new(
+                RealFileSystem,
+                config.dotfiles_directory(),
+                SpecOrigin::DotfilesDirectory,
+            ),
+            runner: runner.clone(),
+        };
         let service = PackageServiceImpl::new(
             repo,
+            dotfiles_repo,
             runner,
             GixGitStatusProvider,
-            service_test_config_with_dir(&package_dir),
+            config,
             CancellationToken::new(),
         );
 
@@ -1332,4 +1346,331 @@ async fn spec_info_counts_no_commands_for_a_spec_apply_refuses() {
     );
     assert!(info.dotfiles.is_empty());
     assert_eq!(info.apply_commands, 0);
+}
+
+// `spec validate --all` validates what apply collects: the package specs and the
+// standalone dotfile specs beside them, with apply's rules for which files it
+// would use.
+mod validate_all_covers_standalone_specs {
+    use std::path::Path;
+
+    use selfie::{config::SelfieConfigBuilder, package::event::ValidationStatus};
+    use test_common::create_test_service_with_config;
+
+    use super::*;
+
+    struct Dirs {
+        _temp: TempDir,
+        packages: std::path::PathBuf,
+        dotfiles: std::path::PathBuf,
+    }
+
+    fn dirs() -> Dirs {
+        let temp = TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        Dirs {
+            _temp: temp,
+            packages,
+            dotfiles,
+        }
+    }
+
+    impl Dirs {
+        fn service(&self) -> impl SpecService {
+            create_test_service_with_config(
+                SelfieConfigBuilder::default()
+                    .environment("test")
+                    .package_directory(&self.packages)
+                    .dotfiles_directory(self.dotfiles.clone())
+                    .build(),
+            )
+        }
+    }
+
+    // A spec as `dotfiles track` writes one: no environments, one entry, and its
+    // source beside it.
+    fn write_standalone(dir: &Path, name: &str, extra_entry_key: &str) {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+        std::fs::write(dir.join(name).join("rc"), "x").unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.yml")),
+            format!(
+                "name: {name}\ndotfiles:\n  - source: {name}/rc\n    target: ~/.{name}rc\n\
+                 {extra_entry_key}"
+            ),
+        )
+        .unwrap();
+    }
+
+    // A package spec whose name matches its file, so it carries no warning of
+    // its own.
+    fn write_package(dir: &Path, file: &str, extra: &str) {
+        let name = Path::new(file).file_stem().unwrap().to_str().unwrap();
+        std::fs::write(
+            dir.join(file),
+            format!("name: {name}\nenvironments:\n  test:\n    install: \"true\"\n{extra}"),
+        )
+        .unwrap();
+    }
+
+    fn results(events: &[PackageEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::ValidationResultCompleted {
+                    validation_result, ..
+                } => Some((
+                    validation_result.package_name.clone(),
+                    validation_result.status.to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn status_name(status: &ValidationStatus) -> String {
+        status.to_string()
+    }
+
+    #[tokio::test]
+    async fn a_clean_standalone_spec_is_valid() {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "gemrc", "");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(
+            results(&events),
+            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_standalone_spec_fails_the_run() {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "gemrc", "    extra: x\n");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_failed_operation(&events);
+        assert_eq!(
+            results(&events),
+            [(
+                "gemrc".to_string(),
+                status_name(&ValidationStatus::HasErrors)
+            )]
+        );
+    }
+
+    // The package spec wins the name, as it does for apply, so the dotfiles copy
+    // is warned about and its own defect is not reported.
+    #[tokio::test]
+    async fn a_standalone_spec_a_package_spec_shadows_is_warned_about_and_not_validated() {
+        let dirs = dirs();
+        write_package(&dirs.packages, "gemrc.yml", "");
+        write_standalone(&dirs.dotfiles, "gemrc", "    extra: x\n");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(
+            results(&events),
+            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
+        );
+        let warnings: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("'gemrc'") && m.contains("packages/")),
+            "{warnings:?}"
+        );
+    }
+
+    // Two files claiming one name are refused, as install refuses them, and
+    // neither is validated: which one a report describes would be a guess. The
+    // failure names the cause. Both files are install-only, so apply would let
+    // the ambiguity through, and a count that ignored it would pass the run.
+    #[tokio::test]
+    async fn an_ambiguous_name_fails_the_run_without_validating_either_file() {
+        let dirs = dirs();
+        write_package(&dirs.packages, "dup.yml", "");
+        write_package(&dirs.packages, "dup.yaml", "    audt: x\n");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_failed_operation(&events);
+        assert!(results(&events).is_empty(), "{:?}", results(&events));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::Warning { message, .. }
+                    if message.contains("'dup'") && message.contains("dup.yaml")
+            )),
+            "the failure must name the ambiguous files"
+        );
+    }
+
+    // A spec whose mapping cannot be trusted is validated whatever environments
+    // it appears to declare, since those are what the key may be hiding.
+    #[tokio::test]
+    async fn a_refused_spec_for_another_environment_is_still_validated() {
+        let dirs = dirs();
+        std::fs::write(
+            dirs.packages.join("elsewhere.yml"),
+            "name: elsewhere\nenvironments:\n  other:\n    install: \"true\"\n\
+             _environments:\n  test:\n    install: \"echo decoy\"\n",
+        )
+        .unwrap();
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_failed_operation(&events);
+        assert_eq!(
+            results(&events),
+            [(
+                "elsewhere".to_string(),
+                status_name(&ValidationStatus::HasErrors)
+            )]
+        );
+    }
+
+    // A dotfiles directory selfie cannot list may hold specs it never saw, so
+    // the run cannot say every spec is valid.
+    #[tokio::test]
+    async fn an_unlistable_dotfiles_directory_fails_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dirs = dirs();
+        write_package(&dirs.packages, "clean.yml", "");
+        std::fs::set_permissions(&dirs.dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root lists it anyway, and then there is nothing to test.
+        let listable = std::fs::read_dir(&dirs.dotfiles).is_ok();
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+        std::fs::set_permissions(&dirs.dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            return;
+        }
+
+        assert_failed_operation(&events);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::Warning { message, .. }
+                    if message.contains("standalone dotfiles")
+            )),
+            "the warning must say which directory could not be read"
+        );
+    }
+
+    // Apply ignores an unparsable dotfiles spec whose name a package spec
+    // claims, so the run reports it without failing over it.
+    #[tokio::test]
+    async fn an_unparsable_standalone_spec_a_package_spec_shadows_does_not_fail_the_run() {
+        let dirs = dirs();
+        write_package(&dirs.packages, "gemrc.yml", "");
+        std::fs::write(dirs.dotfiles.join("gemrc.yml"), "name: [unclosed\n").unwrap();
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PackageEvent::SpecSkipped { .. })),
+            "the file is still reported"
+        );
+    }
+
+    // A key in an environment this run does not use is no reason apply refuses
+    // the package here, so the run does not validate it, as it does not
+    // validate any package declaring only another environment.
+    #[tokio::test]
+    async fn a_spec_refused_only_in_another_environment_is_not_validated() {
+        let dirs = dirs();
+        std::fs::write(
+            dirs.packages.join("elsewhere.yml"),
+            "name: elsewhere\nenvironments:\n  other:\n    install: \"true\"\n    audt: x\n",
+        )
+        .unwrap();
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert!(results(&events).is_empty(), "{:?}", results(&events));
+    }
+
+    // A mistyped name is answered about the package directory, whatever is wrong
+    // with the dotfiles directory.
+    #[tokio::test]
+    async fn spec_validate_of_a_missing_name_names_the_package_directory() {
+        let dirs = dirs();
+        std::fs::remove_dir(&dirs.dotfiles).unwrap();
+        std::os::unix::fs::symlink(dirs.packages.join("gone"), &dirs.dotfiles).unwrap();
+
+        let events = collect_events(dirs.service().validate("typo", None).await).await;
+
+        assert_failed_operation(&events);
+        let Some(OperationResult::Failure(failure)) = get_operation_result(&events) else {
+            panic!("the run must fail");
+        };
+        let message = failure.to_string();
+        assert!(
+            message.contains("not found") && message.contains(&*dirs.packages.to_string_lossy()),
+            "{message}"
+        );
+    }
+
+    // A dotfiles directory selfie cannot list says nothing about a mistyped
+    // name, so the answer is still the package directory's.
+    #[tokio::test]
+    async fn spec_validate_of_a_missing_name_with_an_unreadable_dotfiles_directory_names_the_package_directory()
+     {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dirs = dirs();
+        std::fs::set_permissions(&dirs.dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads it anyway, and then there is nothing to test.
+        let listable = std::fs::read_dir(&dirs.dotfiles).is_ok();
+
+        let events = collect_events(dirs.service().validate("typo", None).await).await;
+        std::fs::set_permissions(&dirs.dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            return;
+        }
+
+        assert_failed_operation(&events);
+        let Some(OperationResult::Failure(failure)) = get_operation_result(&events) else {
+            panic!("the run must fail");
+        };
+        let message = failure.to_string();
+        assert!(
+            message.contains("not found") && message.contains(&*dirs.packages.to_string_lossy()),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_validate_finds_a_standalone_spec_by_name() {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "gemrc", "");
+
+        let events = collect_events(dirs.service().validate("gemrc", None).await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(
+            results(&events),
+            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
+        );
+    }
 }

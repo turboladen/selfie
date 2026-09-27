@@ -266,13 +266,13 @@ impl SelfieServer {
         // refusal here is unconditional.
         let dotfile_service = DotfileServiceImpl::new(
             repo,
+            dotfiles_repo,
             RealFileSystem,
             runner,
             config.clone(),
             CancellationToken::new(),
             SudoPolicy::new(RealPrivilege),
-        )
-        .with_dotfiles_repository(dotfiles_repo);
+        );
         let sync_service = SyncServiceImpl::new(
             GixGitAdapter,
             dotfile_service.clone(),
@@ -500,7 +500,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single spec file for correctness. Returns validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles."
+        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles."
     )]
     async fn spec_validate(
         &self,
@@ -523,7 +523,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim, or a dotfiles directory that cannot be listed, fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -889,7 +889,7 @@ fn namespace_refusal(
 
 /// Returns the standalone dotfiles repository for `config`'s
 /// `dotfiles_directory`. It is built whether or not the directory exists.
-fn dotfiles_repository(config: &SelfieConfig) -> YamlPackageRepository<RealFileSystem> {
+pub(crate) fn dotfiles_repository(config: &SelfieConfig) -> YamlPackageRepository<RealFileSystem> {
     YamlPackageRepository::new(
         RealFileSystem,
         config.dotfiles_directory(),
@@ -1012,6 +1012,7 @@ mod tests {
         );
         let service = PackageServiceImpl::new(
             repo,
+            dotfiles_repository(&config),
             ShellCommandRunner::login_shell(config.command_timeout()),
             GixGitStatusProvider,
             config.clone(),

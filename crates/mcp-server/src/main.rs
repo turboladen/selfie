@@ -78,6 +78,7 @@ async fn async_main() -> Result<()> {
     let runner = ShellCommandRunner::login_shell(config.command_timeout());
     let service = PackageServiceImpl::new(
         repo,
+        server::dotfiles_repository(&config),
         runner,
         GixGitStatusProvider,
         config.clone(),

@@ -33,7 +33,7 @@
 mod apply;
 mod backup;
 mod classify;
-mod collect;
+pub(crate) mod collect;
 pub mod deploy;
 mod deploy_entry;
 pub mod diff;
@@ -49,4 +49,4 @@ pub mod state;
 pub(crate) mod state_file;
 pub(crate) mod template;
 pub mod track;
-mod warning;
+pub(crate) mod warning;

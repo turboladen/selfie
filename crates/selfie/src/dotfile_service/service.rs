@@ -45,13 +45,12 @@ fn is_named(package: &Package, folded_name: &str) -> bool {
 /// Coordinates between the package repository, file system, and application
 /// configuration to deploy dotfiles and check for drift.
 ///
-/// Supports an optional second repository for standalone dotfiles (the `dotfiles/`
-/// directory). When present, both repositories are scanned during apply and drift
-/// operations.
+/// Reads a second repository for standalone dotfiles (the `dotfiles/` directory)
+/// alongside the package repository.
 #[derive(Debug, Clone)]
 pub struct DotfileServiceImpl<R, F, CR, P> {
     package_repository: R,
-    dotfiles_repository: Option<R>,
+    dotfiles_repository: R,
     filesystem: F,
     /// Runs the commands that produce secret-bearing dotfile content.
     runner: CR,
@@ -83,8 +82,16 @@ where
     /// inline would leave the MCP server — a second driving adapter that needs
     /// the same refusal — to repeat the rule, and would leave no way to test
     /// "running under sudo" short of running the suite as root.
+    ///
+    /// `dotfiles_repository`, which shares `package_repository`'s type and so
+    /// must follow it, reads the standalone dotfiles directory. `list`,
+    /// `apply`, `apply_all` and `check_drift` read it alongside the package
+    /// repository, and `track_standalone` writes a new spec into it. Pass it
+    /// whether or not its directory exists: each of those operations decides for
+    /// itself what a missing or unlistable directory means.
     pub fn new(
         package_repository: R,
+        dotfiles_repository: R,
         filesystem: F,
         runner: CR,
         config: SelfieConfig,
@@ -93,26 +100,13 @@ where
     ) -> Self {
         Self {
             package_repository,
-            dotfiles_repository: None,
+            dotfiles_repository,
             filesystem,
             runner,
             config,
             cancellation_token,
             sudo_policy,
         }
-    }
-
-    /// Add a standalone dotfiles repository for the `dotfiles/` directory.
-    ///
-    /// `list`, `apply`, `apply_all` and `check_drift` read it alongside the
-    /// main package repository. `track_standalone` writes a new spec into it
-    /// instead. Attach it whether or not its directory exists: each of those
-    /// operations decides for itself what a missing or unlistable directory
-    /// means.
-    #[must_use]
-    pub fn with_dotfiles_repository(mut self, repo: R) -> Self {
-        self.dotfiles_repository = Some(repo);
-        self
     }
 
     /// The refusal this run must report instead of writing anything, if any.
@@ -159,7 +153,7 @@ where
             Some(refusal) => Err(OperationFailure::Privilege(refusal)),
             None => collect_all_packages(
                 &self.package_repository,
-                self.dotfiles_repository.as_ref(),
+                &self.dotfiles_repository,
                 self.config.dotfiles_directory_is_expected(),
                 self.config.environment(),
             )
@@ -274,7 +268,7 @@ where
     async fn check_drift(&self) -> EventStream {
         let collected = collect_all_packages(
             &self.package_repository,
-            self.dotfiles_repository.as_ref(),
+            &self.dotfiles_repository,
             self.config.dotfiles_directory_is_expected(),
             self.config.environment(),
         );
@@ -335,7 +329,7 @@ where
         // instead of the one the user asked.
         let collected = collect_packages(
             &self.package_repository,
-            self.dotfiles_repository.as_ref(),
+            &self.dotfiles_repository,
             NameCollision::KeepBoth,
             self.config.dotfiles_directory_is_expected(),
             self.config.environment(),
@@ -426,6 +420,11 @@ where
 
     async fn track_standalone(&self, name: &str, target_path: &str) -> EventStream {
         let refusal = self.sudo_refusal();
+        // A directory configured as both is read as the package directory, so a
+        // standalone spec written there declares no environment and apply
+        // refuses it. The track is refused before anything is written.
+        let shared_directory =
+            super::collect::same_directory(&self.package_repository, &self.dotfiles_repository);
         let dotfiles_repo = self.dotfiles_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -444,11 +443,23 @@ where
 
             let result = match refusal {
                 Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
+                None if shared_directory => {
+                    OperationResult::Failure(OperationFailure::Generic(format!(
+                        "Cannot track a standalone dotfile: the dotfiles directory {} is the \
+                         package directory, so selfie reads a spec there as a package spec, and \
+                         `selfie apply` refuses one that declares no environment. Track the file \
+                         into a package with `selfie track` or `selfie package track-dotfile`, or \
+                         set `dotfiles_directory` to a directory of its own.",
+                        config.dotfiles_directory().display()
+                    )))
+                }
                 None => {
                     handle_track_standalone(
                         &name,
                         &target_path,
-                        dotfiles_repo.as_ref(),
+                        // Always `Some`: handle_track_standalone takes an
+                        // Option, and this service always holds a repository.
+                        Some(&dotfiles_repo),
                         &fs,
                         &sender,
                         &config,

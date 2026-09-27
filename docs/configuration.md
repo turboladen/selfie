@@ -168,13 +168,19 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
 
+You may point this at the same directory as `package_directory`, directly or through a symlink.
+selfie then reads that directory once, so no entry is listed twice and no name collides with itself.
+Every spec in it is read as a package spec, which must declare at least one environment: a spec
+written by `selfie dotfiles track`, which declares none, would be refused by `selfie apply` there,
+so `selfie dotfiles track` refuses to write one. Keep such specs in a directory of their own.
+
 If you **set** this and no directory is at the path, selfie says what is there instead and carries
 on without your standalone dotfiles — they are simply absent from `apply`, `dotfiles drift`,
-`dotfiles list` and `sync status`, in the CLI and the MCP server alike. Nothing at the path, a plain
-file, a symlink whose destination is gone, and a path running through a non-directory are all this
-case: none of them can hold a standalone dotfile, so nothing is missing from the run and it
-succeeds. Only the first of them is fixed by creating the directory, so only the first is offered
-`mkdir -p`.
+`dotfiles list`, `sync status` and `spec validate --all`, in the CLI and the MCP server alike.
+Nothing at the path, a plain file, a symlink whose destination is gone, and a path running through a
+non-directory are all this case: none of them can hold a standalone dotfile, so nothing is missing
+from the run and it succeeds. Only the first of them is fixed by creating the directory, so only the
+first is offered `mkdir -p`.
 
 If you do **not** set it and nothing at all is at the default sibling, selfie says nothing: that is
 the ordinary state of a setup with no standalone dotfiles. It stays quiet only for an empty path. A

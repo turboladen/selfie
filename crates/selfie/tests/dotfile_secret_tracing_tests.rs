@@ -125,8 +125,14 @@ async fn no_tracing_record_contains_a_resolved_secret() {
     let runner = FakeCommandRunner::new()
         .succeeding("op read x", SECRET.as_bytes())
         .succeeding("op read y", SECRET.as_bytes());
+    let dotfiles_repo = YamlPackageRepository::new(
+        RealFileSystem,
+        config.dotfiles_directory(),
+        SpecOrigin::DotfilesDirectory,
+    );
     let service = DotfileServiceImpl::new(
         repo,
+        dotfiles_repo,
         RealFileSystem,
         runner,
         config,
