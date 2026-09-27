@@ -709,6 +709,302 @@ mod a_spec_selfie_cannot_read {
         assert_refused_over_the_shadowing_key(&events);
     }
 
+    // The one refused entry a listing reported, after asserting there is exactly
+    // one: a listing that refused the clean spec as well would still hold this.
+    fn only_refusal(refused: &[selfie::package::event::RefusedSpec]) -> &str {
+        assert_eq!(
+            refused.len(),
+            1,
+            "exactly the shadowed spec is refused: {refused:?}"
+        );
+        assert_eq!(refused[0].package_name, "shadowed");
+        assert!(
+            refused[0].reason.contains("_environments"),
+            "the refusal must name the key it refused over, got: {}",
+            refused[0].reason
+        );
+        &refused[0].reason
+    }
+
+    // A listing is not refused for one spec in it. The shadowed spec leaves the
+    // list of packages and joins the refusals, with or without `--all`: without
+    // it is where the spec would otherwise vanish, since the filter reads the
+    // mapping the key shadows.
+    #[tokio::test]
+    async fn package_list_reports_it_as_refused() {
+        for show_all in [false, true] {
+            let temp_dir = TempDir::new().unwrap();
+            write_shadowed(&temp_dir, "shadowed");
+            create_test_package_file(&temp_dir, "clean", true);
+            let service = create_service_test_service(&temp_dir);
+
+            let events = collect_events(PackageService::list(&service, show_all).await).await;
+
+            assert_successful_operation(&events);
+            let data = events
+                .iter()
+                .find_map(|event| match event {
+                    PackageEvent::PackageListLoaded { package_list, .. } => Some(package_list),
+                    _ => None,
+                })
+                .expect("the listing must be sent");
+            only_refusal(&data.refused);
+            // The completion counts it too, since a consumer may read nothing else.
+            let Some(OperationResult::Success(success)) = get_operation_result(&events) else {
+                panic!("the listing must succeed");
+            };
+            let completion = success.to_string();
+            assert!(completion.contains("1 refused package(s)"), "{completion}");
+            let listed: Vec<&str> = data
+                .valid_packages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(listed, ["clean"], "show_all={show_all}");
+            // No item is sent for it either, so its check command never ran.
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    PackageEvent::PackageListItemCompleted { package_item, .. }
+                        if package_item.name == "shadowed"
+                )),
+                "show_all={show_all}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn spec_list_reports_it_as_refused() {
+        let temp_dir = TempDir::new().unwrap();
+        write_shadowed(&temp_dir, "shadowed");
+        create_test_package_file(&temp_dir, "clean", true);
+        let service = create_service_test_service(&temp_dir);
+
+        for show_all in [false, true] {
+            let events = collect_events(SpecService::list(&service, show_all).await).await;
+            assert_successful_operation(&events);
+            let data = spec_list_data(&events);
+            only_refusal(&data.refused);
+            let Some(OperationResult::Success(success)) = get_operation_result(&events) else {
+                panic!("the listing must succeed");
+            };
+            let completion = success.to_string();
+            assert!(completion.contains("1 refused spec(s)"), "{completion}");
+            assert!(data.specs.iter().all(|spec| spec.name != "shadowed"));
+        }
+    }
+
+    // A search lists a refused spec as it lists a clean one: only when it
+    // matches. Two refused specs, one matching, so a search ignoring its
+    // pattern for refused specs lists both.
+    #[tokio::test]
+    async fn spec_search_reports_it_as_refused_only_when_it_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        write_shadowed(&temp_dir, "shadowed");
+        write_shadowed(&temp_dir, "unrelated");
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.search("shad").await).await;
+        assert_successful_operation(&events);
+        only_refusal(&spec_list_data(&events).refused);
+
+        let events = collect_events(service.search("no-such-pattern").await).await;
+        assert_successful_operation(&events);
+        let data = spec_list_data(&events);
+        assert!(data.refused.is_empty(), "{:?}", data.refused);
+        assert!(data.specs.is_empty());
+
+        // The description comes from the file selfie refused, so a refused spec
+        // is not matched on it. Both fixtures carry this description.
+        let events = collect_events(service.search("service layer").await).await;
+        let data = spec_list_data(&events);
+        assert!(data.refused.is_empty(), "{:?}", data.refused);
+    }
+
+    fn spec_list_data(events: &[PackageEvent]) -> &selfie::package::event::SpecListData {
+        events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::SpecListLoaded { spec_list, .. } => Some(spec_list),
+                _ => None,
+            })
+            .expect("the listing must be sent")
+    }
+
+    // The rule follows the environments a listing shows. Without `--all` it is
+    // apply's question here: a key only in 'work' leaves the spec readable, and a
+    // spec declaring no environment is refused. With `--all`, or in a search,
+    // every environment is shown, so the key in 'work' refuses the spec, and
+    // declaring no environment is not a key selfie cannot trust.
+    fn write_mode_fixtures(dir: &TempDir) {
+        std::fs::write(
+            dir.path().join("partial.yml"),
+            "name: partial\nenvironments:\n  test:\n    install: \"true\"\n  work:\n    \
+             install: \"true\"\n    audt: x\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("noenv.yml"), "name: noenv\n").unwrap();
+    }
+
+    fn refused_names(refused: &[selfie::package::event::RefusedSpec]) -> Vec<&str> {
+        let mut names: Vec<&str> = refused.iter().map(|r| r.package_name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[tokio::test]
+    async fn listings_refuse_by_the_environments_they_show() {
+        let temp_dir = TempDir::new().unwrap();
+        write_mode_fixtures(&temp_dir);
+        let service = create_service_test_service(&temp_dir);
+
+        for (show_all, expected) in [(false, ["noenv"]), (true, ["partial"])] {
+            let events = collect_events(PackageService::list(&service, show_all).await).await;
+            let data = events
+                .iter()
+                .find_map(|event| match event {
+                    PackageEvent::PackageListLoaded { package_list, .. } => Some(package_list),
+                    _ => None,
+                })
+                .expect("the listing must be sent");
+            assert_eq!(
+                refused_names(&data.refused),
+                expected,
+                "package list, all={show_all}"
+            );
+
+            let events = collect_events(SpecService::list(&service, show_all).await).await;
+            let data = spec_list_data(&events);
+            assert_eq!(
+                refused_names(&data.refused),
+                expected,
+                "spec list, all={show_all}"
+            );
+        }
+
+        let events = collect_events(service.search("part").await).await;
+        assert_eq!(refused_names(&spec_list_data(&events).refused), ["partial"]);
+    }
+
+    #[tokio::test]
+    async fn status_refuses_it() {
+        let temp_dir = TempDir::new().unwrap();
+        write_shadowed(&temp_dir, "shadowed");
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.status("shadowed").await).await;
+
+        assert_failed_operation(&events);
+        assert_refused_over_the_shadowing_key(&events);
+    }
+
+    // The root is clean, so the dependency's status is the only place the
+    // refusal can show. A status reporting the dependency from its decoy mapping
+    // would read "not in current environment" or run the decoy's check.
+    #[tokio::test]
+    async fn status_reports_a_dependency_carrying_it_as_unknown() {
+        let temp_dir = TempDir::new().unwrap();
+        let _ = create_service_test_package_file_with_deps(&temp_dir, "root", &["shadowed"]);
+        write_shadowed(&temp_dir, "shadowed");
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.status("root").await).await;
+
+        assert_successful_operation(&events);
+        let statuses = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::EnvironmentStatusChecked {
+                    environment_status, ..
+                } => Some(&environment_status.dependency_statuses),
+                _ => None,
+            })
+            .expect("the root's status must be sent");
+        assert_eq!(statuses.len(), 1);
+        match &statuses[0].status {
+            selfie::package::event::EnvironmentStatus::Unknown(reason) => assert!(
+                reason.starts_with("is refused: ") && reason.contains("_environments"),
+                "the status must say it is refused and name the key, got: {reason}"
+            ),
+            other => panic!("the dependency must be unknown, got: {other:?}"),
+        }
+    }
+
+    // Spec info describes the file rather than refusing to, and says why the
+    // environments are missing. Exits 0: `spec validate` is the command whose
+    // job is to fail over a file.
+    #[tokio::test]
+    async fn spec_info_describes_it_with_the_reason() {
+        let temp_dir = TempDir::new().unwrap();
+        write_shadowed(&temp_dir, "shadowed");
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("shadowed").await).await;
+
+        assert_successful_operation(&events);
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        let reason = info
+            .refusal
+            .as_deref()
+            .expect("the refusal must be carried");
+        assert!(reason.contains("_environments"), "got: {reason}");
+        assert!(info.environments.is_empty(), "{:?}", info.environments);
+        assert!(info.dotfiles.is_empty());
+        assert_eq!(info.apply_commands, 0);
+    }
+
+    // The same rule as every other command: a key in an environment this run
+    // does not use leaves the spec readable here. Spec info shows it in full and
+    // says, separately, that apply would refuse it in that environment.
+    #[tokio::test]
+    async fn spec_info_shows_a_spec_refused_only_elsewhere_and_names_why() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("partial.yml"),
+            "name: partial\nenvironments:\n  test:\n    install: \"true\"\n    dotfiles:\n      \
+             - source: t.conf\n        target: ~/.t\n  work:\n    install: \"true\"\n    \
+             audt: x\n    dotfiles:\n      - source: w.conf\n        target: ~/.w\n",
+        )
+        .unwrap();
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("partial").await).await;
+
+        assert_successful_operation(&events);
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert!(info.refusal.is_none(), "{:?}", info.refusal);
+        let mut environments = info.environments.clone();
+        environments.sort();
+        assert_eq!(environments, ["test", "work"]);
+        let elsewhere = info
+            .refusal_elsewhere
+            .as_deref()
+            .expect("the other environment's refusal must be carried");
+        assert!(
+            elsewhere.contains("work") && elsewhere.contains("audt"),
+            "{elsewhere}"
+        );
+        // Each entry says whether apply would deploy it where it is declared.
+        let refused: Vec<(Option<&str>, bool)> = info
+            .dotfiles
+            .iter()
+            .map(|d| (d.environment.as_deref(), d.refused))
+            .collect();
+        assert_eq!(refused, [(Some("test"), false), (Some("work"), true)]);
+    }
+
     // The controls. A guard that refuses everything passes every test above and
     // is worse than no guard at all, so the same spec without the key has to
     // reach each of the three commands.
@@ -733,6 +1029,36 @@ mod a_spec_selfie_cannot_read {
         let events = collect_events(service.check("clean").await).await;
 
         assert_successful_operation(&events);
+    }
+
+    #[tokio::test]
+    async fn the_same_spec_without_the_key_still_reports_status() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_package_file(&temp_dir, "clean", true);
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.status("clean").await).await;
+
+        assert_successful_operation(&events);
+    }
+
+    #[tokio::test]
+    async fn the_same_spec_without_the_key_still_has_its_environments_in_spec_info() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_package_file(&temp_dir, "clean", true);
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("clean").await).await;
+
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert!(info.refusal.is_none());
+        assert!(!info.environments.is_empty());
     }
 
     #[tokio::test]
@@ -906,4 +1232,104 @@ mod recommends_after_the_root_stops_loading {
             "a dependency's recommend was installed; events: {events:?}"
         );
     }
+}
+
+// `spec info` reports where each dotfile's content comes from, and how many
+// commands apply would run here to produce it. The fixture varies the count
+// along each axis a wrong count could take: a template with two vars (counted
+// once, it reads 1), a shared command overridden here by a plain file (counted
+// from the shared list, it adds 1), and a command in another environment
+// (counted across environments, it adds 1).
+#[tokio::test]
+async fn spec_info_reports_dotfile_sources_and_the_commands_apply_runs() {
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::write(
+        temp_dir.path().join("sourced.yml"),
+        r#"name: sourced
+dotfiles:
+  - source: a.tpl
+    target: ~/.a
+    vars:
+      x: echo x
+      y: echo y
+  - command: echo shared
+    target: ~/.b
+environments:
+  test:
+    install: "true"
+    dotfiles:
+      - source: b.conf
+        target: ~/.b
+  other:
+    install: "true"
+    dotfiles:
+      - command: echo other
+        target: ~/.c
+"#,
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.spec_info("sourced").await).await;
+
+    assert_successful_operation(&events);
+    let info = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+            _ => None,
+        })
+        .expect("the info must be sent");
+    assert_eq!(
+        info.apply_commands, 2,
+        "two vars, and nothing else runs here"
+    );
+    let rows: Vec<(Option<&str>, &str)> = info
+        .dotfiles
+        .iter()
+        .map(|d| (d.environment.as_deref(), d.entry.target()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (None, "~/.a"),
+            (None, "~/.b"),
+            (Some("other"), "~/.c"),
+            (Some("test"), "~/.b"),
+        ],
+        "every entry in every scope is reported"
+    );
+}
+
+// A package spec declaring no environment is refused by apply, so apply runs
+// none of its commands however many its entries name, and spec info says why
+// in place of the entries.
+#[tokio::test]
+async fn spec_info_counts_no_commands_for_a_spec_apply_refuses() {
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::write(
+        temp_dir.path().join("unscoped.yml"),
+        "name: unscoped\ndotfiles:\n  - command: echo shared\n    target: ~/.b\n",
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.spec_info("unscoped").await).await;
+
+    let info = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+            _ => None,
+        })
+        .expect("the info must be sent");
+    assert!(
+        info.refusal
+            .as_deref()
+            .is_some_and(|reason| reason.contains("environment")),
+        "{:?}",
+        info.refusal
+    );
+    assert!(info.dotfiles.is_empty());
+    assert_eq!(info.apply_commands, 0);
 }

@@ -112,17 +112,16 @@ pub(crate) fn origin_label(origin: SpecOrigin) -> &'static str {
     }
 }
 
-/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+/// Render one dotfile entry as JSON, with where its content comes from.
 ///
 /// Reports where content comes from without producing any of it: var names and
 /// the command string come from the package file and are references, not values.
-/// Nothing here runs a command or renders a template, so enumeration cannot leak
-/// a secret or trigger an authentication prompt.
+/// Nothing here runs a command or renders a template, so rendering an entry cannot
+/// leak a secret or trigger an authentication prompt.
 pub(crate) fn dotfile_entry_json(
     package: &str,
     scope: Option<&str>,
     entry: &selfie::package::DotfileEntry,
-    origin: &str,
 ) -> serde_json::Value {
     use selfie::package::ContentSource;
 
@@ -130,7 +129,6 @@ pub(crate) fn dotfile_entry_json(
         "package": package,
         "environment": scope,
         "target": entry.target(),
-        "origin": origin,
     });
     let map = value.as_object_mut().expect("constructed as an object");
 
@@ -161,6 +159,23 @@ pub(crate) fn dotfile_entry_json(
     }
 
     value
+}
+
+/// Specs selfie parsed and will not read, as fields.
+// Shared by every listing that reports them. A refused spec is not a spec with
+// nothing in it, and a caller reading a total cannot tell the two apart unless
+// the refusals are their own field.
+fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
+    refused
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "package": &r.package_name,
+                "path": &r.path,
+                "reason": &r.reason,
+            })
+        })
+        .collect()
 }
 
 /// One parse failure as fields, shared by every surface that reports one.
@@ -208,15 +223,34 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "status": format!("{}", audit_result.result),
             "details": audit_details(&audit_result.result),
         })),
-        PackageEvent::PackageInfoLoaded { package_info, .. } => Some(serde_json::json!({
-            "type": "package_info",
-            "name": &package_info.name,
-            "description": &package_info.description,
-            "homepage": &package_info.homepage,
-            "environments": &package_info.environments,
-            "current_environment": &package_info.current_environment,
-            "git_status": git_status_label(package_info.git_status.as_ref()),
-        })),
+        PackageEvent::PackageInfoLoaded { package_info, .. } => {
+            let dotfiles: Vec<Value> = package_info
+                .dotfiles
+                .iter()
+                .map(|dotfile| {
+                    let mut row = dotfile_entry_json(
+                        &package_info.name,
+                        dotfile.environment.as_deref(),
+                        &dotfile.entry,
+                    );
+                    row["refused"] = dotfile.refused.into();
+                    row
+                })
+                .collect();
+            Some(serde_json::json!({
+                "type": "package_info",
+                "name": &package_info.name,
+                "description": &package_info.description,
+                "homepage": &package_info.homepage,
+                "environments": &package_info.environments,
+                "current_environment": &package_info.current_environment,
+                "git_status": git_status_label(package_info.git_status.as_ref()),
+                "refusal": &package_info.refusal,
+                "refusal_elsewhere": &package_info.refusal_elsewhere,
+                "dotfiles": dotfiles,
+                "apply_commands": package_info.apply_commands,
+            }))
+        }
         PackageEvent::EnvironmentStatusChecked {
             environment_status, ..
         } => {
@@ -301,6 +335,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &spec_list.package_directory,
                 "total_specs": spec_list.specs.len(),
                 "invalid_packages": invalid,
+                "refused": refused_json(&spec_list.refused),
             }))
         }
         PackageEvent::DotfileListLoaded { dotfile_list, .. } => {
@@ -315,7 +350,9 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                     pkg.dotfiles_with_scope()
                         .into_iter()
                         .map(move |(scope, entry)| {
-                            dotfile_entry_json(pkg.name(), scope, entry, origin)
+                            let mut row = dotfile_entry_json(pkg.name(), scope, entry);
+                            row["origin"] = origin.into();
+                            row
                         })
                 })
                 .collect();
@@ -323,17 +360,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             // A refused package is not a package with no dotfiles, and an
             // assistant reading `total` cannot tell those apart unless the
             // refusals are their own field.
-            let refused: Vec<Value> = dotfile_list
-                .refused
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "package": &r.package_name,
-                        "path": &r.path,
-                        "reason": &r.reason,
-                    })
-                })
-                .collect();
+            let refused = refused_json(&dotfile_list.refused);
 
             Some(serde_json::json!({
                 "type": "dotfile_list",
@@ -356,6 +383,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &package_list.package_directory,
                 "total_packages": package_list.valid_packages.len(),
                 "invalid_packages": invalid,
+                "refused": refused_json(&package_list.refused),
             }))
         }
         PackageEvent::RecommendStarted { recommend_name, .. } => Some(serde_json::json!({
@@ -1072,6 +1100,7 @@ mod tests {
             spec_list: selfie::package::event::SpecListData {
                 specs: vec![],
                 invalid_packages: vec![error],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/packages".to_string(),
                 environment_stats: std::collections::HashMap::new(),
@@ -1106,6 +1135,7 @@ mod tests {
             package_list: selfie::package::event::PackageListData {
                 valid_packages: vec![],
                 invalid_packages: vec![error],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/packages".to_string(),
                 environment_stats: std::collections::HashMap::new(),
@@ -1123,6 +1153,83 @@ mod tests {
         assert_eq!(row["reason"], "unclosed bracket '{'");
         assert_eq!(row["line"], 2);
         assert_eq!(row["column"], 15);
+    }
+
+    // A refused spec is its own field, apart from the packages it is not counted
+    // among, so a caller reading the total is not told the directory holds less
+    // than it does.
+    #[tokio::test]
+    async fn a_package_list_summary_reports_a_refused_spec_outside_the_total() {
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageListLoaded {
+            operation_info: test_op_info(),
+            package_list: selfie::package::event::PackageListData {
+                valid_packages: vec![],
+                invalid_packages: vec![],
+                refused: vec![selfie::package::event::RefusedSpec {
+                    package_name: "shadowed".to_string(),
+                    path: "/packages/shadowed.yml".to_string(),
+                    reason: "'_environments' is refused".to_string(),
+                }],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let summary = &result.data["data"][0];
+        assert_eq!(summary["total_packages"], 0);
+        let row = &summary["refused"][0];
+        assert_eq!(row["package"], "shadowed");
+        assert_eq!(row["path"], "/packages/shadowed.yml");
+        assert_eq!(row["reason"], "'_environments' is refused");
+    }
+
+    // Each entry is rendered by the listing's own function, so a template names
+    // its vars and a command names itself, and the count travels as a number.
+    #[tokio::test]
+    async fn package_info_reports_each_dotfile_source_and_the_apply_command_count() {
+        let entry = |yaml: &str| -> selfie::package::DotfileEntry {
+            selfie::yaml::parse(yaml).expect("fixture must parse")
+        };
+        let info = selfie::package::event::PackageInfoData {
+            name: "sourced".to_string(),
+            description: None,
+            homepage: None,
+            environments: vec!["test".to_string()],
+            current_environment: "test".to_string(),
+            git_status: None,
+            refusal: None,
+            refusal_elsewhere: None,
+            dotfiles: vec![
+                selfie::package::event::ScopedDotfile {
+                    environment: None,
+                    entry: entry("source: a.tpl\ntarget: ~/.a\nvars:\n  x: echo x\n"),
+                    refused: false,
+                },
+                selfie::package::event::ScopedDotfile {
+                    environment: Some("test".to_string()),
+                    entry: entry("command: echo b\ntarget: ~/.b\n"),
+                    refused: true,
+                },
+            ],
+            apply_commands: 2,
+        };
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageInfoLoaded {
+            operation_info: test_op_info(),
+            package_info: info,
+        }]));
+        let result = collect_events(stream).await;
+
+        let data = &result.data["data"][0];
+        assert_eq!(data["apply_commands"], 2);
+        assert_eq!(data["dotfiles"][0]["kind"], "template");
+        assert_eq!(data["dotfiles"][0]["vars"][0], "x");
+        assert_eq!(data["dotfiles"][1]["kind"], "command");
+        assert_eq!(data["dotfiles"][1]["command"], "echo b");
+        assert_eq!(data["dotfiles"][1]["environment"], "test");
+        assert_eq!(data["dotfiles"][0]["refused"], false);
+        assert_eq!(data["dotfiles"][1]["refused"], true);
     }
 
     // A kind with no location says so, rather than inventing one.
@@ -1330,6 +1437,7 @@ mod tests {
                 spec_list: selfie::package::event::SpecListData {
                     specs: vec![],
                     invalid_packages: vec![],
+                    refused: vec![],
                     current_environment: "macos".to_string(),
                     package_directory: "/tmp/packages".to_string(),
                     environment_stats: Default::default(),
@@ -1340,6 +1448,7 @@ mod tests {
                 operation_info: test_op_info(),
                 result: OperationResult::Success(OperationSuccess::spec_list_generated(
                     1,
+                    0,
                     0,
                     "macos".to_string(),
                     StepCount::new(2, 2),

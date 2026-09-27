@@ -12,7 +12,10 @@ use crate::{
     commands::runner::CommandRunner,
     config::SelfieConfig,
     package::{
-        event::{EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem},
+        event::{
+            EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem,
+            RefusedSpec,
+        },
         port::PackageRepository,
         service::ProgressTracker,
     },
@@ -57,6 +60,19 @@ where
     // Sort packages alphabetically by name before processing
     let mut sorted_packages: Vec<_> = valid_packages.into_iter().collect();
     sorted_packages.sort_by(|a, b| a.name().cmp(b.name()));
+
+    // Refused specs are separated before anything reads the environment mapping.
+    // A key shadowing `environments:` makes the filter below miss, and the spec
+    // would vanish from the listing with nothing said. The rule follows the
+    // environments the listing shows: apply's question in this one, and any
+    // environment's with `--all`.
+    let shown = if show_all {
+        super::steps::Shown::Every
+    } else {
+        super::steps::Shown::Current(config.environment())
+    };
+    let (sorted_packages, refused) = super::steps::separate_refused(sorted_packages, shown);
+    let refused: Vec<RefusedSpec> = refused.into_iter().map(|(_, spec)| spec).collect();
 
     // Calculate environment statistics from all valid packages (before filtering)
     let mut environment_stats: HashMap<String, usize> = HashMap::new();
@@ -200,12 +216,14 @@ where
         .map(|invalid| (*invalid).clone())
         .collect();
 
-    // Calculate the count before moving the vector
+    // Calculate the counts before moving the vectors
     let valid_count = valid_package_items.len();
+    let refused_count = refused.len();
 
     let package_list_data = PackageListData {
         valid_packages: valid_package_items,
         invalid_packages: invalid_package_items,
+        refused,
         current_environment: config.environment().to_string(),
         package_directory: config.package_directory().display().to_string(),
         environment_stats,
@@ -221,6 +239,7 @@ where
     OperationResult::Success(OperationSuccess::package_list_generated(
         valid_count,
         invalid_packages.len(),
+        refused_count,
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))

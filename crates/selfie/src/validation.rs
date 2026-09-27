@@ -87,18 +87,6 @@ impl ValidationIssues {
             .filter(|issue| issue.level == ValidationLevel::Warning)
             .collect()
     }
-
-    /// Get issues by category
-    ///
-    /// Filters all issues to return only those matching the specified category.
-    /// Useful for handling specific types of validation problems.
-    #[must_use]
-    pub fn issues_by_category(&self, category: &ValidationErrorCategory) -> Vec<&ValidationIssue> {
-        self.0
-            .iter()
-            .filter(|issue| issue.category == *category)
-            .collect()
-    }
 }
 
 impl From<Vec<ValidationIssue>> for ValidationIssues {

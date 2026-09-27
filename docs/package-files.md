@@ -232,6 +232,24 @@ refuse for the same reason: the key is not modeled, so rewriting from the struct
 silently. The same refusal covers a key at the file's top level, where a rewrite would take every
 entry under it.
 
+The commands that only read a package say what selfie would refuse instead of reading the file
+anyway. A command about the current environment asks what `selfie apply` asks here: an unrecognized
+key at the top level or in this environment, or a package spec that declares no environment at all.
+A command that shows every environment refuses a file with an unrecognized key in any of them.
+
+- `selfie package list` and `selfie spec list` list such a package as refused, with the reason, and
+  exit `0`. With `--all` they show every environment and take the second rule.
+- `selfie spec search` shows every environment, so it takes the second rule, and lists a refused
+  package when its file name matches.
+- `selfie package status` fails on a package apply would refuse and exits `1`, and reports a
+  dependency apply would refuse as unknown, with the reason.
+- `selfie spec info` describes a package apply would refuse but shows the reason in place of its
+  environments and dotfiles, and exits `0`. When apply would refuse the package only in another
+  environment, it shows everything, marks that environment's dotfile entries as refused, and adds a
+  line naming the reason.
+- `selfie spec remove` reports a package it will not read as one that may depend on the package
+  being removed, and counts it as a dependent when its file names that package.
+
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
@@ -1224,8 +1242,10 @@ a known gap rather than an intentional design.
 - **Resolved values are not reliably erasable from process memory.** String and buffer reallocation
   can leave copies behind; selfie makes no scrubbing guarantee.
 - **`selfie apply` executes commands from package files**, rather than only copying data out of
-  them. `selfie spec validate` reports how many commands a package will run, but treat a package
-  directory you did not write as code, not as data.
+  them. `selfie spec validate` reports how many commands a package will run, and `selfie spec info`
+  lists each dotfile's content source (a repository file, a template and its var names, or a
+  command) and warns how many commands `selfie apply` would run in the current environment. Treat a
+  package directory you did not write as code, not as data.
 
 ### Drift Detection
 

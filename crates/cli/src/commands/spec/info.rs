@@ -9,8 +9,11 @@ use selfie::package::{
 };
 
 use crate::{
-    config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor,
-    formatters::format_key, git_style, status_style,
+    config::CliConfig,
+    display_manager::{DisplayManager, shorten_path},
+    event_processor::EventProcessor,
+    formatters::format_key,
+    git_style, status_style,
 };
 
 use crate::commands::common;
@@ -37,6 +40,12 @@ pub(crate) async fn handle_info(
                 PackageEvent::PackageInfoLoaded { package_info, .. } => {
                     let table = create_package_info_table(package_info, config);
                     display.println(format!("{table}"));
+                    print_dotfiles(package_info, display);
+                    if let Some(reason) = &package_info.refusal_elsewhere {
+                        display.print_info(format!(
+                            "selfie apply would refuse this spec in another environment: {reason}"
+                        ));
+                    }
                     true // Handled
                 }
                 PackageEvent::EnvironmentStatusChecked {
@@ -88,16 +97,27 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         table.add_row(vec![format_key_fn("Homepage"), homepage_value]);
     }
 
-    // Format the environment names as a comma-separated list
-    let env_names = common::format_environment_names(
-        &package_info.environments,
-        &package_info.current_environment,
-        config,
-    );
-    table.add_row(vec![
-        format_key_fn("Environments"),
-        format_value(&env_names),
-    ]);
+    // A refused spec's environments cannot be trusted, so the reason stands in
+    // for them rather than an empty list that reads as "declares none".
+    if let Some(refusal) = &package_info.refusal {
+        let text = format!("selfie apply would refuse this spec here: {refusal}");
+        let value = if config.use_colors() {
+            style(text).red().to_string()
+        } else {
+            text
+        };
+        table.add_row(vec![format_key_fn("Refused"), value]);
+    } else {
+        let env_names = common::format_environment_names(
+            &package_info.environments,
+            &package_info.current_environment,
+            config,
+        );
+        table.add_row(vec![
+            format_key_fn("Environments"),
+            format_value(&env_names),
+        ]);
+    }
 
     if let Some(git_status) = &package_info.git_status {
         table.add_row(vec![
@@ -107,6 +127,40 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
     }
 
     table
+}
+
+/// The spec's dotfile entries and where each one's content comes from, then
+/// how many commands apply would run for them here.
+fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
+    if package_info.dotfiles.is_empty() {
+        return;
+    }
+
+    let mut table = common::create_formatted_table();
+    table.set_header(vec!["Environment", "Source", "Target"]);
+    for dotfile in &package_info.dotfiles {
+        table.add_row(vec![
+            match (&dotfile.environment, dotfile.refused) {
+                (Some(environment), true) => format!("{environment} (refused)"),
+                (Some(environment), false) => environment.clone(),
+                (None, _) => "(shared)".to_string(),
+            },
+            crate::commands::dotfiles::list::source_cell(&dotfile.entry),
+            shorten_path(dotfile.entry.target()),
+        ]);
+    }
+    display.println(format!("\n{table}"));
+
+    // A reader may take a package file for data, and applying this one runs
+    // commands.
+    if package_info.apply_commands > 0 {
+        display.print_warning(format!(
+            "selfie apply runs {} {} in environment '{}' to produce this package's dotfiles",
+            package_info.apply_commands,
+            selfie::pluralize(package_info.apply_commands, "command", "commands"),
+            package_info.current_environment,
+        ));
+    }
 }
 
 pub(crate) fn create_environment_table(

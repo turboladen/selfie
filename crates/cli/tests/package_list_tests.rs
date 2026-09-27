@@ -546,3 +546,100 @@ fn an_invalid_package_row_names_the_file_once_and_fits_one_line() {
         "the row must carry the entire reason, got: {row}"
     );
 }
+
+// A spec carrying a key that shadows `environments:` parses, and every command
+// reading its environments must say so rather than read the decoy. The fixture
+// keeps a real `environments:` too, so the refusal comes from the key alone.
+mod a_spec_selfie_will_not_read {
+    use super::*;
+
+    fn write_shadowed(temp_dir: &tempfile::TempDir) {
+        fs::write(
+            temp_dir.path().join("packages").join("shadowed.yml"),
+            format!(
+                "name: shadowed\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n\
+                 _environments:\n  {SELFIE_ENV}:\n    install: \"echo decoy\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn combined(output: &std::process::Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    #[test]
+    fn package_list_names_it_as_refused_and_exits_0() {
+        let temp_dir = setup_default_test_config();
+        write_shadowed(&temp_dir);
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["package", "list"])
+            .output()
+            .unwrap();
+
+        let text = combined(&output);
+        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert!(text.contains("shadowed"), "{text}");
+        assert!(text.contains("refused"), "{text}");
+        assert!(text.contains("_environments"), "{text}");
+        assert!(
+            text.contains("0 valid package(s) and 1 refused package(s)"),
+            "{text}"
+        );
+        assert!(!text.contains("No packages found"), "{text}");
+    }
+
+    #[test]
+    fn spec_list_names_it_as_refused() {
+        let temp_dir = setup_default_test_config();
+        write_shadowed(&temp_dir);
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["spec", "list"])
+            .output()
+            .unwrap();
+
+        let text = combined(&output);
+        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert!(text.contains("Refused: shadowed"), "{text}");
+        assert!(text.contains("_environments"), "{text}");
+    }
+
+    // Described with the reason in place of the environments, and exits 0.
+    #[test]
+    fn spec_info_shows_the_reason_instead_of_the_environments() {
+        let temp_dir = setup_default_test_config();
+        write_shadowed(&temp_dir);
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["spec", "info", "shadowed"])
+            .output()
+            .unwrap();
+
+        let text = combined(&output);
+        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert!(text.contains("Refused"), "{text}");
+        assert!(text.contains("_environments"), "{text}");
+        assert!(!text.contains("Environments"), "{text}");
+    }
+
+    #[test]
+    fn package_status_refuses_it_and_exits_1() {
+        let temp_dir = setup_default_test_config();
+        write_shadowed(&temp_dir);
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["package", "status", "shadowed"])
+            .output()
+            .unwrap();
+
+        let text = combined(&output);
+        assert_eq!(output.status.code(), Some(1), "{text}");
+        assert!(text.contains("_environments"), "{text}");
+    }
+}

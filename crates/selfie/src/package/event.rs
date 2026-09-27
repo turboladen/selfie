@@ -703,6 +703,10 @@ pub enum OperationSuccess {
     PackageListGenerated {
         valid_count: usize,
         invalid_count: usize,
+        /// Specs the listing reported as refused. Reported, not failed: a listing
+        /// that shows a refused spec has done what it was asked, so these are
+        /// not counted by [`refused_count`](OperationSuccess::refused_count).
+        refused_specs: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -731,6 +735,10 @@ pub enum OperationSuccess {
     SpecListGenerated {
         valid_count: usize,
         invalid_count: usize,
+        /// Specs the listing reported as refused. Reported, not failed: a listing
+        /// that shows a refused spec has done what it was asked, so these are
+        /// not counted by [`refused_count`](OperationSuccess::refused_count).
+        refused_specs: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1076,6 +1084,25 @@ impl From<&str> for OperationFailure {
     }
 }
 
+/// A listing's counts as "3 valid package(s) and 1 refused package(s)", naming
+/// the invalid and refused counts only when either is not zero.
+#[must_use]
+pub fn listing_counts(valid: usize, invalid: usize, refused: usize, noun: &str) -> String {
+    let mut parts = vec![format!("{valid} valid {noun}(s)")];
+    if invalid > 0 {
+        parts.push(format!("{invalid} invalid {noun}(s)"));
+    }
+    if refused > 0 {
+        parts.push(format!("{refused} refused {noun}(s)"));
+    }
+    let last = parts.pop().unwrap_or_default();
+    if parts.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", parts.join(", "))
+    }
+}
+
 impl std::fmt::Display for OperationSuccess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1151,17 +1178,16 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::PackageListGenerated {
                 valid_count,
                 invalid_count,
+                refused_specs,
                 steps_completed,
                 ..
             } => {
-                let status = if *invalid_count > 0 {
-                    format!(
-                        "with {valid_count} valid package(s) and {invalid_count} invalid package(s)"
-                    )
-                } else {
-                    format!("with {valid_count} valid package(s)")
-                };
-                write!(f, "Package listing completed {status} {steps_completed}")
+                let status =
+                    listing_counts(*valid_count, *invalid_count, *refused_specs, "package");
+                write!(
+                    f,
+                    "Package listing completed with {status} {steps_completed}"
+                )
             }
             OperationSuccess::PackageCreated {
                 package_name,
@@ -1206,15 +1232,12 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::SpecListGenerated {
                 valid_count,
                 invalid_count,
+                refused_specs,
                 steps_completed,
                 ..
             } => {
-                let status = if *invalid_count > 0 {
-                    format!("with {valid_count} valid spec(s) and {invalid_count} invalid spec(s)")
-                } else {
-                    format!("with {valid_count} valid spec(s)")
-                };
-                write!(f, "Spec listing completed {status} {steps_completed}")
+                let status = listing_counts(*valid_count, *invalid_count, *refused_specs, "spec");
+                write!(f, "Spec listing completed with {status} {steps_completed}")
             }
             OperationSuccess::SpecsValidated {
                 validated_count,
@@ -1512,12 +1535,14 @@ impl OperationSuccess {
     pub fn spec_list_generated(
         valid_count: usize,
         invalid_count: usize,
+        refused_specs: usize,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::SpecListGenerated {
             valid_count,
             invalid_count,
+            refused_specs,
             environment,
             steps_completed,
         }
@@ -1528,12 +1553,14 @@ impl OperationSuccess {
     pub fn package_list_generated(
         valid_count: usize,
         invalid_count: usize,
+        refused_specs: usize,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageListGenerated {
             valid_count,
             invalid_count,
+            refused_specs,
             environment,
             steps_completed,
         }
@@ -1695,8 +1722,6 @@ impl OperationSuccess {
             | OperationSuccess::PackageCreated { .. }
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
-            | OperationSuccess::PackageListGenerated { .. }
-            | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::PackageUpdated { .. }
             | OperationSuccess::DotfileTracked { .. }
@@ -1705,6 +1730,11 @@ impl OperationSuccess {
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
+            // A listing reports the specs it refuses and still did what it was
+            // asked, so they are not refusals of work: counting them here would
+            // exit a listing non-zero for showing a broken file.
+            OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. } => None,
         }
     }
 
@@ -2331,6 +2361,30 @@ pub struct PackageInfoData {
     pub environments: Vec<String>,
     pub current_environment: String,
     pub git_status: Option<super::git::GitFileStatus>,
+    /// Why `selfie apply` would refuse this spec in the current environment,
+    /// when it would. `environments` and `dotfiles` are then empty, because
+    /// neither can be trusted, and `apply_commands` is zero.
+    pub refusal: Option<String>,
+    /// Why apply would refuse this spec in another environment it declares, when
+    /// it would there and not here.
+    pub refusal_elsewhere: Option<String>,
+    /// Every dotfile entry the spec declares, shared and per environment.
+    pub dotfiles: Vec<ScopedDotfile>,
+    /// How many commands `selfie apply` would run in the current environment to
+    /// produce this spec's dotfile content: one per `command` entry and one per
+    /// template var. Zero when apply would refuse the spec.
+    pub apply_commands: usize,
+}
+
+/// A dotfile entry and the environment that declares it.
+#[derive(Debug, Clone)]
+pub struct ScopedDotfile {
+    /// The declaring environment, or `None` for a shared entry.
+    pub environment: Option<String>,
+    pub entry: crate::package::DotfileEntry,
+    /// Whether apply refuses the package in the declaring environment, so the
+    /// entry would not deploy there.
+    pub refused: bool,
 }
 
 /// Structured data for environment status
@@ -2367,6 +2421,11 @@ pub struct DependencyStatus {
 pub struct PackageListData {
     pub valid_packages: Vec<PackageListItem>,
     pub invalid_packages: Vec<crate::package::port::PackageParseError>,
+    /// Packages that parsed and that selfie will not read in the environments the
+    /// listing shows: the current one, or any of them under `--all`. Listed
+    /// whatever the environment filter, since a refused file cannot say which
+    /// environments it declares.
+    pub refused: Vec<RefusedSpec>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
@@ -2394,6 +2453,10 @@ pub struct SpecListItem {
 pub struct SpecListData {
     pub specs: Vec<SpecListItem>,
     pub invalid_packages: Vec<crate::package::port::PackageParseError>,
+    /// Specs that parsed and that selfie will not read in the environments the
+    /// listing shows: the current one, or any of them under `--all` and in a
+    /// search. Listed whatever the filter, as unparsable specs are.
+    pub refused: Vec<RefusedSpec>,
     pub current_environment: String,
     pub package_directory: String,
     pub environment_stats: std::collections::HashMap<String, usize>,
@@ -2441,6 +2504,16 @@ pub struct RefusedSpec {
     pub path: String,
     /// What selfie objected to.
     pub reason: String,
+}
+
+impl RefusedSpec {
+    pub(crate) fn new(package: &crate::package::Package, reason: impl std::fmt::Display) -> Self {
+        Self {
+            package_name: package.name().to_string(),
+            path: package.path().display().to_string(),
+            reason: reason.to_string(),
+        }
+    }
 }
 
 /// Structured data for check results

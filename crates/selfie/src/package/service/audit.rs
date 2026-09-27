@@ -117,19 +117,23 @@ where
     // A warning rather than an error, as for an unparsable file above: whether
     // `audit --all` exits non-zero over one file is user-visible behavior and
     // belongs to its own change.
-    let mut package_names: Vec<String> = Vec::new();
-    for package in packages.valid_packages() {
-        if let Some(refusal) = package.spec_refusal(config.environment()) {
-            sender
-                .send_warning(format!("Skipping package '{}': {refusal}", package.name()))
-                .await;
-            continue;
-        }
-
-        if package.environments().contains_key(config.environment()) {
-            package_names.push(package.name().to_string());
-        }
+    let (readable, refused) = super::steps::separate_refused(
+        packages.valid_packages(),
+        super::steps::Shown::Current(config.environment()),
+    );
+    for (_, spec) in refused {
+        sender
+            .send_warning(format!(
+                "Skipping package '{}': {}",
+                spec.package_name, spec.reason
+            ))
+            .await;
     }
+    let package_names: Vec<String> = readable
+        .into_iter()
+        .filter(|package| package.environments().contains_key(config.environment()))
+        .map(|package| package.name().to_string())
+        .collect();
 
     let total_packages = package_names.len();
     let max_concurrent = config.max_concurrency().get();
@@ -1067,6 +1071,17 @@ mod tests {
             crate::package::SpecOrigin::PackageDirectory,
         );
 
+        // A bad key only in another environment is no reason apply refuses the
+        // package here, so the run audits it.
+        let elsewhere_yaml = "name: elsewhere-pkg\nenvironments:\n  test:\n    install: \"echo install\"\n    audit: \"echo bun\"\n  work:\n    install: \"echo install\"\n    audt: x\n".to_string();
+        let mut elsewhere: crate::package::Package =
+            crate::yaml::parse(&elsewhere_yaml).expect("fixture must parse");
+        elsewhere.set_source(
+            temp_dir.path().join("elsewhere-pkg.yml"),
+            elsewhere_yaml,
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+
         let good_for_get = good.clone();
         let good_path = temp_dir.path().join("good-pkg.yml");
         let mut mock_repo = MockPackageRepository::new();
@@ -1074,6 +1089,7 @@ mod tests {
             Ok(ListPackagesOutput(vec![
                 Ok(good.clone()),
                 Ok(shadowed.clone()),
+                Ok(elsewhere.clone()),
             ]))
         });
         mock_repo.expect_get_package().returning(move |_| {
@@ -1122,8 +1138,12 @@ mod tests {
         }
 
         assert_eq!(
-            audit_results, 1,
-            "only the readable package may produce an audit result"
+            audit_results, 2,
+            "only the packages readable here may produce an audit result"
+        );
+        assert!(
+            warnings.iter().all(|w| !w.contains("elsewhere-pkg")),
+            "{warnings:?}"
         );
         let named = warnings
             .iter()

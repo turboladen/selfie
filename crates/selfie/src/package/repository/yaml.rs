@@ -500,23 +500,38 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         // A spec that did not load may well name the target. Carrying the
         // failures out lets the caller say so rather than count them as absent.
-        let unreadable: Vec<PackageParseError> = package_list.invalid_packages().cloned().collect();
+        let mut unreadable: Vec<PackageParseError> =
+            package_list.invalid_packages().cloned().collect();
 
+        let target = target_package.to_lowercase();
         for package in package_list.valid_packages() {
-            // Skip the target package itself
-            if package.name() == target_package {
+            // Names compare with case folded, as package lookup resolves them.
+            if package.name().to_lowercase() == target {
                 continue;
             }
 
+            // A spec whose mapping a shadowing key may hide can name the target
+            // where this loop cannot see it, so it is reported with the specs
+            // that did not load. It is still checked below: reporting a
+            // dependency the file may not really have is the safe direction.
+            // Asked of every environment, since the loop reads every one.
+            if let Some(reason) = package.listing_refusal() {
+                unreadable.push(PackageParseError::new(
+                    package.path().clone(),
+                    PackageParseKind::Refused {
+                        reason: reason.to_string(),
+                    },
+                ));
+            }
+
             // Check all environments for dependencies
-            for env_config in package.environments().values() {
-                if env_config
+            if package.environments().values().any(|env_config| {
+                env_config
                     .dependencies()
-                    .contains(&target_package.to_string())
-                {
-                    dependents.push(package.clone());
-                    break; // Found dependency, no need to check other environments
-                }
+                    .iter()
+                    .any(|dependency| dependency.to_lowercase() == target)
+            }) {
+                dependents.push(package.clone());
             }
         }
 
@@ -1410,14 +1425,14 @@ mod tests {
 
         // Counts alone would also be satisfied by a regression that reclassified
         // this as an ordinary parse failure, so the wording is asserted too. It
-        // must describe a *read* -- every `FileSystemError` refusal is worded for
-        // the deploy side and says selfie will not write through a target, which
-        // is false twice over here -- and must not name the path at all, since
+        // must describe declining the file -- every `FileSystemError` refusal is
+        // worded for the deploy side and says selfie will not write through a
+        // target, which is false twice over here -- and must not name the path, since
         // every caller renders it beside one. Rendering the filesystem error
         // verbatim would print it twice.
         let message = invalid[0].to_string();
         assert!(message.contains("symlink"), "got: {message}");
-        assert!(message.contains("will not read"), "got: {message}");
+        assert!(message.contains("will not use"), "got: {message}");
         assert!(!message.contains("write"), "got: {message}");
         assert!(!message.contains("target"), "got: {message}");
         assert_eq!(message.matches("ghost.yml").count(), 0, "got: {message}");
@@ -1582,6 +1597,65 @@ mod tests {
             .expect_err("a fifo spec must be refused");
 
         assert!(message.contains("named pipe (fifo)"), "got: {message}");
+    }
+
+    // A spec selfie refuses is reported with the specs that did not load, never
+    // counted as not depending. Where its mapping does name the target, it is a
+    // dependent as well: over-reporting a dependency is the safe direction. The
+    // clean spec is the control. Names differ in case, as lookup ignores it, and
+    // the target's own spec is not its dependent however it is spelled.
+    #[test]
+    fn a_refused_spec_is_reported_rather_than_cleared() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let shadow = "_environments:\n  test:\n    install: \"true\"\n";
+        std::fs::write(
+            package_dir.join("clean.yml"),
+            "name: clean\nenvironments:\n  test:\n    install: \"true\"\n    \
+             dependencies: [Target-Package]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("a.yml"),
+            format!(
+                "name: a\nenvironments:\n  test:\n    install: \"true\"\n    \
+                 dependencies: [target-package]\n{shadow}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("shadowed.yml"),
+            format!("name: shadowed\nenvironments:\n  test:\n    install: \"true\"\n{shadow}"),
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("target-package.yml"),
+            "name: TARGET-package\nenvironments:\n  test:\n    install: \"true\"\n    \
+             dependencies: [target-package]\n",
+        )
+        .unwrap();
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        let (dependents, unreadable) = repo.find_dependent_packages("target-package").unwrap();
+
+        let mut names: Vec<&str> = dependents.iter().map(Package::name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a", "clean"]);
+        let mut refused: Vec<String> = unreadable
+            .iter()
+            .map(|error| {
+                assert!(
+                    matches!(error.kind(), PackageParseKind::Refused { reason } if reason.contains("_environments")),
+                    "{:?}",
+                    error.kind()
+                );
+                error.package_path().file_name().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        refused.sort_unstable();
+        assert_eq!(refused, ["a.yml", "shadowed.yml"]);
     }
 
     #[test]

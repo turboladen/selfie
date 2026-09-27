@@ -487,7 +487,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_info",
-        description = "Get detailed definition info about a specific package including environments, dependencies, and commands. Does not check runtime installation status."
+        description = "Get detailed definition info about a specific package including environments, dependencies, and commands. Does not check runtime installation status. `dotfiles` lists every dotfile entry with its content source (`kind` file, template with var names, command, or invalid, with the reason in `error`), and `apply_commands` counts the commands `selfie apply` would run in the current environment to produce them; nothing is run to report either. When 'selfie apply' would refuse the spec in the current environment, `refusal` carries the reason, `environments` and `dotfiles` are empty because the file cannot be trusted to say what it declares, and `apply_commands` is 0 because apply would run nothing; the call still succeeds. `refusal_elsewhere` carries the reason apply would refuse the spec in another environment, when it would there and not here."
     )]
     async fn spec_info(
         &self,
@@ -513,7 +513,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, description, and environments. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List all specs for the current environment with name, description, and environments. A spec that loaded but that 'selfie apply' would refuse in the current environment, such as one whose `environments:` a misspelled or anchor-named key shadows, is left out of the specs and listed in the summary's `refused` array with `package`, `path` and `reason`. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -588,7 +588,10 @@ impl SelfieServer {
     #[tool(
         name = "selfie_package_list",
         description = "List packages with installation status. Set all=true to include packages from other environments. \
-A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location."
+A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
+A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path` and `reason`, \
+and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
+with all=true, when a key in any environment cannot be trusted."
     )]
     async fn package_list(
         &self,
@@ -601,7 +604,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_package_status",
-        description = "Check runtime installation status for a specific package in the current environment"
+        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. A dependency whose spec selfie will not read has an unknown status carrying that reason."
     )]
     async fn package_status(
         &self,
@@ -951,8 +954,7 @@ mod tests {
                 "exactly one of",
             ),
         ] {
-            let json =
-                crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml), "packages");
+            let json = crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml));
 
             assert_eq!(json["kind"], "invalid", "for {yaml}");
             assert_eq!(json["target"], "~/.creds", "for {yaml}");
@@ -972,7 +974,6 @@ mod tests {
             "creds",
             Some("macos"),
             &entry("source: creds.tpl\ntarget: ~/.creds\nvars:\n  api_key: op read x\n"),
-            "packages",
         );
 
         assert_eq!(json["kind"], "template");

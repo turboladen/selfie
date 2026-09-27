@@ -96,16 +96,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
             table.add_row(vec![
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
-                // Renders var names and command strings, never a resolved value.
-                //
-                // A refused entry is shown as the reason it was refused rather
-                // than omitted: it is in the package file, `selfie apply` will
-                // report skipping it, and a listing that hid it would leave the
-                // user looking for a dotfile the table says does not exist. The
-                // brief form, since a cell cannot hold the anchor advice.
-                entry
-                    .content_source()
-                    .map_or_else(|invalid| invalid.brief(), |source| source.to_string()),
+                source_cell(entry),
                 shorten_path(entry.target()),
             ]);
             total += 1;
@@ -119,6 +110,19 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
         data.packages.len(),
         selfie::pluralize(data.packages.len(), "package", "packages"),
     ));
+}
+
+/// Where `entry`'s content comes from, as a table cell: var names and command
+/// strings, never a resolved value.
+pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
+    // A refused entry is shown as the reason it was refused rather than omitted:
+    // it is in the package file, `selfie apply` will report skipping it, and a
+    // listing that hid it would leave the user looking for a dotfile the table
+    // says does not exist. The brief form, since a cell cannot hold the anchor
+    // advice.
+    entry
+        .content_source()
+        .map_or_else(|invalid| invalid.brief(), |source| source.to_string())
 }
 
 /// Print the base directories above the table so relative source paths have context.

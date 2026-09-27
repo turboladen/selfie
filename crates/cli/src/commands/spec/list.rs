@@ -54,7 +54,7 @@ pub(super) fn handle_spec_list_event(
 fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayManager) {
     let use_colors = config.use_colors();
 
-    if data.specs.is_empty() && data.invalid_packages.is_empty() {
+    if data.specs.is_empty() && data.invalid_packages.is_empty() && data.refused.is_empty() {
         display.print_info("No specs found.");
         return;
     }
@@ -87,6 +87,19 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     for invalid in &data.invalid_packages {
         // One sentence, styled or not, so the two branches cannot drift apart.
         let text = format!("Invalid: {} — {invalid}", invalid.package_path().display());
+        let msg = if use_colors {
+            format!("  {} {}", style("⚠").yellow(), style(text).dim())
+        } else {
+            format!("  {text}")
+        };
+        display.println(msg);
+    }
+
+    for refused in &data.refused {
+        let text = format!(
+            "Refused: {} ({}) — {}",
+            refused.package_name, refused.path, refused.reason
+        );
         let msg = if use_colors {
             format!("  {} {}", style("⚠").yellow(), style(text).dim())
         } else {
@@ -167,6 +180,7 @@ mod tests {
             spec_list: SpecListData {
                 specs: vec![],
                 invalid_packages: vec![],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/tmp/packages".to_string(),
                 environment_stats: Default::default(),

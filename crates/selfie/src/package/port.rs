@@ -96,7 +96,8 @@ pub trait PackageRepository: Send + Sync {
 
     /// Every package listing `target_package` as a dependency in any of its
     /// environments, so a caller can say what a removal would break, paired with
-    /// the spec files that could not be read while looking.
+    /// the spec files that could not be read while looking, or that selfie
+    /// refuses to read.
     ///
     /// A caller that ignores the second list is claiming nothing depends on the
     /// target when the honest answer is that it does not know: an unreadable
@@ -690,9 +691,9 @@ pub enum PackageParseKind {
 
     /// The package file could not be read, for a reason that is nobody's mistake
     ///
-    /// Distinct from [`Refused`](Self::Refused), which is selfie declining to read
-    /// something it could have. Nothing here was declined; the read could not be
-    /// attempted.
+    /// Distinct from [`Refused`](Self::Refused), which is selfie declining a file
+    /// it could have read or did read. Nothing here was declined; the read could
+    /// not be attempted.
     #[error("the package file could not be read: {reason}")]
     Unreadable { reason: String },
 
@@ -705,17 +706,19 @@ pub enum PackageParseKind {
     )]
     IrregularFile { kind: &'static str },
 
-    /// Some other refusal from the filesystem port, worded for a read
+    /// selfie declined the package file: the filesystem port refused to read
+    /// it, or selfie read it and the spec guard will not use what it says
     ///
-    /// Carries a `reason` rather than the [`FileSystemError`] itself.
-    // Every refusal variant's own `Display` names a *target* and says selfie
-    // will not **write** through it, having been written for the deploy side.
-    // Rendering one here would report a write refusal on a read path.
+    /// Carries a `reason` rather than the refusal itself.
+    // Every filesystem refusal variant's own `Display` names a *target* and says
+    // selfie will not **write** through it, having been written for the deploy
+    // side. Rendering one here would report a write refusal on a read path.
     //
-    // Reached only if `irregular_target_refusal` ever returns something other
-    // than `IrregularTarget`. It exists so that growth fails closed with
-    // sensible wording rather than falling through to the read.
-    #[error("selfie will not read the package file: {reason}")]
+    // The filesystem half is reached only if `irregular_target_refusal` ever
+    // returns something other than `IrregularTarget`, so that growth fails closed
+    // with sensible wording. The spec guard's half carries a refusal such as a
+    // key shadowing `environments:`, for a file that parsed.
+    #[error("selfie will not use the package file: {reason}")]
     Refused { reason: String },
 }
 
