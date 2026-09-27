@@ -120,13 +120,13 @@ pub(crate) fn create_dotfile_service(
 > {
     DotfileServiceImpl::new(
         create_package_repository(config),
+        create_dotfiles_repository(config),
         RealFileSystem,
         create_command_runner(config),
         config.selfie_config().clone(),
         cancellation_token,
         sudo_policy(config),
     )
-    .with_dotfiles_repository(create_dotfiles_repository(config))
 }
 
 /// Create a `SyncServiceImpl` with `GixGitAdapter` and `DotfileService`.

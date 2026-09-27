@@ -266,13 +266,13 @@ impl SelfieServer {
         // refusal here is unconditional.
         let dotfile_service = DotfileServiceImpl::new(
             repo,
+            dotfiles_repo,
             RealFileSystem,
             runner,
             config.clone(),
             CancellationToken::new(),
             SudoPolicy::new(RealPrivilege),
-        )
-        .with_dotfiles_repository(dotfiles_repo);
+        );
         let sync_service = SyncServiceImpl::new(
             GixGitAdapter,
             dotfile_service.clone(),

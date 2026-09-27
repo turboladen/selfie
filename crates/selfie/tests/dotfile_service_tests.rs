@@ -307,7 +307,8 @@ impl TestDirs {
         self
     }
 
-    // Create a service backed only by the packages directory.
+    // Create a service over both directories, answering provider commands with
+    // a runner that knows none.
     fn service(
         &self,
     ) -> DotfileServiceImpl<
@@ -319,7 +320,8 @@ impl TestDirs {
         self.service_with_runner(FakeCommandRunner::new())
     }
 
-    // A packages-only service whose provider commands answer from `runner`.
+    // A service over both directories whose provider commands answer from
+    // `runner`.
     fn service_with_runner(
         &self,
         runner: FakeCommandRunner,
@@ -359,7 +361,20 @@ impl TestDirs {
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
-        DotfileServiceImpl::new(repo, fs, runner, config, token, self.sudo_policy)
+        let dotfiles_repo = YamlPackageRepository::new(
+            fs,
+            self.dotfiles_dir.clone(),
+            SpecOrigin::DotfilesDirectory,
+        );
+        DotfileServiceImpl::new(
+            repo,
+            dotfiles_repo,
+            fs,
+            runner,
+            config,
+            token,
+            self.sudo_policy,
+        )
     }
 
     // As [`service_with_runner`](Self::service_with_runner), but with a caller-supplied
@@ -385,8 +400,14 @@ impl TestDirs {
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
+        let dotfiles_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            self.dotfiles_dir.clone(),
+            SpecOrigin::DotfilesDirectory,
+        );
         DotfileServiceImpl::new(
             repo,
+            dotfiles_repo,
             fs,
             runner,
             config,
@@ -424,13 +445,13 @@ impl TestDirs {
         );
         DotfileServiceImpl::new(
             package_repo,
+            dotfiles_repo,
             fs,
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
             self.sudo_policy,
         )
-        .with_dotfiles_repository(dotfiles_repo)
     }
 
     // Both directories, with `dotfiles_directory` left unset. `dotfiles_dir` is
@@ -467,13 +488,13 @@ impl TestDirs {
         );
         DotfileServiceImpl::new(
             package_repo,
+            dotfiles_repo,
             fs,
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
             self.sudo_policy,
         )
-        .with_dotfiles_repository(dotfiles_repo)
     }
 
     // A service that believes the home directory is `home`.
@@ -506,6 +527,11 @@ impl TestDirs {
                 config.package_directory().clone(),
                 SpecOrigin::PackageDirectory,
             ),
+            YamlPackageRepository::new(
+                fs.clone(),
+                self.dotfiles_dir.clone(),
+                SpecOrigin::DotfilesDirectory,
+            ),
             fs,
             FakeCommandRunner::new(),
             config,
@@ -533,17 +559,17 @@ impl TestDirs {
                 config.package_directory().clone(),
                 SpecOrigin::PackageDirectory,
             ),
-            fs.clone(),
+            YamlPackageRepository::new(
+                fs.clone(),
+                self.dotfiles_dir.clone(),
+                SpecOrigin::DotfilesDirectory,
+            ),
+            fs,
             FakeCommandRunner::new(),
             config,
             CancellationToken::new(),
             self.sudo_policy,
         )
-        .with_dotfiles_repository(YamlPackageRepository::new(
-            fs,
-            self.dotfiles_dir.clone(),
-            SpecOrigin::DotfilesDirectory,
-        ))
     }
 }
 
@@ -1459,6 +1485,11 @@ async fn state_is_recorded_after_each_deploy_not_after_the_run() {
             fs.clone(),
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
+        ),
+        YamlPackageRepository::new(
+            fs.clone(),
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
         ),
         fs,
         FakeCommandRunner::new(),
@@ -7354,8 +7385,14 @@ mod symlinked_targets {
             SpecOrigin::PackageDirectory,
         );
         let writes = Arc::new(AtomicUsize::new(0));
+        let dotfiles_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        );
         let service = DotfileServiceImpl::new(
             repo,
+            dotfiles_repo,
             BlindToSymlinks(RealFileSystem, Arc::clone(&writes)),
             FakeCommandRunner::new(),
             config,

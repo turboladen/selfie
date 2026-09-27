@@ -23,8 +23,8 @@ pub(super) struct Collected {
     pub(super) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
 }
 
-/// Collect packages from both the main package repository and the optional
-/// dotfiles repository, returning a combined list, what is worth saying, and what
+/// Collect packages from both the main package repository and the dotfiles
+/// repository, returning a combined list, what is worth saying, and what
 /// was refused.
 ///
 /// Warnings are returned rather than emitted because collection happens before
@@ -32,7 +32,7 @@ pub(super) struct Collected {
 /// [`ApplyWarning`] is what tells it which event each one is.
 pub(super) fn collect_all_packages<R: PackageRepository>(
     package_repo: &R,
-    dotfiles_repo: Option<&R>,
+    dotfiles_repo: &R,
     dotfiles_directory_is_expected: bool,
     environment: &str,
 ) -> Result<Collected, crate::package::port::PackageListError> {
@@ -57,7 +57,7 @@ pub(super) fn collect_all_packages<R: PackageRepository>(
 /// name several files claim matters to a deploying caller.
 pub(super) fn collect_packages<R: PackageRepository>(
     package_repo: &R,
-    dotfiles_repo: Option<&R>,
+    dotfiles_repo: &R,
     collision: NameCollision,
     dotfiles_directory_is_expected: bool,
     environment: &str,
@@ -88,36 +88,34 @@ pub(super) fn collect_packages<R: PackageRepository>(
     let mut unparsable_in_dotfiles = Vec::new();
     let mut refusals = Vec::new();
 
-    if let Some(dotfiles) = dotfiles_repo {
-        match dotfiles.list_packages() {
-            Ok(output) => {
-                note_unparsable(&output, &mut warnings);
-                unparsable_in_dotfiles = unparsable_paths(&output);
-                dotfiles_packages = output.valid_packages().cloned().collect();
-            }
-            Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
-                error,
-                dotfiles_directory_is_expected,
-            ) {
-                super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
-                super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
-                    warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
-                }
-                // Both refuse the run, because neither can claim the collection
-                // is complete. They are pushed as different warnings so the
-                // sentence a user reads says which one happened: one asserts a
-                // directory is there and unreadable, the other cannot say even
-                // that.
-                super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
-                    warnings.push(ApplyWarning::UnreadableRepository(error));
-                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
-                }
-                super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
-                    warnings.push(ApplyWarning::UncheckableRepository(error));
-                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
-                }
-            },
+    match dotfiles_repo.list_packages() {
+        Ok(output) => {
+            note_unparsable(&output, &mut warnings);
+            unparsable_in_dotfiles = unparsable_paths(&output);
+            dotfiles_packages = output.valid_packages().cloned().collect();
         }
+        Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
+            error,
+            dotfiles_directory_is_expected,
+        ) {
+            super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
+            super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
+                warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
+            }
+            // Both refuse the run, because neither can claim the collection
+            // is complete. They are pushed as different warnings so the
+            // sentence a user reads says which one happened: one asserts a
+            // directory is there and unreadable, the other cannot say even
+            // that.
+            super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
+                warnings.push(ApplyWarning::UnreadableRepository(error));
+                refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
+            }
+            super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
+                warnings.push(ApplyWarning::UncheckableRepository(error));
+                refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
+            }
+        },
     }
 
     if collision == NameCollision::KeepBoth {
