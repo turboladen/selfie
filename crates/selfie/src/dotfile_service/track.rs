@@ -27,24 +27,14 @@ use crate::{
 use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
 
-/// Check that a name is safe for use as a filesystem path component.
-///
-/// Rejects names containing path separators, `..`, or characters outside
-/// the alphanumeric + hyphen + underscore set used for package names.
-fn is_safe_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
 /// Why a name cannot be a directory under the repository, or `None` if it can.
 fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
-    if is_safe_name(name) {
+    if crate::package::is_valid_spec_name(name) {
         return None;
     }
     Some(OperationFailure::Generic(format!(
-        "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+        "Invalid name '{name}': {}",
+        crate::package::SPEC_NAME_RULE
     )))
 }
 
@@ -60,9 +50,9 @@ fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
 // forever; the second writes it beside the specs and records a `source:` naming a
 // directory that is not there.
 //
-// Deliberately not the standalone path's name rule, which governs a name the user
-// invents. A spec stem is whatever loads, so `python3.11.yml` is an ordinary
-// package that deploys today. Position separates those from `.` and `..`.
+// The spec-name rule refuses both stems at load as well. This guard asks about
+// position instead of characters, so it holds even if that rule admits a name
+// that climbs out.
 fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFailure> {
     let refuse = |why: &str| {
         Some(OperationFailure::Generic(format!(
@@ -182,20 +172,6 @@ fn tracked_copy_path(spec_path: &Path, entry: &DotfileEntry) -> PathBuf {
         Some(source) => spec_dir.join(source),
         None => spec_path.to_path_buf(),
     }
-}
-
-// Why a track added nothing although it found no entry for the target: the spec
-// already carries one whose recorded target matches, by a comparison that
-// disagreed with the one made before the copy.
-//
-// Reported rather than swallowed. Selfie cannot say which of the two comparisons
-// is right, and the spec is the user's file, so it declines and names what it
-// found instead of rewriting either.
-fn unadded_entry_failure(recorded_target: &str, copy: &Path, removal: &CopyRemoval) -> String {
-    format!(
-        "The spec already has an entry for '{recorded_target}', so nothing was added. {}",
-        copy_fate(copy, removal)
-    )
 }
 
 /// What became of a copy a track had written, once a later step failed.
@@ -494,16 +470,20 @@ where
         }
     };
 
-    // An entry for this target already in the spec. Each entry's own target goes
-    // through `expand_target_path`, not the rule: this compares a recorded entry
-    // rather than writing to it, and a spec may hold one the rule refuses.
+    // An entry for this target that apply deploys in the current environment,
+    // whether shared or under `environments.<env>.dotfiles`: appending a shared
+    // entry beside one would give that environment two entries for one target.
+    // An entry scoped to another environment does not count, since nothing
+    // deploys it here; the shared entry added instead is what that environment's
+    // entry overrides. Each target goes through `expand_target_path`, not the
+    // rule: this compares a recorded entry rather than writing to it.
     //
     // A `SpecKind::New` spec has no entries, so this answers `None` for one
     // without a branch of its own.
     let already_tracked = spec
         .package
-        .dotfiles()
-        .iter()
+        .dotfiles_for_environment(config.environment())
+        .into_iter()
         .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
 
     if let Some(entry) = already_tracked {
@@ -522,7 +502,7 @@ where
         // other arm of this event.
         return OperationResult::Success(OperationSuccess::DotfileTracked {
             name: spec.name,
-            source_path: tracked_copy_path(&spec.spec_path, entry),
+            source_path: tracked_copy_path(&spec.spec_path, &entry),
             target_path: entry.target().to_string(),
             was_already_tracked: true,
             environment: config.environment().to_string(),
@@ -667,29 +647,10 @@ where
     }
 
     let recorded_target = portable_target(filesystem, &expanded_target);
+    // Added unconditionally: the already-tracked answer above has ruled out an
+    // entry for this target in the current environment.
     spec.package
         .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
-
-    // `add_dotfile` drops the entry when an existing one carries the same target
-    // *string*, while the answer above compares expanded paths. The two agree as
-    // long as the recorded form derives from the same expansion, and a
-    // disagreement would otherwise save a spec that never names the copy, leave
-    // the copy behind, and record a deployment for a source the spec does not
-    // contain -- while reporting success. Checked rather than assumed, and
-    // compensated exactly as a failed save is.
-    if !spec
-        .package
-        .dotfiles()
-        .iter()
-        .any(|entry| entry.source() == Some(relative_source.as_str()))
-    {
-        let removal = remove_own_copy(filesystem, &source_path, &content);
-        return OperationResult::Failure(OperationFailure::Generic(unadded_entry_failure(
-            &recorded_target,
-            &source_path,
-            &removal,
-        )));
-    }
 
     if let Err(e) = repo.save_package(&spec.package, &spec.spec_path) {
         // Only the file, and only selfie's own. `remove_own_copy` establishes the
@@ -780,6 +741,26 @@ mod tests {
                 "refusal offers the target-side remedy: {message}"
             );
         }
+    }
+
+    // The loader refuses `.` and `..` as spec names before a track reaches this
+    // guard, so only a direct call exercises it. It asks about position, and
+    // must refuse both names whatever the name rule admits.
+    #[test]
+    fn the_copy_directory_guard_refuses_names_that_leave_or_are_the_spec_directory() {
+        let spec = Path::new("/repo/packages/x.yml");
+
+        let climbs = unusable_copy_directory(spec, "..").expect("'..' must be refused");
+        assert!(climbs.to_string().contains("outside"), "got: {climbs}");
+
+        let same = unusable_copy_directory(spec, ".").expect("'.' must be refused");
+        assert!(
+            same.to_string()
+                .contains("rather than a directory of its own"),
+            "got: {same}"
+        );
+
+        assert!(unusable_copy_directory(spec, "python3.11").is_none());
     }
 
     // The copy is removed only when the path still holds what this call wrote.

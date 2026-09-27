@@ -53,6 +53,15 @@ warning and still loads the file.
 name: ripgrep # for file ripgrep.yaml
 ```
 
+A name uses only letters, digits, `-`, `_`, `.`, `@` and `+`. It may not start or end with a dot,
+and may not itself end in `.yml` or `.yaml`, so `python3.11.yml`, `node@20.yml` and `g++.yml` are
+packages named `python3.11`, `node@20` and `g++`. The same rule covers the `name:` field, which
+`selfie spec validate` reports, and the file name, which selfie checks as it loads the directory. A
+file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded: every command that
+lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
+`invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
+the MCP server's `selfie_spec_create` refuse such a name rather than write the file.
+
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
 package from another — `Neovim.YML`, `neovim.yml` and `neovim.yaml` all name the package `neovim`.
@@ -192,6 +201,16 @@ environments:
       - source: zscaler/work.conf # present only on work
         target: ~/.config/zscaler/config
 ```
+
+An override has to spell its `target` exactly as the shared entry does. Any other pair of entries
+that deploy to the same file in one environment is an error: two shared entries, two entries in one
+environment, or a shared and an environment entry whose targets differ as written but name the same
+file, such as `~/.x` and `~/./.x`. Deploying either would leave the other reported as drifted on
+every run, so `selfie apply` refuses every entry in the group, writes none of them, counts each one
+it would have deployed as a refusal and exits non-zero; `selfie dotfiles drift` refuses the same
+entries. `selfie spec validate` reports the group as an error naming each entry. Validation compares
+targets without knowing your home directory, so `~/.x` and `/home/you/.x` pass it, while `apply` and
+`drift` still refuse the pair.
 
 There is intentionally no way to _exclude_ a shared entry from a single environment: a config that
 is not universal belongs in the relevant `environments.<name>.dotfiles` lists rather than the shared
@@ -1284,6 +1303,13 @@ selfie package track-dotfile starship ~/.config/starship.toml
 
 The track commands copy the file into the repo, create or update the YAML spec with the
 source→target mapping, and record initial deploy state for drift detection.
+
+A file the package already deploys in the current environment is reported as already tracked, and
+nothing is copied or added. An entry under `environments.<name>.dotfiles` counts when `<name>` is
+the current environment; one scoped to another environment does not, so the track adds a shared
+entry, which that environment's entry overrides if it spells the target the same way. The entry's
+target counts however it is spelled, so `~/.gemrc` and the absolute path to the same file are one
+target.
 
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the

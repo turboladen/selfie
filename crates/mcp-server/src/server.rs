@@ -308,18 +308,6 @@ impl SelfieServer {
             ),
         );
 
-        // Validate package name to prevent path traversal (e.g. "../outside")
-        if params.package.contains('/')
-            || params.package.contains('\\')
-            || params.package.contains("..")
-            || params.package.is_empty()
-        {
-            return Err(McpError::invalid_params(
-                format!("Invalid package name: '{}'", params.package),
-                None,
-            ));
-        }
-
         // Check for namespace conflicts across packages/ and dotfiles/ directories
         let pkg_repo = YamlPackageRepository::new(
             RealFileSystem,
@@ -513,7 +501,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, description, and environments. A spec that loaded but that 'selfie apply' would refuse in the current environment, such as one whose `environments:` a misspelled or anchor-named key shadows, is left out of the specs and listed in the summary's `refused` array with `package`, `path` and `reason`. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List all specs for the current environment with name, description, and environments. A spec that loaded but that 'selfie apply' would refuse in the current environment, such as one whose `environments:` a misspelled or anchor-named key shadows, is left out of the specs and listed in the summary's `refused` array with `package`, `path` and `reason`. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -523,7 +511,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim, or a dotfiles directory that cannot be listed, fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim, or a dotfiles directory that cannot be listed, fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -561,7 +549,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit_all",
-        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn package_audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;
@@ -657,7 +645,7 @@ with all=true, when a key in any environment cannot be trusted."
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\", \"not_loaded\" or \"ambiguous\" (several spec files, such as bat.yml and bat.yaml, claim the name, so none is used, whatever they declare; a `conflicting_paths` field lists them); branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, or finds several spec files in one directory claiming one name where one failed to parse or declares dotfiles for this environment (none of them deploys) or a spec file it could not load, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `warning` row reading \"an earlier `<program>` command failed; no command was run\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\", \"not_loaded\" or \"ambiguous\" (several spec files, such as bat.yml and bat.yaml, claim the name, so none is used, whatever they declare; a `conflicting_paths` field lists them); branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. If selfie refuses any entry — an unrecognized key, two or more entries of one package that deploy to the same target in this environment (every one of them is refused and none is written), a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, or finds several spec files in one directory claiming one name where one failed to parse or declares dotfiles for this environment (none of them deploys) or a spec file it could not load, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `warning` row reading \"an earlier `<program>` command failed; no command was run\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -694,7 +682,7 @@ with all=true, when a key in any environment cannot be trusted."
 
     #[tool(
         name = "selfie_dotfiles_drift",
-        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift refuses to check something — a spec it could not load (reported as a `spec_skipped` row), a name several spec files in one directory claim where one of them failed to parse or has dotfiles for this environment (a name claimed only by install-only files is left to `selfie_package_install`, and a `dotfiles/` file under a name `packages/` claims only warns), a package apply would refuse whole, an entry apply would refuse, a source that escapes the package directory or cannot be read, a target that is a symlink (whether or not its content matches), a fifo, socket or device node, a directory, or that cannot be read (each reported as a `warning` row with no drift row, and left out of the total), or a dotfiles directory that cannot be read or cannot be classified — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. A secret-bearing entry (a `command`, or a `source` with `vars`) is reported as a `dotfile_skipped` row and counted in the result's `unverified_count` field; it is unverifiable by design, is not a refusal, and does not make the result an error. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is reported as a `warning` row and the check carries on as though nothing had been deployed, so every entry then shows as untracked."
+        description = "Check deployed dotfiles for drift between repo sources and targets. Returns per-file drift status. If drift refuses to check something — a spec it could not load (reported as a `spec_skipped` row), a name several spec files in one directory claim where one of them failed to parse or has dotfiles for this environment (a name claimed only by install-only files is left to `selfie_package_install`, and a `dotfiles/` file under a name `packages/` claims only warns), a package apply would refuse whole, an entry apply would refuse, a source that escapes the package directory or cannot be read, a target that is a symlink (whether or not its content matches), a fifo, socket or device node, a directory, or that cannot be read (each reported as a `warning` row with no drift row, and left out of the total), or a dotfiles directory that cannot be read or cannot be classified — the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the check ran. A secret-bearing entry (a `command`, or a `source` with `vars`) is reported as a `dotfile_skipped` row and counted in the result's `unverified_count` field; it is unverifiable by design, is not a refusal, and does not make the result an error. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is reported as a `warning` row and the check carries on as though nothing had been deployed, so every entry then shows as untracked."
     )]
     async fn selfie_dotfiles_drift(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -1019,6 +1007,52 @@ mod tests {
             CancellationToken::new(),
         );
         SelfieServer::new(service, config, Vec::new())
+    }
+
+    // `selfie_spec_create` for `name`, with an inert install command.
+    async fn create(server: &SelfieServer, name: &str) -> serde_json::Value {
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": name,
+            "install": "true",
+            "environment": "test",
+        }))
+        .unwrap();
+        tool_json(&server.spec_create(Parameters(params)).await.unwrap())
+    }
+
+    // The name rule is the library's, so the tool refuses what the loader would
+    // refuse, a path that climbs out included, and admits what it would load.
+    #[tokio::test]
+    async fn spec_create_follows_the_spec_name_rule() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+
+        // A file really is there outside the package directory, so a lookup
+        // would answer "already taken"; the name rule must answer first.
+        let outside = temp.path().join("outside.yml");
+        std::fs::write(&outside, "keep").unwrap();
+
+        for name in ["my tool", "../outside", ".hidden"] {
+            let json = create(&server, name).await;
+            assert!(
+                json.to_string().contains("not a valid spec name"),
+                "{name}: got {json}"
+            );
+            assert!(
+                !json.to_string().contains("already taken"),
+                "{name}: got {json}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+
+        let json = create(&server, "node@20").await;
+        assert!(
+            packages.join("node@20.yml").exists(),
+            "a legal name must be created: {json}"
+        );
     }
 
     // The JSON a tool returned.

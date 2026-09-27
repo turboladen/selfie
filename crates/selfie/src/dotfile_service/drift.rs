@@ -21,7 +21,9 @@ use crate::{
     },
 };
 
-use super::classify::{Classified, Purpose, RepoRead, classify_entry, read_repo_file};
+use super::classify::{
+    Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry, read_repo_file,
+};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
 /// Core logic for checking drift, or `None` if the run was cancelled part way.
@@ -77,6 +79,9 @@ where
         return None;
     }
 
+    // Asked once, so every package compares targets against the same home.
+    let home = ResolvedHome::of(filesystem);
+
     for package in packages {
         // Between packages, for a run whose entries are few or absent.
         if token.is_cancelled() {
@@ -106,7 +111,10 @@ where
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        for entry in &package.dotfiles_for_environment(config.environment()) {
+        // The same collisions apply refuses, so drift refuses the same entries.
+        let collisions = PackageCollisions::of(package, &home, config.environment());
+
+        for scoped in &package.effective_dotfiles(Some(config.environment())) {
             // Between entries. Drift reads and checksums every tracked file, so
             // over a large repository an unchecked run goes on long after the
             // receiver is gone.
@@ -119,35 +127,36 @@ where
             // send the user looking for a different problem from the one apply
             // reports, and every refusal counts: a green result over an entry drift
             // never examined is a false success.
-            let repo = match classify_entry(filesystem, &base_dir, entry, Purpose::Check) {
-                Ok(Classified::RepoFile(repo)) => repo,
-                // Secret-bearing entries hold no deploy state, so there is nothing
-                // to compare against, and resolving them here would run the user's
-                // commands: leaking content into a read-only operation and
-                // prompting for authentication. Classified first all the same, so
-                // an entry apply would refuse is reported as refused rather than as
-                // merely unverifiable.
-                //
-                // Reported as unverifiable rather than counted as drift or as a
-                // refusal. Either would leave `dotfiles drift` permanently dirty on
-                // any machine with one provider-sourced dotfile (ADR-0003).
-                Ok(Classified::SecretBearing(secret)) => {
-                    sender
-                        .send_dotfile_skipped(
-                            &secret.origin,
-                            secret.path.display(),
-                            "provider-sourced (not verifiable without resolving)",
-                        )
-                        .await;
-                    tally.unverified += 1;
-                    continue;
-                }
-                Err(refused) => {
-                    refused.send(sender).await;
-                    tally.refused += 1;
-                    continue;
-                }
-            };
+            let repo =
+                match classify_entry(filesystem, &base_dir, *scoped, &collisions, Purpose::Check) {
+                    Ok(Classified::RepoFile(repo)) => repo,
+                    // Secret-bearing entries hold no deploy state, so there is nothing
+                    // to compare against, and resolving them here would run the user's
+                    // commands: leaking content into a read-only operation and
+                    // prompting for authentication. Classified first all the same, so
+                    // an entry apply would refuse is reported as refused rather than as
+                    // merely unverifiable.
+                    //
+                    // Reported as unverifiable rather than counted as drift or as a
+                    // refusal. Either would leave `dotfiles drift` permanently dirty on
+                    // any machine with one provider-sourced dotfile (ADR-0003).
+                    Ok(Classified::SecretBearing(secret)) => {
+                        sender
+                            .send_dotfile_skipped(
+                                &secret.origin,
+                                secret.path.display(),
+                                "provider-sourced (not verifiable without resolving)",
+                            )
+                            .await;
+                        tally.unverified += 1;
+                        continue;
+                    }
+                    Err(refused) => {
+                        refused.send(sender).await;
+                        tally.refused += 1;
+                        continue;
+                    }
+                };
             let RepoRead {
                 source_content,
                 current,

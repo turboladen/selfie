@@ -3648,26 +3648,24 @@ environments:
     );
 }
 
-// selfie-ir68.16. `spec_name_from_file_name` splits on the last dot, so a spec file
-// named `...yml` is loadable under the name `..`, and a copy directory composed from
-// that name lands outside the package directory. The guard asks about containment,
-// not about characters, which is what separates this from the ordinary dotted stem
-// in the control below.
-
-// The wording is asserted, not just the absence of the file. A spec that failed to
-// load would leave nothing written for an unrelated reason, and this test would then
-// pass while the guard did nothing.
-#[tokio::test]
-async fn a_package_track_refuses_a_copy_directory_outside_the_package_directory() {
+// selfie-ir68.16 and selfie-ir68.25. `spec_name_from_file_name` splits on the last
+// dot, so `...yml` claims the name `..` and `..yml` claims `.`. A copy directory
+// composed from either lands outside the package directory or on it. The loader
+// refuses both stems by the spec-name rule, before anything is copied;
+// `unusable_copy_directory` stays behind it as a second guard and has unit tests
+// of its own.
+//
+// The wording is asserted, not just the absence of the file, so a spec that failed
+// to load for some unrelated reason cannot pass for the rule.
+async fn assert_track_refuses_spec_stem(stem: &str) {
     let dirs = TestDirs::new();
 
-    // Loadable, and its name is `..`.
     let yaml = r#"name: dots
 environments:
   test:
     install: "echo installed"
 "#;
-    std::fs::write(dirs.package_dir.join("...yml"), yaml).unwrap();
+    std::fs::write(dirs.package_dir.join(format!("{stem}.yml")), yaml).unwrap();
 
     let target_file = dirs.target_dir.join("gemrc");
     std::fs::write(&target_file, "gem: --no-document").unwrap();
@@ -3675,79 +3673,49 @@ environments:
     let service = dirs.service();
     let events = collect_events(
         service
-            .track_for_package("..", target_file.to_str().unwrap())
-            .await,
-    )
-    .await;
-
-    let result = get_operation_result(&events).expect("Should have a Completed event");
-    match result {
-        OperationResult::Failure(OperationFailure::Generic(message)) => {
-            assert!(
-                message.contains("outside"),
-                "the refusal must say what it prevented: {message}"
-            );
-            assert!(
-                message.contains(".."),
-                "the refusal must name what it refused: {message}"
-            );
-        }
-        other => panic!("expected the track to be refused, got: {other:?}"),
-    }
-
-    // The escape itself: one level above the package directory is where
-    // `packages/..` resolves to.
-    let escaped = dirs.package_dir.parent().unwrap().join("gemrc");
-    assert!(
-        !escaped.exists(),
-        "a copy was written outside the package directory at {}",
-        escaped.display()
-    );
-}
-
-// The other name the split produces: `..yml` yields `.`, which composes the spec's
-// own directory rather than one below it. The copy would land beside the specs and
-// the entry would record a `source:` naming a directory that is not there.
-#[tokio::test]
-async fn a_package_track_refuses_a_copy_directory_that_is_the_package_directory() {
-    let dirs = TestDirs::new();
-
-    let yaml = r#"name: dot
-environments:
-  test:
-    install: "echo installed"
-"#;
-    std::fs::write(dirs.package_dir.join("..yml"), yaml).unwrap();
-
-    let target_file = dirs.target_dir.join("gemrc");
-    std::fs::write(&target_file, "gem: --no-document").unwrap();
-
-    let service = dirs.service();
-    let events = collect_events(
-        service
-            .track_for_package(".", target_file.to_str().unwrap())
+            .track_for_package(stem, target_file.to_str().unwrap())
             .await,
     )
     .await;
 
     match get_operation_result(&events).expect("Should have a Completed event") {
-        OperationResult::Failure(OperationFailure::Generic(message)) => {
+        OperationResult::Failure(failure) => {
+            let message = failure.to_string();
             assert!(
-                message.contains("rather than a directory of its own"),
-                "the refusal must say what it prevented: {message}"
+                message.contains(&format!("its name '{stem}' is not a valid spec name")),
+                "the refusal must name the stem and the rule: {message}"
             );
+            // The file was never opened, so the frame must not say it was unreadable.
+            assert!(message.starts_with("Cannot use package"), "got: {message}");
         }
         other => panic!("expected the track to be refused, got: {other:?}"),
     }
+
+    // Neither where `packages/..` resolves to nor the package directory itself.
+    let escaped = dirs.package_dir.parent().unwrap().join("gemrc");
+    assert!(
+        !escaped.exists(),
+        "a copy was written at {}",
+        escaped.display()
+    );
     assert!(
         !dirs.package_dir.join("gemrc").exists(),
         "a copy was written straight into the package directory"
     );
 }
 
-// The control for the guard above, and the reason it asks about containment rather
-// than about characters. `python3.11.yml` is an ordinary package that loads and
-// deploys today; a guard on the name's characters would make it untrackable.
+#[tokio::test]
+async fn a_package_track_refuses_a_spec_whose_name_climbs_out() {
+    assert_track_refuses_spec_stem("..").await;
+}
+
+#[tokio::test]
+async fn a_package_track_refuses_a_spec_whose_name_is_the_package_directory() {
+    assert_track_refuses_spec_stem(".").await;
+}
+
+// The control for the refusals above: dots inside a name are legal, so
+// `python3.11.yml` is an ordinary package that loads and can be tracked into.
 #[tokio::test]
 async fn a_package_track_still_works_for_a_dotted_spec_stem() {
     let dirs = TestDirs::new();
@@ -3781,6 +3749,111 @@ environments:
             .exists(),
         "the copy must land in the package's own directory"
     );
+}
+
+// An entry under the current environment's `dotfiles` tracks its target as
+// surely as a shared one. A scan of the shared list alone would append a second,
+// shared entry for the same file, and the environment would then hold two entries
+// for one target. The target is named absolutely while the entry spells it with
+// `~`, so the scan has to compare expanded paths.
+#[tokio::test]
+async fn a_package_track_finds_an_environment_scoped_entry_for_the_target() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+
+    let yaml = r#"name: gem
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: gem/gemrc
+        target: ~/.gemrc
+"#;
+    let spec_path = dirs.package_dir.join("gem.yml");
+    std::fs::write(&spec_path, yaml).unwrap();
+
+    let target_file = home.join(".gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("gem", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            was_already_tracked,
+            target_path,
+            ..
+        }) => {
+            assert!(was_already_tracked, "the scoped entry was not found");
+            assert_eq!(target_path, "~/.gemrc", "must name the entry's own target");
+        }
+        other => panic!("expected an already-tracked answer, got: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&spec_path).unwrap(),
+        yaml,
+        "the spec must not gain a second entry"
+    );
+    assert!(
+        !dirs.package_dir.join("gem").join(".gemrc").exists(),
+        "nothing may be copied for an already-tracked target"
+    );
+}
+
+// An entry scoped to another environment deploys nothing here, so it does not
+// make the file tracked. The track adds a shared entry, which that environment's
+// entry, spelled the same, overrides there.
+#[tokio::test]
+async fn a_package_track_ignores_an_entry_scoped_to_another_environment() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+
+    let yaml = r#"name: gem
+environments:
+  test:
+    install: "echo installed"
+  work:
+    install: "echo installed"
+    dotfiles:
+      - source: gem/work-gemrc
+        target: ~/.gemrc
+"#;
+    let spec_path = dirs.package_dir.join("gem.yml");
+    std::fs::write(&spec_path, yaml).unwrap();
+
+    let target_file = home.join(".gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("gem", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            was_already_tracked,
+            ..
+        }) => assert!(!was_already_tracked, "another environment's entry counted"),
+        other => panic!("expected the track to succeed, got: {other:?}"),
+    }
+    let spec = std::fs::read_to_string(&spec_path).unwrap();
+    let package: selfie::package::Package = selfie::yaml::parse(&spec).unwrap();
+    assert_eq!(
+        package
+            .dotfiles()
+            .iter()
+            .map(|e| (e.source(), e.target()))
+            .collect::<Vec<_>>(),
+        vec![(Some("gem/.gemrc"), "~/.gemrc")],
+        "one shared entry must be added:\n{spec}"
+    );
+    assert!(dirs.package_dir.join("gem").join(".gemrc").exists());
 }
 
 #[tokio::test]
@@ -15555,5 +15628,325 @@ mod one_directory_configured_as_both {
         let warnings = dotfiles_directory_warnings(&events);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("symlink to nothing"), "{warnings:?}");
+    }
+}
+
+// Two entries in one package deploying to one target. Deploying either would
+// have the deploy state flip between their checksums on every run, and drift
+// report the loser as changed each time, so both are refused and neither is
+// written. The two spell the target differently -- `~/.x` and its absolute
+// form -- so the refusal has to compare expanded paths.
+mod duplicate_targets {
+    use super::*;
+    use std::path::Path;
+
+    fn deploy_state_of(events: &[PackageEvent]) -> (usize, usize) {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                refused_count,
+                ..
+            }) => (*deployed_count, *refused_count),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+    }
+
+    // A package with two entries on `<home>/.x` and a third, unrelated entry,
+    // which must still deploy. Returns the colliding target and the other one.
+    fn colliding_package(dirs: &TestDirs, home: &Path) -> (PathBuf, PathBuf) {
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("one"), "one").unwrap();
+        std::fs::write(sources.join("two"), "two").unwrap();
+        std::fs::write(sources.join("three"), "three").unwrap();
+
+        let target = home.join(".x");
+        let other = home.join(".other");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "dup",
+            &[
+                ("dup/one", "~/.x"),
+                ("dup/two", target.to_str().unwrap()),
+                ("dup/three", other.to_str().unwrap()),
+            ],
+        );
+        (target, other)
+    }
+
+    // Each refusal names the package, both entries and the target, so the user
+    // can find them without counting list items, and says what the command did
+    // about them in that command's own terms.
+    fn assert_names_the_pair(warnings: &[String], target: &Path, consequence: &str) {
+        let collisions: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("dotfiles[0] and dotfiles[1] both deploy to"))
+            .collect();
+        assert_eq!(collisions.len(), 2, "one refusal per entry: {warnings:?}");
+        for warning in collisions {
+            assert!(
+                warning.contains(&format!("'{}'", target.display())),
+                "the refusal must name the expanded target: {warning}"
+            );
+            assert!(
+                warning.contains("in package 'dup'"),
+                "the refusal must name the package: {warning}"
+            );
+            assert!(
+                warning.contains(consequence),
+                "the refusal must say what happened: {warning}"
+            );
+        }
+    }
+
+    // Default options: `stop_on_error` would end the run at the first refusal,
+    // and the second entry and the unrelated one would never be reached.
+    #[tokio::test]
+    async fn apply_refuses_both_entries_and_deploys_the_rest() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let (target, other) = colliding_package(&dirs, &home);
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (1, 2));
+        assert!(!target.exists(), "a colliding entry was deployed");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "three");
+        assert_names_the_pair(
+            &warning_messages(&events),
+            &target,
+            "none of them is applied",
+        );
+    }
+
+    // Drift classifies through the same function, so it refuses the same two
+    // entries and compares only the third.
+    #[tokio::test]
+    async fn drift_refuses_the_entries_apply_refuses() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let (target, _other) = colliding_package(&dirs, &home);
+
+        let events = collect_events(dirs.service_with_home(&home).check_drift().await).await;
+
+        let (_drift, total, refused) = drift_summary(&events);
+        assert_eq!((total, refused), (1, 2));
+        let warnings = warning_messages(&events);
+        assert_names_the_pair(&warnings, &target, "so drift cannot compare them");
+        assert!(
+            !warnings.iter().any(|w| w.contains("applied")),
+            "drift applies nothing: {warnings:?}"
+        );
+    }
+
+    // Two environment entries overriding one shared target, spelled exactly as
+    // it is. Only the first reaches the environment's effective set, so apply
+    // would deploy it and drop the second unreported. The first is refused
+    // instead, naming both; the second never deploys in any case, so it is not
+    // counted a second time.
+    #[tokio::test]
+    async fn apply_refuses_two_overrides_of_one_shared_target() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["shared", "one", "two"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/one
+        target: "~/.x"
+      - source: dup/two
+        target: "~/.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 1));
+        assert!(!home.join(".x").exists(), "an override was deployed");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains(
+                "environments.test.dotfiles[0] and environments.test.dotfiles[1] both deploy to"
+            )),
+            "got: {warnings:?}"
+        );
+    }
+
+    // Two shared entries on one target, both overridden by one environment
+    // entry. The override replaces both and deploys once: a second deploy would
+    // run a provider command a second time. The shared pair is validate's to
+    // report; in this environment neither of them deploys.
+    #[tokio::test]
+    async fn one_override_of_two_shared_entries_deploys_once() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["one", "two", "work"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/one
+    target: "~/.x"
+  - source: dup/two
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/work
+        target: "~/.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let deploying = events
+            .iter()
+            .filter(|e| matches!(e, PackageEvent::DotfileDeploying { .. }))
+            .count();
+        assert_eq!(deploying, 1, "the override must be deployed once");
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count,
+                skipped_count,
+                refused_count,
+                ..
+            }) => assert_eq!((*deployed_count, *skipped_count, *refused_count), (1, 0, 0)),
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".x")).unwrap(), "work");
+    }
+
+    // The two overrides plus a third entry spelled `~/./.x`. The effective set
+    // holds the first override and the third, and the environment's own list
+    // holds all three; both refusals name every one of them, so the user sees
+    // the whole group from either warning.
+    #[tokio::test]
+    async fn every_refusal_names_the_whole_group_for_its_target() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        for name in ["shared", "one", "two", "three"] {
+            std::fs::write(sources.join(name), name).unwrap();
+        }
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/one
+        target: "~/.x"
+      - source: dup/two
+        target: "~/.x"
+      - source: dup/three
+        target: "~/./.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 2));
+        let warnings = warning_messages(&events);
+        let naming_all = warnings
+            .iter()
+            .filter(|w| {
+                w.contains(
+                    "environments.test.dotfiles[0], environments.test.dotfiles[1] and \
+                     environments.test.dotfiles[2] all deploy to",
+                )
+            })
+            .count();
+        assert_eq!(naming_all, 2, "got: {warnings:?}");
+    }
+
+    // A shared entry and an environment entry spelled differently for one file.
+    // Spelled identically it would be an override; spelled this way both deploy
+    // in that environment, so both are refused, with the hint about spelling.
+    #[tokio::test]
+    async fn apply_refuses_an_environment_entry_that_matches_a_shared_one_only_by_expansion() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("shared"), "shared").unwrap();
+        std::fs::write(sources.join("work"), "work").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            r#"name: dup
+dotfiles:
+  - source: dup/shared
+    target: "~/.x"
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: dup/work
+        target: "~/./.x"
+"#,
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(deploy_state_of(&events), (0, 2));
+        assert!(!home.join(".x").exists(), "a colliding entry was deployed");
+        let warnings = warning_messages(&events);
+        let hinted = warnings
+            .iter()
+            .filter(|w| {
+                w.contains("dotfiles[0] and environments.test.dotfiles[0] both deploy to")
+                    && w.contains("write the target exactly as the shared entry does")
+            })
+            .count();
+        assert_eq!(hinted, 2, "got: {warnings:?}");
     }
 }

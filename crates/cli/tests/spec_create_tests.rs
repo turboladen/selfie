@@ -29,6 +29,29 @@ fn spec_create_writes_a_package_that_does_not_exist() {
     );
 }
 
+// The name typed on the command line reaches the library's spec-name rule, so
+// the CLI cannot write a spec every later command refuses to load. The
+// interactive prompts build their package the same way and hand it to the same
+// service call, which is where the rule is applied.
+#[test]
+fn spec_create_refuses_a_name_the_loader_would_refuse() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+
+    sandboxed_command(&temp)
+        .args(["spec", "create", "my tool"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Refusing to create 'my tool': it is not a valid spec name",
+        ));
+
+    assert!(
+        !packages.join("my tool.yml").exists(),
+        "a refused name must write nothing"
+    );
+}
+
 // A spec stored under a different capitalization answers to the folded name, so
 // the create finds `Neovim.yml` and declines instead of writing a second file.
 //
@@ -77,13 +100,11 @@ fn spec_create_does_not_replace_a_file_stored_under_another_case() {
 // A name whose Unicode normalization differs from the stored file's.
 //
 // Identity folds case and nothing else, so a spec stored in NFC is invisible to a
-// lookup for the same name in NFD, while APFS resolves the NFD path onto that file.
-// Name resolution says the name is free, the file system says the path is taken,
-// and only the second is right. Without the guard the write replaces a regular file
-// by rename and destroys a spec the user wrote.
-//
-// The load-bearing branch runs only on a normalization-insensitive volume, so CI on
-// ubuntu takes the other one. Both assert; a skip would observe nothing.
+// lookup for the same name in NFD, while APFS resolves the NFD path onto that file:
+// a create that reached the write would replace a spec the user wrote. The
+// decomposed name carries a combining mark, which the spec-name rule does not
+// admit, so the create is refused before any lookup, on every file system alike.
+// The occupied-path guard behind it keeps its own unit test.
 #[test]
 fn spec_create_does_not_replace_a_file_stored_under_another_normalization() {
     const NFC: &str = "na\u{ef}ve";
@@ -95,60 +116,24 @@ fn spec_create_does_not_replace_a_file_stored_under_another_normalization() {
     let yaml = "name: naive\nenvironments:\n  test-env:\n    install: \"true\"\n";
     fs::write(&existing, yaml).unwrap();
 
-    // Ask this file system rather than the platform name: a case-sensitive APFS
-    // volume and a case-insensitive one both fold normalization, and ext4 folds
-    // neither.
-    let folds_normalization = packages.join(format!("{NFD}.yml")).exists();
-
-    let assertion = sandboxed_command(&temp)
+    sandboxed_command(&temp)
         .args(["spec", "create", NFD])
-        .assert();
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a valid spec name"));
 
-    if folds_normalization {
-        // Distinct from the already-exists path, which cancels at a menu and exits
-        // 0. Here no package answers to the name at all, so the run fails. The
-        // output is asserted as well as the status, because nearly every failure
-        // mode exits non-zero, including never reaching the guard.
-        //
-        // Deliberately not asserting the sentence about capitalization: that blames
-        // the one cause the name fold excludes, and is being corrected separately.
-        assertion
-            .failure()
-            .stderr(predicates::str::contains("is already taken"))
-            .stderr(predicates::str::contains(
-                "though no package answers to that name",
-            ));
-
-        let mut entries: Vec<String> = fs::read_dir(&packages)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        entries.sort();
-        assert_eq!(
-            entries.len(),
-            1,
-            "the create must not add a second file: {entries:?}"
-        );
-        assert_eq!(
-            fs::read_to_string(&existing).unwrap(),
-            yaml,
-            "the existing spec must survive byte for byte"
-        );
-    } else {
-        // Two distinct paths, so nothing was at risk and the create is ordinary.
-        // Asserted rather than skipped: this half proves the guard does not refuse
-        // a name that merely looks similar.
-        assertion
-            .success()
-            .stdout(predicates::str::contains("created"));
-        assert!(
-            packages.join(format!("{NFD}.yml")).exists(),
-            "on a normalization-sensitive file system the new spec is its own file"
-        );
-        assert_eq!(
-            fs::read_to_string(&existing).unwrap(),
-            yaml,
-            "the existing spec must survive byte for byte"
-        );
-    }
+    let entries: Vec<String> = fs::read_dir(&packages)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the create must not add a second file: {entries:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&existing).unwrap(),
+        yaml,
+        "the existing spec must survive byte for byte"
+    );
 }

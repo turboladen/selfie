@@ -705,6 +705,12 @@ mod tests {
                     reason: "it is a symlink".to_string(),
                 },
             ),
+            (
+                "InvalidName",
+                PackageParseKind::InvalidName {
+                    name: "ghost".to_string(),
+                },
+            ),
         ];
 
         for (kind, parse_kind) in cases {

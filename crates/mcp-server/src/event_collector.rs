@@ -186,7 +186,7 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
 fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
     use selfie::package::port::PackageParseKind;
 
-    // One match, and no catch-all: a sixth kind has to state here whether it
+    // One match, and no catch-all: a new kind has to state here whether it
     // reports a location, rather than inheriting `None` from an arm that never
     // considered it.
     let (at, reason) = match error.kind() {
@@ -194,7 +194,8 @@ fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value
         other @ (PackageParseKind::Io { .. }
         | PackageParseKind::Unreadable { .. }
         | PackageParseKind::IrregularFile { .. }
-        | PackageParseKind::Refused { .. }) => (None, other.to_string()),
+        | PackageParseKind::Refused { .. }
+        | PackageParseKind::InvalidName { .. }) => (None, other.to_string()),
     };
 
     serde_json::json!({
@@ -1252,6 +1253,32 @@ mod tests {
         assert_eq!(row["kind"], "irregular_file");
         assert!(row["line"].is_null(), "got: {row}");
         assert!(row["column"].is_null(), "got: {row}");
+    }
+
+    // A spec refused for its file name is its own kind, so an assistant can tell
+    // "rename the file" apart from "fix the file".
+    #[tokio::test]
+    async fn a_spec_refused_for_its_name_reports_its_kind() {
+        let error = selfie::package::port::PackageParseError::new(
+            "/packages/my tool.yml",
+            selfie::package::port::PackageParseKind::InvalidName {
+                name: "my tool".to_string(),
+            },
+        );
+
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecSkipped {
+            operation_info: test_op_info(),
+            error,
+        }]));
+        let result = collect_events(stream).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["kind"], "invalid_name");
+        assert_eq!(row["path"], "/packages/my tool.yml");
+        let reason = row["reason"].as_str().expect("a reason");
+        assert!(reason.contains("'my tool'"), "got: {reason}");
+        assert!(!reason.contains("/packages/"), "got: {reason}");
+        assert!(row["line"].is_null(), "got: {row}");
     }
 
     // The other half of the CLI's window: the terminal gets the file's text, this
