@@ -182,6 +182,20 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
     // Load a Package from a file using the FileSystem trait
     fn load_package_from_file(&self, path: &Path) -> Result<Package, PackageParseError> {
+        // Before the read, so a file no command could name is refused whatever
+        // it holds. The stem as spelled, not folded: folding can turn a letter
+        // into a letter plus a combining mark, which the rule refuses.
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            && !crate::package::is_valid_spec_name(stem)
+        {
+            return Err(PackageParseError::new(
+                path,
+                PackageParseKind::InvalidName {
+                    name: stem.to_string(),
+                },
+            ));
+        }
+
         let content = self.read_spec_file(path)?;
 
         let mut package: Package = crate::yaml::parse(&content)
@@ -315,9 +329,10 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // A file that was never parsed gets its own variant. `ParseError` renders
         // as "Parse error in package `ghost`", which would send the user to
         // inspect YAML in a file selfie could not open -- whether it declined to
-        // open it or the open failed.
+        // open it or the open failed. A file refused for its name gets another,
+        // since it was not opened and the remedy is a rename.
         //
-        // Exhaustive, so a new kind has to say which of the two it is here.
+        // Exhaustive, so a new kind has to say which of these it is here.
         let package = self
             .load_package_from_file(package_file)
             .map_err(|source| match source.kind() {
@@ -325,6 +340,12 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                 | PackageParseKind::Refused { .. }
                 | PackageParseKind::Unreadable { .. }
                 | PackageParseKind::Io { .. } => PackageError::UnreadableFile {
+                    name: name.to_string(),
+                    packages_path: self.package_dir.clone(),
+                    failed_file: package_file.clone(),
+                    source,
+                },
+                PackageParseKind::InvalidName { .. } => PackageError::UnusableName {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
@@ -994,6 +1015,45 @@ mod tests {
         let invalid: Vec<_> = output.invalid_packages().collect();
         assert_eq!(invalid.len(), 1, "the unparsable file must be reported");
         assert_eq!(invalid[0].package_path(), package_dir.join("invalid.yaml"));
+    }
+
+    // A stem the spec-name rule refuses is reported against its file, and never
+    // read: `my tool.yml` has no content mocked, so a read would fail the test for
+    // a different reason. The dotted and Homebrew-style names are the controls.
+    #[test]
+    fn a_spec_file_whose_stem_breaks_the_name_rule_is_refused_unread() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        fs.mock_no_irregular_files();
+        let package_dir = PathBuf::from("/test/packages");
+        let legal = ["python3.11", "node@20", "g++"];
+
+        let mut listing = vec![package_dir.join("my tool.yml")];
+        for name in legal {
+            let path = package_dir.join(format!("{name}.yml"));
+            fs.mock_read_file(
+                path.clone(),
+                format!("name: {name}\nenvironments:\n  test-env:\n    install: echo\n"),
+            );
+            listing.push(path);
+        }
+        fs.mock_list_directory(package_dir.clone(), &listing);
+
+        let repo =
+            YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
+        let output = repo.list_packages().unwrap();
+
+        let mut names: Vec<&str> = output.valid_packages().map(Package::name).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["g++", "node@20", "python3.11"]);
+
+        let invalid: Vec<_> = output.invalid_packages().collect();
+        assert_eq!(invalid.len(), 1, "got: {invalid:?}");
+        assert_eq!(invalid[0].package_path(), package_dir.join("my tool.yml"));
+        assert_eq!(invalid[0].kind().label(), "invalid_name");
+        let message = invalid[0].to_string();
+        assert!(message.contains("'my tool'"), "got: {message}");
+        assert!(message.contains("'.', '@' and '+'"), "got: {message}");
     }
 
     #[test]

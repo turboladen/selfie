@@ -245,6 +245,35 @@ pub(crate) fn spec_name_from_file_name(file_name: &str) -> Option<String> {
         .then(|| stem.to_lowercase())
 }
 
+/// Whether `name` is usable as a package or dotfile spec name.
+///
+/// A name is letters, digits, `-`, `_`, `.`, `@` and `+`, neither starting nor
+/// ending with a dot, and not ending in `.yml` or `.yaml` in any case.
+pub(crate) fn is_valid_spec_name(name: &str) -> bool {
+    // One rule for a spec file's stem at load, the `name:` field at validation,
+    // and the name `dotfiles track` is given, so no package loads that cannot
+    // be tracked into, or tracks and never loads.
+    //
+    // No leading dot refuses `.`, `..` and hidden names, which would put a copy
+    // directory at or above the package directory. No `.yml` suffix: a copy
+    // directory `foo.yml` would list as the spec `foo`, since enumeration asks
+    // only for a file name. `@` and `+` admit Homebrew-style names such as
+    // `node@20` and `g++`.
+    let lower = name.to_lowercase();
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && !lower.ends_with(".yml")
+        && !lower.ends_with(".yaml")
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
+}
+
+/// The rule [`is_valid_spec_name`] applies, worded as a remedy for a refusal.
+pub(crate) const SPEC_NAME_RULE: &str = "use only letters, digits, '-', '_', '.', '@' and '+', \
+     with no dot at the start or end and no '.yml' or '.yaml' ending";
+
 /// The package name a spec file's path claims, or `None` if it names no spec.
 pub(crate) fn spec_name_of(path: &std::path::Path) -> Option<String> {
     path.file_name()
@@ -2561,7 +2590,47 @@ environments:
 
 #[cfg(test)]
 mod spec_name_tests {
-    use super::spec_name_from_file_name;
+    use super::{is_valid_spec_name, spec_name_from_file_name};
+
+    // Dots inside a name are ordinary: a versioned package is a common spec.
+    #[test]
+    fn the_name_rule_admits_dotted_and_unicode_names() {
+        for name in [
+            "neovim",
+            "python3.11",
+            "a..b",
+            "my-tool_2",
+            "\u{fc}nicode",
+            "node@20",
+            "python@3.11",
+            "g++",
+        ] {
+            assert!(is_valid_spec_name(name), "{name} must be accepted");
+        }
+    }
+
+    // `.` and `..` would put a copy directory at or above the package directory,
+    // and a hidden name is not a package anyone asked for. Everything else here
+    // is a character that is not in the rule.
+    #[test]
+    fn the_name_rule_refuses_leading_dots_and_other_characters() {
+        for name in [
+            "", ".", "..", "...", ".hidden", "my tool", "a/b", "a\\b", "a:b", "a\tb", "a\nb",
+            "a\0b", "a\u{7f}b", "a#b",
+        ] {
+            assert!(!is_valid_spec_name(name), "{name:?} must be refused");
+        }
+    }
+
+    // A copy directory is named after its package, and enumeration asks only for
+    // a file name, so a directory `foo.yml` beside the specs would list as `foo`.
+    #[test]
+    fn the_name_rule_refuses_a_spec_extension_or_trailing_dot() {
+        for name in ["foo.yml", "foo.yaml", "Foo.YML", "foo.YaMl", "foo."] {
+            assert!(!is_valid_spec_name(name), "{name:?} must be refused");
+        }
+        assert!(is_valid_spec_name("foo.ymlx"));
+    }
 
     // Every place that decides whether two files are one package now asks this
     // one function, so these cases are the contract the loader, the push guard

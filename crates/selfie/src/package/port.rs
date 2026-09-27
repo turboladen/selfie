@@ -301,6 +301,7 @@ impl PackageRepoError {
                 **e,
                 PackageError::ParseError { .. }
                     | PackageError::UnreadableFile { .. }
+                    | PackageError::UnusableName { .. }
                     | PackageError::MultiplePackagesFound { .. }
             ),
             _ => false,
@@ -498,6 +499,20 @@ pub enum PackageError {
         name: String,
         packages_path: PathBuf,
         /// The specific file that could not be read
+        failed_file: PathBuf,
+        #[source]
+        source: PackageParseError,
+    },
+
+    /// Package definition file exists, but its file name is not a valid spec name
+    ///
+    /// The file is never read, so neither "parse error" nor "cannot read" is
+    /// true of it: the remedy is renaming the file.
+    #[error("Cannot use package `{name}` from {}: {source}", failed_file.display())]
+    UnusableName {
+        name: String,
+        packages_path: PathBuf,
+        /// The file whose name is refused
         failed_file: PathBuf,
         #[source]
         source: PackageParseError,
@@ -729,6 +744,13 @@ pub enum PackageParseKind {
     // key shadowing `environments:`, for a file that parsed.
     #[error("selfie will not use the package file: {reason}")]
     Refused { reason: String },
+
+    /// The file's name, without its extension, is not a valid spec name
+    ///
+    /// Refused before the file is read, since no name the file could be asked
+    /// for would be one selfie accepts everywhere else.
+    #[error("its name '{name}' is not a valid spec name. Rename the file: {rule}.", rule = crate::package::SPEC_NAME_RULE)]
+    InvalidName { name: String },
 }
 
 impl PackageParseKind {
@@ -741,7 +763,7 @@ impl PackageParseKind {
     // callers treat as an enum -- which is the defect selfie-c0vk exists to
     // complain about on a neighboring event field.
     //
-    // Matched here rather than in the adapter, and with no catch-all, so a sixth
+    // Matched here rather than in the adapter, and with no catch-all, so a new
     // kind is a compile error beside the enum -- where whoever adds one is already
     // looking -- rather than in a crate they may never open.
     //
@@ -756,6 +778,7 @@ impl PackageParseKind {
             Self::Unreadable { .. } => "unreadable",
             Self::IrregularFile { .. } => "irregular_file",
             Self::Refused { .. } => "refused",
+            Self::InvalidName { .. } => "invalid_name",
         }
     }
 }

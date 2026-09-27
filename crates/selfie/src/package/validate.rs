@@ -323,25 +323,14 @@ impl Package {
 
     /// Validate the package name format
     ///
-    /// Package names must be non-empty and contain only alphanumeric characters,
-    /// hyphens, and underscores. They cannot start or end with special characters.
+    /// The name must be non-empty and follow the one spec-name rule the loader
+    /// applies to a file's stem.
     ///
     /// # Errors
     ///
-    /// Returns a `ValidationIssue` if the package name is invalid:
-    /// - Empty name
-    /// - Contains invalid characters
-    /// - Starts or ends with special characters
+    /// Returns a `ValidationIssue` if the package name is empty or breaks the
+    /// rule.
     fn validate_name(&self) -> Result<(), ValidationIssue> {
-        /// Whether `name` is usable as a package name.
-        fn is_valid_package_name(name: &str) -> bool {
-            // Package names should only contain alphanumeric chars, hyphens, and underscores
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        }
-
         let name_loc = location_string(&self.name.defined);
 
         if self.name.value.is_empty() {
@@ -352,12 +341,13 @@ impl Package {
                 Some("Add 'name: your-package-name' to the package file."),
                 name_loc,
             ));
-        } else if !is_valid_package_name(&self.name.value) {
+        } else if !crate::package::is_valid_spec_name(&self.name.value) {
+            let rule = crate::package::SPEC_NAME_RULE;
             return Err(ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 "name",
-                "Package name contains invalid characters",
-                Some("Use only alphanumeric characters, hyphens, and underscores."),
+                "Package name is not a valid spec name",
+                Some(&format!("Rename it: {rule}.")),
                 name_loc,
             ));
         }
@@ -1205,6 +1195,32 @@ mod tests {
             .map(|i| format!("{}: {}", i.field(), i.message()))
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    // The `name:` field follows the rule the loader applies to a file's stem, so
+    // a name that could not be a spec file is an error, and a dotted one is not.
+    #[test]
+    fn the_name_field_follows_the_spec_name_rule() {
+        let name_errors = |name: &str| {
+            package_from_yaml(&format!(
+                "name: '{name}'\nenvironments:\n  w:\n    install: echo\n"
+            ))
+            .validate_required_fields()
+            .into_iter()
+            .filter(|i| i.field() == "name")
+            .collect::<Vec<_>>()
+        };
+
+        let refused = name_errors("my tool");
+        assert_eq!(refused.len(), 1, "got: {}", messages(&refused));
+        assert!(
+            refused[0]
+                .suggestion()
+                .is_some_and(|s| s.contains("'.', '@' and '+'")),
+            "the suggestion must state the rule: {:?}",
+            refused[0].suggestion()
+        );
+        assert!(name_errors("python3.11").is_empty());
     }
 
     #[test]

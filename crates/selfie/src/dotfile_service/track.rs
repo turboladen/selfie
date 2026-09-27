@@ -27,24 +27,14 @@ use crate::{
 use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
 use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
 
-/// Check that a name is safe for use as a filesystem path component.
-///
-/// Rejects names containing path separators, `..`, or characters outside
-/// the alphanumeric + hyphen + underscore set used for package names.
-fn is_safe_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
 /// Why a name cannot be a directory under the repository, or `None` if it can.
 fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
-    if is_safe_name(name) {
+    if crate::package::is_valid_spec_name(name) {
         return None;
     }
     Some(OperationFailure::Generic(format!(
-        "Invalid name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+        "Invalid name '{name}': {}",
+        crate::package::SPEC_NAME_RULE
     )))
 }
 
@@ -60,9 +50,9 @@ fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
 // forever; the second writes it beside the specs and records a `source:` naming a
 // directory that is not there.
 //
-// Deliberately not the standalone path's name rule, which governs a name the user
-// invents. A spec stem is whatever loads, so `python3.11.yml` is an ordinary
-// package that deploys today. Position separates those from `.` and `..`.
+// The spec-name rule refuses both stems at load as well. This guard asks about
+// position instead of characters, so it holds even if that rule admits a name
+// that climbs out.
 fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFailure> {
     let refuse = |why: &str| {
         Some(OperationFailure::Generic(format!(
@@ -780,6 +770,26 @@ mod tests {
                 "refusal offers the target-side remedy: {message}"
             );
         }
+    }
+
+    // The loader refuses `.` and `..` as spec names before a track reaches this
+    // guard, so only a direct call exercises it. It asks about position, and
+    // must refuse both names whatever the name rule admits.
+    #[test]
+    fn the_copy_directory_guard_refuses_names_that_leave_or_are_the_spec_directory() {
+        let spec = Path::new("/repo/packages/x.yml");
+
+        let climbs = unusable_copy_directory(spec, "..").expect("'..' must be refused");
+        assert!(climbs.to_string().contains("outside"), "got: {climbs}");
+
+        let same = unusable_copy_directory(spec, ".").expect("'.' must be refused");
+        assert!(
+            same.to_string()
+                .contains("rather than a directory of its own"),
+            "got: {same}"
+        );
+
+        assert!(unusable_copy_directory(spec, "python3.11").is_none());
     }
 
     // The copy is removed only when the path still holds what this call wrote.

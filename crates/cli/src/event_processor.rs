@@ -312,7 +312,7 @@ impl EventProcessor {
                                     }
                                 }
                                 // Every kind but `Yaml` is routed to
-                                // `UnreadableFile` before it gets here, so this
+                                // another variant before it gets here, so this
                                 // is growth insurance rather than a live case.
                                 other => {
                                     self.display.print_error(format!(
