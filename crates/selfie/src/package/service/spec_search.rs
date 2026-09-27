@@ -36,12 +36,9 @@ where
         SpecQueryOptions {
             load_step_label: "Loading specs",
             emit_step_label: "Searching specs",
-            filter: move |pkg: &crate::package::Package| {
-                let name_match = pkg.name().to_lowercase().contains(&pattern_lower);
-                let desc_match = pkg
-                    .description()
-                    .is_some_and(|d: &str| d.to_lowercase().contains(&pattern_lower));
-                name_match || desc_match
+            filter: move |name: &str, description: Option<&str>| {
+                name.to_lowercase().contains(&pattern_lower)
+                    || description.is_some_and(|d| d.to_lowercase().contains(&pattern_lower))
             },
             show_all: true, // search results span all environments
         },

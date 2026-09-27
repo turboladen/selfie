@@ -169,13 +169,13 @@ name: "incomplete-package"
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Package parses but has no matching environment — list succeeds but
-    // the package shouldn't appear in the default (env-filtered) output
+    // The package parses, and apply refuses it for declaring no environment.
+    // The listing says so rather than leaving it out, and still succeeds.
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("No packages found").or(
-            // If other packages exist, incomplete-package shouldn't show
-            predicate::str::contains("incomplete-package").not(),
+        .stdout(predicate::str::contains("incomplete-package  refused"))
+        .stdout(predicate::str::contains(
+            "At least one environment must be defined",
         ));
 }
 

@@ -513,7 +513,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_list",
-        description = "List all specs for the current environment with name, description, and environments. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List all specs for the current environment with name, description, and environments. A spec that loaded but that 'selfie apply' would refuse in the current environment, such as one whose `environments:` a misspelled or anchor-named key shadows, is left out of the specs and listed in the summary's `refused` array with `package`, `path` and `reason`. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\" or \"refused\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn spec_list(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::list(&*self.service, false).await;
@@ -588,7 +588,10 @@ impl SelfieServer {
     #[tool(
         name = "selfie_package_list",
         description = "List packages with installation status. Set all=true to include packages from other environments. \
-A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location."
+A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
+A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path` and `reason`, \
+and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
+with all=true, when a key in any environment cannot be trusted."
     )]
     async fn package_list(
         &self,
@@ -601,7 +604,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_package_status",
-        description = "Check runtime installation status for a specific package in the current environment"
+        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. A dependency whose spec selfie will not read has an unknown status carrying that reason."
     )]
     async fn package_status(
         &self,

@@ -8,7 +8,9 @@ use crate::{
     config::SelfieConfig,
     package::{
         Package,
-        event::{EventSender, OperationResult, OperationSuccess, SpecListData, SpecListItem},
+        event::{
+            EventSender, OperationResult, OperationSuccess, RefusedSpec, SpecListData, SpecListItem,
+        },
         git::GitStatusProvider,
         port::PackageRepository,
         service::ProgressTracker,
@@ -21,9 +23,11 @@ pub(super) struct SpecQueryOptions<'a, F> {
     pub load_step_label: &'a str,
     /// Human-readable label for step 2 progress (e.g., "Emitting spec definitions")
     pub emit_step_label: &'a str,
-    /// Predicate that decides which valid packages to include in results
+    /// Predicate on a spec's name and description, deciding which specs to
+    /// include. Asked of refused specs as well.
     pub filter: F,
-    /// Value for `show_all` in the emitted `SpecListData`
+    /// Whether specs not declaring the current environment are included. Also
+    /// the value of `show_all` in the emitted `SpecListData`.
     pub show_all: bool,
 }
 
@@ -42,7 +46,7 @@ pub(super) async fn load_filter_emit<PR, G, F>(
 where
     PR: PackageRepository,
     G: GitStatusProvider,
-    F: Fn(&Package) -> bool,
+    F: Fn(&str, Option<&str>) -> bool,
 {
     // Step 1: Load and process packages
     progress.next(sender, opts.load_step_label).await;
@@ -64,6 +68,29 @@ where
     let mut sorted_packages: Vec<_> = valid_packages.into_iter().collect();
     sorted_packages.sort_by(|a, b| a.name().cmp(b.name()));
 
+    // Refused specs are taken out before the statistics and the environment
+    // filter, both of which read the mapping a refused spec cannot be trusted to
+    // hold. The rule follows the environments the listing shows: apply's question
+    // in this one, and any environment's when every environment is shown. A
+    // refused spec still answers the caller's filter, matched on its file's name
+    // alone, since its description comes from the file selfie refused.
+    let matches = |package: &Package| (opts.filter)(package.name(), package.description());
+    let shown = if opts.show_all {
+        super::steps::Shown::Every
+    } else {
+        super::steps::Shown::Current(config.environment())
+    };
+    let (sorted_packages, refused) = super::steps::separate_refused(sorted_packages, shown);
+    let refused: Vec<RefusedSpec> = refused
+        .into_iter()
+        .filter(|(package, _)| {
+            package
+                .spec_name()
+                .is_some_and(|name| (opts.filter)(&name, None))
+        })
+        .map(|(_, spec)| spec)
+        .collect();
+
     // Calculate environment statistics from all valid packages (before filtering)
     let mut environment_stats: HashMap<String, usize> = HashMap::new();
     for package in &sorted_packages {
@@ -72,10 +99,12 @@ where
         }
     }
 
-    // Apply the caller's filter
+    let environment = config.environment();
     let packages_to_show: Vec<_> = sorted_packages
         .into_iter()
-        .filter(|pkg| (opts.filter)(pkg))
+        .filter(|pkg| {
+            matches(pkg) && (opts.show_all || pkg.environments().contains_key(environment))
+        })
         .collect();
 
     // Look up git status for the package directory (once for all files),
@@ -120,10 +149,12 @@ where
 
     let valid_count = spec_items.len();
     let invalid_count = invalid_package_items.len();
+    let refused_count = refused.len();
 
     let spec_list_data = SpecListData {
         specs: spec_items,
         invalid_packages: invalid_package_items,
+        refused,
         current_environment: config.environment().to_string(),
         package_directory: config.package_directory().display().to_string(),
         environment_stats,
@@ -135,6 +166,7 @@ where
     OperationResult::Success(OperationSuccess::spec_list_generated(
         valid_count,
         invalid_count,
+        refused_count,
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))
@@ -178,7 +210,7 @@ mod tests {
         (sender, rx)
     }
 
-    fn make_opts<F: Fn(&Package) -> bool>(filter: F) -> SpecQueryOptions<'static, F> {
+    fn make_opts<F: Fn(&str, Option<&str>) -> bool>(filter: F) -> SpecQueryOptions<'static, F> {
         SpecQueryOptions {
             load_step_label: "Loading",
             emit_step_label: "Emitting",
@@ -232,14 +264,15 @@ mod tests {
         let mut progress = ProgressTracker::new(2);
         let mock_git = mock_git_not_in_repo();
 
-        // Filter to only macos packages
+        // Only macos packages, because `show_all` is off and the environment is
+        // macos. The filter itself admits every spec.
         let result = load_filter_emit(
             &mock_repo,
             &config,
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|pkg: &Package| pkg.environments().contains_key("macos")),
+            make_opts(|_: &str, _: Option<&str>| true),
         )
         .await;
 
@@ -285,7 +318,7 @@ mod tests {
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|_: &Package| true),
+            make_opts(|_: &str, _: Option<&str>| true),
         )
         .await;
 
@@ -351,7 +384,7 @@ mod tests {
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|_: &Package| true),
+            make_opts(|_: &str, _: Option<&str>| true),
         )
         .await;
 
@@ -392,7 +425,7 @@ mod tests {
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|_: &Package| true),
+            make_opts(|_: &str, _: Option<&str>| true),
         )
         .await;
 
@@ -425,7 +458,7 @@ mod tests {
             SpecQueryOptions {
                 load_step_label: "Loading",
                 emit_step_label: "Emitting",
-                filter: |_: &Package| true,
+                filter: |_: &str, _: Option<&str>| true,
                 show_all: true,
             },
         )
@@ -480,7 +513,7 @@ mod tests {
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|pkg: &Package| pkg.name().starts_with("include")),
+            make_opts(|name: &str, _: Option<&str>| name.starts_with("include")),
         )
         .await;
 
@@ -531,7 +564,7 @@ mod tests {
             &mock_git,
             &sender,
             &mut progress,
-            make_opts(|_: &Package| false), // filter rejects everything
+            make_opts(|_: &str, _: Option<&str>| false), // filter rejects everything
         )
         .await;
 

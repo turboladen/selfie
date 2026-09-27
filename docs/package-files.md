@@ -232,6 +232,18 @@ refuse for the same reason: the key is not modeled, so rewriting from the struct
 silently. The same refusal covers a key at the file's top level, where a rewrite would take every
 entry under it.
 
+The commands that only read a package say what selfie would refuse instead of reading the file
+anyway. A command about the current environment asks what `selfie apply` asks here: an unrecognized
+key at the top level or in this environment, or a package spec that declares no environment at all.
+A command that shows every environment refuses a file with an unrecognized key in any of them.
+
+- `selfie package list` and `selfie spec list` list such a package as refused, with the reason, and
+  exit `0`. With `--all` they show every environment and take the second rule.
+- `selfie spec search` shows every environment, so it takes the second rule, and lists a refused
+  package when its file name matches.
+- `selfie package status` fails on a package apply would refuse and exits `1`, and reports a
+  dependency apply would refuse as unknown, with the reason.
+
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 

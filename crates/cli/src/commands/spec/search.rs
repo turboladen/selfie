@@ -92,6 +92,7 @@ mod tests {
                 spec_list: SpecListData {
                     specs: vec![item],
                     invalid_packages: vec![],
+                    refused: vec![],
                     current_environment: "test".to_string(),
                     package_directory: "/tmp/packages".to_string(),
                     environment_stats: Default::default(),
@@ -102,6 +103,7 @@ mod tests {
                 operation_info: test_op_info(),
                 result: OperationResult::Success(OperationSuccess::spec_list_generated(
                     1,
+                    0,
                     0,
                     "test".to_string(),
                     StepCount::new(2, 2),
@@ -132,6 +134,7 @@ mod tests {
                 spec_list: SpecListData {
                     specs: vec![],
                     invalid_packages: vec![],
+                    refused: vec![],
                     current_environment: "test".to_string(),
                     package_directory: "/tmp/packages".to_string(),
                     environment_stats: Default::default(),
@@ -141,6 +144,7 @@ mod tests {
             PackageEvent::Completed {
                 operation_info: test_op_info(),
                 result: OperationResult::Success(OperationSuccess::spec_list_generated(
+                    0,
                     0,
                     0,
                     "test".to_string(),
@@ -208,6 +212,7 @@ mod tests {
             spec_list: SpecListData {
                 specs: vec![],
                 invalid_packages: vec![],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/tmp/packages".to_string(),
                 environment_stats: Default::default(),

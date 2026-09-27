@@ -229,6 +229,24 @@ fn handle_list_event(
                 display.println(line);
             }
 
+            // Whatever environment is selected, as for an unparsable spec: a refused
+            // file cannot say which environments it declares.
+            for refused in &package_list.refused {
+                let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
+                let name_column = format!(
+                    "{prefix} {:<width$}",
+                    refused.package_name,
+                    width = state.max_name_len
+                );
+                let text = format!("refused ({}): {}", refused.path, refused.reason);
+                let line = if use_colors {
+                    format!("{name_column}  {}", style(text).red())
+                } else {
+                    format!("{name_column}  {text}")
+                };
+                display.println(line);
+            }
+
             display.println("");
             display.println(format!(
                 "Package directory: {}",
@@ -237,18 +255,22 @@ fn handle_list_event(
 
             let valid = package_list.valid_packages.len();
             let invalid = package_list.invalid_packages.len();
-            let total = valid + invalid;
+            let refused = package_list.refused.len();
 
-            if total == 0 && package_list.environment_stats.is_empty() {
+            // The hints are about what the environment filter left, so they are
+            // given only when the listing found nothing at all to show.
+            if valid + invalid + refused == 0 && package_list.environment_stats.is_empty() {
                 display.println("No packages found.");
-            } else if valid == 0 && invalid == 0 {
+            } else if valid + invalid + refused == 0 {
                 display.println(format!(
                     "No packages found for environment '{}'.",
                     config.environment()
                 ));
                 display_environment_stats(&package_list.environment_stats, config, display);
-            } else if invalid > 0 {
-                display.println(format!("{valid} valid, {invalid} invalid"));
+            } else if invalid > 0 || refused > 0 {
+                display.println(selfie::package::event::listing_counts(
+                    valid, invalid, refused, "package",
+                ));
             } else {
                 display.println(format!("{valid} packages"));
             }
@@ -451,6 +473,7 @@ mod tests {
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
             invalid_packages: vec![],
+            refused: vec![],
             current_environment: TEST_ENV.to_string(),
             package_directory: "/test/path".to_string(),
             environment_stats: std::collections::HashMap::new(),
@@ -476,6 +499,7 @@ mod tests {
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
             invalid_packages: vec![],
+            refused: vec![],
             current_environment: TEST_ENV.to_string(),
             package_directory: "/test/path".to_string(),
             environment_stats,
@@ -510,6 +534,7 @@ mod tests {
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![package_item],
             invalid_packages: vec![],
+            refused: vec![],
             current_environment: TEST_ENV.to_string(),
             package_directory: "/test/path".to_string(),
             environment_stats,
@@ -538,6 +563,7 @@ mod tests {
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![],
             invalid_packages: vec![invalid_package],
+            refused: vec![],
             current_environment: TEST_ENV.to_string(),
             package_directory: "/test/path".to_string(),
             environment_stats: std::collections::HashMap::new(),
@@ -580,6 +606,7 @@ mod tests {
         let package_list = selfie::package::event::PackageListData {
             valid_packages: vec![package_item],
             invalid_packages: vec![invalid_package],
+            refused: vec![],
             current_environment: TEST_ENV.to_string(),
             package_directory: "/test/path".to_string(),
             environment_stats,
@@ -784,6 +811,7 @@ mod tests {
             package_list: selfie::package::event::PackageListData {
                 valid_packages: vec![],
                 invalid_packages: vec![],
+                refused: vec![],
                 current_environment: TEST_ENV.to_string(),
                 package_directory: "/test/path".to_string(),
                 environment_stats: std::collections::HashMap::new(),

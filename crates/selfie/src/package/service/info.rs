@@ -128,10 +128,16 @@ where
         }
     };
 
+    let current_env = config.environment();
+    if let Some(failure) =
+        super::steps::refuse_unreadable_spec(package_name, &package_blob, current_env)
+    {
+        return failure;
+    }
+
     // Step 2: Check installation status for the current environment
     progress.next(sender, "Checking installation status").await;
 
-    let current_env = config.environment();
     if let Some(env_config) = package_blob.package.environments().get(current_env) {
         let status =
             get_installation_status(package_name, current_env, env_config, command_runner, token)
@@ -237,6 +243,15 @@ where
             };
         }
     };
+
+    // The refusal is asked before the lookup below, which a shadowing key makes
+    // miss or find a decoy.
+    if let Some(reason) = dep_package.package.spec_refusal(current_env) {
+        return DependencyStatus {
+            name: dep_name.to_string(),
+            status: EnvironmentStatus::Unknown(format!("is refused: {reason}")),
+        };
+    }
 
     let Some(env_config) = dep_package.package.environments().get(current_env) else {
         return DependencyStatus {

@@ -163,6 +163,23 @@ pub(crate) fn dotfile_entry_json(
     value
 }
 
+/// Specs selfie parsed and will not read, as fields.
+// Shared by every listing that reports them. A refused spec is not a spec with
+// nothing in it, and a caller reading a total cannot tell the two apart unless
+// the refusals are their own field.
+fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
+    refused
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "package": &r.package_name,
+                "path": &r.path,
+                "reason": &r.reason,
+            })
+        })
+        .collect()
+}
+
 /// One parse failure as fields, shared by every surface that reports one.
 ///
 /// `kind` is what a caller branches on; `reason` is prose to display. `line` and
@@ -301,6 +318,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &spec_list.package_directory,
                 "total_specs": spec_list.specs.len(),
                 "invalid_packages": invalid,
+                "refused": refused_json(&spec_list.refused),
             }))
         }
         PackageEvent::DotfileListLoaded { dotfile_list, .. } => {
@@ -323,17 +341,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             // A refused package is not a package with no dotfiles, and an
             // assistant reading `total` cannot tell those apart unless the
             // refusals are their own field.
-            let refused: Vec<Value> = dotfile_list
-                .refused
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "package": &r.package_name,
-                        "path": &r.path,
-                        "reason": &r.reason,
-                    })
-                })
-                .collect();
+            let refused = refused_json(&dotfile_list.refused);
 
             Some(serde_json::json!({
                 "type": "dotfile_list",
@@ -356,6 +364,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                 "package_directory": &package_list.package_directory,
                 "total_packages": package_list.valid_packages.len(),
                 "invalid_packages": invalid,
+                "refused": refused_json(&package_list.refused),
             }))
         }
         PackageEvent::RecommendStarted { recommend_name, .. } => Some(serde_json::json!({
@@ -1072,6 +1081,7 @@ mod tests {
             spec_list: selfie::package::event::SpecListData {
                 specs: vec![],
                 invalid_packages: vec![error],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/packages".to_string(),
                 environment_stats: std::collections::HashMap::new(),
@@ -1106,6 +1116,7 @@ mod tests {
             package_list: selfie::package::event::PackageListData {
                 valid_packages: vec![],
                 invalid_packages: vec![error],
+                refused: vec![],
                 current_environment: "test".to_string(),
                 package_directory: "/packages".to_string(),
                 environment_stats: std::collections::HashMap::new(),
@@ -1123,6 +1134,36 @@ mod tests {
         assert_eq!(row["reason"], "unclosed bracket '{'");
         assert_eq!(row["line"], 2);
         assert_eq!(row["column"], 15);
+    }
+
+    // A refused spec is its own field, apart from the packages it is not counted
+    // among, so a caller reading the total is not told the directory holds less
+    // than it does.
+    #[tokio::test]
+    async fn a_package_list_summary_reports_a_refused_spec_outside_the_total() {
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageListLoaded {
+            operation_info: test_op_info(),
+            package_list: selfie::package::event::PackageListData {
+                valid_packages: vec![],
+                invalid_packages: vec![],
+                refused: vec![selfie::package::event::RefusedSpec {
+                    package_name: "shadowed".to_string(),
+                    path: "/packages/shadowed.yml".to_string(),
+                    reason: "'_environments' is refused".to_string(),
+                }],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+            },
+        }]));
+        let result = collect_events(stream).await;
+
+        let summary = &result.data["data"][0];
+        assert_eq!(summary["total_packages"], 0);
+        let row = &summary["refused"][0];
+        assert_eq!(row["package"], "shadowed");
+        assert_eq!(row["path"], "/packages/shadowed.yml");
+        assert_eq!(row["reason"], "'_environments' is refused");
     }
 
     // A kind with no location says so, rather than inventing one.
@@ -1330,6 +1371,7 @@ mod tests {
                 spec_list: selfie::package::event::SpecListData {
                     specs: vec![],
                     invalid_packages: vec![],
+                    refused: vec![],
                     current_environment: "macos".to_string(),
                     package_directory: "/tmp/packages".to_string(),
                     environment_stats: Default::default(),
@@ -1340,6 +1382,7 @@ mod tests {
                 operation_info: test_op_info(),
                 result: OperationResult::Success(OperationSuccess::spec_list_generated(
                     1,
+                    0,
                     0,
                     "macos".to_string(),
                     StepCount::new(2, 2),

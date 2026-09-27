@@ -26,7 +26,6 @@ where
     PR: PackageRepository,
     G: GitStatusProvider,
 {
-    let environment = config.environment().to_string();
     load_filter_emit(
         repo,
         config,
@@ -36,9 +35,9 @@ where
         SpecQueryOptions {
             load_step_label: "Loading specs",
             emit_step_label: "Emitting spec definitions",
-            filter: move |pkg: &crate::package::Package| {
-                show_all || pkg.environments().contains_key(&environment)
-            },
+            // The filter admits every spec. Whether one outside the current
+            // environment is shown is `show_all`'s to decide.
+            filter: |_: &str, _: Option<&str>| true,
             show_all,
         },
     )
