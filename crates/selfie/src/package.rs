@@ -1432,18 +1432,12 @@ impl Package {
         envs
     }
 
-    /// Add a dotfile mapping to this package.
+    /// Add a shared dotfile mapping to this package.
     ///
-    /// Skips the entry if a dotfile with the same target already exists,
-    /// preventing duplicate entries from repeated `track-dotfile` calls.
+    /// Adds it whatever the package already holds; a caller that must not
+    /// duplicate a target checks first.
     pub fn add_dotfile(&mut self, entry: DotfileEntry) {
-        let already_tracked = self
-            .dotfiles
-            .iter()
-            .any(|existing| existing.target() == entry.target());
-        if !already_tracked {
-            self.dotfiles.push(entry);
-        }
+        self.dotfiles.push(entry);
     }
 
     /// Get the optional post-install note for this package

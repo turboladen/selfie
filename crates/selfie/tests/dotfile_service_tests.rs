@@ -3751,6 +3751,111 @@ environments:
     );
 }
 
+// An entry under the current environment's `dotfiles` tracks its target as
+// surely as a shared one. A scan of the shared list alone would append a second,
+// shared entry for the same file, and the environment would then hold two entries
+// for one target. The target is named absolutely while the entry spells it with
+// `~`, so the scan has to compare expanded paths.
+#[tokio::test]
+async fn a_package_track_finds_an_environment_scoped_entry_for_the_target() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+
+    let yaml = r#"name: gem
+environments:
+  test:
+    install: "echo installed"
+    dotfiles:
+      - source: gem/gemrc
+        target: ~/.gemrc
+"#;
+    let spec_path = dirs.package_dir.join("gem.yml");
+    std::fs::write(&spec_path, yaml).unwrap();
+
+    let target_file = home.join(".gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("gem", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            was_already_tracked,
+            target_path,
+            ..
+        }) => {
+            assert!(was_already_tracked, "the scoped entry was not found");
+            assert_eq!(target_path, "~/.gemrc", "must name the entry's own target");
+        }
+        other => panic!("expected an already-tracked answer, got: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&spec_path).unwrap(),
+        yaml,
+        "the spec must not gain a second entry"
+    );
+    assert!(
+        !dirs.package_dir.join("gem").join(".gemrc").exists(),
+        "nothing may be copied for an already-tracked target"
+    );
+}
+
+// An entry scoped to another environment deploys nothing here, so it does not
+// make the file tracked. The track adds a shared entry, which that environment's
+// entry, spelled the same, overrides there.
+#[tokio::test]
+async fn a_package_track_ignores_an_entry_scoped_to_another_environment() {
+    let dirs = TestDirs::new();
+    let home = dirs.target_dir.clone();
+
+    let yaml = r#"name: gem
+environments:
+  test:
+    install: "echo installed"
+  work:
+    install: "echo installed"
+    dotfiles:
+      - source: gem/work-gemrc
+        target: ~/.gemrc
+"#;
+    let spec_path = dirs.package_dir.join("gem.yml");
+    std::fs::write(&spec_path, yaml).unwrap();
+
+    let target_file = home.join(".gemrc");
+    std::fs::write(&target_file, "gem: --no-document").unwrap();
+
+    let events = collect_events(
+        dirs.service_with_home(&home)
+            .track_for_package("gem", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    match get_operation_result(&events).expect("Should have a Completed event") {
+        OperationResult::Success(OperationSuccess::DotfileTracked {
+            was_already_tracked,
+            ..
+        }) => assert!(!was_already_tracked, "another environment's entry counted"),
+        other => panic!("expected the track to succeed, got: {other:?}"),
+    }
+    let spec = std::fs::read_to_string(&spec_path).unwrap();
+    let package: selfie::package::Package = selfie::yaml::parse(&spec).unwrap();
+    assert_eq!(
+        package
+            .dotfiles()
+            .iter()
+            .map(|e| (e.source(), e.target()))
+            .collect::<Vec<_>>(),
+        vec![(Some("gem/.gemrc"), "~/.gemrc")],
+        "one shared entry must be added:\n{spec}"
+    );
+    assert!(dirs.package_dir.join("gem").join(".gemrc").exists());
+}
+
 #[tokio::test]
 async fn test_track_for_package_fails_when_package_not_found() {
     let dirs = TestDirs::new();
