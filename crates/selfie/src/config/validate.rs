@@ -51,11 +51,22 @@ impl SelfieConfig {
         issues.extend(validate_package_directory(fs, &self.package_directory));
 
         if let Some(ref path) = self.dotfiles_directory {
-            issues.extend(validate_optional_directory(fs, "dotfiles_directory", path));
+            issues.extend(validate_optional_directory(
+                fs,
+                "dotfiles_directory",
+                path,
+                Setting::Read,
+            ));
         }
 
         if let Some(ref path) = self.state_directory {
-            issues.extend(validate_optional_directory(fs, "state_directory", path));
+            // selfie creates the state directory when it first records a deploy.
+            issues.extend(validate_optional_directory(
+                fs,
+                "state_directory",
+                path,
+                Setting::State,
+            ));
         }
 
         if let Some(issue) = validate_command_timeout(self.command_timeout) {
@@ -143,9 +154,20 @@ fn validate_package_directory(
         )];
     }
 
-    validate_directory_path(fs, "package_directory", package_directory)
+    validate_directory_path(fs, "package_directory", package_directory, Setting::Read)
         .into_iter()
         .collect()
+}
+
+/// Says which directory a setting names, which decides what its state means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    /// A directory selfie reads specs from. A command finds nothing in a missing
+    /// one, so the warning offers to create it.
+    Read,
+    /// The state directory. selfie creates it on first use and refuses a run
+    /// over anything else in its way, so the report is the run's own verdict.
+    State,
 }
 
 /// Validate an optional directory path: it must not be empty, and it is
@@ -154,6 +176,7 @@ fn validate_optional_directory(
     fs: &impl FileSystem,
     field_name: &str,
     path: &Path,
+    setting: Setting,
 ) -> Vec<ValidationIssue> {
     if path.as_os_str().is_empty() {
         return vec![ValidationIssue::error(
@@ -166,7 +189,7 @@ fn validate_optional_directory(
         )];
     }
 
-    validate_directory_path(fs, field_name, path)
+    validate_directory_path(fs, field_name, path, setting)
         .into_iter()
         .collect()
 }
@@ -177,6 +200,7 @@ fn validate_directory_path(
     fs: &impl FileSystem,
     field_name: &str,
     path: &Path,
+    setting: Setting,
 ) -> Option<ValidationIssue> {
     let expanded_path = match super::yaml::expand_tilde_only(fs, path) {
         Ok(expanded) => expanded.unwrap_or_else(|| path.to_path_buf()),
@@ -202,14 +226,15 @@ fn validate_directory_path(
         ));
     }
 
-    read_directory_issue(
-        field_name,
-        &expanded_path,
-        fs.directory_state(&expanded_path),
-    )
+    let state = fs.directory_state(&expanded_path);
+    match setting {
+        Setting::Read => read_directory_issue(field_name, &expanded_path, state),
+        Setting::State => state_directory_issue(field_name, &expanded_path, state),
+    }
 }
 
-/// What to report about a directory setting whose state is `state`.
+/// What to report about a directory selfie reads specs from, whose state is
+/// `state`.
 fn read_directory_issue(
     field_name: &str,
     path: &Path,
@@ -267,6 +292,35 @@ fn read_directory_issue(
                 Some("Check the path and each directory above it"),
             ))
         }
+    }
+}
+
+/// What to report about the state directory, whose state is `state`: the
+/// verdict a run reaches over the same path, in the run's own words.
+fn state_directory_issue(
+    field_name: &str,
+    path: &Path,
+    state: DirectoryState,
+) -> Option<ValidationIssue> {
+    use crate::dotfile_service::state_file::{
+        StateDirectoryVerdict, not_there_yet_warning, state_directory_verdict,
+    };
+
+    match state_directory_verdict(path, state) {
+        StateDirectoryVerdict::InUse => None,
+        StateDirectoryVerdict::NotThereYet => Some(ValidationIssue::warning(
+            ValidationErrorCategory::Advisory,
+            field_name,
+            &not_there_yet_warning(path),
+            None,
+        )),
+        // An error, because a run refuses it.
+        StateDirectoryVerdict::Refused(failure) => Some(ValidationIssue::error(
+            ValidationErrorCategory::PathFormat,
+            field_name,
+            &failure.to_string(),
+            None,
+        )),
     }
 }
 
@@ -650,8 +704,10 @@ mod tests {
         assert!(issues.is_empty());
     }
 
+    // A missing state directory on the real file system warns without offering
+    // `mkdir`, since selfie creates it on first use.
     #[test]
-    fn state_directory_absolute_nonexistent_produces_warning() {
+    fn state_directory_absolute_nonexistent_warns_that_it_is_not_there_yet() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
 
@@ -662,16 +718,16 @@ mod tests {
             .build();
 
         let result = config.validate(&crate::fs::RealFileSystem);
-        let warnings: Vec<_> = result
+        let issues: Vec<_> = result
             .issues()
             .warnings()
             .into_iter()
             .filter(|i| i.field == "state_directory")
             .collect();
 
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
-        assert!(warnings[0].message.contains("does not exist"));
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].category, ValidationErrorCategory::Advisory);
+        assert!(issues[0].message.contains("not there yet"), "{issues:?}");
     }
 
     #[test]
@@ -921,6 +977,48 @@ mod tests {
         );
     }
 
+    // The state directory gets the verdict a run reaches over the same path. A
+    // missing one is created on first use, so it warns only that the path may be
+    // a typo, in the run's own words.
+    #[test]
+    fn a_missing_state_directory_warns_that_it_is_not_there_yet() {
+        let issue = directory_issue(
+            "state_directory",
+            DirectoryState::Absent(AbsentReason::Empty),
+        )
+        .expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert_eq!(issue.category, ValidationErrorCategory::Advisory);
+        assert!(issue.message.contains("is not there yet"), "{issue:?}");
+        assert!(issue.message.contains("typo"), "{issue:?}");
+        assert!(!suggestion(&issue).contains("mkdir"), "{issue:?}");
+    }
+
+    // A run refuses a state directory that anything else holds, or that it cannot
+    // check, so the check of the configuration reports each as an error.
+    #[test]
+    fn a_state_directory_a_run_refuses_is_an_error() {
+        for state in [
+            dangling(),
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                parent: PathBuf::from("/nowhere"),
+            }),
+            unknown(),
+        ] {
+            let issue = directory_issue("state_directory", state).expect("an issue");
+
+            assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
+            assert!(
+                issue.message.contains("Cannot use the deploy state"),
+                "{issue:?}"
+            );
+        }
+    }
+
     // `~` is expanded through the port, the way the loader expands it.
     #[test]
     fn a_leading_tilde_is_expanded_through_the_port() {
@@ -1002,5 +1100,25 @@ mod tests {
             .expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Warning);
         assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
+    }
+
+    #[test]
+    fn a_relative_state_directory_is_an_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/tmp")
+            .state_directory(PathBuf::from("state"))
+            .build();
+
+        let result = config.validate(&crate::fs::RealFileSystem);
+        assert!(
+            result
+                .issues()
+                .errors()
+                .iter()
+                .any(|i| i.field == "state_directory"),
+            "{:?}",
+            result.issues()
+        );
     }
 }

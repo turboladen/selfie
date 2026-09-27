@@ -520,11 +520,17 @@ This checks:
 - Path accessibility
 - Environment name validity
 
-Each directory setting is reported as the commands that read it treat it. A path holding a regular
-file, or a fifo, socket or device node, is an error, since no directory can be created there. Every
-other way the path fails to hold a directory is a warning: nothing there, a symlink to nothing, a
-path running through something that is not a directory, or a path selfie could not check. A missing
-directory is offered a correction of the setting if the path is a typo, or a `mkdir -p` command.
+`package_directory` and `dotfiles_directory` are reported as the commands that read them treat them.
+A path holding a regular file, or a fifo, socket or device node, is an error, since no directory can
+be created there. Every other way the path fails to hold a directory is a warning: nothing there, a
+symlink to nothing, a path running through something that is not a directory, or a path selfie could
+not check. A missing directory is offered a correction of the setting if the path is a typo, or a
+`mkdir -p` command.
+
+`state_directory` gets the verdict a run reaches over the same path, in the run's own words. A
+missing one is a warning that it is not there yet, since selfie creates it on first use, and that
+the path may be a typo. Anything else in its way, or a path selfie could not check, is an error,
+because every command that records a deploy refuses to run over it.
 
 ## Troubleshooting
 
