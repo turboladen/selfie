@@ -125,9 +125,13 @@ question therefore stays a separate call, ordered ahead of the classifier on eve
 target, and it is what the warning below reads the link's destination from. The two questions take
 different stats and are not merged.
 
-The secret-bearing path uses the same classifier and the same refusal. The conflict detail handed to
-a resolver carries the target's state rather than a byte slice, so a revealed conflict cannot render
-an unreadable target as an empty file.
+The secret-bearing path uses the same classifier and the same refusal. A target it cannot read is
+refused rather than put to a resolver, so the conflict detail carries only bytes that were read, and
+a revealed conflict cannot render an unreadable target as an empty file. Before any provider command
+runs, the target is opened without being read, and one that will not open is refused, so no
+authentication prompt is raised for a deploy that could only be refused, and a dry run and drift
+refuse it as apply does. The read after the command keeps its own refusal, for a target that became
+unreadable while the command ran.
 
 The two writers keep diverging on a symlinked target, and the divergence is recorded here rather
 than removed. A repository-file entry refuses: the link is the user's configuration, the content is
@@ -169,7 +173,11 @@ provider command runs or a template renders. A credential fetch, possibly with a
 would then run for a target the writer goes on to refuse. Rejected: word a dry run as a skip for a
 symlinked secret target. A preview would then say nothing about a link a real run will replace.
 Rejected: keep the rule that leaves an already-matching destination's link alone. An outcome that
-depends on the destination's mode is what this decision removes.
+depends on the destination's mode is what this decision removes. Rejected: refuse an unreadable
+secret target only at the read after its provider command. The command, and any prompt it raises,
+would run for a deploy that can only be refused, and a dry run and drift could not refuse what apply
+refuses. Rejected: learn readability before the command by reading the target, which reads the
+credential once more for nothing; opening it without reading answers the same question.
 
 Reopen when a third content class appears whose writer is neither of these two, or when a write mode
 exists that completes a write without replacing the link. Reopen also when the secret writer gains a
@@ -360,8 +368,10 @@ to.
 - A repository's listing error carries the directory's path and state, so attaching a repository and
   naming that directory stop being unrelated facts.
 - The target classifier gains a directory state and loses its preceding existence probe. The
-  secret-bearing apply path stops classifying its own target, and the conflict detail handed to a
-  resolver changes shape to carry the state.
+  secret-bearing apply path stops classifying its own target, and refuses one it cannot read, so the
+  conflict detail handed to a resolver only ever carries bytes that were read. The `FileSystem` port
+  gains an open-only probe, asked before any provider command, which drift asks too, so a check
+  opens a credential file it never reads.
 - The name-uniqueness check stops discarding the dotfiles repository's listing errors, so a track
   from either adapter refuses rather than creating a spec whose name a directory selfie could not
   list already holds.

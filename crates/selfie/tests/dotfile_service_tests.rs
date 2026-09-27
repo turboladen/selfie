@@ -558,6 +558,13 @@ impl TestDirs {
 struct CancelOnReadOf(RealFileSystem, PathBuf, CancellationToken);
 
 impl selfie::fs::FileSystem for CancelOnReadOf {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.open_for_read_refusal(path)
+    }
+
     // Delegated: this decorator's subject is when the token is canceled, not what is
     // at a directory path.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -650,23 +657,22 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     }
 }
 
-// `RealFileSystem` that records every path a target read is asked for, and can
-// stage answers the disk cannot give on demand: the first read of a path answering
-// a chosen `TargetRead`, a pre-command directory check that sees no directory,
-// symlink or irregular questions that miss what is there for all or the first few
-// looks, a fifo that appears between the first and second look, and a link swapped
-// in on disk just before the owner-only check.
+// `RealFileSystem` that records every path a target read is asked for, and stages
+// answers the disk cannot give on demand: a chosen first read of a path, a
+// pre-command check that sees no directory or no open refusal, symlink or irregular
+// questions that miss what is there for the first few looks, a fifo appearing
+// between looks, and a link swapped in just before the owner-only check.
 //
 // "Never read" is otherwise unobservable: a read through a link that ends in a
 // refusal leaves the same events as no read at all. Every test asserting a path was
-// not read pairs it with a control target the run does read, so an empty record
-// cannot pass.
+// not read pairs it with a control target the run does read.
 #[derive(Clone, Debug)]
 struct RecordsTargetReads {
     inner: RealFileSystem,
     reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
     blind_to_directories: bool,
+    blind_to_open_refusals: bool,
     blind_to_symlinks: bool,
     symlinks_blind_for: Option<(
         PathBuf,
@@ -689,6 +695,7 @@ impl RecordsTargetReads {
             reads: std::sync::Arc::default(),
             staged_read: None,
             blind_to_directories: false,
+            blind_to_open_refusals: false,
             blind_to_symlinks: false,
             symlinks_blind_for: None,
             fifo_on_second_look: None,
@@ -751,6 +758,13 @@ impl RecordsTargetReads {
         self
     }
 
+    // `open_for_read_refusal` answers `None` everywhere: a target that became
+    // unreadable after the secret path's pre-command check, while its command ran.
+    fn blind_to_open_refusals(mut self) -> Self {
+        self.blind_to_open_refusals = true;
+        self
+    }
+
     // `is_directory` answers `false` everywhere: a directory put in place after the
     // secret path's pre-command check.
     fn blind_to_directories(mut self) -> Self {
@@ -773,6 +787,16 @@ impl RecordsTargetReads {
 }
 
 impl selfie::fs::FileSystem for RecordsTargetReads {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        if self.blind_to_open_refusals {
+            return None;
+        }
+        self.inner.open_for_read_refusal(path)
+    }
+
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
         self.inner.directory_state(path)
     }
@@ -905,6 +929,13 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
 struct HomeAt(RealFileSystem, PathBuf);
 
 impl selfie::fs::FileSystem for HomeAt {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.0.open_for_read_refusal(path)
+    }
+
     fn is_directory(
         &self,
         path: &selfie::fs::TargetPath,
@@ -1001,6 +1032,13 @@ struct SymlinkAppearsAfterFirstLook {
 }
 
 impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.open_for_read_refusal(path)
+    }
+
     // Delegated: this decorator's subject is the symlink question's second answer, not
     // what is at a directory path.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -1106,6 +1144,13 @@ struct FollowingStatPanicsAt {
 }
 
 impl selfie::fs::FileSystem for FollowingStatPanicsAt {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.open_for_read_refusal(path)
+    }
+
     // Delegated: this decorator's subject is the second symlink answer, not what is at
     // a directory path.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -1215,6 +1260,13 @@ struct SecondLookIsAnUnknownRefusal {
 }
 
 impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.open_for_read_refusal(path)
+    }
+
     // Delegated: this decorator's subject is the second symlink answer, not what is at
     // a directory path.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -1322,6 +1374,13 @@ struct StateWritesFailAfter {
 }
 
 impl selfie::fs::FileSystem for StateWritesFailAfter {
+    fn open_for_read_refusal(
+        &self,
+        path: &selfie::fs::TargetPath,
+    ) -> Option<selfie::fs::FileSystemError> {
+        self.inner.open_for_read_refusal(path)
+    }
+
     fn is_directory(
         &self,
         path: &selfie::fs::TargetPath,
@@ -3950,10 +4009,10 @@ mod secret_bearing {
     use std::sync::{Arc, Mutex};
 
     // A value distinctive enough that finding it anywhere is unambiguous.
-    const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+    pub(super) const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
 
     // Write a package whose single dotfile is a whole-file provider entry.
-    fn provider_package(package_dir: &std::path::Path, target: &str, command: &str) {
+    pub(super) fn provider_package(package_dir: &std::path::Path, target: &str, command: &str) {
         let yaml = format!(
             "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
              - command: \"{command}\"\n    target: \"{target}\"\n"
@@ -5508,72 +5567,6 @@ mod secret_bearing {
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "key = \"from-repo\""
-        );
-    }
-
-    #[tokio::test]
-    async fn an_existing_but_unreadable_target_is_not_silently_overwritten() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        // An unreadable file is still a file, and it may be the very credential an
-        // overwrite would destroy. Treating "cannot read" as "not there" would
-        // deploy over it with no prompt.
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "existing credential").unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
-        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
-
-        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
-        let service = dirs.service_with_runner(runner);
-
-        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
-
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
-            "an unreadable target must be a conflict, got: {events:?}"
-        );
-
-        // Restore permissions so the content can be checked.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "existing credential",
-            "the unreadable target must not have been overwritten"
-        );
-        assert_no_event_mentions(&events, SECRET);
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_target_conflict_says_so_rather_than_reporting_zero_lines() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "existing credential").unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
-        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
-
-        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
-        let service = dirs.service_with_runner(runner);
-
-        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let summary = events
-            .iter()
-            .find_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
-                _ => None,
-            })
-            .expect("expected a conflict event");
-
-        assert!(
-            summary.contains("could not be read"),
-            "an empty-looking '0 lines' would understate what an overwrite \
-             destroys, got: {summary}"
         );
     }
 
@@ -7241,6 +7234,13 @@ mod symlinked_targets {
         struct BlindToSymlinks(RealFileSystem, Arc<AtomicUsize>);
 
         impl FileSystem for BlindToSymlinks {
+            fn open_for_read_refusal(
+                &self,
+                path: &selfie::fs::TargetPath,
+            ) -> Option<selfie::fs::FileSystemError> {
+                self.0.open_for_read_refusal(path)
+            }
+
             fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
                 self.0.is_directory(path)
             }
@@ -10756,6 +10756,140 @@ mod unreadable_targets {
 
         drop(guard);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "V1");
+    }
+
+    // A secret-bearing entry refuses a target it cannot read, as a repository-file
+    // entry does, and before any command runs: a provider command can raise a
+    // biometric prompt for a deploy that could only be refused. A dry run and drift
+    // refuse it in the same words, since each refuses whatever apply refuses
+    // without running anything. The resolver accepts everything and `auto_accept`
+    // is set, so a target that reached either would be overwritten.
+    #[tokio::test]
+    async fn a_secret_target_it_cannot_read_is_refused_before_any_command_runs() {
+        use super::secret_bearing::provider_package;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "EXISTING").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let Some(guard) = make_unreadable(&target) else {
+            skip("a_secret_target_it_cannot_read_is_refused_before_any_command_runs");
+            return;
+        };
+
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read x", super::secret_bearing::SECRET.as_bytes());
+        let counted = runner.clone();
+        let service = dirs.service_with_runner(runner);
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            auto_accept: true,
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let applied = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(counted.call_count(), 0, "no command may run");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the resolver must not be asked"
+        );
+        assert_eq!(count_of(&applied, deployed), 0, "got: {applied:?}");
+        assert_eq!(count_of(&applied, conflicted), 0, "got: {applied:?}");
+        let from_apply = the_unreadable_warning(&applied, &target);
+        assert!(
+            from_apply.ends_with(". No command was run."),
+            "{from_apply}"
+        );
+        assert_eq!(refused_count(&applied), 1);
+
+        let previewed = collect_events(
+            service
+                .apply_all(ApplyOptions {
+                    dry_run: true,
+                    ..Default::default()
+                })
+                .await,
+        )
+        .await;
+        assert_eq!(the_unreadable_warning(&previewed, &target), from_apply);
+        assert_eq!(refused_count(&previewed), 1);
+
+        let drift = collect_events(service.check_drift().await).await;
+        let from_drift = the_unreadable_warning(&drift, &target);
+        assert_eq!(format!("{from_drift}. No command was run."), from_apply);
+        assert_eq!(drift_summary(&drift).2, 1, "counted refused: {drift:?}");
+
+        assert_eq!(
+            counted.call_count(),
+            0,
+            "no command may run in any of the three"
+        );
+        // Asserted while the guard still holds the mode, since dropping it restores
+        // 0600.
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o200,
+            "the target's mode must be untouched"
+        );
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
+    }
+
+    // The second layer: a target that turns unreadable while the command runs,
+    // after the check before it, is refused by the read after it, with the secret
+    // in hand. Staged by a probe that misses the refusal, over a real 0200 file.
+    #[tokio::test]
+    async fn a_secret_target_unreadable_by_the_time_of_the_read_is_refused() {
+        use super::secret_bearing::{SECRET, provider_package};
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "EXISTING").unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let Some(guard) = make_unreadable(&target) else {
+            skip("a_secret_target_unreadable_by_the_time_of_the_read_is_refused");
+            return;
+        };
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = ApplyOptions {
+            auto_accept: true,
+            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
+            ..Default::default()
+        };
+        let fs = RecordsTargetReads::new().blind_to_open_refusals();
+        let events =
+            collect_events(dirs.service_with_fs(fs, runner).apply_all(options).await).await;
+
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the resolver must not be asked"
+        );
+        assert_eq!(count_of(&events, deployed), 0, "got: {events:?}");
+        assert_eq!(count_of(&events, conflicted), 0, "got: {events:?}");
+        let warning = the_unreadable_warning(&events, &target);
+        assert!(!warning.contains("No command was run"), "{warning}");
+        assert_eq!(refused_count(&events), 1);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o200,
+            "the target's mode must be untouched"
+        );
+
+        // The positive control for the scan below: the command ran, so the secret
+        // was in hand when the refusal was worded.
+        assert_eq!(counted.call_count(), 1);
+        for event in &events {
+            test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
+        }
+
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
     }
 
     // A4. A link whose destination cannot be read is a symlinked target first,

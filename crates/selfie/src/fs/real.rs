@@ -379,56 +379,71 @@ fn not_regular(path: &Path, metadata: &fs::Metadata) -> Option<TargetRead> {
     None
 }
 
+/// Open `path` for reading without following a symlink at its final component or
+/// waiting on a fifo. Returns the file, or what is there instead when the open
+/// finds a state of its own: nothing, a link, a directory, a fifo, socket or device
+/// node.
+///
+/// # Errors
+///
+/// The open's own error when what is there is a regular file that will not open,
+/// or cannot be told.
+// The one open the target read and the open-only probe share, so the two cannot
+// disagree about a target that has not changed.
+//
+// `O_NOFOLLOW` makes the open itself refuse a link at the final component, so no
+// earlier check has to be current for it to be safe. `O_NONBLOCK` makes opening a
+// fifo return at once instead of waiting for a writer. `O_NOCTTY` stops a terminal
+// device becoming the controlling terminal on Linux. Opening a device can still
+// have side effects, which is why callers ask `irregular_target_refusal` first.
+fn open_no_follow(path: &Path) -> io::Result<Result<fs::File, TargetRead>> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_NOCTTY).bits())
+        .open(path)
+    {
+        Ok(file) => Ok(Ok(file)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(Err(TargetRead::Absent))
+        }
+        // Anything else that failed to open is named from a non-following stat, so
+        // the errno never has to say what is there: a link refused by `O_NOFOLLOW`
+        // (`ELOOP`, or `EMLINK` on FreeBSD), a directory or fifo selfie may not
+        // open, a socket, which cannot be opened at all. A regular file, or a path
+        // the stat cannot reach either -- a loop above it -- is the open's own error.
+        Err(e) => match fs::symlink_metadata(path) {
+            Ok(metadata) => not_regular(path, &metadata).map(Err).ok_or(e),
+            Err(_) => Err(e),
+        },
+    }
+}
+
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
-    // `O_NOFOLLOW` makes the open itself refuse a link at the final component, so
-    // no earlier check has to be current for the read to be safe. `O_NONBLOCK`
-    // makes opening a fifo return at once instead of waiting for a writer, and the
-    // descriptor's own type, not the path's, then decides what was opened: a fifo,
+    // The descriptor's own type, not the path's, decides what was opened: a fifo,
     // socket or device planted after the caller's stat is refused before anything is
-    // read from it. `O_NOCTTY` stops a terminal device becoming the controlling
-    // terminal on Linux. Opening a device can still have side effects, which is why
-    // callers ask `irregular_target_refusal` first; this is the second layer.
+    // read from it.
     fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError> {
         use nix::fcntl::{FcntlArg, OFlag, fcntl};
         use std::io::Read as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
 
         let path = path.path();
         let io_error = |e: io::Error| FileSystemError::IoError(Arc::new(e));
 
-        let mut file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_NOCTTY).bits())
-            .open(path)
-        {
+        let mut file = match open_no_follow(path).map_err(io_error)? {
             Ok(file) => file,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(TargetRead::Absent);
-            }
-            // Anything else that failed to open is named from a non-following stat,
-            // so the errno never has to say what is there: a link refused by
-            // `O_NOFOLLOW` (`ELOOP`, or `EMLINK` on FreeBSD), a directory or fifo
-            // selfie may not open, a socket, which cannot be opened at all. A
-            // regular file, or a path the stat cannot reach either -- a loop above
-            // it -- is the open's own error.
-            Err(e) => {
-                return match fs::symlink_metadata(path) {
-                    Ok(metadata) => match not_regular(path, &metadata) {
-                        Some(found) => Ok(found),
-                        None => Err(io_error(e)),
-                    },
-                    Err(_) => Err(io_error(e)),
-                };
-            }
+            Err(found) => return Ok(found),
         };
 
         let metadata = file.metadata().map_err(io_error)?;
@@ -470,6 +485,14 @@ impl FileSystem for RealFileSystem {
     // hang on the read path.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         irregular_refusal(path.path())
+    }
+
+    // Everything `open_no_follow` names as a state of its own is left to the question
+    // that owns it, so only a file that will not open, or cannot be told, refuses.
+    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
+        open_no_follow(path.path())
+            .err()
+            .map(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
     fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
@@ -1999,6 +2022,91 @@ mod no_follow_read_tests {
         let file = dir.path().join("file");
         fs::write(&file, b"plain").unwrap();
         assert_eq!(read(&file.join("target")).unwrap(), TargetRead::Absent);
+    }
+}
+
+// These tests pin the open-only probe. It must refuse exactly what the read would
+// fail to open, and answer everything the read names as a state of its own with
+// `None`.
+#[cfg(test)]
+mod open_for_read_tests {
+    use super::*;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    fn probe(path: &Path) -> Option<FileSystemError> {
+        RealFileSystem.open_for_read_refusal(&crate::fs::target::repository_path(path))
+    }
+
+    #[test]
+    fn a_file_it_may_not_read_is_refused_and_one_it_may_is_not() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("creds");
+        std::fs::write(&file, "x").unwrap();
+        assert!(probe(&file).is_none());
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            eprintln!("SKIP a_file_it_may_not_read_is_refused: mode bits do not bite");
+            return;
+        }
+        assert!(
+            matches!(probe(&file), Some(FileSystemError::IoError(_))),
+            "a file the read cannot open must be refused"
+        );
+    }
+
+    // Each of these is a state the read reports without an error, so the probe
+    // leaves it to the question that owns it.
+    #[test]
+    fn nothing_there_a_link_and_a_path_below_a_file_are_not_refusals() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("plain");
+        std::fs::write(&file, "x").unwrap();
+        let unreadable = dir.path().join("unreadable");
+        std::fs::write(&unreadable, "x").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&unreadable, &link).unwrap();
+
+        assert!(probe(&dir.path().join("absent")).is_none());
+        assert!(probe(&file.join("below")).is_none());
+        assert!(
+            probe(&link).is_none(),
+            "a link is left to the symlink question, even one to a file that would refuse"
+        );
+    }
+
+    // A directory the open is refused on, and a socket, which cannot be opened at
+    // all, are states the read names. The probe must not word either as a file that
+    // could not be read.
+    #[test]
+    fn a_directory_or_socket_that_will_not_open_is_not_a_refusal() {
+        let dir = tempdir().unwrap();
+        let closed = dir.path().join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let socket = dir.path().join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+        let closed_answer = probe(&closed);
+        let socket_answer = probe(&socket);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(closed_answer.is_none(), "got: {closed_answer:?}");
+        assert!(socket_answer.is_none(), "got: {socket_answer:?}");
+    }
+
+    // `O_NONBLOCK` is what keeps this from waiting for a writer.
+    #[test]
+    fn a_fifo_is_opened_without_waiting() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(probe(&fifo).is_none()).unwrap());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true));
     }
 }
 

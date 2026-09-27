@@ -160,8 +160,8 @@ pub(super) enum TargetState {
 // between the two deploys instead of refusing, and a directory is named rather than
 // reported as a read failure. The port says what is there; an error leaves it
 // unknown -- a parent that denies access, a loop above the target -- and an unknown
-// target is never written over: the secret path would put it to a resolver, and the
-// repository-file path and drift refuse it outright.
+// target is never written over: apply refuses it on both paths, and drift refuses it
+// too.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
     match filesystem.read_file_no_follow(target) {
         Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),

@@ -20,7 +20,7 @@ use crate::{
 
 use super::refusal::{
     Link, TargetGuard, directory_target_refusal, guard_refusal, guard_target, link_at,
-    readable_target, refusal_warning, target_refusal,
+    readable_target, refusal_warning, target_refusal, unreadable_target_refusal,
 };
 
 /// An entry refused before it was deployed or compared, with the warning that
@@ -198,8 +198,7 @@ fn deployable_secret_target<F: FileSystem>(
     // Only for a plain target. A link is replaced whatever it points at, so the
     // guard -- which stats following the link -- is the whole of what refuses one.
     if link.is_none()
-        && let Some(refusal) =
-            unwritable_target_refusal(filesystem, source, target, Purpose::Deploy)
+        && let Some(refusal) = pre_command_refusal(filesystem, source, target, Purpose::Deploy)
     {
         return Err(Refused(refusal));
     }
@@ -229,7 +228,7 @@ fn checkable_secret_target<F: FileSystem>(
     if let Some(refusal) = filesystem.irregular_target_refusal(target) {
         return Err(Refused(refusal_warning(source, &refusal)));
     }
-    match unwritable_target_refusal(filesystem, source, target, Purpose::Check) {
+    match pre_command_refusal(filesystem, source, target, Purpose::Check) {
         Some(refusal) => Err(Refused(refusal)),
         None => Ok(None),
     }
@@ -259,8 +258,9 @@ pub(super) fn secret_target_link<F: FileSystem>(
     }
 }
 
-/// Why a secret write to this target could never land, when that is the case,
-/// worded for `purpose`.
+/// Why selfie refuses a secret deploy to this target before running any command,
+/// when it does, worded for `purpose`: a directory at the target, a target that
+/// exists and will not open for reading, or one selfie could not classify.
 ///
 /// `source` is the target as the package file spells it, so the refusal names
 /// what the user wrote rather than the expanded path. Asked only of a target that
@@ -269,10 +269,11 @@ pub(super) fn secret_target_link<F: FileSystem>(
 // on the target, so "nothing is known about it" is not a license to write a
 // credential over it.
 //
-// Framed like `refusal_warning` rather than by calling it: that takes a
-// `FileSystemError`, and every variant's `Display` embeds the path, so routing
-// this through it prints the path twice.
-fn unwritable_target_refusal<F: FileSystem>(
+// A target that will not open is often still writable, since a rename needs only
+// the directory. It is refused because selfie will not overwrite a credential it
+// cannot see, and it is refused here so that no provider command, and no prompt it
+// raises, runs for it. The read after the command refuses one that changed meanwhile.
+fn pre_command_refusal<F: FileSystem>(
     filesystem: &F,
     source: &str,
     path: &TargetPath,
@@ -288,7 +289,18 @@ fn unwritable_target_refusal<F: FileSystem>(
         Purpose::Check => ("", ""),
     };
     match filesystem.is_directory(path) {
-        Ok(false) => None,
+        // The target is absent or is not a directory, so the only question left is
+        // whether it opens.
+        Ok(false) => filesystem.open_for_read_refusal(path).map(|error| {
+            let refusal = unreadable_target_refusal(source, path, &error);
+            // The error ends its sentence without a period, so one goes before the
+            // next sentence.
+            if unrun.is_empty() {
+                refusal
+            } else {
+                format!("{refusal}.{unrun}")
+            }
+        }),
         Ok(true) => Some(format!("{}{unrun}", directory_target_refusal(source, path))),
         Err(e) => Some(format!(
             "Skipping '{source}': selfie could not determine what is at the target{unwritten}.{unrun} The check failed with: {e}"

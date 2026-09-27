@@ -41,8 +41,12 @@ pub enum ConflictDetail<'a> {
     /// `'static` boundary the blocking resolver call requires, so the only copy
     /// that exists is one an adapter took deliberately.
     Secret {
+        /// The structural summary, which reveals neither value.
         summary: &'a str,
+        /// The resolved content an Accept would write.
         incoming: &'a [u8],
+        /// The target's bytes as read. A target that could not be read is refused
+        /// and never reaches a resolver, so an empty slice is an empty file.
         current: &'a [u8],
     },
 }

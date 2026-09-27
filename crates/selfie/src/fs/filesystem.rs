@@ -379,6 +379,18 @@ pub trait FileSystem: Send + Sync {
     /// opened.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
+    /// The refusal a read of `path` would meet when it opens it, or `None` when the
+    /// open succeeds, nothing is there, the final component is a symlink, or what is
+    /// there is not a regular file: a directory, fifo, socket or device node.
+    ///
+    /// Opens and closes without reading a byte, never follows a symlink at the final
+    /// component, and never waits on a fifo. Answers for the effective user, as the
+    /// read itself would.
+    ///
+    /// Advisory: a target can change between this and the read, so a caller that
+    /// reads must still handle the read's own error.
+    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
+
     /// Whether a directory is at `path`.
     ///
     /// Symlinks are followed, so it reports on what the path resolves to. `false`
