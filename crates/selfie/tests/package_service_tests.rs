@@ -930,6 +930,81 @@ mod a_spec_selfie_cannot_read {
         }
     }
 
+    // Spec info describes the file rather than refusing to, and says why the
+    // environments are missing. Exits 0: `spec validate` is the command whose
+    // job is to fail over a file.
+    #[tokio::test]
+    async fn spec_info_describes_it_with_the_reason() {
+        let temp_dir = TempDir::new().unwrap();
+        write_shadowed(&temp_dir, "shadowed");
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("shadowed").await).await;
+
+        assert_successful_operation(&events);
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        let reason = info
+            .refusal
+            .as_deref()
+            .expect("the refusal must be carried");
+        assert!(reason.contains("_environments"), "got: {reason}");
+        assert!(info.environments.is_empty(), "{:?}", info.environments);
+        assert!(info.dotfiles.is_empty());
+        assert_eq!(info.apply_commands, 0);
+    }
+
+    // The same rule as every other command: a key in an environment this run
+    // does not use leaves the spec readable here. Spec info shows it in full and
+    // says, separately, that apply would refuse it in that environment.
+    #[tokio::test]
+    async fn spec_info_shows_a_spec_refused_only_elsewhere_and_names_why() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("partial.yml"),
+            "name: partial\nenvironments:\n  test:\n    install: \"true\"\n    dotfiles:\n      \
+             - source: t.conf\n        target: ~/.t\n  work:\n    install: \"true\"\n    \
+             audt: x\n    dotfiles:\n      - source: w.conf\n        target: ~/.w\n",
+        )
+        .unwrap();
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("partial").await).await;
+
+        assert_successful_operation(&events);
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert!(info.refusal.is_none(), "{:?}", info.refusal);
+        let mut environments = info.environments.clone();
+        environments.sort();
+        assert_eq!(environments, ["test", "work"]);
+        let elsewhere = info
+            .refusal_elsewhere
+            .as_deref()
+            .expect("the other environment's refusal must be carried");
+        assert!(
+            elsewhere.contains("work") && elsewhere.contains("audt"),
+            "{elsewhere}"
+        );
+        // Each entry says whether apply would deploy it where it is declared.
+        let refused: Vec<(Option<&str>, bool)> = info
+            .dotfiles
+            .iter()
+            .map(|d| (d.environment.as_deref(), d.refused))
+            .collect();
+        assert_eq!(refused, [(Some("test"), false), (Some("work"), true)]);
+    }
+
     // The controls. A guard that refuses everything passes every test above and
     // is worse than no guard at all, so the same spec without the key has to
     // reach each of the three commands.
@@ -965,6 +1040,25 @@ mod a_spec_selfie_cannot_read {
         let events = collect_events(service.status("clean").await).await;
 
         assert_successful_operation(&events);
+    }
+
+    #[tokio::test]
+    async fn the_same_spec_without_the_key_still_has_its_environments_in_spec_info() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_package_file(&temp_dir, "clean", true);
+        let service = create_service_test_service(&temp_dir);
+
+        let events = collect_events(service.spec_info("clean").await).await;
+
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert!(info.refusal.is_none());
+        assert!(!info.environments.is_empty());
     }
 
     #[tokio::test]
@@ -1138,4 +1232,104 @@ mod recommends_after_the_root_stops_loading {
             "a dependency's recommend was installed; events: {events:?}"
         );
     }
+}
+
+// `spec info` reports where each dotfile's content comes from, and how many
+// commands apply would run here to produce it. The fixture varies the count
+// along each axis a wrong count could take: a template with two vars (counted
+// once, it reads 1), a shared command overridden here by a plain file (counted
+// from the shared list, it adds 1), and a command in another environment
+// (counted across environments, it adds 1).
+#[tokio::test]
+async fn spec_info_reports_dotfile_sources_and_the_commands_apply_runs() {
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::write(
+        temp_dir.path().join("sourced.yml"),
+        r#"name: sourced
+dotfiles:
+  - source: a.tpl
+    target: ~/.a
+    vars:
+      x: echo x
+      y: echo y
+  - command: echo shared
+    target: ~/.b
+environments:
+  test:
+    install: "true"
+    dotfiles:
+      - source: b.conf
+        target: ~/.b
+  other:
+    install: "true"
+    dotfiles:
+      - command: echo other
+        target: ~/.c
+"#,
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.spec_info("sourced").await).await;
+
+    assert_successful_operation(&events);
+    let info = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+            _ => None,
+        })
+        .expect("the info must be sent");
+    assert_eq!(
+        info.apply_commands, 2,
+        "two vars, and nothing else runs here"
+    );
+    let rows: Vec<(Option<&str>, &str)> = info
+        .dotfiles
+        .iter()
+        .map(|d| (d.environment.as_deref(), d.entry.target()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (None, "~/.a"),
+            (None, "~/.b"),
+            (Some("other"), "~/.c"),
+            (Some("test"), "~/.b"),
+        ],
+        "every entry in every scope is reported"
+    );
+}
+
+// A package spec declaring no environment is refused by apply, so apply runs
+// none of its commands however many its entries name, and spec info says why
+// in place of the entries.
+#[tokio::test]
+async fn spec_info_counts_no_commands_for_a_spec_apply_refuses() {
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::write(
+        temp_dir.path().join("unscoped.yml"),
+        "name: unscoped\ndotfiles:\n  - command: echo shared\n    target: ~/.b\n",
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.spec_info("unscoped").await).await;
+
+    let info = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+            _ => None,
+        })
+        .expect("the info must be sent");
+    assert!(
+        info.refusal
+            .as_deref()
+            .is_some_and(|reason| reason.contains("environment")),
+        "{:?}",
+        info.refusal
+    );
+    assert!(info.dotfiles.is_empty());
+    assert_eq!(info.apply_commands, 0);
 }

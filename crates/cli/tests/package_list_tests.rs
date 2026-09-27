@@ -610,6 +610,24 @@ mod a_spec_selfie_will_not_read {
         assert!(text.contains("_environments"), "{text}");
     }
 
+    // Described with the reason in place of the environments, and exits 0.
+    #[test]
+    fn spec_info_shows_the_reason_instead_of_the_environments() {
+        let temp_dir = setup_default_test_config();
+        write_shadowed(&temp_dir);
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["spec", "info", "shadowed"])
+            .output()
+            .unwrap();
+
+        let text = combined(&output);
+        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert!(text.contains("Refused"), "{text}");
+        assert!(text.contains("_environments"), "{text}");
+        assert!(!text.contains("Environments"), "{text}");
+    }
+
     #[test]
     fn package_status_refuses_it_and_exits_1() {
         let temp_dir = setup_default_test_config();

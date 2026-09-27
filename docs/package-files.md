@@ -243,6 +243,10 @@ A command that shows every environment refuses a file with an unrecognized key i
   package when its file name matches.
 - `selfie package status` fails on a package apply would refuse and exits `1`, and reports a
   dependency apply would refuse as unknown, with the reason.
+- `selfie spec info` describes a package apply would refuse but shows the reason in place of its
+  environments and dotfiles, and exits `0`. When apply would refuse the package only in another
+  environment, it shows everything, marks that environment's dotfile entries as refused, and adds a
+  line naming the reason.
 
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
@@ -1236,8 +1240,10 @@ a known gap rather than an intentional design.
 - **Resolved values are not reliably erasable from process memory.** String and buffer reallocation
   can leave copies behind; selfie makes no scrubbing guarantee.
 - **`selfie apply` executes commands from package files**, rather than only copying data out of
-  them. `selfie spec validate` reports how many commands a package will run, but treat a package
-  directory you did not write as code, not as data.
+  them. `selfie spec validate` reports how many commands a package will run, and `selfie spec info`
+  lists each dotfile's content source (a repository file, a template and its var names, or a
+  command) and warns how many commands `selfie apply` would run in the current environment. Treat a
+  package directory you did not write as code, not as data.
 
 ### Drift Detection
 

@@ -2361,6 +2361,30 @@ pub struct PackageInfoData {
     pub environments: Vec<String>,
     pub current_environment: String,
     pub git_status: Option<super::git::GitFileStatus>,
+    /// Why `selfie apply` would refuse this spec in the current environment,
+    /// when it would. `environments` and `dotfiles` are then empty, because
+    /// neither can be trusted, and `apply_commands` is zero.
+    pub refusal: Option<String>,
+    /// Why apply would refuse this spec in another environment it declares, when
+    /// it would there and not here.
+    pub refusal_elsewhere: Option<String>,
+    /// Every dotfile entry the spec declares, shared and per environment.
+    pub dotfiles: Vec<ScopedDotfile>,
+    /// How many commands `selfie apply` would run in the current environment to
+    /// produce this spec's dotfile content: one per `command` entry and one per
+    /// template var. Zero when apply would refuse the spec.
+    pub apply_commands: usize,
+}
+
+/// A dotfile entry and the environment that declares it.
+#[derive(Debug, Clone)]
+pub struct ScopedDotfile {
+    /// The declaring environment, or `None` for a shared entry.
+    pub environment: Option<String>,
+    pub entry: crate::package::DotfileEntry,
+    /// Whether apply refuses the package in the declaring environment, so the
+    /// entry would not deploy there.
+    pub refused: bool,
 }
 
 /// Structured data for environment status

@@ -487,7 +487,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_info",
-        description = "Get detailed definition info about a specific package including environments, dependencies, and commands. Does not check runtime installation status."
+        description = "Get detailed definition info about a specific package including environments, dependencies, and commands. Does not check runtime installation status. `dotfiles` lists every dotfile entry with its content source (`kind` file, template with var names, command, or invalid, with the reason in `error`), and `apply_commands` counts the commands `selfie apply` would run in the current environment to produce them; nothing is run to report either. When 'selfie apply' would refuse the spec in the current environment, `refusal` carries the reason, `environments` and `dotfiles` are empty because the file cannot be trusted to say what it declares, and `apply_commands` is 0 because apply would run nothing; the call still succeeds. `refusal_elsewhere` carries the reason apply would refuse the spec in another environment, when it would there and not here."
     )]
     async fn spec_info(
         &self,
@@ -954,8 +954,7 @@ mod tests {
                 "exactly one of",
             ),
         ] {
-            let json =
-                crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml), "packages");
+            let json = crate::event_collector::dotfile_entry_json("creds", None, &entry(yaml));
 
             assert_eq!(json["kind"], "invalid", "for {yaml}");
             assert_eq!(json["target"], "~/.creds", "for {yaml}");
@@ -975,7 +974,6 @@ mod tests {
             "creds",
             Some("macos"),
             &entry("source: creds.tpl\ntarget: ~/.creds\nvars:\n  api_key: op read x\n"),
-            "packages",
         );
 
         assert_eq!(json["kind"], "template");

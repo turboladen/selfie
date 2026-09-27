@@ -112,17 +112,16 @@ pub(crate) fn origin_label(origin: SpecOrigin) -> &'static str {
     }
 }
 
-/// Render one dotfile entry as JSON for `selfie_dotfiles_list`.
+/// Render one dotfile entry as JSON, with where its content comes from.
 ///
 /// Reports where content comes from without producing any of it: var names and
 /// the command string come from the package file and are references, not values.
-/// Nothing here runs a command or renders a template, so enumeration cannot leak
-/// a secret or trigger an authentication prompt.
+/// Nothing here runs a command or renders a template, so rendering an entry cannot
+/// leak a secret or trigger an authentication prompt.
 pub(crate) fn dotfile_entry_json(
     package: &str,
     scope: Option<&str>,
     entry: &selfie::package::DotfileEntry,
-    origin: &str,
 ) -> serde_json::Value {
     use selfie::package::ContentSource;
 
@@ -130,7 +129,6 @@ pub(crate) fn dotfile_entry_json(
         "package": package,
         "environment": scope,
         "target": entry.target(),
-        "origin": origin,
     });
     let map = value.as_object_mut().expect("constructed as an object");
 
@@ -225,15 +223,34 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "status": format!("{}", audit_result.result),
             "details": audit_details(&audit_result.result),
         })),
-        PackageEvent::PackageInfoLoaded { package_info, .. } => Some(serde_json::json!({
-            "type": "package_info",
-            "name": &package_info.name,
-            "description": &package_info.description,
-            "homepage": &package_info.homepage,
-            "environments": &package_info.environments,
-            "current_environment": &package_info.current_environment,
-            "git_status": git_status_label(package_info.git_status.as_ref()),
-        })),
+        PackageEvent::PackageInfoLoaded { package_info, .. } => {
+            let dotfiles: Vec<Value> = package_info
+                .dotfiles
+                .iter()
+                .map(|dotfile| {
+                    let mut row = dotfile_entry_json(
+                        &package_info.name,
+                        dotfile.environment.as_deref(),
+                        &dotfile.entry,
+                    );
+                    row["refused"] = dotfile.refused.into();
+                    row
+                })
+                .collect();
+            Some(serde_json::json!({
+                "type": "package_info",
+                "name": &package_info.name,
+                "description": &package_info.description,
+                "homepage": &package_info.homepage,
+                "environments": &package_info.environments,
+                "current_environment": &package_info.current_environment,
+                "git_status": git_status_label(package_info.git_status.as_ref()),
+                "refusal": &package_info.refusal,
+                "refusal_elsewhere": &package_info.refusal_elsewhere,
+                "dotfiles": dotfiles,
+                "apply_commands": package_info.apply_commands,
+            }))
+        }
         PackageEvent::EnvironmentStatusChecked {
             environment_status, ..
         } => {
@@ -333,7 +350,9 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
                     pkg.dotfiles_with_scope()
                         .into_iter()
                         .map(move |(scope, entry)| {
-                            dotfile_entry_json(pkg.name(), scope, entry, origin)
+                            let mut row = dotfile_entry_json(pkg.name(), scope, entry);
+                            row["origin"] = origin.into();
+                            row
                         })
                 })
                 .collect();
@@ -1164,6 +1183,53 @@ mod tests {
         assert_eq!(row["package"], "shadowed");
         assert_eq!(row["path"], "/packages/shadowed.yml");
         assert_eq!(row["reason"], "'_environments' is refused");
+    }
+
+    // Each entry is rendered by the listing's own function, so a template names
+    // its vars and a command names itself, and the count travels as a number.
+    #[tokio::test]
+    async fn package_info_reports_each_dotfile_source_and_the_apply_command_count() {
+        let entry = |yaml: &str| -> selfie::package::DotfileEntry {
+            selfie::yaml::parse(yaml).expect("fixture must parse")
+        };
+        let info = selfie::package::event::PackageInfoData {
+            name: "sourced".to_string(),
+            description: None,
+            homepage: None,
+            environments: vec!["test".to_string()],
+            current_environment: "test".to_string(),
+            git_status: None,
+            refusal: None,
+            refusal_elsewhere: None,
+            dotfiles: vec![
+                selfie::package::event::ScopedDotfile {
+                    environment: None,
+                    entry: entry("source: a.tpl\ntarget: ~/.a\nvars:\n  x: echo x\n"),
+                    refused: false,
+                },
+                selfie::package::event::ScopedDotfile {
+                    environment: Some("test".to_string()),
+                    entry: entry("command: echo b\ntarget: ~/.b\n"),
+                    refused: true,
+                },
+            ],
+            apply_commands: 2,
+        };
+        let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageInfoLoaded {
+            operation_info: test_op_info(),
+            package_info: info,
+        }]));
+        let result = collect_events(stream).await;
+
+        let data = &result.data["data"][0];
+        assert_eq!(data["apply_commands"], 2);
+        assert_eq!(data["dotfiles"][0]["kind"], "template");
+        assert_eq!(data["dotfiles"][0]["vars"][0], "x");
+        assert_eq!(data["dotfiles"][1]["kind"], "command");
+        assert_eq!(data["dotfiles"][1]["command"], "echo b");
+        assert_eq!(data["dotfiles"][1]["environment"], "test");
+        assert_eq!(data["dotfiles"][0]["refused"], false);
+        assert_eq!(data["dotfiles"][1]["refused"], true);
     }
 
     // A kind with no location says so, rather than inventing one.

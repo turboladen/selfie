@@ -15,7 +15,7 @@ use crate::{
     package::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
-            OperationResult, OperationSuccess, PackageInfoData,
+            OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -66,6 +66,37 @@ where
         }
     };
 
+    // The rule every other command asks: what apply would say about this spec
+    // here. A refused spec is still described, since its name and description
+    // came through, but what the key may be hiding is left out rather than shown
+    // as the file's, and apply would run none of its commands.
+    let package = &package_blob.package;
+    let refusal = package.spec_refusal(config.environment());
+    let (environments, dotfiles, apply_commands, refusal_elsewhere) = if refusal.is_some() {
+        (Vec::new(), Vec::new(), 0, None)
+    } else {
+        (
+            package.environments().keys().cloned().collect(),
+            package
+                .dotfiles_with_scope()
+                .into_iter()
+                .map(|(scope, entry)| ScopedDotfile {
+                    environment: scope.map(str::to_string),
+                    entry: entry.clone(),
+                    refused: scope.is_some_and(|environment| package.is_refused(environment)),
+                })
+                .collect(),
+            // The current environment's effective set, overrides replacing the
+            // shared entries they target, since that is what apply deploys.
+            package
+                .dotfiles_for_environment(config.environment())
+                .iter()
+                .map(crate::package::DotfileEntry::command_count)
+                .sum(),
+            package.listing_refusal().map(|reason| reason.to_string()),
+        )
+    };
+
     let package_info = PackageInfoData {
         name: package_blob.package.name().to_string(),
         description: package_blob
@@ -76,14 +107,13 @@ where
             .package
             .homepage()
             .map(std::string::ToString::to_string),
-        environments: package_blob
-            .package
-            .environments()
-            .keys()
-            .cloned()
-            .collect(),
+        environments,
         current_environment: config.environment().to_string(),
         git_status: file_git_status,
+        refusal: refusal.map(|reason| reason.to_string()),
+        refusal_elsewhere,
+        dotfiles,
+        apply_commands,
     };
 
     sender.send_package_info(package_info).await;
