@@ -4065,6 +4065,7 @@ async fn a_tracked_target_outside_home_keeps_its_absolute_path() {
 mod secret_bearing {
     use super::*;
     use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     // A value distinctive enough that finding it anywhere is unambiguous.
@@ -4584,8 +4585,8 @@ mod secret_bearing {
         std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
-        let looks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let plain_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let looks = Arc::new(AtomicUsize::new(0));
+        let plain_checks = Arc::new(AtomicUsize::new(0));
         let fs = SymlinkAppearsAfterFirstLook {
             inner: RealFileSystem,
             looks: looks.clone(),
@@ -4612,7 +4613,7 @@ mod secret_bearing {
         // sees. Two looks means the first answered "plain" and the second the truth,
         // which is the window itself.
         assert!(
-            looks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            looks.load(Ordering::SeqCst) >= 2,
             "the target must have been asked about twice, once before the resolve and \
              once before the read"
         );
@@ -4621,7 +4622,7 @@ mod secret_bearing {
         // reach it. Without this, a double that reported the link both times would
         // still satisfy the count above.
         assert!(
-            plain_checks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            plain_checks.load(Ordering::SeqCst) >= 1,
             "the first pass must have classified the target as plain"
         );
 
@@ -4647,12 +4648,18 @@ mod secret_bearing {
 
         let fs = SecondLookIsAnUnknownRefusal {
             inner: RealFileSystem,
-            looks: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            looks: Arc::new(AtomicUsize::new(0)),
         };
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
         let service = dirs.service_with_fs(fs, runner);
 
-        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        // The resolver accepts, so an entry that went on past the refusal would reach
+        // the write, and the content assertion below would see it. The target differs,
+        // so with no resolver that entry would be reported as a conflict and skipped.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let events = collect_events(service.apply_all(options).await).await;
 
         assert!(
             warning_messages(&events)
@@ -4668,6 +4675,15 @@ mod secret_bearing {
             "previous",
             "a refused entry must leave the target alone"
         );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the entry was compared after its refusal"
+        );
+        assert_eq!(refused_count(&events), 1, "the refusal was not counted");
+        // The command ran, so the first look passed and the refusal came from the
+        // second.
+        assert_eq!(counted.call_count(), 1, "control: the first look passed");
     }
 
     // The security case. A link at a secret target must not be read *through*: the
