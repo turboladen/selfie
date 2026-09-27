@@ -236,10 +236,7 @@ pub(super) fn below_non_directory_refusal(
 // at a call site — no test pins this wrapper at the write site, so a copy there
 // could drift unnoticed.
 //
-// Named as a property rather than counted. The count was "three", and was correct
-// until the same change that wrote it added three more call sites — a number in a
-// comment is a claim that goes stale on the next edit, in a file whose whole
-// subject is claims going stale.
+// Keep this comment free of a call-site count; any number goes stale when the next caller is added.
 pub(super) fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
 }
