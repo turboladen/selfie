@@ -413,7 +413,10 @@ pub(crate) enum DotfilesSubcommands {
     ///
     /// Compares deployed dotfiles against their source files and the last-known
     /// checksums to detect changes. Reports which files have drifted and how
-    /// (repo changed, target changed, or both).
+    /// (repo changed, target changed, or both). A secret-bearing entry (a
+    /// `command`, or a `source` with `vars`) is reported separately as
+    /// unverified rather than compared, since checking it would run its
+    /// resolving command.
     ///
     /// Example: `selfie dotfiles drift`
     Drift,
@@ -421,7 +424,9 @@ pub(crate) enum DotfilesSubcommands {
     /// List all dotfiles defined across packages
     ///
     /// Shows all dotfile mappings (source → target) from both the packages
-    /// directory and the standalone dotfiles directory.
+    /// directory and the standalone dotfiles directory. A secret-bearing
+    /// entry's content is never resolved here: only its var names or command
+    /// string are shown, never a value.
     ///
     /// Example: `selfie dotfiles list`
     List,
@@ -536,11 +541,14 @@ pub(crate) struct ApplyArgs {
     #[arg(add = ArgValueCompleter::new(complete_package_names))]
     pub(crate) name: Option<String>,
 
-    /// Show what would change without writing
+    /// Show what would change without writing. Does not resolve secret-bearing
+    /// entries, so it cannot say whether one would change.
     #[arg(long)]
     pub(crate) dry_run: bool,
 
-    /// Auto-accept overwrite for conflicts (non-interactive mode)
+    /// Auto-accept overwrite for conflicts (non-interactive mode). Does not
+    /// apply to secret-bearing entries: their conflicts are still asked
+    /// about, and skipped when no terminal is attached.
     #[arg(long, short)]
     pub(crate) yes: bool,
 }

@@ -322,7 +322,9 @@ cli:
 
 #### `command_timeout`
 
-Default timeout for package operations in seconds.
+Default timeout for package operations in seconds. Also bounds every dotfile provider command and
+template binding, applied per command rather than per entry — an entry with several bindings can
+take longer than this in total to resolve.
 
 ```yaml
 command_timeout: 600 # 10 minutes
