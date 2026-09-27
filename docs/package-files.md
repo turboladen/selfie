@@ -247,6 +247,8 @@ A command that shows every environment refuses a file with an unrecognized key i
   environments and dotfiles, and exits `0`. When apply would refuse the package only in another
   environment, it shows everything, marks that environment's dotfile entries as refused, and adds a
   line naming the reason.
+- `selfie spec remove` reports a package it will not read as one that may depend on the package
+  being removed, and counts it as a dependent when its file names that package.
 
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
