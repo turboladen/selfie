@@ -161,18 +161,10 @@ pub fn shell_quote(path: &Path) -> String {
 }
 
 /// One shell word, quoted unless every character is one the shell leaves alone.
-///
-/// Single quotes, with the shell's own escape for an embedded single quote, which is
-/// the one character single quotes do not cover.
 fn quote_word(word: &str) -> String {
-    if !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
-    {
-        return word.to_string();
-    }
-    format!("'{}'", word.replace('\'', r"'\''"))
+    // `try_quote` refuses only a NUL byte, which no path can hold. Should one ever
+    // arrive, the word goes out as written rather than as a panic.
+    shlex::try_quote(word).map_or_else(|_| word.to_string(), std::borrow::Cow::into_owned)
 }
 
 impl DirectoryState {
@@ -734,5 +726,27 @@ mod tests {
         });
         assert!(!message.is_empty(), "the guard fell through silently");
         assert!(message.contains("repository file"), "got: {message}");
+    }
+
+    // The remedy is pasted into a shell, so whatever the path holds, the shell must
+    // read it back as exactly one word naming that path. A single quote is the case
+    // single-quoting alone cannot carry.
+    #[test]
+    fn a_quoted_path_reads_back_as_one_word() {
+        for path in [
+            "/home/me/dotfiles",
+            "/home/me/my dotfiles",
+            "/home/me/it's here",
+            "/home/me/a\"b$c`d",
+            "/home/me/café",
+            "-foo",
+        ] {
+            let quoted = super::shell_quote(std::path::Path::new(path));
+            assert_eq!(
+                shlex::split(&quoted),
+                Some(vec![path.to_string()]),
+                "{path} quoted as {quoted}"
+            );
+        }
     }
 }
