@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::fs::{
-    filesystem::{FileSystem, FileSystemError, TargetRead},
+    filesystem::{AbsentReason, FileSystem, FileSystemError, TargetRead},
     target::{TargetPath, TargetRejection},
 };
 
@@ -160,8 +160,8 @@ pub(super) enum TargetState {
 // between the two deploys instead of refusing, and a directory is named rather than
 // reported as a read failure. The port says what is there; an error leaves it
 // unknown -- a parent that denies access, a loop above the target -- and an unknown
-// target is never written over: the secret path would put it to a resolver, and the
-// repository-file path and drift refuse it outright.
+// target is never written over: apply refuses it on both paths, and drift refuses it
+// too.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
     match filesystem.read_file_no_follow(target) {
         Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
@@ -214,6 +214,21 @@ pub(super) fn directory_at_target(target: &TargetPath) -> String {
 /// Why an entry whose target is a directory is refused.
 pub(super) fn directory_target_refusal(source: &str, target: &TargetPath) -> String {
     format!("Skipping '{source}': {}", directory_at_target(target))
+}
+
+/// Why an entry whose target lies below a component that is not a directory is
+/// refused, naming that component. The sentence ends without a period, so a
+/// caller can extend it.
+pub(super) fn below_non_directory_refusal(
+    source: &str,
+    target: &TargetPath,
+    reason: &AbsentReason,
+) -> String {
+    format!(
+        "Skipping '{source}': the target '{}' {}",
+        target.display(),
+        reason.clause()
+    )
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the

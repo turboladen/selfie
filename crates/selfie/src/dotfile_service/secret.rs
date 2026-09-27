@@ -25,9 +25,7 @@ use crate::{
 
 use super::classify::{SecretEntry, secret_target_link};
 use super::port::ApplyOptions;
-use super::refusal::{
-    Link, TargetState, classify_link, directory_target_refusal, read_target_state, refusal_warning,
-};
+use super::refusal::{Link, TargetState, classify_link, read_target_state, readable_or_refusal};
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -66,24 +64,19 @@ pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<String> {
 /// file (1 line vs 12 lines), which is the distinction a user needs in order to
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
-fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>) -> String {
-    // Separators plus one, so a trailing newline reads as an extra line. Exact line
-    // semantics do not matter here; the comparison between the two sides does.
+fn secret_conflict_summary(origin: &str, incoming: &[u8], current: &[u8]) -> String {
+    // Each piece `split_inclusive` yields is one line with its newline, so a
+    // trailing newline ends a line rather than starting one, as `wc -l` counts. An
+    // unterminated last line is a piece too, which `wc -l` would drop: "0 lines" for
+    // content that is not empty would read as an empty file.
     //
     // Both sides count through this one closure, so they cannot pluralize
     // differently. It is the only information a user gets before deciding whether
     // to overwrite a credential nothing recorded, so it should not read as though
     // selfie cannot count.
     let count = |b: &[u8]| {
-        let n = b.iter().filter(|c| **c == b'\n').count() + 1;
+        let n = b.split_inclusive(|&c| c == b'\n').count();
         format!("{n} {}", crate::pluralize(n, "line", "lines"))
-    };
-
-    let current_side = match current {
-        Some(bytes) => count(bytes),
-        // Said plainly rather than shown as "0 lines", which would read as an
-        // empty file and understate what an overwrite destroys.
-        None => "could not be read".to_string(),
     };
 
     // Says that nothing is kept, because every other overwrite selfie performs
@@ -92,10 +85,11 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: Option<&[u8]>
     // past a secret conflict.
     format!(
         "  {}\n  target exists and differs from resolved output\n\n  \
-         resolved output : {}\n  current target  : {current_side}\n  (content hidden)\n  \
+         resolved output : {}\n  current target  : {}\n  (content hidden)\n  \
          no copy of the current target is kept",
         origin,
         count(incoming),
+        count(current),
     )
 }
 
@@ -123,9 +117,10 @@ type Phase<T = ()> = Result<T, SecretOutcome>;
 enum Found {
     /// A symlink, which is replaced whatever it points at.
     Link(Link),
-    /// Anything a write may land on after a comparison: nothing there, a readable
-    /// file, or one that could not be read.
-    State(TargetState),
+    /// The bytes of the regular file at the target, or `None` when nothing is
+    /// there. `None` never stands for a target that could not be read: that is
+    /// refused before a `Found` exists.
+    Current(Option<Vec<u8>>),
 }
 
 /// Say that a symlinked target was replaced, naming the link and its destination.
@@ -224,16 +219,20 @@ where
                 }
                 return Ok(outcome);
             }
-            Found::State(current) => current,
+            Found::Current(current) => current,
         };
-        self.settle_in_sync(target, &resolved, &current).await?;
-        self.settle_conflict(target, &resolved, &current).await?;
+        self.settle_in_sync(target, &resolved, current.as_deref())
+            .await?;
+        self.settle_conflict(target, &resolved, current.as_deref())
+            .await?;
 
         Ok(self.write(target, &resolved).await)
     }
 
     /// Read the target immediately before the write, and settle what the read found:
-    /// a link to replace, a target to compare, or a refusal.
+    /// a link to replace, a target to compare, or a refusal. A target that could not
+    /// be read is refused, as the repository-file path refuses one, so it never
+    /// reaches a resolver.
     ///
     /// Never replaces a link the read found without a look confirming it is still
     /// one, so whatever took its place is compared, not written over.
@@ -252,21 +251,18 @@ where
             state => state,
         };
 
-        let refusal = match state {
-            TargetState::Absent | TargetState::Readable(_) | TargetState::Unreadable(_) => {
-                return Ok(Found::State(state));
+        // The repository-file path's classifier and refusal, so the two paths cannot
+        // answer differently about one file. Everything refused here appeared while
+        // the command ran, since the check before it refuses what was already there.
+        // A link here is one again where the look just found none, and a target that
+        // changes under every look is refused rather than chased.
+        match readable_or_refusal(source, &target.path, state) {
+            Ok(current) => Ok(Found::Current(current)),
+            Err(refusal) => {
+                self.sender.send_warning(refusal).await;
+                Err(SecretOutcome::Failed)
             }
-            // A link again, where the look just found none: a target changing under
-            // every look is refused rather than chased.
-            TargetState::Link(link) => refusal_warning(source, &link.refusal()),
-            TargetState::Irregular(refusal) => refusal_warning(source, &refusal),
-            // A directory put there during the resolve. The pre-command check refused
-            // one already present, so this is the same refusal, arriving late; the
-            // resolver could only be asked to overwrite a directory.
-            TargetState::Directory => directory_target_refusal(source, &target.path),
-        };
-        self.sender.send_warning(refusal).await;
-        Err(SecretOutcome::Failed)
+        }
     }
 
     /// Ask both of the guard's questions of `path` again, sending the refusal when
@@ -384,12 +380,12 @@ where
         &self,
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
-        current: &TargetState,
+        current: Option<&[u8]>,
     ) -> Phase {
-        let TargetState::Readable(bytes) = current else {
+        let Some(bytes) = current else {
             return Ok(());
         };
-        if bytes != &resolved.bytes {
+        if bytes != resolved.bytes.as_slice() {
             return Ok(());
         }
 
@@ -458,19 +454,10 @@ where
         &self,
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
-        current: &TargetState,
+        current: Option<&[u8]>,
     ) -> Phase {
-        if matches!(current, TargetState::Absent) {
+        let Some(current) = current else {
             return Ok(());
-        }
-
-        // `None` for an unreadable target: there is nothing to describe or
-        // reveal. The resolver is still consulted, because replacing a file only
-        // needs write permission on its directory — so an overwrite may well be
-        // possible and the user is entitled to choose it.
-        let current: Option<&[u8]> = match current {
-            TargetState::Readable(bytes) => Some(bytes),
-            _ => None,
         };
         let summary = secret_conflict_summary(&target.origin, &resolved.bytes, current);
 
@@ -502,7 +489,7 @@ where
         &self,
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
-        current: Option<&[u8]>,
+        current: &[u8],
         summary: &str,
     ) -> bool {
         let Some(resolver) = &self.options.conflict_resolver else {
@@ -512,7 +499,7 @@ where
         let resolver = Arc::clone(resolver);
         let path = target.path.display().to_string();
         let incoming = resolved.bytes.clone();
-        let current = current.unwrap_or_default().to_vec();
+        let current = current.to_vec();
         let summary = summary.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -600,15 +587,13 @@ mod tests {
     // swapping the arguments, so a fix to one site cannot pass by being checked at
     // the other.
 
-    // The fixtures are unterminated on purpose. The counter is separators plus one,
-    // so "token\n" reads as two lines and a terminated fixture never produces the
-    // singular. That counting is its own question, filed separately.
+    // The fixtures are unterminated, so `wc -l` alone would count each one short.
     #[test]
     fn a_one_line_side_reads_line_and_a_two_line_side_reads_lines() {
         let one: &[u8] = b"token";
         let two: &[u8] = b"token\nsecond";
 
-        let summary = secret_conflict_summary("op read x", one, Some(two));
+        let summary = secret_conflict_summary("op read x", one, two);
         // The trailing newline is part of the assertion: "1 line" is a prefix of
         // "1 lines", so a match without it would hold for the bug.
         assert!(
@@ -620,7 +605,7 @@ mod tests {
             "the current side is not plural: {summary}"
         );
 
-        let swapped = secret_conflict_summary("op read x", two, Some(one));
+        let swapped = secret_conflict_summary("op read x", two, one);
         assert!(
             swapped.contains("resolved output : 2 lines\n"),
             "the resolved side is not plural: {swapped}"
@@ -631,15 +616,28 @@ mod tests {
         );
     }
 
-    // An unreadable target says so rather than counting, and pluralizing must not
-    // have disturbed that arm.
+    // selfie-ir68.24. A trailing newline ends a line and does not start one, so an
+    // ordinary one-line file is "1 line", and an empty one is "0 lines". Asserted
+    // on both sides by swapping the arguments.
     #[test]
-    fn an_unreadable_current_target_is_still_said_plainly() {
-        let summary = secret_conflict_summary("op read x", b"token", None);
-        assert!(
-            summary.contains("current target  : could not be read"),
-            "got: {summary}"
-        );
+    fn a_trailing_newline_does_not_start_a_line() {
+        for (content, expected) in [
+            (&b"token\n"[..], "1 line\n"),
+            (&b"token\nsecond\n"[..], "2 lines\n"),
+            (&b""[..], "0 lines\n"),
+        ] {
+            let other: &[u8] = b"x";
+            let resolved = secret_conflict_summary("op read x", content, other);
+            assert!(
+                resolved.contains(&format!("resolved output : {expected}")),
+                "{content:?}: {resolved}"
+            );
+            let current = secret_conflict_summary("op read x", other, content);
+            assert!(
+                current.contains(&format!("current target  : {expected}")),
+                "{content:?}: {current}"
+            );
+        }
     }
 
     // A link selfie could not read still names the link, with no destination clause.

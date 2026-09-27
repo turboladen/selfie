@@ -387,21 +387,17 @@ pub trait FileSystem: Send + Sync {
     /// opened.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
-    /// Whether a directory is at `path`.
+    /// The refusal a read of `path` would meet when it opens it, or `None` when the
+    /// open succeeds, nothing is there, the final component is a symlink, or what is
+    /// there is not a regular file: a directory, fifo, socket or device node.
     ///
-    /// Symlinks are followed, so it reports on what the path resolves to. `false`
-    /// when nothing is there, so an absent target is not an error.
+    /// Opens and closes without reading a byte, never follows a symlink at the final
+    /// component, and never waits on a fifo. Answers for the effective user, as the
+    /// read itself would.
     ///
-    /// Answered with a stat rather than a listing, and a directory never blocks the
-    /// way a fifo does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FileSystemError`] when the stat fails for any reason other than
-    /// the path not existing — a parent that cannot be traversed, most often. A
-    /// caller cannot treat that as "no directory": nothing is known about the
-    /// path, and a write there may still land on one.
-    fn is_directory(&self, path: &TargetPath) -> Result<bool, FileSystemError>;
+    /// Advisory: a target can change between this and the read, so a caller that
+    /// reads must still handle the read's own error.
+    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
     /// Whether a file is readable only by its owner
     ///

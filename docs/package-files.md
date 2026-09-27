@@ -659,9 +659,8 @@ where nothing can be, is treated as absent, and the write that follows fails and
 refuses the entry with a warning naming the target and the read error, shows no diff, and writes
 nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning, counts
 the entry as refused, and exits `1` rather than calling the target changed. Make the target
-readable, or point the entry elsewhere, and run apply again. A secret-bearing entry handles an
-unreadable target [differently](#deploy-behavior-and-permissions): it is a conflict, reported and
-skipped unless an interactive prompt accepts it.
+readable, or point the entry elsewhere, and run apply again. A secret-bearing entry refuses an
+unreadable target the same way, [before running its commands](#deploy-behavior-and-permissions).
 
 ### How targets are written
 
@@ -1096,9 +1095,10 @@ Consequences worth knowing before you adopt this:
   command. They are counted as not verifiable, apart from the entries drift compared, and are not
   refusals, so they do not make the check exit `1`. An entry `selfie apply` would refuse without
   running anything — a target it will not write to, a template escaping the package directory or
-  missing, unreadable or a fifo, a directory or a fifo at the target — is reported by drift as that
-  same refusal, worded for a check that writes and runs nothing, and does make it exit `1`. A
-  symlink at the target is reported as unverifiable whatever it points at: drift does not follow it.
+  missing, unreadable or a fifo, a directory or a fifo at the target, a target it cannot read, a
+  target below a regular file or a dangling symlink — is reported by drift as that same refusal,
+  worded for a check that writes and runs nothing, and does make it exit `1`. A symlink at the
+  target is reported as unverifiable whatever it points at: drift does not follow it.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
@@ -1113,12 +1113,14 @@ truncated credential.
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.
 
-For a secret-bearing entry, an existing regular file whose read fails is a conflict as well,
-summarized as "could not be read", and is never treated as absent: an interactive prompt can still
-accept the overwrite, since replacing a file needs only write permission on its directory, and
-without one the entry is skipped. A directory and a symlink do not reach that case — the first is
-refused before any command runs, or when selfie reads the target if it appeared while the command
-ran, and a symlink selfie has seen is replaced without being read.
+For a secret-bearing entry, an existing target selfie cannot read is refused, as a repository-file
+entry's is: a warning names the target and the error, nothing is written, the entry counts as
+refused, and neither `--yes` nor an interactive prompt can accept an overwrite. selfie opens the
+target without reading it before running any command, so an unreadable target is refused with no
+provider command run and no authentication prompt raised, and a dry run and `selfie dotfiles drift`
+refuse it too. A target that becomes unreadable while the commands run is refused by the read that
+follows them. A symlink does not reach that case: one selfie has seen is replaced without being
+read.
 
 Note this differs from a repository-file entry, which is [refused and skipped](#symlinked-targets)
 rather than replaced. Neither writes through the link. They differ in what happens next because the
@@ -1136,12 +1138,20 @@ appeared; one that appears after the second look is replaced the same way. After
 succeeds selfie warns, naming the link and where it pointed, so a link you created deliberately is
 not removed silently.
 
-Two things refuse before any command runs, because the write could never succeed and a provider
-command can raise a biometric prompt. A fifo, socket or device node is refused, whether it is at the
-target or behind a link, because the writer refuses one either way. A **directory at the target
-itself** is refused too, because a file cannot replace a directory — but a directory _behind a link_
-is not, since the replacement lands on the link. A plain target selfie cannot classify at all — one
-it has no permission to look at — is refused rather than written over.
+These refuse before any command runs, because a provider command can raise a biometric prompt for a
+deploy that would only be refused:
+
+- A fifo, socket or device node, whether it is at the target or behind a link, because the writer
+  refuses one either way.
+- A **directory at the target itself**, because a file cannot replace a directory. A directory
+  _behind a link_ is not refused, since the replacement lands on the link.
+- A target below a regular file or a dangling symlink, where nothing can be. The warning names what
+  is in the way.
+- A target that exists and cannot be opened for reading. A rename could often still replace it, but
+  selfie will not overwrite a credential it cannot see.
+- A plain target selfie cannot classify at all, such as one it has no permission to look at.
+
+A directory or a fifo that appears while the commands run is refused when selfie reads the target.
 
 With `stop_on_error` set, any of these refusals stops the rest of the run.
 
@@ -1163,8 +1173,10 @@ CONFLICT  ~/.gem/credentials
 ```
 
 Line counts are enough to tell a rotated token (1 line vs 1 line) from a hand-edited file (1 line vs
-12 lines). Command strings and var names **are** shown: they come from the package file and are
-references, not credentials.
+12 lines). Lines are counted as `wc -l` counts them, so a trailing newline does not start another
+line, except that a last line with no newline still counts: `token` and `token` followed by a
+newline are both 1 line, and an empty file is 0 lines. Command strings and var names **are** shown:
+they come from the package file and are references, not credentials.
 
 At an interactive prompt `selfie apply` offers to reveal the two values, behind its own warning and
 its own keypress. It is never the default and is never reachable by accepting one. The MCP server
