@@ -762,7 +762,7 @@ A spec that could not be loaded is reported in the summary's invalid_packages, w
 
     #[tool(
         name = "selfie_sync_push",
-        description = "Commit and push changes to remote. Creates one commit per changed package by default. Use batch=true for a single commit, or 'messages' for custom per-package messages."
+        description = "Currently disabled for anything that would create a commit: with changes to commit it refuses before staging anything, because its commit could record every tracked file as deleted; commit with git instead. With nothing new to commit it still pushes commits that already exist. The parameters are accepted but have no effect while disabled."
     )]
     async fn selfie_sync_push(
         &self,
