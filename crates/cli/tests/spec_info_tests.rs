@@ -51,6 +51,12 @@ fn spec_info_lists_dotfile_sources_and_warns_that_apply_runs_commands() {
         )),
         "{text}"
     );
+    // The column holds a command or a rendered template for a secret-bearing
+    // entry, not a source path, so its header must not say "Source".
+    assert!(
+        text.contains("Content"),
+        "the dotfiles table's column must be headed 'Content', got:\n{text}"
+    );
 }
 
 // A spec with only repository files runs nothing, and must not say it does.

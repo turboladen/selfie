@@ -88,7 +88,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
     print_base_directories(config, display, &data.packages);
 
     let mut table = create_formatted_table();
-    table.set_header(vec!["Package", "Environment", "Source", "Target"]);
+    table.set_header(vec!["Package", "Environment", "Content", "Target"]);
 
     let mut total = 0;
     for pkg in &data.packages {
