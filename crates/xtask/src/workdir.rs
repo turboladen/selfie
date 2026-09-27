@@ -1,7 +1,8 @@
 //! Choosing the directory a run writes its archives, targets and logs into.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -85,6 +86,32 @@ fn refuse_inside(dir: &Path, forbidden: &[PathBuf]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A run's report: each line goes to stdout and to a file as it is produced,
+/// so a run that is interrupted still leaves its verdicts behind.
+pub struct Summary(File);
+
+impl Summary {
+    /// Creates the report file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `path` already exists.
+    pub fn create(path: &Path) -> Result<Self> {
+        Ok(Self(File::create_new(path)?))
+    }
+
+    /// Prints `text` and appends it to the file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be written.
+    pub fn line(&mut self, text: &str) -> Result<()> {
+        println!("{text}");
+        writeln!(self.0, "{text}")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

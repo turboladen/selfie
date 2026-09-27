@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cargo::{self, Build};
+use crate::cargo::{self, Run};
 use crate::git::Repo;
 use crate::proc::{self, Outcome};
-use crate::workdir;
+use crate::workdir::{self, Summary};
 
 /// Arguments for `cargo xtask percommit`.
 #[derive(clap::Args)]
@@ -76,14 +76,12 @@ impl fmt::Display for Verdict {
 }
 
 fn score(log: &str, outcome: Outcome) -> Verdict {
-    if outcome == Outcome::TimedOut {
-        return Verdict::NeverRan(NeverRan::TimedOut);
-    }
-    match cargo::build(log, "selfie") {
-        Build::CompileError => Verdict::Fail(Fail::CompileError),
-        Build::NotStarted => Verdict::NeverRan(NeverRan::NoBuildLine),
-        Build::Built if outcome.success() => Verdict::Ok,
-        Build::Built => Verdict::Fail(Fail::Exit(outcome)),
+    match cargo::classify(outcome, log, "selfie") {
+        Run::Built => Verdict::Ok,
+        Run::CompileError => Verdict::Fail(Fail::CompileError),
+        Run::Failed(outcome) => Verdict::Fail(Fail::Exit(outcome)),
+        Run::NotStarted => Verdict::NeverRan(NeverRan::NoBuildLine),
+        Run::TimedOut => Verdict::NeverRan(NeverRan::TimedOut),
     }
 }
 
@@ -335,22 +333,6 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
-}
-
-// Every line goes to stdout and to the summary file as it is produced, so a
-// run that is interrupted still leaves its verdicts behind.
-struct Summary(File);
-
-impl Summary {
-    fn create(path: &Path) -> Result<Self> {
-        Ok(Self(File::create_new(path)?))
-    }
-
-    fn line(&mut self, text: &str) -> Result<()> {
-        println!("{text}");
-        writeln!(self.0, "{text}")?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

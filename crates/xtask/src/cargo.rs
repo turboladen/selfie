@@ -5,6 +5,8 @@ use std::process::Command;
 
 use regex::Regex;
 
+use crate::proc::Outcome;
+
 /// What a cargo log says about building one package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Build {
@@ -15,6 +17,34 @@ pub enum Build {
     NotStarted,
     /// Cargo started the package and reported no compile error.
     Built,
+}
+
+/// How one cargo invocation that builds `package` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// Cargo built the package and exited 0.
+    Built,
+    /// rustc reported an error, or cargo said it could not compile a crate.
+    CompileError,
+    /// Cargo never started the package.
+    NotStarted,
+    /// The deadline passed first.
+    TimedOut,
+    /// Cargo built the package and then exited unsuccessfully.
+    Failed(Outcome),
+}
+
+/// Classifies a cargo run from how it ended and what it logged.
+pub fn classify(outcome: Outcome, log: &str, package: &str) -> Run {
+    if outcome == Outcome::TimedOut {
+        return Run::TimedOut;
+    }
+    match build(log, package) {
+        Build::CompileError => Run::CompileError,
+        Build::NotStarted => Run::NotStarted,
+        Build::Built if outcome.success() => Run::Built,
+        Build::Built => Run::Failed(outcome),
+    }
 }
 
 /// Classifies `log` for `package`.
