@@ -5,7 +5,7 @@
 //! selfie could not read is never written over: a caller that did not get a
 //! usable load has no value to hand the writer.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -77,7 +77,7 @@ pub(super) enum StateLoad {
 
 /// Why the deploy state could not be used. Each message names its remedy.
 #[derive(Debug, Error)]
-pub(super) enum StateLoadFailure {
+pub(crate) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
     Locate(#[source] StatePathError),
@@ -148,6 +148,61 @@ pub(super) fn read_only_state_warning(failure: &StateLoadFailure) -> String {
     format!("{failure}; continuing as though nothing had been deployed")
 }
 
+/// What selfie makes of a state directory, given what is at its path.
+pub(crate) enum StateDirectoryVerdict {
+    /// A directory selfie can use.
+    InUse,
+    /// Nothing is there. selfie creates the directory on the first write, so a
+    /// configured path is worth a warning only because it may be a typo.
+    NotThereYet,
+    /// Something at the path stops selfie using it, and a run is refused.
+    Refused(StateLoadFailure),
+}
+
+/// The verdict on the state directory at `directory`, whose state is `state`.
+pub(crate) fn state_directory_verdict(
+    directory: &Path,
+    state: DirectoryState,
+) -> StateDirectoryVerdict {
+    // Every consumer of the state directory asks this, so a run and a check of
+    // the configuration agree about one path.
+    match state {
+        // A `0o000` state directory is a `Directory` here, and the read that
+        // follows refuses it, naming the state file rather than the directory.
+        DirectoryState::Directory => StateDirectoryVerdict::InUse,
+        // The first write creates the directory, so nothing needs doing here.
+        DirectoryState::Absent(AbsentReason::Empty) => StateDirectoryVerdict::NotThereYet,
+        // Creating cannot help: something else holds the path. `create_dir_all`
+        // fails here, and it would fail after the run had already deployed.
+        DirectoryState::Absent(reason) => {
+            StateDirectoryVerdict::Refused(StateLoadFailure::StateDirectoryOccupied {
+                path: directory.to_path_buf(),
+                what: reason.clause(),
+            })
+        }
+        // A path selfie cannot classify may hold a state it must not overwrite, so it
+        // refuses rather than starting from an empty one and writing over whatever is
+        // there. `Unlistable` is grouped in to keep the match total: only a listing
+        // discovers it, and this answer comes from a stat.
+        DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
+            StateDirectoryVerdict::Refused(StateLoadFailure::StateDirectoryUnreadable {
+                path: directory.to_path_buf(),
+                why: format!("could not be checked: {error}"),
+            })
+        }
+    }
+}
+
+/// The warning for a configured state directory at `directory` that is not
+/// there yet.
+pub(crate) fn not_there_yet_warning(directory: &Path) -> String {
+    format!(
+        "state_directory '{}' is not there yet, so nothing shows as deployed; selfie creates \
+         it on the first write. Correct the setting if that path is a typo",
+        directory.display()
+    )
+}
+
 /// Where the deploy state lives, with a warning about its directory when one is
 /// worth making.
 fn deploy_state_path<F: FileSystem>(
@@ -171,47 +226,21 @@ fn deploy_state_path<F: FileSystem>(
     // in the way would otherwise surface as a write error after the run had done
     // its work.
     let directory = path.path().parent().unwrap_or_else(|| path.path());
-    match filesystem.directory_state(directory) {
-        DirectoryState::Directory => Ok((path, None)),
-        // Nothing is there, and the first write creates it. Said out loud when the
-        // user named the path, because the two ways to reach this are a first run and
-        // a typo, and they are indistinguishable from the run's output otherwise: a
-        // mistyped directory reports every deployed dotfile as untracked, and an
-        // `apply -y` then overwrites edited targets instead of reporting conflicts.
-        // An unnamed default needs no warning, since a first run is its ordinary
-        // state and nothing was typed to get it wrong.
-        DirectoryState::Absent(AbsentReason::Empty) => {
-            let warning = config.state_directory().map(|_| {
-                format!(
-                    "state_directory '{}' is not there yet, so nothing shows as deployed; \
-                     selfie creates it on the first write. Correct the setting if that path \
-                     is a typo",
-                    directory.display()
-                )
-            });
+    match state_directory_verdict(directory, filesystem.directory_state(directory)) {
+        StateDirectoryVerdict::InUse => Ok((path, None)),
+        // Said out loud when the user named the path, because the two ways to reach
+        // this are a first run and a typo, and they are indistinguishable from the
+        // run's output otherwise: a mistyped directory reports every deployed
+        // dotfile as untracked, and an `apply -y` then overwrites edited targets
+        // instead of reporting conflicts. An unnamed default needs no warning, since
+        // a first run is its ordinary state and nothing was typed to get it wrong.
+        StateDirectoryVerdict::NotThereYet => {
+            let warning = config
+                .state_directory()
+                .map(|_| not_there_yet_warning(directory));
             Ok((path, warning))
         }
-        // Creating cannot help: something else holds the path. `create_dir_all`
-        // fails here, and it would fail after the run had already deployed.
-        DirectoryState::Absent(reason) => Err(StateLoadFailure::StateDirectoryOccupied {
-            path: directory.to_path_buf(),
-            what: reason.clause(),
-        }),
-        // A path selfie cannot classify may hold a state it must not overwrite, so it
-        // refuses rather than starting from an empty one and writing over whatever is
-        // there.
-        //
-        // `Unlistable` is grouped in to keep the match total, not because this call
-        // can produce it: only a listing discovers that a directory will not open its
-        // entries, and this stats the path. A `0o000` state directory is a
-        // `Directory` here and is refused by the read that follows, which names the
-        // state file rather than the directory.
-        DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
-            Err(StateLoadFailure::StateDirectoryUnreadable {
-                path: directory.to_path_buf(),
-                why: format!("could not be checked: {error}"),
-            })
-        }
+        StateDirectoryVerdict::Refused(failure) => Err(failure),
     }
 }
 

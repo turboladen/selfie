@@ -46,7 +46,7 @@ mod secret;
 pub mod semantic;
 pub mod service;
 pub mod state;
-mod state_file;
+pub(crate) mod state_file;
 pub(crate) mod template;
 pub mod track;
 mod warning;

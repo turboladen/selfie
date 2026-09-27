@@ -386,12 +386,10 @@ impl PackageListError {
     #[must_use]
     pub fn clause(&self) -> String {
         match &self.state {
-            DirectoryState::Absent(reason) => reason.clause(),
-            DirectoryState::Unlistable(error) => format!("could not be listed: {error}"),
-            DirectoryState::Unknown(error) => format!("could not be checked: {error}"),
             // A path the port calls a directory whose listing still failed. The
             // listing is the more recent answer, so it may be hiding entries.
             DirectoryState::Directory => "could not be listed".to_string(),
+            state => state.clause(),
         }
     }
 }

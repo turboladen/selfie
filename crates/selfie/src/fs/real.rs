@@ -505,6 +505,11 @@ impl FileSystem for RealFileSystem {
     }
 
     fn directory_state(&self, path: &Path) -> DirectoryState {
+        // A trailing slash makes `lstat` follow a symlink at the final component,
+        // so a dangling link reads as nothing there and a link to a file reads as
+        // unknown. Components drop the slash before either stat.
+        let path: PathBuf = path.components().collect();
+        let path = path.as_path();
         // Two stats, and the order matters. Measured on darwin, because the reason
         // field only earns its place if these differ:
         //   self-referential link  lstat ok+link,  stat ELOOP
@@ -2075,6 +2080,30 @@ mod directory_state_tests {
             }
             other => panic!("expected a dangling link, got {other:?}"),
         }
+    }
+
+    // A trailing slash makes a stat follow the link, where it would answer
+    // "nothing there". The same link must classify the same way with or without
+    // one, and so must a link to a file.
+    #[test]
+    fn a_trailing_slash_does_not_change_what_a_link_is() {
+        let dir = tempdir().unwrap();
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        let file = dir.path().join("plain");
+        std::fs::write(&file, "x").unwrap();
+        let to_file = dir.path().join("to-file");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+
+        let slashed = |path: &Path| PathBuf::from(format!("{}/", path.display()));
+        assert!(matches!(
+            RealFileSystem.directory_state(&slashed(&dangling)),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink { .. })
+        ));
+        assert!(matches!(
+            RealFileSystem.directory_state(&slashed(&to_file)),
+            DirectoryState::Absent(AbsentReason::Occupied { .. })
+        ));
     }
 
     #[test]
