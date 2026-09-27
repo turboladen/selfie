@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod bindiff;
 mod cargo;
 #[cfg(test)]
 mod control;
@@ -27,6 +28,8 @@ enum Cmd {
     Percommit(percommit::Args),
     /// Apply each mutation in a spec in its own archive and score the named tests.
     Mutate(mutate::Args),
+    /// Run the base and HEAD binaries over identical sandboxes and diff them.
+    Bindiff(bindiff::Args),
 }
 
 fn main() -> ExitCode {
@@ -34,6 +37,7 @@ fn main() -> ExitCode {
     let result = proc::kill_groups_on_interrupt().and_then(|()| match &cli.command {
         Cmd::Percommit(args) => percommit::run(args),
         Cmd::Mutate(args) => mutate::run(args),
+        Cmd::Bindiff(args) => bindiff::run(args),
     });
     match result {
         Ok(code) => code,

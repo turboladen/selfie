@@ -1,0 +1,21 @@
+# A package file that is not valid YAML, beside one that is.
+
+[[file]]
+path = "packages/broken.yaml"
+content = "name: [unclosed\n"
+
+[[file]]
+path = "packages/fine.yaml"
+content = """
+name: fine
+environments:
+  sandbox:
+    install: "true"
+    check: "true"
+"""
+
+[[run]]
+args = ["--no-color", "package", "list"]
+
+[[run]]
+args = ["--no-color", "spec", "validate", "broken"]

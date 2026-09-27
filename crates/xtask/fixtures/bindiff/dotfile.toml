@@ -1,0 +1,32 @@
+# A package deploying one dotfile, applied and then checked for drift.
+observe = [".toolrc", "state/deploy-state.yml"]
+
+[[file]]
+path = ".config/selfie/config.yaml"
+content = """
+environment: sandbox
+package_directory: @HOME@/packages
+state_directory: @HOME@/state
+"""
+
+[[file]]
+path = "packages/tool/toolrc"
+content = "setting = 1\n"
+
+[[file]]
+path = "packages/tool.yaml"
+content = """
+name: tool
+dotfiles:
+  - source: tool/toolrc
+    target: ~/.toolrc
+environments:
+  sandbox:
+    install: "true"
+"""
+
+[[run]]
+args = ["--no-color", "apply", "--yes"]
+
+[[run]]
+args = ["--no-color", "dotfiles", "drift"]

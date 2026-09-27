@@ -10,9 +10,11 @@ anyhow.workspace = true
 # crate using it, and it pins the same version.
 clap = { version = "4.5.31", features = ["derive"] }
 ctrlc = { version = "3.4", features = ["termination"] }
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.31", features = ["fs", "signal", "user"] }
 regex = "1"
 serde.workspace = true
+serde_json.workspace = true
+shlex = "2"
 similar.workspace = true
 tempfile.workspace = true
 toml = "1"

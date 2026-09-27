@@ -1,0 +1,23 @@
+# One package whose install and check commands are inert.
+
+[[file]]
+path = "packages/tool.yaml"
+content = """
+name: tool
+environments:
+  sandbox:
+    install: "true"
+    check: "true"
+"""
+
+[[run]]
+args = ["--no-color", "package", "list"]
+
+[[run]]
+args = ["--no-color", "spec", "info", "tool"]
+
+[[run]]
+args = ["--no-color", "spec", "validate", "tool"]
+
+[[run]]
+args = ["--no-color", "package", "check", "tool"]

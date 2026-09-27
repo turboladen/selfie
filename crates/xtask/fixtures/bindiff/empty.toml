@@ -1,0 +1,13 @@
+# The default config and an empty package directory.
+
+[[run]]
+args = ["--no-color", "package", "list"]
+
+[[run]]
+args = ["--no-color", "spec", "list"]
+
+[[run]]
+args = ["--no-color", "dotfiles", "list"]
+
+[[run]]
+args = ["--no-color", "dotfiles", "drift"]

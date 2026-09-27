@@ -100,6 +100,26 @@ impl Repo {
         self.git(&["show", &format!("{sha}:{path}")])
     }
 
+    /// The names of the files directly inside `dir` as committed at `sha`,
+    /// sorted. Subdirectories and submodules are left out.
+    ///
+    /// # Errors
+    ///
+    /// Fails when git cannot list the tree.
+    pub fn list(&self, sha: &str, dir: &str) -> Result<Vec<String>> {
+        // NUL-separated, because without `-z` git quotes a name holding
+        // non-ASCII bytes. Each entry is `<mode> <type> <object>\t<name>`.
+        let listing = self.git(&["ls-tree", "-z", &format!("{sha}:{dir}")])?;
+        let mut names: Vec<String> = listing
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter(|(meta, _)| meta.split(' ').nth(1) == Some("blob"))
+            .map(|(_, name)| name.to_owned())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
     /// Whether the working tree differs from `HEAD`, counting untracked files
     /// that are not ignored.
     ///

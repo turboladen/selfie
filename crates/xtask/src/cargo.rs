@@ -2,7 +2,7 @@
 //! tests ran.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -131,6 +131,17 @@ pub fn test_results(log: &str) -> HashMap<String, TestStatus> {
     results
 }
 
+/// The executable cargo reported building for the binary target `name`, read
+/// from the JSON messages `--message-format=json` prints on stdout.
+pub fn executable(messages: &str, name: &str) -> Option<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == name)
+        .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .next_back()
+}
+
 /// Every source file rustc recorded in the dep-info files under
 /// `target_dir`'s `debug/deps`, as rustc wrote each path: relative to the
 /// workspace root for a workspace member, absolute otherwise.
@@ -245,5 +256,23 @@ mod tests {
                    test a::x ... ok\n\nfailures:\n    a::x\n\n\
                    test result: FAILED. 0 passed; 1 failed\n";
         assert_eq!(test_results(log)["a::x"], TestStatus::Failed);
+    }
+
+    #[test]
+    fn the_executable_comes_from_the_named_binary_artifact() {
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"selfie"},"executable":null}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"other"},"executable":"/t/other"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"selfie"},"executable":"/t/selfie"}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        assert_eq!(
+            executable(messages, "selfie"),
+            Some(PathBuf::from("/t/selfie"))
+        );
+        assert_eq!(executable(messages, "missing"), None);
     }
 }

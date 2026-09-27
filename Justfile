@@ -196,6 +196,18 @@ mutate spec *args:
 mutate-self-test *args:
     CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate --self-test "$@"
 
+# Diff the base and HEAD binaries over sandboxed fixtures: `just bindiff main`
+[no-cd]
+[positional-arguments]
+bindiff base *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask bindiff "$@"
+
+# Prove the binary-diff harness sees a difference and refuses an escaping fixture
+[no-cd]
+[positional-arguments]
+bindiff-self-test *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask bindiff --self-test "$@"
+
 # Generate and open documentation
 docs:
     cargo doc --open

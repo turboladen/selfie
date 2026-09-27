@@ -3806,6 +3806,8 @@ dependencies = [
  "nix",
  "regex",
  "serde",
+ "serde_json",
+ "shlex",
  "similar",
  "tempfile",
  "toml",
