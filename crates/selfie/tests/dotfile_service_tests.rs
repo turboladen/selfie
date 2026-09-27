@@ -122,6 +122,14 @@ impl selfie::dotfile_service::port::ConflictResolver for Counting {
     }
 }
 
+// Options whose only setting is a `Counting` resolver that adds to `asked`.
+fn counting_resolver(asked: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> ApplyOptions {
+    ApplyOptions {
+        conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(asked)))),
+        ..Default::default()
+    }
+}
+
 // Every warning a run emitted.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
@@ -4057,10 +4065,17 @@ async fn a_tracked_target_outside_home_keeps_its_absolute_path() {
 mod secret_bearing {
     use super::*;
     use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     // A value distinctive enough that finding it anywhere is unambiguous.
     pub(super) const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+
+    // What a pre-existing target holds before an apply that must not write over it.
+    // Each control below overwrites the same seed, so the tests it controls and the
+    // control itself always start from identical bytes.
+    const PROVIDER_SEED: &str = "previous-credential-abc123";
+    const BINDING_SEED: &str = "key: previous-credential-abc123\n";
 
     // Write a package whose single dotfile is a whole-file provider entry.
     pub(super) fn provider_package(package_dir: &std::path::Path, target: &str, command: &str) {
@@ -4181,24 +4196,24 @@ mod secret_bearing {
         use std::os::unix::fs::PermissionsExt as _;
 
         let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "previous-credential-abc123").unwrap();
+        std::fs::write(&target, PROVIDER_SEED).unwrap();
         let mode_before = std::fs::metadata(&target).unwrap().permissions().mode();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
         let service = dirs.service_with_runner(runner);
 
-        // `accepting()`, not `ApplyOptions::default()`. Without a resolver a
+        // The resolver accepts, so partial content that reached the write would
+        // replace the seed, and the content assertion below would see it. A
         // secret-bearing entry whose target differs is reported as a conflict and
-        // skipped, so the target would survive for a reason that has nothing to
-        // do with the read — and mutating `run_capture` to return partial content
-        // left this test passing. It has to take the overwrite path for the
-        // assertion below to mean anything.
-        let _ = collect_events(service.apply_all(accepting()).await).await;
+        // skipped when there is no resolver, and the target would then survive for a
+        // reason that has nothing to do with the read.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let events = collect_events(service.apply_all(counting_resolver(&asked)).await).await;
 
         assert_eq!(
-            std::fs::read(&target).unwrap(),
-            b"previous-credential-abc123",
+            std::fs::read_to_string(&target).unwrap(),
+            PROVIDER_SEED,
             "a working credential was replaced with a truncated one"
         );
         assert_eq!(
@@ -4206,23 +4221,48 @@ mod secret_bearing {
             mode_before,
             "the target's mode changed despite nothing being deployed"
         );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "a failed read was compared"
+        );
+        assert_eq!(refused_count(&events), 1, "the failed read was not refused");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("pipe died mid-read")),
+            "the refusal must name the failed read: {warnings:?}"
+        );
     }
 
     #[tokio::test]
     async fn the_same_provider_fixture_does_write_when_the_read_succeeds() {
-        // Control for both tests above. Without it they pass if apply never
-        // reached the entry at all — a broken fixture would look like a fix.
+        // This is the control for both tests above. Without it they pass if apply
+        // never reached the entry at all.
+        //
+        // It also controls the pre-existing-target tests,
+        // `a_provider_whose_output_could_not_be_read_leaves_a_pre_existing_target_intact`
+        // and `empty_provider_output_is_an_error_and_does_not_truncate_the_target`.
+        // Both seed `PROVIDER_SEED` and accept through `counting_resolver`, and here
+        // the resolver is asked and the write replaces the seed, so their `asked == 0`
+        // and intact-target assertions can fail.
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "previous-credential-abc123").unwrap();
+        std::fs::write(&target, PROVIDER_SEED).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_runner(runner);
 
-        let _ = collect_events(service.apply_all(accepting()).await).await;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let _ = collect_events(service.apply_all(options).await).await;
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "the resolver was not asked"
+        );
     }
 
     #[tokio::test]
@@ -4254,7 +4294,7 @@ mod secret_bearing {
     async fn a_binding_whose_output_could_not_be_read_leaves_a_pre_existing_target_intact() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "key: previous-credential-abc123\n").unwrap();
+        std::fs::write(&target, BINDING_SEED).unwrap();
         template_package(
             &dirs.package_dir,
             target.to_str().unwrap(),
@@ -4265,25 +4305,42 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
         let service = dirs.service_with_runner(runner);
 
-        // `accepting()` for the same reason as the provider case above: without a
-        // resolver this would be skipped as a conflict and prove nothing.
-        let _ = collect_events(service.apply_all(accepting()).await).await;
+        // The resolver accepts, for the reason the provider case gives: with no
+        // resolver the differing target would be skipped as a conflict.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let events = collect_events(service.apply_all(counting_resolver(&asked)).await).await;
 
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
-            "key: previous-credential-abc123\n",
+            BINDING_SEED,
             "a working credential was replaced with a truncated one"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "a failed read was compared"
+        );
+        assert_eq!(refused_count(&events), 1, "the failed read was not refused");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("pipe died mid-read")),
+            "the refusal must name the failed read: {warnings:?}"
         );
     }
 
     #[tokio::test]
     async fn the_same_binding_fixture_does_write_when_the_read_succeeds() {
-        // Control for the two binding tests above. Seeded and `accepting()` so it
-        // exercises the same overwrite path the pre-existing-target test does —
-        // a control taking a different path would not control anything.
+        // This is the control for the two binding tests above. Without it they pass if
+        // apply never reached the entry at all.
+        //
+        // It also controls the pre-existing-target tests,
+        // `a_binding_whose_output_could_not_be_read_leaves_a_pre_existing_target_intact`
+        // and `an_empty_binding_is_an_error_and_does_not_truncate_the_target`. It seeds
+        // `BINDING_SEED` and accepts through `counting_resolver` as they do, so it
+        // exercises the overwrite path they guard.
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "key: previous-credential-abc123\n").unwrap();
+        std::fs::write(&target, BINDING_SEED).unwrap();
         template_package(
             &dirs.package_dir,
             target.to_str().unwrap(),
@@ -4294,11 +4351,18 @@ mod secret_bearing {
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
         let service = dirs.service_with_runner(runner);
 
-        let _ = collect_events(service.apply_all(accepting()).await).await;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let _ = collect_events(service.apply_all(options).await).await;
 
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             format!("key: {SECRET}\n")
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "the resolver was not asked"
         );
     }
 
@@ -4576,8 +4640,8 @@ mod secret_bearing {
         std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
-        let looks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let plain_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let looks = Arc::new(AtomicUsize::new(0));
+        let plain_checks = Arc::new(AtomicUsize::new(0));
         let fs = SymlinkAppearsAfterFirstLook {
             inner: RealFileSystem,
             looks: looks.clone(),
@@ -4604,7 +4668,7 @@ mod secret_bearing {
         // sees. Two looks means the first answered "plain" and the second the truth,
         // which is the window itself.
         assert!(
-            looks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            looks.load(Ordering::SeqCst) >= 2,
             "the target must have been asked about twice, once before the resolve and \
              once before the read"
         );
@@ -4613,7 +4677,7 @@ mod secret_bearing {
         // reach it. Without this, a double that reported the link both times would
         // still satisfy the count above.
         assert!(
-            plain_checks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            plain_checks.load(Ordering::SeqCst) >= 1,
             "the first pass must have classified the target as plain"
         );
 
@@ -4639,12 +4703,18 @@ mod secret_bearing {
 
         let fs = SecondLookIsAnUnknownRefusal {
             inner: RealFileSystem,
-            looks: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            looks: Arc::new(AtomicUsize::new(0)),
         };
         let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let counted = runner.clone();
         let service = dirs.service_with_fs(fs, runner);
 
-        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        // The resolver accepts, so an entry that went on past the refusal would reach
+        // the write, and the content assertion below would see it. The target differs,
+        // so with no resolver that entry would be reported as a conflict and skipped.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let events = collect_events(service.apply_all(options).await).await;
 
         assert!(
             warning_messages(&events)
@@ -4660,6 +4730,15 @@ mod secret_bearing {
             "previous",
             "a refused entry must leave the target alone"
         );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the entry was compared after its refusal"
+        );
+        assert_eq!(refused_count(&events), 1, "the refusal was not counted");
+        // The command ran, so the first look passed and the refusal came from the
+        // second.
+        assert_eq!(counted.call_count(), 1, "control: the first look passed");
     }
 
     // The security case. A link at a secret target must not be read *through*: the
@@ -5338,18 +5417,87 @@ mod secret_bearing {
     async fn empty_provider_output_is_an_error_and_does_not_truncate_the_target() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
-        std::fs::write(&target, "existing credential").unwrap();
+        std::fs::write(&target, PROVIDER_SEED).unwrap();
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
         let runner = FakeCommandRunner::new().succeeding("op read x", b"");
         let service = dirs.service_with_runner(runner);
 
-        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        // The resolver accepts, so an empty output that went on to the write would
+        // truncate the target, and the content assertion below would see it. The
+        // target differs, so with no resolver that write would be reported as a
+        // conflict and skipped.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let events = collect_events(service.apply_all(options).await).await;
 
-        assert!(format!("{events:?}").contains("produced no output"));
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("command 'op read x' produced no output")),
+            "{events:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
-            "existing credential"
+            PROVIDER_SEED,
+            "an empty output truncated the target"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "an empty output was compared against the target"
+        );
+        assert_eq!(
+            refused_count(&events),
+            1,
+            "the empty output was not refused"
+        );
+    }
+
+    // A template whose binding prints nothing must leave the target intact too. This
+    // is the binding twin of
+    // `empty_provider_output_is_an_error_and_does_not_truncate_the_target`.
+    #[tokio::test]
+    async fn an_empty_binding_is_an_error_and_does_not_truncate_the_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, BINDING_SEED).unwrap();
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"");
+        let service = dirs.service_with_runner(runner);
+
+        // The resolver accepts, so an empty binding that reached the write would
+        // replace the seed where the content assertion below sees it.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let options = counting_resolver(&asked);
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("var 'api_key' produced no output")),
+            "{events:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            BINDING_SEED,
+            "an empty binding truncated the target"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "an empty binding was compared against the target"
+        );
+        assert_eq!(
+            refused_count(&events),
+            1,
+            "the empty binding was not refused"
         );
     }
 
@@ -10833,10 +10981,7 @@ mod unreadable_targets {
         };
 
         let asked = Arc::new(AtomicUsize::new(0));
-        let options = ApplyOptions {
-            conflict_resolver: Some(Arc::new(Counting(Arc::clone(&asked)))),
-            ..Default::default()
-        };
+        let options = counting_resolver(&asked);
         let events = collect_events(dirs.service().apply_all(options).await).await;
 
         assert_eq!(
@@ -11323,10 +11468,7 @@ mod target_classification {
         let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN-VALUE");
         let counted = runner.clone();
         let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let options = ApplyOptions {
-            conflict_resolver: Some(std::sync::Arc::new(Counting(std::sync::Arc::clone(&asked)))),
-            ..Default::default()
-        };
+        let options = counting_resolver(&asked);
         let events = collect_events(
             dirs.service_with_fs(
                 RecordsTargetReads::new().blind_to_directory_at(&target),
@@ -11404,13 +11546,6 @@ mod target_reads_never_follow {
             target.display()
         );
         std::fs::write(dirs.package_dir.join("creds.yml"), yaml).unwrap();
-    }
-
-    fn counting_resolver(asked: &Arc<AtomicUsize>) -> ApplyOptions {
-        ApplyOptions {
-            conflict_resolver: Some(Arc::new(Counting(Arc::clone(asked)))),
-            ..Default::default()
-        }
     }
 
     // A link that appears after the secret path's second look. The read finds it,
