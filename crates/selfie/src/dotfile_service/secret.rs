@@ -65,15 +65,17 @@ pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<String> {
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
 fn secret_conflict_summary(origin: &str, incoming: &[u8], current: &[u8]) -> String {
-    // Separators plus one, so a trailing newline reads as an extra line. Exact line
-    // semantics do not matter here; the comparison between the two sides does.
+    // Each piece `split_inclusive` yields is one line with its newline, so a
+    // trailing newline ends a line rather than starting one, as `wc -l` counts. An
+    // unterminated last line is a piece too, which `wc -l` would drop: "0 lines" for
+    // content that is not empty would read as an empty file.
     //
     // Both sides count through this one closure, so they cannot pluralize
     // differently. It is the only information a user gets before deciding whether
     // to overwrite a credential nothing recorded, so it should not read as though
     // selfie cannot count.
     let count = |b: &[u8]| {
-        let n = b.iter().filter(|c| **c == b'\n').count() + 1;
+        let n = b.split_inclusive(|&c| c == b'\n').count();
         format!("{n} {}", crate::pluralize(n, "line", "lines"))
     };
 
@@ -585,9 +587,7 @@ mod tests {
     // swapping the arguments, so a fix to one site cannot pass by being checked at
     // the other.
 
-    // The fixtures are unterminated on purpose. The counter is separators plus one,
-    // so "token\n" reads as two lines and a terminated fixture never produces the
-    // singular. That counting is its own question, filed separately.
+    // The fixtures are unterminated, so `wc -l` alone would count each one short.
     #[test]
     fn a_one_line_side_reads_line_and_a_two_line_side_reads_lines() {
         let one: &[u8] = b"token";
@@ -614,6 +614,30 @@ mod tests {
             swapped.contains("current target  : 1 line\n"),
             "the current side is not singular: {swapped}"
         );
+    }
+
+    // selfie-ir68.24. A trailing newline ends a line and does not start one, so an
+    // ordinary one-line file is "1 line", and an empty one is "0 lines". Asserted
+    // on both sides by swapping the arguments.
+    #[test]
+    fn a_trailing_newline_does_not_start_a_line() {
+        for (content, expected) in [
+            (&b"token\n"[..], "1 line\n"),
+            (&b"token\nsecond\n"[..], "2 lines\n"),
+            (&b""[..], "0 lines\n"),
+        ] {
+            let other: &[u8] = b"x";
+            let resolved = secret_conflict_summary("op read x", content, other);
+            assert!(
+                resolved.contains(&format!("resolved output : {expected}")),
+                "{content:?}: {resolved}"
+            );
+            let current = secret_conflict_summary("op read x", other, content);
+            assert!(
+                current.contains(&format!("current target  : {expected}")),
+                "{content:?}: {current}"
+            );
+        }
     }
 
     // A link selfie could not read still names the link, with no destination clause.

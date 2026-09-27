@@ -1171,8 +1171,10 @@ CONFLICT  ~/.gem/credentials
 ```
 
 Line counts are enough to tell a rotated token (1 line vs 1 line) from a hand-edited file (1 line vs
-12 lines). Command strings and var names **are** shown: they come from the package file and are
-references, not credentials.
+12 lines). Lines are counted as `wc -l` counts them, so a trailing newline does not start another
+line, except that a last line with no newline still counts: `token` and `token` followed by a
+newline are both 1 line, and an empty file is 0 lines. Command strings and var names **are** shown:
+they come from the package file and are references, not credentials.
 
 At an interactive prompt `selfie apply` offers to reveal the two values, behind its own warning and
 its own keypress. It is never the default and is never reachable by accepting one. The MCP server
