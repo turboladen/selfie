@@ -181,33 +181,33 @@ impl Drop for Group {
     }
 }
 
+/// Whether process `pid` has exited, waiting up to five seconds for it to.
+/// A zombie counts as exited.
+pub fn is_gone(pid: i32) -> bool {
+    // A killed process stays a zombie until its new parent reaps it, and a
+    // container whose init does not reap keeps it forever.
+    for _ in 0..50 {
+        if nix::sys::signal::kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH) {
+            return true;
+        }
+        let state = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_default();
+        if state.starts_with('Z') {
+            return true;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::sys::signal::kill;
     use std::fs;
     use std::path::Path;
-
-    // A killed process stays a zombie until its new parent reaps it, and a
-    // container whose init does not reap keeps it forever, so a zombie counts
-    // as gone.
-    fn is_gone(pid: i32) -> bool {
-        for _ in 0..50 {
-            if kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH) {
-                return true;
-            }
-            let state = Command::new("ps")
-                .args(["-o", "stat=", "-p", &pid.to_string()])
-                .output()
-                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-                .unwrap_or_default();
-            if state.starts_with('Z') {
-                return true;
-            }
-            sleep(Duration::from_millis(100));
-        }
-        false
-    }
 
     fn background_sleep(dir: &Path, then: &str) -> Command {
         let mut cmd = Command::new("sh");

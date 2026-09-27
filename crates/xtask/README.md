@@ -43,3 +43,70 @@ self-test. The toolchain is probed once per run, in the first commit's archive.
 `--self-test` appends a type error, then a warn-level clippy lint, to `crates/selfie/src/lib.rs` at
 the merge base, which is already on `main`. It stops unless both fail with an `error` diagnostic
 quoting the injected line. The second control is an error only while `-D warnings` is in force.
+
+## mutate
+
+```bash
+just mutate path/to/spec.toml               # every mutation in the spec
+just mutate path/to/spec.toml --only m1     # one of them
+just mutate-self-test                       # prove the runner scores each case correctly
+```
+
+A spec lists mutations. Each one names a file, an anchor copied from the committed file, its
+replacement, the package and the one cargo target holding the tests, and the tests expected to fail,
+written exactly as libtest prints them. The target is `["--lib"]`, or `--bin`, `--test`, `--example`
+or `--bench` followed by one name. A relative spec path is read from the directory `just` was run
+in.
+
+```toml
+rev = "HEAD"              # optional: the commit archived, and the source of every anchor
+build_timeout_secs = 1800 # optional
+test_timeout_secs = 600   # optional
+
+[[mutation]]
+id = "every-rule"         # letters, digits, `-`, `_` or `.`; names the mutation's directory
+file = "crates/selfie/src/package/service/steps.rs"
+anchor = '''
+        Shown::Every => package.listing_refusal(),
+'''
+replacement = '''
+        Shown::Every => None,
+'''
+package = "selfie"
+target = ["--test", "package_service_tests"]   # required: one test target
+tests = ["a_spec_selfie_cannot_read::listings_refuse_by_the_environments_they_show"]
+expect = "caught"                              # or "survived", for a documented survivor
+```
+
+Before anything is built, a mutation is refused if its anchor does not match exactly once in the
+file at `rev`, overlapping matches included. One unmutated baseline per package and target must then
+pass every named test, and each mutation runs that same set of tests. Each mutation runs in its own
+archive with its own target directory. It builds with `--no-run`, and is refused unless rustc's
+dep-info shows the mutated file was compiled into that build, which a file in a dependency of the
+tested crate is. It then runs `cargo test --no-fail-fast -- --exact <tests>` under the test
+deadline. Each run leaves `mutation.diff`, `build.log` and `test.log` in `mutations/<id>/`.
+
+| Verdict     | Meaning                                                                                      |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| `CAUGHT`    | every named test failed                                                                      |
+| `SURVIVED`  | every named test passed                                                                      |
+| `MIXED`     | some failed and some passed; each is listed                                                  |
+| `NEVER-RAN` | refused, did not compile, timed out, or a named test did not run; the reason says which case |
+
+A mutation matches when it scores `CAUGHT` and expects `caught`, or `SURVIVED` and expects
+`survived`. The run exits 0 when every mutation matches, 1 when any does not, and 2 on an error or a
+failed self-test.
+
+A mutation that crashes the test process, with a stack overflow or an abort, scores `NEVER-RAN`: the
+crash takes libtest's report with it, so no named test can be credited. Narrow such a mutation until
+the test can report.
+
+A `SURVIVED` still needs a human judgment: check in `mutation.diff` that the mutated line is
+reachable and that its value is observed, because a substitution the compiler can discard changes
+nothing and survives.
+
+`--self-test` mutates `crates/xtask/src/control.rs` at HEAD with eight controls: a value flip that
+must be caught, a comment edit that must survive, and six that must never run. Those six cover an
+anchor that matches nothing, a type error, a test process that aborts, a hang past the deadline, a
+test the baseline does not list, and a file the build never compiles, which is this README. The hang
+spawns a child, and the self-test also checks that the child died with its process group.

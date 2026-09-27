@@ -7,7 +7,10 @@ use clap::{Parser, Subcommand};
 
 mod archive;
 mod cargo;
+#[cfg(test)]
+mod control;
 mod git;
+mod mutate;
 mod percommit;
 mod proc;
 mod workdir;
@@ -23,12 +26,15 @@ struct Cli {
 enum Cmd {
     /// Run `just clippy` on every commit below the tip, each in its own archive.
     Percommit(percommit::Args),
+    /// Apply each mutation in a spec in its own archive and score the named tests.
+    Mutate(mutate::Args),
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = proc::kill_groups_on_interrupt().and_then(|()| match &cli.command {
         Cmd::Percommit(args) => percommit::run(args),
+        Cmd::Mutate(args) => mutate::run(args),
     });
     match result {
         Ok(code) => code,

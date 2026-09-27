@@ -184,6 +184,18 @@ xtask_target := justfile_directory() / "target" / "xtask"
 percommit base *args:
     CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask percommit "$@"
 
+# Run each mutation in a spec in its own archive: `just mutate spec.toml`
+[no-cd]
+[positional-arguments]
+mutate spec *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate "$@"
+
+# Prove the mutation runner scores caught, survived and never-ran correctly
+[no-cd]
+[positional-arguments]
+mutate-self-test *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate --self-test "$@"
+
 # Generate and open documentation
 docs:
     cargo doc --open

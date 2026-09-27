@@ -12,4 +12,7 @@ clap = { version = "4.5.31", features = ["derive"] }
 ctrlc = { version = "3.4", features = ["termination"] }
 nix = { version = "0.31", features = ["signal"] }
 regex = "1"
+serde.workspace = true
+similar.workspace = true
 tempfile.workspace = true
+toml = "1"

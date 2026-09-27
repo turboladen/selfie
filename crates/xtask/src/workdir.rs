@@ -3,7 +3,7 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -86,6 +86,14 @@ fn refuse_inside(dir: &Path, forbidden: &[PathBuf]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Returns `path` as a relative path made only of plain components, or `None`
+/// when it is empty, absolute, or contains `.` or `..`.
+pub fn plain_relative(path: &str) -> Option<&Path> {
+    let p = Path::new(path);
+    let plain = !path.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)));
+    plain.then_some(p)
 }
 
 /// A run's report: each line goes to stdout and to a file as it is produced,
