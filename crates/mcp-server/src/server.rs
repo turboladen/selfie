@@ -549,7 +549,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit_all",
-        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A conflict, or a package nothing provides, anywhere in the run is a successful call with status 'found'. An audit that could not run comes back as an ERROR result with status 'failed', and a spec left out (one that could not be loaded, or that selfie will not read) as an ERROR result with status 'refused' and a `refused` count. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn package_audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;

@@ -686,6 +686,23 @@ pub enum OperationSuccess {
         audit_result: AuditResult,
         steps_completed: StepCount,
     },
+    /// Every package with an entry for this environment audited, and what the
+    /// audits found.
+    PackagesAudited {
+        /// Packages audited, including those with no audit command.
+        audited_count: usize,
+        /// Packages installed from a source they do not expect.
+        conflict_count: usize,
+        /// Packages nothing provides.
+        not_installed_count: usize,
+        /// Packages whose audit could not run.
+        error_count: usize,
+        /// Spec files left out because they could not be loaded or selfie will
+        /// not read them.
+        refused_count: usize,
+        environment: String,
+        steps_completed: StepCount,
+    },
     /// Package installation operation completed
     PackageInstalled {
         package_name: String,
@@ -1144,6 +1161,19 @@ impl std::fmt::Display for OperationSuccess {
             } => write!(
                 f,
                 "Package '{package_name}' check completed {verdict} {steps_completed}"
+            ),
+            OperationSuccess::PackagesAudited {
+                audited_count,
+                conflict_count,
+                not_installed_count,
+                error_count,
+                refused_count,
+                ..
+            } => write!(
+                f,
+                "Audit completed for {audited_count} package(s): {conflict_count} with conflicts, \
+                 {not_installed_count} not installed, {error_count} could not be audited, \
+                 {refused_count} spec(s) left out"
             ),
             OperationSuccess::PackageAudited {
                 package_name,
@@ -1698,7 +1728,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageUpdated { package_name, .. }
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
             OperationSuccess::DotfileTracked { name, .. } => Some(name),
-            OperationSuccess::PackageListGenerated { .. }
+            OperationSuccess::PackagesAudited { .. }
+            | OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfilesApplied { .. }
@@ -1729,11 +1760,11 @@ impl OperationSuccess {
 
     /// How many refusals this success carries, for operations that count them.
     ///
-    /// `None` where the question does not apply. Two variants answer it,
-    /// [`DotfilesApplied`](Self::DotfilesApplied) and
-    /// [`DotfileDriftChecked`](Self::DotfileDriftChecked) — and `Some(0)` is
-    /// distinct from `None`, being a run that could have refused something and
-    /// did not.
+    /// `None` where the question does not apply. Three variants answer it:
+    /// [`DotfilesApplied`](Self::DotfilesApplied),
+    /// [`DotfileDriftChecked`](Self::DotfileDriftChecked) and
+    /// [`PackagesAudited`](Self::PackagesAudited). `Some(0)` is distinct from
+    /// `None`, being a run that could have refused something and did not.
     ///
     /// Exists so an adapter can report the number rather than the fact. The MCP
     /// server puts it in its own JSON field: an assistant told only that
@@ -1746,7 +1777,8 @@ impl OperationSuccess {
         // that counts refusals would otherwise reach an adapter reporting none.
         match self {
             OperationSuccess::DotfilesApplied { refused_count, .. }
-            | OperationSuccess::DotfileDriftChecked { refused_count, .. } => Some(*refused_count),
+            | OperationSuccess::DotfileDriftChecked { refused_count, .. }
+            | OperationSuccess::PackagesAudited { refused_count, .. } => Some(*refused_count),
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
@@ -1785,6 +1817,7 @@ impl OperationSuccess {
             OperationSuccess::DotfilesApplied { .. }
             | OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackagesAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
@@ -1815,6 +1848,7 @@ impl OperationSuccess {
             // Every variant listed, as in `refused_count`.
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackagesAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
@@ -1871,6 +1905,22 @@ impl OperationSuccess {
                 // other has nothing to run.
                 AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
             },
+            // A package with no audit command is left out of every count: across
+            // many packages, not having one is ordinary.
+            OperationSuccess::PackagesAudited {
+                conflict_count,
+                not_installed_count,
+                error_count,
+                ..
+            } => {
+                if *error_count > 0 {
+                    Outcome::Failed
+                } else if *conflict_count > 0 || *not_installed_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
             OperationSuccess::PackageChecked { verdict, .. } => match verdict {
                 CheckVerdict::Installed => Outcome::Clean,
                 CheckVerdict::NotInstalled { .. } => Outcome::Found,
@@ -1900,6 +1950,7 @@ impl OperationSuccess {
         match self {
             OperationSuccess::PackageChecked { environment, .. }
             | OperationSuccess::PackageAudited { environment, .. }
+            | OperationSuccess::PackagesAudited { environment, .. }
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::SpecInfoRetrieved { environment, .. }
@@ -1929,6 +1980,9 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::PackageAudited {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackagesAudited {
                 steps_completed, ..
             }
             | OperationSuccess::PackageInstalled {
@@ -3000,6 +3054,23 @@ mod tests {
         }
     }
 
+    fn audited_all(
+        conflicts: usize,
+        not_installed: usize,
+        errors: usize,
+        refused: usize,
+    ) -> OperationSuccess {
+        OperationSuccess::PackagesAudited {
+            audited_count: 4,
+            conflict_count: conflicts,
+            not_installed_count: not_installed,
+            error_count: errors,
+            refused_count: refused,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
     // Each counted variant along every axis that scores it, plus a mixed case
     // per variant so the precedence is pinned, not just each axis alone.
     #[test]
@@ -3052,6 +3123,28 @@ mod tests {
             (
                 "audit no command",
                 audited(AuditResult::NoAuditCommand),
+                Outcome::Failed,
+            ),
+            ("audit all clean", audited_all(0, 0, 0, 0), Outcome::Clean),
+            (
+                "audit all conflict",
+                audited_all(1, 0, 0, 0),
+                Outcome::Found,
+            ),
+            (
+                "audit all not installed",
+                audited_all(0, 1, 0, 0),
+                Outcome::Found,
+            ),
+            ("audit all error", audited_all(0, 0, 1, 0), Outcome::Failed),
+            (
+                "audit all refused",
+                audited_all(0, 0, 0, 1),
+                Outcome::Failed,
+            ),
+            (
+                "audit all refused and conflicted",
+                audited_all(1, 1, 0, 1),
                 Outcome::Failed,
             ),
             (

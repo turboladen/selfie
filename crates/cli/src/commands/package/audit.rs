@@ -75,10 +75,12 @@ pub(crate) async fn handle_audit_all(
                 true
             }
             PackageEvent::Progress { .. } => true,
+            // The summary line is printed only when the run was not clean, at its
+            // verdict's level.
             PackageEvent::Completed {
-                result: OperationResult::Success(_),
+                result: OperationResult::Success(success),
                 ..
-            } => true,
+            } if success.outcome() == Outcome::Clean => true,
             _ => false,
         })
         .await;

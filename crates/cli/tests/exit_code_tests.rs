@@ -189,6 +189,45 @@ fn audit_exits_one_when_its_command_fails() {
     assert_eq!(code, Some(FAILED), "{output}");
 }
 
+#[test]
+fn audit_all_exits_clean_when_every_audit_is_clean() {
+    let temp = sandbox();
+    write_audited_package(&temp, "tool", "echo tool");
+    // No audit command: ordinary across many packages, so it counts for nothing.
+    write_spec(
+        &temp,
+        "quiet",
+        &format!("name: quiet\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["package", "audit", "--all"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+}
+
+#[test]
+fn audit_all_exits_three_when_one_package_has_a_conflict() {
+    let temp = sandbox();
+    write_audited_package(&temp, "tool", "echo tool");
+    write_audited_package(&temp, "other", "echo other-manager");
+
+    let (code, output) = run(&temp, &["package", "audit", "--all"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+    // The run says what it concluded, not only the per-package lines.
+    assert!(output.contains("1 with conflicts"), "{output}");
+}
+
+// A spec it could not load is a package it could not audit, so the answer has a
+// hole in it even though the rest found a conflict.
+#[test]
+fn audit_all_exits_one_over_a_spec_it_could_not_load() {
+    let temp = sandbox();
+    write_audited_package(&temp, "other", "echo other-manager");
+    write_spec(&temp, "broken", "name: broken\nenvironments: [\n");
+
+    let (code, output) = run(&temp, &["package", "audit", "--all"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+}
+
 // Like `package check` with no check command: nothing can answer the question.
 #[test]
 fn audit_exits_one_without_an_audit_command() {
