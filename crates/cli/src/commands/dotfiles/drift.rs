@@ -35,28 +35,26 @@ pub(crate) async fn handle_drift(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
-            // Render the completion summary with color that matches the outcome:
-            //   0 drifted → green ✔ (all clean)
-            //   N drifted → yellow ⚠ (attention needed)
-            // A success carrying a refusal is deliberately not claimed here.
+            // The summary is green when nothing drifted or was orphaned, and yellow
+            // otherwise. A success carrying a refusal is not claimed here:
             // `process_events` skips its default handler for any event a custom
-            // handler returns `true` for, and that default handler is the only
-            // thing that writes the exit code. Rendering a refusal prettily here
-            // would print the warning and exit 0, while the MCP server -- which
-            // reads `had_refusals` directly -- would report the same run as
-            // refused. Apply learned this at `commands/apply.rs`; this is the
-            // same half of the same problem.
+            // handler returns `true` for, and only that handler writes the exit
+            // code. Claiming a refusal would print the warning and exit 0, while
+            // the MCP server, which reads `had_refusals`, reports the run as
+            // refused. `commands/apply.rs` leaves refusals to the default handler
+            // for the same reason.
             PackageEvent::Completed {
                 result: OperationResult::Success(success),
                 ..
             } if !success.had_refusals() => {
-                // Drift found is worth the reader's attention. An unverified
+                // Drift or an orphan found is worth the reader's attention. An unverified
                 // entry is not: it is unverifiable by design, and the summary
                 // names the count. Anything refused, including a spec that could
                 // not be loaded, never reaches here: it fails the check above.
                 let unclean = matches!(
                     success,
-                    OperationSuccess::DotfileDriftChecked { drift_count, .. } if *drift_count > 0
+                    OperationSuccess::DotfileDriftChecked { drift_count, orphan_count, .. }
+                        if *drift_count > 0 || *orphan_count > 0
                 );
 
                 if unclean {

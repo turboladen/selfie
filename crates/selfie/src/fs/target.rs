@@ -82,6 +82,14 @@ impl TargetPath {
     pub fn display(&self) -> std::path::Display<'_> {
         self.path.display()
     }
+
+    /// The key the deploy state records this target under.
+    #[must_use]
+    pub fn state_key(&self) -> String {
+        // Every writer and reader of the deploy state takes its key from here, so
+        // no two can spell one target differently.
+        self.path.display().to_string()
+    }
 }
 
 /// Expand a deploy target without resolving its final component.

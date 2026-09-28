@@ -420,6 +420,24 @@ impl EventProcessor {
                     .print_warning(format!("  Drift in {short_target}: {drift_type}"));
             }
 
+            // A warning: the file is one the user may still want, and nothing
+            // will manage it again unless they act.
+            PackageEvent::DotfileOrphaned {
+                source,
+                target,
+                package,
+                ..
+            } => {
+                let short_target = crate::display_manager::shorten_path(&target);
+                let by = package
+                    .map(|package| format!(" by package '{package}'"))
+                    .unwrap_or_default();
+                self.display.print_warning(format!(
+                    "  Orphaned {short_target}: deployed from {source}{by}, and no entry deploys \
+                     to it now. selfie leaves it in place; check whether you still need it"
+                ));
+            }
+
             PackageEvent::PostInstallNote { note, .. } => {
                 self.display.print_info(format!("\n📋 {note}"));
             }
@@ -849,6 +867,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 1,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -884,6 +903,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),

@@ -669,7 +669,7 @@ where
     // The folded name from the spec's path, as apply records it. `spec.name` is
     // the name as typed, which may differ in case.
     loaded.state_mut().record_deployment(
-        &expanded_target.display().to_string(),
+        &expanded_target.state_key(),
         &relative_source,
         &checksum,
         crate::package::spec_name_of(&spec.spec_path).as_deref(),

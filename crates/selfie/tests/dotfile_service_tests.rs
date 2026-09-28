@@ -599,9 +599,12 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.open_for_read_refusal(path)
     }
 
-    // Delegated: this decorator's subject is when the token is canceled, not what is
-    // at a directory path.
+    // Cancels too when asked what is at the path, which is how the orphan check
+    // looks at a target it does not read.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
+        if path == self.1 {
+            self.2.cancel();
+        }
         self.0.directory_state(path)
     }
 
@@ -16181,5 +16184,936 @@ mod recorded_package {
             .get(&target.display().to_string())
             .expect("the target is recorded");
         assert_eq!(entry.package(), Some("starship"));
+    }
+}
+
+// Deploy-state records whose target no entry deploys to any more. selfie reports
+// such a file while it is there and drops the record once it is gone; it never
+// touches the file.
+mod orphans {
+    use super::recorded_package::state_in;
+    use super::*;
+
+    // Every orphan event, as `(source, target)`.
+    fn orphans(events: &[PackageEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileOrphaned { source, target, .. } => {
+                    Some((source.clone(), target.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // The package each orphan event names, in event order.
+    fn orphan_packages(events: &[PackageEvent]) -> Vec<Option<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileOrphaned { package, .. } => Some(package.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn orphan_count(events: &[PackageEvent]) -> usize {
+        match get_operation_result(events).expect("no Completed event") {
+            OperationResult::Success(success) => success
+                .orphan_count()
+                .unwrap_or_else(|| panic!("no orphan count on {success:?}")),
+            other => panic!("expected a success, got {other:?}"),
+        }
+    }
+
+    // Warnings saying the orphan check was skipped.
+    fn skipped_checks(events: &[PackageEvent]) -> usize {
+        warning_messages(events)
+            .iter()
+            .filter(|message| message.contains("for orphans"))
+            .count()
+    }
+
+    fn target(dirs: &TestDirs, file: &str) -> String {
+        dirs.target_dir.join(file).display().to_string()
+    }
+
+    // A package `name` deploying each of `files` from `packages/<name>/<file>` to
+    // `target/<file>`.
+    fn package(dirs: &TestDirs, name: &str, files: &[&str]) {
+        let source_dir = dirs.package_dir.join(name);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let mut entries = Vec::new();
+        for file in files {
+            std::fs::write(source_dir.join(file), format!("{name} {file}")).unwrap();
+            entries.push((format!("{name}/{file}"), target(dirs, file)));
+        }
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(source, target)| (source.as_str(), target.as_str()))
+            .collect();
+        create_package_with_dotfiles(&dirs.package_dir, name, &pairs);
+    }
+
+    // Add a record to the state file, as though an earlier run had deployed
+    // `source` to `target` for `package`.
+    fn seed(dirs: &TestDirs, target: &str, source: &str, package: Option<&str>) {
+        let path = dirs.state_dir.join("deploy-state.yml");
+        let mut state = if path.exists() {
+            state_in(dirs)
+        } else {
+            DeployState::empty()
+        };
+        state.record_deployment(target, source, "seeded", package);
+        std::fs::write(&path, serde_saphyr::to_string(&state).unwrap()).unwrap();
+    }
+
+    // A file the user still has at an orphaned target.
+    fn leave_file(dirs: &TestDirs, file: &str) {
+        std::fs::write(dirs.target_dir.join(file), "the user's copy").unwrap();
+    }
+
+    async fn run_apply_all(dirs: &TestDirs) -> Vec<PackageEvent> {
+        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await
+    }
+
+    async fn run_apply(dirs: &TestDirs, name: &str) -> Vec<PackageEvent> {
+        collect_events(dirs.service().apply(name, ApplyOptions::default()).await).await
+    }
+
+    async fn run_dry_run(dirs: &TestDirs) -> Vec<PackageEvent> {
+        let options = ApplyOptions {
+            dry_run: true,
+            ..ApplyOptions::default()
+        };
+        collect_events(dirs.service().apply_all(options).await).await
+    }
+
+    async fn run_drift(dirs: &TestDirs) -> Vec<PackageEvent> {
+        collect_events(dirs.service().check_drift().await).await
+    }
+
+    fn recorded(dirs: &TestDirs, target: &str) -> bool {
+        state_in(dirs).get(target).is_some()
+    }
+
+    // The bead's case: an entry's target changed. The old file is reported, kept
+    // and left as it was; the entry's new target, which the run just recorded, is
+    // not reported.
+    #[tokio::test]
+    async fn a_moved_target_is_reported_by_apply_and_drift_and_kept() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, &target(&dirs, "old"), "app/old", Some("app"));
+        leave_file(&dirs, "old");
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(
+            orphans(&events),
+            vec![("app/old".to_string(), target(&dirs, "old"))]
+        );
+        assert_eq!(orphan_packages(&events), vec![Some("app".to_string())]);
+        assert_eq!(orphan_count(&events), 1);
+        assert_eq!(refused_count(&events), 0, "an orphan is not a refusal");
+        match get_operation_result(&events).unwrap() {
+            OperationResult::Success(success) => {
+                assert!(!success.had_refusals());
+                let OperationSuccess::DotfilesApplied {
+                    steps_completed, ..
+                } = success
+                else {
+                    panic!("expected DotfilesApplied, got {success:?}");
+                };
+                assert_eq!(
+                    steps_completed.total, 1,
+                    "an orphan is not an entry's outcome"
+                );
+            }
+            other => panic!("expected a success, got {other:?}"),
+        }
+        assert!(recorded(&dirs, &target(&dirs, "old")));
+        assert!(recorded(&dirs, &target(&dirs, "new")));
+        assert_eq!(
+            std::fs::read_to_string(dirs.target_dir.join("old")).unwrap(),
+            "the user's copy"
+        );
+
+        let events = run_drift(&dirs).await;
+        assert_eq!(
+            orphans(&events),
+            vec![("app/old".to_string(), target(&dirs, "old"))]
+        );
+        assert_eq!(orphan_count(&events), 1);
+        assert_eq!(drift_summary(&events).0, 0, "an orphan is not drift");
+    }
+
+    // Once the file is gone, only a run that writes drops its record, and it
+    // reports nothing.
+    #[tokio::test]
+    async fn a_gone_orphan_is_dropped_by_apply_and_kept_by_drift_and_a_dry_run() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, &target(&dirs, "old"), "app/old", Some("app"));
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "old")));
+
+        let events = run_dry_run(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "old")));
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(orphan_count(&events), 0);
+        assert!(!recorded(&dirs, &target(&dirs, "old")));
+        assert!(recorded(&dirs, &target(&dirs, "new")));
+    }
+
+    // A dry run reports what it finds and changes nothing.
+    #[tokio::test]
+    async fn a_dry_run_reports_an_orphan_and_writes_nothing() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, &target(&dirs, "old"), "app/old", None);
+        leave_file(&dirs, "old");
+        let before = std::fs::read(dirs.state_dir.join("deploy-state.yml")).unwrap();
+
+        let events = run_dry_run(&dirs).await;
+        assert_eq!(orphans(&events).len(), 1, "{events:?}");
+        assert_eq!(
+            std::fs::read(dirs.state_dir.join("deploy-state.yml")).unwrap(),
+            before
+        );
+    }
+
+    // A target below a dangling link may be on a volume that is not mounted, so
+    // it counts as present: reported, and its record kept.
+    #[tokio::test]
+    async fn a_target_below_a_dangling_link_keeps_its_record() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        std::os::unix::fs::symlink(
+            dirs.target_dir.join("unmounted"),
+            dirs.target_dir.join("vol"),
+        )
+        .unwrap();
+        let old = dirs.target_dir.join("vol/old").display().to_string();
+        seed(&dirs, &old, "app/old", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(orphans(&events), vec![("app/old".to_string(), old.clone())]);
+        assert!(recorded(&dirs, &old));
+    }
+
+    // A path selfie cannot classify may hold the file, so it too is reported and
+    // kept.
+    #[tokio::test]
+    async fn a_target_that_cannot_be_checked_keeps_its_record() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        let looped = dirs.target_dir.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let old = looped.join("old").display().to_string();
+        seed(&dirs, &old, "app/old", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(orphans(&events), vec![("app/old".to_string(), old.clone())]);
+        assert!(recorded(&dirs, &old));
+    }
+
+    // An entry apply refuses still names its target, so its record is neither
+    // reported nor dropped, even with the file gone.
+    #[tokio::test]
+    async fn a_refused_entry_keeps_its_gone_targets_record() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["kept"]);
+        std::fs::remove_file(dirs.package_dir.join("app/kept")).unwrap();
+        seed(&dirs, &target(&dirs, "kept"), "app/kept", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(refused_count(&events), 1, "{events:?}");
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "kept")));
+    }
+
+    // A spec that could not be loaded may be the one deploying a target, so no
+    // record is judged, gone or not, and the skip is said once.
+    #[tokio::test]
+    async fn an_unloadable_spec_stops_the_check_and_says_so_once() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        std::fs::write(dirs.package_dir.join("broken.yml"), "name: [unclosed\n").unwrap();
+        seed(&dirs, &target(&dirs, "present"), "broken/present", None);
+        seed(&dirs, &target(&dirs, "gone"), "broken/gone", None);
+        seed(&dirs, &target(&dirs, "app-old"), "app/old", Some("app"));
+        leave_file(&dirs, "present");
+        leave_file(&dirs, "app-old");
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("for orphans") && message.contains("broken.yml")),
+            "the warning must name the spec that stopped the check: {events:?}"
+        );
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+
+        // A named apply hides the warning naming the spec, so its own warning is
+        // the only place the spec is named.
+        let events = run_apply(&dirs, "app").await;
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("for orphans") && message.contains("broken.yml")),
+            "{events:?}"
+        );
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+    }
+
+    // A package refused whole, here for a misspelled `dotfiles` key, has entries
+    // nothing read.
+    #[tokio::test]
+    async fn a_refused_package_stops_the_check() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        write_package_yaml(
+            &dirs.package_dir,
+            "typo",
+            "name: typo\nenvironments:\n  test:\n    install: \"true\"\nconfigs:\n  - source: typo/x\n    target: /nowhere\n",
+        );
+        seed(&dirs, &target(&dirs, "old"), "typo/x", Some("typo"));
+        leave_file(&dirs, "old");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+    }
+
+    // A configured dotfiles directory that is not there leaves out every
+    // standalone dotfile, which is how a typo in the setting looks.
+    #[tokio::test]
+    async fn an_absent_dotfiles_directory_stops_the_check() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        std::fs::remove_dir(&dirs.dotfiles_dir).unwrap();
+        seed(&dirs, &target(&dirs, "old"), "old/old", Some("old"));
+        leave_file(&dirs, "old");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+    }
+
+    // Without a home directory no `~` target resolves, so a record under the home
+    // directory cannot be matched to its entry.
+    #[tokio::test]
+    async fn a_home_that_cannot_be_resolved_stops_the_check() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/rc"), "x").unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, "app", &[("app/rc", "~/.rc")]);
+        // A package with an absolute target, so something is deployed and only the
+        // home directory stands between the record and its entry.
+        package(&dirs, "abs", &["abs"]);
+        let rc = home.join(".rc").display().to_string();
+        seed(&dirs, &rc, "app/rc", Some("app"));
+        std::fs::write(home.join(".rc"), "x").unwrap();
+
+        // A relative "home" is one `deploy_target` refuses to expand against.
+        let service = dirs.service_with_home(std::path::Path::new("relative-home"));
+        let events = collect_events(service.check_drift().await).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+    }
+
+    // A name several files claim, where none deploys anything here, is no
+    // refusal, so the check still runs and still judges correctly.
+    #[tokio::test]
+    async fn an_unrefused_ambiguity_does_not_stop_the_check() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        for file in ["dup.yml", "dup.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: dup\nenvironments:\n  test:\n    install: \"true\"\n",
+            )
+            .unwrap();
+        }
+        seed(&dirs, &target(&dirs, "old"), "app/old", Some("app"));
+        leave_file(&dirs, "old");
+        run_apply_all(&dirs).await;
+
+        let events = run_drift(&dirs).await;
+        assert_eq!(skipped_checks(&events), 0, "{events:?}");
+        assert_eq!(
+            orphans(&events),
+            vec![("app/old".to_string(), target(&dirs, "old"))]
+        );
+    }
+
+    // Only the current environment's entries count: another environment's target
+    // is not deployed here.
+    #[tokio::test]
+    async fn a_target_only_another_environment_deploys_is_an_orphan() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/x"), "x").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "app",
+            &format!(
+                "name: app\ndotfiles:\n  - source: app/x\n    target: \"{}\"\nenvironments:\n  test:\n    install: \"true\"\n  other:\n    install: \"true\"\n    dotfiles:\n      - source: app/x\n        target: \"{}\"\n",
+                target(&dirs, "here"),
+                target(&dirs, "other")
+            ),
+        );
+        seed(&dirs, &target(&dirs, "other"), "app/x", Some("app"));
+        leave_file(&dirs, "other");
+
+        let events = run_drift(&dirs).await;
+        assert_eq!(
+            orphans(&events),
+            vec![("app/x".to_string(), target(&dirs, "other"))]
+        );
+    }
+
+    // An environment's entry overriding a shared one by its raw target still
+    // deploys to that target.
+    #[tokio::test]
+    async fn an_overridden_shared_target_is_not_an_orphan() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/shared"), "s").unwrap();
+        std::fs::write(dirs.package_dir.join("app/mine"), "m").unwrap();
+        let rc = target(&dirs, "rc");
+        write_package_yaml(
+            &dirs.package_dir,
+            "app",
+            &format!(
+                "name: app\ndotfiles:\n  - source: app/shared\n    target: \"{rc}\"\nenvironments:\n  test:\n    install: \"true\"\n    dotfiles:\n      - source: app/mine\n        target: \"{rc}\"\n"
+            ),
+        );
+        seed(&dirs, &rc, "app/shared", Some("app"));
+        leave_file(&dirs, "rc");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+    }
+
+    // A secret-bearing entry records nothing, but it still deploys to its
+    // target, so a record there is not an orphan.
+    #[tokio::test]
+    async fn a_secret_bearing_target_is_not_an_orphan() {
+        let dirs = TestDirs::new();
+        let creds = target(&dirs, "creds");
+        write_package_yaml(
+            &dirs.package_dir,
+            "app",
+            &format!(
+                "name: app\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - command: \"true\"\n    target: \"{creds}\"\n"
+            ),
+        );
+        seed(&dirs, &creds, "app/creds", Some("app"));
+        leave_file(&dirs, "creds");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+    }
+
+    // Two entries of one package sharing a target are refused, and both still
+    // name it.
+    #[tokio::test]
+    async fn colliding_entries_still_name_their_target() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a"), "a").unwrap();
+        std::fs::write(dirs.package_dir.join("app/b"), "b").unwrap();
+        let rc = target(&dirs, "rc");
+        create_package_with_dotfiles(&dirs.package_dir, "app", &[("app/a", &rc), ("app/b", &rc)]);
+        seed(&dirs, &rc, "app/a", Some("app"));
+        leave_file(&dirs, "rc");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+    }
+
+    // A standalone dotfile's target is deployed like a package's.
+    #[tokio::test]
+    async fn a_standalone_dotfiles_target_is_not_an_orphan() {
+        let dirs = TestDirs::new();
+        let rc = dirs.target_dir.join("starship.toml");
+        std::fs::write(&rc, "format").unwrap();
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", rc.to_str().unwrap())
+                .await,
+        )
+        .await;
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(orphan_count(&events), 0);
+    }
+
+    // Track records the target expanded, and the survey must build the same key
+    // from the `~` form the spec holds, or every tracked file reads as orphaned
+    // on its first apply.
+    #[tokio::test]
+    async fn a_tracked_file_under_home_is_never_an_orphan() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".gitconfig"), "[user]").unwrap();
+        std::fs::write(dirs.target_dir.join("abs.conf"), "abs").unwrap();
+        let service = dirs.service_with_home(&home);
+
+        for (name, path) in [("git", "~/.gitconfig"), ("abs", "")] {
+            let path = if path.is_empty() {
+                dirs.target_dir.join("abs.conf").display().to_string()
+            } else {
+                path.to_string()
+            };
+            let events = collect_events(service.track_standalone(name, &path).await).await;
+            assert!(
+                matches!(
+                    get_operation_result(&events),
+                    Some(OperationResult::Success(_))
+                ),
+                "{events:?}"
+            );
+        }
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 0, "{events:?}");
+        let events = collect_events(service.check_drift().await).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(state_in(&dirs).entries().len(), 2);
+    }
+
+    // `apply <name>` speaks only of its own package's records.
+    #[tokio::test]
+    async fn a_named_apply_reports_only_its_own_packages_orphans() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        package(&dirs, "beta", &["b"]);
+        seed(&dirs, &target(&dirs, "a-old"), "alpha/a-old", Some("alpha"));
+        seed(&dirs, &target(&dirs, "b-old"), "beta/b-old", Some("beta"));
+        seed(&dirs, &target(&dirs, "legacy"), "x/legacy", None);
+        for file in ["a-old", "b-old", "legacy"] {
+            leave_file(&dirs, file);
+        }
+
+        let events = run_apply(&dirs, "Alpha").await;
+        assert_eq!(
+            orphans(&events),
+            vec![("alpha/a-old".to_string(), target(&dirs, "a-old"))]
+        );
+        assert_eq!(orphan_count(&events), 1);
+
+        // A record naming no package belongs to no named apply; apply-all reports
+        // it, naming no package.
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(orphans(&events).len(), 3, "{events:?}");
+        assert_eq!(
+            orphan_packages(&events),
+            vec![Some("alpha".to_string()), Some("beta".to_string()), None]
+        );
+    }
+
+    // A target two packages deploy to is recorded under whichever wrote it last.
+    // When that one drops its entry, the other still deploys there.
+    #[tokio::test]
+    async fn a_named_apply_judges_against_every_package() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["shared"]);
+        package(&dirs, "beta", &["b"]);
+        seed(&dirs, &target(&dirs, "shared"), "beta/shared", Some("beta"));
+        leave_file(&dirs, "shared");
+
+        let events = run_apply(&dirs, "beta").await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "shared")));
+    }
+
+    // A named apply drops its own gone records and leaves another package's.
+    #[tokio::test]
+    async fn a_named_apply_drops_only_its_own_gone_records() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        package(&dirs, "beta", &["b"]);
+        seed(&dirs, &target(&dirs, "a-old"), "alpha/a-old", Some("alpha"));
+        seed(&dirs, &target(&dirs, "b-old"), "beta/b-old", Some("beta"));
+
+        let events = run_apply(&dirs, "alpha").await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(!recorded(&dirs, &target(&dirs, "a-old")));
+        assert!(recorded(&dirs, &target(&dirs, "b-old")));
+    }
+
+    // A record written before `package` existed is attributed by the next apply
+    // that writes, when exactly one package deploys to it, and not by a dry run.
+    #[tokio::test]
+    async fn a_legacy_record_is_attributed_by_an_apply() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a", "shared"]);
+        package(&dirs, "beta", &["shared"]);
+        // One content for the shared target, so neither apply rewrites its record.
+        for name in ["alpha", "beta"] {
+            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
+        }
+        run_apply_all(&dirs).await;
+        let mut state = state_in(&dirs);
+        for key in [target(&dirs, "a"), target(&dirs, "shared")] {
+            let entry = state.get(&key).unwrap().clone();
+            state.record_deployment(&key, entry.source(), entry.checksum(), None);
+        }
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            serde_saphyr::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        run_dry_run(&dirs).await;
+        assert_eq!(
+            state_in(&dirs).get(&target(&dirs, "a")).unwrap().package(),
+            None
+        );
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+        let state = state_in(&dirs);
+        assert_eq!(
+            state.get(&target(&dirs, "a")).unwrap().package(),
+            Some("alpha")
+        );
+        assert_eq!(
+            state.get(&target(&dirs, "shared")).unwrap().package(),
+            None,
+            "two packages deploy there, so neither is guessed"
+        );
+    }
+
+    // A named apply attributes only its own package's records.
+    #[tokio::test]
+    async fn a_named_apply_attributes_only_its_own_records() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        package(&dirs, "beta", &["b"]);
+        run_apply_all(&dirs).await;
+        let mut state = state_in(&dirs);
+        for key in [target(&dirs, "a"), target(&dirs, "b")] {
+            let entry = state.get(&key).unwrap().clone();
+            state.record_deployment(&key, entry.source(), entry.checksum(), None);
+        }
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            serde_saphyr::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        run_apply(&dirs, "alpha").await;
+        let state = state_in(&dirs);
+        assert_eq!(
+            state.get(&target(&dirs, "a")).unwrap().package(),
+            Some("alpha")
+        );
+        assert_eq!(state.get(&target(&dirs, "b")).unwrap().package(), None);
+    }
+
+    // A run that stops part way neither reports nor drops anything.
+    #[tokio::test]
+    async fn a_cancelled_run_reports_and_drops_nothing() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, &target(&dirs, "present"), "app/present", Some("app"));
+        seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
+        leave_file(&dirs, "present");
+        let source = dirs.package_dir.join("app/new");
+
+        let token = CancellationToken::new();
+        let service = dirs.service_cancelling_on_read(&source, token.clone());
+        let events = collect_events(service.check_drift().await).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PackageEvent::Canceled { .. })),
+            "{events:?}"
+        );
+
+        let token = CancellationToken::new();
+        let service = dirs.service_cancelling_on_read(&source, token.clone());
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_by_stop_on_error_drops_nothing() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        package(&dirs, "app", &["missing"]);
+        std::fs::remove_file(dirs.package_dir.join("app/missing")).unwrap();
+        seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "{events:?}"
+        );
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+    }
+
+    // A failed tidy loses only the tidy: one warning, and the run's result as it
+    // would otherwise be.
+    #[tokio::test]
+    async fn a_failed_tidy_warns_once_and_leaves_the_result_alone() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        std::fs::write(dirs.target_dir.join("new"), "app new").unwrap();
+        seed(&dirs, &target(&dirs, "new"), "app/new", Some("app"));
+        seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
+        let fs = StateWritesFailAfter {
+            inner: RealFileSystem,
+            state_file: dirs.state_dir.join("deploy-state.yml"),
+            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+        let tidy = warning_messages(&events)
+            .into_iter()
+            .filter(|message| message.contains("Could not tidy the deploy state"))
+            .count();
+        assert_eq!(tidy, 1, "{events:?}");
+        assert_eq!(refused_count(&events), 0, "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+    }
+
+    // The same file under another spelling is still deployed, so it is not
+    // reported. A symlinked directory is one such spelling on every platform.
+    #[tokio::test]
+    async fn a_target_reached_through_a_symlinked_directory_is_not_an_orphan() {
+        let dirs = TestDirs::new();
+        let real = dirs.target_dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dirs.target_dir.join("alias")).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/rc"), "rc").unwrap();
+        let rc = real.join("rc").display().to_string();
+        create_package_with_dotfiles(&dirs.package_dir, "app", &[("app/rc", &rc)]);
+        std::fs::write(real.join("rc"), "rc").unwrap();
+        let aliased = dirs.target_dir.join("alias/rc").display().to_string();
+        seed(&dirs, &aliased, "app/rc", Some("app"));
+        // A control: a real orphan in the same run is still reported.
+        seed(&dirs, &target(&dirs, "old"), "app/old", Some("app"));
+        leave_file(&dirs, "old");
+
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(
+            orphans(&events),
+            vec![("app/old".to_string(), target(&dirs, "old"))]
+        );
+        assert!(recorded(&dirs, &aliased), "the record is kept");
+
+        let events = run_drift(&dirs).await;
+        assert_eq!(orphans(&events).len(), 1, "{events:?}");
+    }
+
+    // A case-only rename on a case-insensitive volume, the default on macOS.
+    // Skipped where the temporary directory is case-sensitive, since there the
+    // two spellings are two files.
+    #[tokio::test]
+    async fn a_case_only_rename_on_a_case_insensitive_volume_is_not_an_orphan() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.target_dir.join("Probe"), "").unwrap();
+        if !dirs.target_dir.join("probe").exists() {
+            eprintln!("skipped: {} is case-sensitive", dirs.target_dir.display());
+            return;
+        }
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/rc"), "rc").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/rc", &target(&dirs, "rc"))],
+        );
+        std::fs::write(dirs.target_dir.join("Rc"), "rc").unwrap();
+        seed(&dirs, &target(&dirs, "Rc"), "app/rc", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "Rc")), "the record is kept");
+    }
+
+    // A package directory with nothing in it for this environment looks the same
+    // as a mistyped one, so nothing is judged, and no record is dropped.
+    #[tokio::test]
+    async fn no_package_deploying_anything_stops_the_check() {
+        let dirs = TestDirs::new();
+        write_package_yaml(
+            &dirs.package_dir,
+            "tool",
+            "name: tool\nenvironments:\n  test:\n    install: \"true\"\n",
+        );
+        seed(&dirs, &target(&dirs, "present"), "app/present", Some("app"));
+        seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
+        leave_file(&dirs, "present");
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert_eq!(skipped_checks(&events), 1, "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("package_directory")),
+            "{events:?}"
+        );
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+    }
+
+    // A dotfiles/ spec left unused because several packages/ specs claim its name
+    // still names its targets; nothing collected stands in for it.
+    #[tokio::test]
+    async fn a_dotfiles_spec_set_aside_by_an_ambiguous_name_stops_the_check() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        for file in ["bat.yml", "bat.yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(file),
+                "name: bat\nenvironments:\n  test:\n    install: \"true\"\n",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("bat")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("bat/config"), "c").unwrap();
+        let config = target(&dirs, "config");
+        std::fs::write(
+            dirs.dotfiles_dir.join("bat.yml"),
+            format!("name: bat\ndotfiles:\n  - source: bat/config\n    target: \"{config}\"\n"),
+        )
+        .unwrap();
+        seed(&dirs, &config, "bat/config", Some("bat"));
+        leave_file(&dirs, "config");
+
+        let events = run_drift(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("for orphans") && message.contains("'bat'")),
+            "{events:?}"
+        );
+    }
+
+    // A record naming a package that no longer deploys its target is corrected to
+    // the one package that does, by a named apply of that package too.
+    #[tokio::test]
+    async fn a_record_naming_a_stale_package_is_attributed_to_the_producer() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        std::fs::write(dirs.target_dir.join("a"), "alpha a").unwrap();
+        let a = target(&dirs, "a");
+        seed(&dirs, &a, "alpha/a", Some("renamed"));
+
+        run_apply(&dirs, "alpha").await;
+        assert_eq!(state_in(&dirs).get(&a).unwrap().package(), Some("alpha"));
+    }
+
+    // A cancel that lands while orphans are being reported stops the run before
+    // it drops anything.
+    #[tokio::test]
+    async fn a_cancel_during_the_orphan_check_drops_nothing() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
+        seed(&dirs, &target(&dirs, "present"), "app/present", Some("app"));
+        leave_file(&dirs, "present");
+
+        let token = CancellationToken::new();
+        let service =
+            dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        assert!(failure_message(&events).contains("cancelled"), "{events:?}");
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
+
+        // Drift writes nothing, but a cancel during its check still makes the
+        // answer partial, so it must not report a completed check.
+        let token = CancellationToken::new();
+        let service =
+            dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
+        let events = collect_events(service.check_drift().await).await;
+        assert_cancelled_without_counts(&events);
+    }
+
+    // A relative key names no one file, so it is never judged or dropped.
+    #[tokio::test]
+    async fn a_relative_key_is_never_judged() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        seed(&dirs, "relative/rc", "app/rc", Some("app"));
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(recorded(&dirs, "relative/rc"));
+    }
+
+    // A dotfiles/ spec shadowed by a single packages/ spec of the same name is
+    // unused, and nothing collected stands in for its entries.
+    #[tokio::test]
+    async fn a_dotfiles_spec_shadowed_by_a_package_stops_the_check() {
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["new"]);
+        write_package_yaml(
+            &dirs.package_dir,
+            "git",
+            "name: git\nenvironments:\n  test:\n    install: \"true\"\n",
+        );
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("git")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("git/gitconfig"), "g").unwrap();
+        let gitconfig = target(&dirs, "gitconfig");
+        std::fs::write(
+            dirs.dotfiles_dir.join("git.yml"),
+            format!(
+                "name: git\ndotfiles:\n  - source: git/gitconfig\n    target: \"{gitconfig}\"\n"
+            ),
+        )
+        .unwrap();
+        seed(&dirs, &gitconfig, "git/gitconfig", Some("git"));
+        leave_file(&dirs, "gitconfig");
+        seed(&dirs, &target(&dirs, "gone"), "git/gone", Some("git"));
+
+        let events = run_apply_all(&dirs).await;
+        assert!(orphans(&events).is_empty(), "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("for orphans") && message.contains("'git'")),
+            "{events:?}"
+        );
+        assert!(recorded(&dirs, &target(&dirs, "gone")));
     }
 }

@@ -103,6 +103,24 @@ impl DeployState {
         );
     }
 
+    /// Name `package` as the one that deployed `target`, replacing whatever the
+    /// record named. Returns whether the record changed; a target with no
+    /// record gains none.
+    pub fn attribute(&mut self, target: &str, package: &str) -> bool {
+        match self.deployed.get_mut(target) {
+            Some(entry) if entry.package.as_deref() != Some(package) => {
+                entry.package = Some(package.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop the record for `target`. Returns whether there was one.
+    pub fn remove(&mut self, target: &str) -> bool {
+        self.deployed.remove(target).is_some()
+    }
+
     pub fn detect_drift(
         &self,
         target: &str,
@@ -295,6 +313,31 @@ mod tests {
         let loaded: DeployState = crate::yaml::parse(&yaml).unwrap();
         assert_eq!(loaded.get("/t/a").unwrap().package(), Some("alpha"));
         assert_eq!(loaded.get("/t/b").unwrap().package(), None);
+    }
+
+    #[test]
+    fn attributing_names_the_package_and_reports_only_a_change() {
+        let mut state = DeployState::empty();
+        state.record_deployment("/t/legacy", "x", "h", None);
+        state.record_deployment("/t/owned", "y", "h", Some("first"));
+        assert!(state.attribute("/t/legacy", "second"));
+        assert!(state.attribute("/t/owned", "second"));
+        assert!(!state.attribute("/t/owned", "second"));
+        assert!(!state.attribute("/t/absent", "second"));
+        assert_eq!(state.get("/t/legacy").unwrap().package(), Some("second"));
+        assert_eq!(state.get("/t/owned").unwrap().package(), Some("second"));
+        assert!(state.get("/t/absent").is_none());
+    }
+
+    #[test]
+    fn removing_drops_only_the_named_record() {
+        let mut state = DeployState::empty();
+        state.record_deployment("/t/a", "a", "h", None);
+        state.record_deployment("/t/b", "b", "h", None);
+        assert!(state.remove("/t/a"));
+        assert!(!state.remove("/t/a"));
+        assert!(state.get("/t/a").is_none());
+        assert!(state.get("/t/b").is_some());
     }
 
     #[test]

@@ -699,6 +699,54 @@ the entry as refused, and exits `1` rather than calling the target changed. Make
 readable, or point the entry elsewhere, and run apply again. A secret-bearing entry refuses an
 unreadable target the same way, [before running its commands](#deploy-behavior-and-permissions).
 
+### Orphaned targets
+
+When you change an entry's `target`, remove an entry, or remove a package, the file selfie last
+deployed there stays on disk and nothing manages it any more. selfie calls such a file _orphaned_.
+It never deletes or changes one: the file may still be something you want. `selfie apply`,
+`selfie apply <name>` and `selfie dotfiles drift` report each orphaned file that is still there:
+
+```
+⚠   Orphaned ~/.config/old.toml: deployed from myapp/config.toml by package 'myapp', and no entry deploys to it now. selfie leaves it in place; check whether you still need it
+```
+
+The summary counts them as `N orphaned`. An orphan is neither drift nor a refusal, so it does not
+change the exit status. The warning repeats on every run until you delete the file or point an entry
+at it again.
+
+A target counts as orphaned when no entry of any package deploys to it in the current environment,
+whether or not that entry could deploy this time. A target only another environment deploys to is
+therefore reported after you switch environments. A target that another package still deploys to is
+not an orphan, and neither is the same file reached under another spelling: through a symlinked
+directory, or by a change of case alone on a case-insensitive volume.
+
+`selfie apply <name>` reports only the targets its own package last deployed. A record naming no
+package, as a state file from an earlier version of selfie holds, is reported by `selfie apply` and
+`selfie dotfiles drift` but never by `selfie apply <name>`. An apply names the package on a record
+whose target exactly one package deploys to, which an orphan's never is: it fills in a missing name
+and replaces the name of a package that no longer deploys there. `selfie apply <name>` does this
+only for its own package's targets. An older version of selfie that rewrites the state file drops
+every record's package; the next apply names it again only where exactly one package deploys to the
+target.
+
+Once the file is gone, `selfie apply` drops selfie's record of it and says nothing. A dry run and
+`selfie dotfiles drift` change nothing, and a run that stops part way drops nothing. A target selfie
+cannot check, or one below a symlink whose destination is missing, as when the link points into a
+volume that is not mounted, counts as still there. So does a target below a regular file, where
+nothing can be: its warning repeats until the file in the way is gone. A target on a volume reached
+by its own path, such as `/Volumes/Backup/app.conf`, looks gone while the volume is unmounted, so an
+apply run then drops its record and the file is not reported once the volume is back. Dropping a
+record by mistake would cost little anyway: without one, a target whose content differs from its
+source is a conflict, never overwritten.
+
+selfie does not judge orphans at all when it cannot see every entry, and says so once, naming the
+reason, whenever some record is in question. That happens when a spec could not be loaded, several
+spec files claim a name selfie would deploy from, a dotfiles/ spec is unused because packages/ has a
+spec by the same name, a package is refused whole, a dotfiles directory cannot be read, a configured
+`dotfiles_directory` is missing, or a `~` target cannot be resolved for want of a home directory. It
+also happens when no package deploys anything in the current environment, which is what a mistyped
+`package_directory` looks like.
+
 ### How targets are written
 
 Every target, repository-file or secret, is written to a temporary file beside it and renamed into
