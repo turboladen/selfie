@@ -104,6 +104,8 @@ impl TargetPath {
 /// *parent* directory is still followed, and `a/link/../b` becomes `a/b` rather
 /// than wherever `link` points.
 ///
+/// Extra slashes after `~/` are dropped, as a shell drops them: `~//x` is `~/x`.
+///
 /// `~user` is not supported. It falls through to the literal path, which is then
 /// relative. This function does **not** refuse it: [`deploy_target`] does, by
 /// name, and every path that deploys or tracks obtains its target from there
@@ -130,8 +132,10 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
         let expanded = if tilde == "~" { home.home().ok() } else { None };
 
         match expanded {
+            // `~//x` leaves `/x` after the first slash, and joining an absolute
+            // path replaces the home directory. A shell reads `~//x` as `~/x`.
             Some(home) => match rest {
-                Some(rest) => home.join(rest),
+                Some(rest) => home.join(rest.trim_start_matches('/')),
                 None => home,
             },
             // No home directory, or a `~user` form. Falling back to the literal
@@ -527,6 +531,28 @@ mod tests {
             deploy_target(&fs, "~/test-file").unwrap().path(),
             Path::new("/home/user/test-file")
         );
+    }
+
+    // Extra slashes after `~` mean what they mean to a shell: `~//x` is `~/x`.
+    // `Path::join` replaces its base when handed an absolute path, so joining
+    // the `/x` left after the first slash would deploy to `/x`, outside the home
+    // directory. The single-slash row is the control.
+    #[test]
+    fn extra_slashes_after_the_tilde_stay_under_the_home_directory() {
+        for (target, expected) in [
+            ("~//.gemrc", "/home/user/.gemrc"),
+            ("~///.gemrc", "/home/user/.gemrc"),
+            ("~//", "/home/user"),
+            ("~/.gemrc", "/home/user/.gemrc"),
+        ] {
+            let mut fs = MockFileSystem::default();
+            fs.mock_expand_path("~", "/home/user");
+            assert_eq!(
+                deploy_target(&fs, target).unwrap().path(),
+                Path::new(expected),
+                "target: {target}"
+            );
+        }
     }
 
     // The refusal for `~user/…` must name the unsupported form. Restating the
