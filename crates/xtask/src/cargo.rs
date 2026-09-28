@@ -83,6 +83,9 @@ pub fn scrub_env(cmd: &mut Command) -> &mut Command {
         .env_remove("CARGO_MAKEFLAGS")
         .env_remove("MAKEFLAGS")
         .env_remove("MFLAGS")
+        // Uncaptured test output would be printed between libtest's result
+        // lines and could be read as one.
+        .env_remove("RUST_TEST_NOCAPTURE")
         .env("CARGO_TERM_COLOR", "never")
         // A quiet cargo prints no `Compiling` line, and every verdict here
         // depends on that line.
