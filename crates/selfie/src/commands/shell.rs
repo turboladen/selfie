@@ -86,11 +86,9 @@ impl ShellCommandRunner {
         }
     }
 
-    /// Build a `Command` with the configured shell, login flag, and command string.
-    ///
-    /// When `working_dir` is `Some`, the child runs there; otherwise it inherits
-    /// selfie's own current directory.
-    fn build_command(&self, command: &str, working_dir: Option<&Path>) -> Command {
+    /// Build a `Command` with the configured shell, login flag, and command
+    /// string, to run in `working_dir`.
+    fn build_command(&self, command: &str, working_dir: &Path) -> Command {
         let mut cmd = Command::new(&self.shell);
         if self.login {
             cmd.arg("-l");
@@ -99,11 +97,9 @@ impl ShellCommandRunner {
             .arg(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-            set_pwd(&mut cmd, dir);
-        }
+            .stderr(Stdio::piped())
+            .current_dir(working_dir);
+        set_pwd(&mut cmd, working_dir);
         cmd
     }
 
@@ -144,17 +140,12 @@ impl ShellCommandRunner {
         &self,
         mut cmd: Command,
         reported: &str,
-        working_dir: Option<&Path>,
+        working_dir: &Path,
         timeout: Duration,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
-        // Report the directory the command actually ran in, not selfie's own, so a
-        // failure names the place the user configured.
-        let working_directory = working_dir.map_or_else(
-            || std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
-            Path::to_path_buf,
-        );
+        let working_directory = working_dir.to_path_buf();
 
         // Check for pre-cancellation before spawning
         if token.is_cancelled() {
@@ -166,7 +157,7 @@ impl ShellCommandRunner {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| spawn_error(reported, working_dir, &working_directory, e))?;
+            .map_err(|e| spawn_error(reported, working_dir, e))?;
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -240,26 +231,11 @@ impl CommandRunner for ShellCommandRunner {
     async fn execute(
         &self,
         command: &str,
+        working_dir: &Path,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.execute_with_timeout(command, self.default_timeout, token)
+        self.execute_in_dir(command, working_dir, self.default_timeout, token)
             .await
-    }
-
-    async fn execute_with_timeout(
-        &self,
-        command: &str,
-        timeout: Duration,
-        token: &CancellationToken,
-    ) -> Result<CommandOutput, CommandError> {
-        self.run_buffered(
-            self.build_command(command, None),
-            command,
-            None,
-            timeout,
-            token,
-        )
-        .await
     }
 
     async fn execute_in_dir(
@@ -270,9 +246,9 @@ impl CommandRunner for ShellCommandRunner {
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         self.run_buffered(
-            self.build_command(command, Some(working_dir)),
+            self.build_command(command, working_dir),
             command,
-            Some(working_dir),
+            working_dir,
             timeout,
             token,
         )
@@ -284,13 +260,13 @@ impl CommandRunner for ShellCommandRunner {
     async fn execute_streaming(
         &self,
         command: &str,
+        working_dir: &Path,
         timeout: Duration,
         output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
         token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
-        let working_directory =
-            std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        let working_directory = working_dir.to_path_buf();
 
         // Check for pre-cancellation before spawning
         if token.is_cancelled() {
@@ -300,11 +276,11 @@ impl CommandRunner for ShellCommandRunner {
             });
         }
 
-        let mut cmd = self.build_command(command, None);
+        let mut cmd = self.build_command(command, working_dir);
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| spawn_error(command, None, &working_directory, e))?;
+            .map_err(|e| spawn_error(command, working_dir, e))?;
 
         let stdout = child
             .stdout
@@ -398,7 +374,7 @@ impl CommandRunner for ShellCommandRunner {
             .run_buffered(
                 self.build_content_command(&recipe, working_dir, fd),
                 command,
-                Some(working_dir),
+                working_dir,
                 timeout,
                 token,
             )
@@ -450,27 +426,22 @@ fn set_pwd(cmd: &mut Command, dir: &Path) {
 
 /// The error for a shell that could not be started: `WorkingDirectoryUnusable`
 /// when `working_dir` was the cause, `IoError` otherwise.
-fn spawn_error(
-    command: &str,
-    working_dir: Option<&Path>,
-    working_directory: &Path,
-    source: std::io::Error,
-) -> CommandError {
+fn spawn_error(command: &str, working_dir: &Path, source: std::io::Error) -> CommandError {
     // std applies `current_dir` in the child before exec, and reports a failed
     // `chdir` as a spawn error with the same errno a missing shell produces, so
     // the error alone cannot say which failed. The kernel has already refused the
     // directory and nothing ran; this probe only picks the message, so a race
     // can misname a failure but never runs a line of the command.
-    if working_dir.is_some_and(is_unenterable) {
+    if is_unenterable(working_dir) {
         return CommandError::WorkingDirectoryUnusable {
             command: command.to_string(),
-            working_directory: working_directory.to_path_buf(),
+            working_directory: working_dir.to_path_buf(),
             source: Arc::new(source),
         };
     }
     CommandError::IoError {
         command: command.to_string(),
-        working_directory: working_directory.to_path_buf(),
+        working_directory: working_dir.to_path_buf(),
         source: Arc::new(source),
     }
 }
@@ -1014,7 +985,7 @@ mod tests {
 
         let output = tokio::time::timeout(
             Duration::from_secs(20),
-            runner.execute_with_timeout(command, Duration::from_secs(20), &token()),
+            runner.execute_in_dir(command, Path::new("."), Duration::from_secs(20), &token()),
         )
         .await
         .expect("reading both pipes deadlocked")
@@ -1050,7 +1021,12 @@ mod tests {
         let started = Instant::now();
 
         let result = runner
-            .execute_with_timeout("sleep 8 & echo started", Duration::from_secs(2), &token())
+            .execute_in_dir(
+                "sleep 8 & echo started",
+                Path::new("."),
+                Duration::from_secs(2),
+                &token(),
+            )
             .await;
 
         assert!(
@@ -1107,8 +1083,9 @@ mod tests {
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
 
         let result = runner
-            .execute_with_timeout(
+            .execute_in_dir(
                 &format!("exec {MARKER}"),
+                Path::new("."),
                 Duration::from_millis(300),
                 &token(),
             )
@@ -1135,6 +1112,7 @@ mod tests {
         let result = runner
             .execute_streaming(
                 &format!("exec {MARKER}"),
+                Path::new("."),
                 Duration::from_millis(300),
                 tx,
                 &token(),
@@ -1159,14 +1137,14 @@ mod tests {
         let token = token();
 
         // Test a basic echo command
-        let result = runner.execute("echo hello", &token).await;
+        let result = runner.execute("echo hello", Path::new("."), &token).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout_str().contains("hello"));
         assert!(output.is_success());
 
         // Test command failure
-        let result = runner.execute("exit 1", &token).await;
+        let result = runner.execute("exit 1", Path::new("."), &token).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(!output.is_success());
@@ -1198,7 +1176,7 @@ mod tests {
 
         // Command that should timeout (sleep for 1s)
         let result = runner
-            .execute_with_timeout("sleep 1", Duration::from_millis(10), &token)
+            .execute_in_dir("sleep 1", Path::new("."), Duration::from_millis(10), &token)
             .await;
         assert!(matches!(result, Err(CommandError::Timeout { .. })));
     }
@@ -1214,7 +1192,7 @@ mod tests {
 
         // Create a command that will timeout
         let result = runner
-            .execute_with_timeout("sleep 1", Duration::from_millis(10), &token)
+            .execute_in_dir("sleep 1", Path::new("."), Duration::from_millis(10), &token)
             .await;
 
         assert!(result.is_err());
@@ -1235,7 +1213,7 @@ mod tests {
 
         // Try to execute a command that doesn't exist
         let result = runner
-            .execute("nonexistent_command_12345_xyz", &token)
+            .execute("nonexistent_command_12345_xyz", Path::new("."), &token)
             .await;
 
         // Command might succeed but with non-zero exit code, or fail
@@ -1256,6 +1234,7 @@ mod tests {
         let result = runner
             .execute(
                 "cat /root/.ssh/id_rsa 2>/dev/null || echo 'permission denied'",
+                Path::new("."),
                 &token,
             )
             .await;
@@ -1279,7 +1258,11 @@ mod tests {
 
         // Try to execute a command with invalid syntax
         let result = runner
-            .execute("if [ 1 -eq 1 ; then echo 'unclosed'", &token)
+            .execute(
+                "if [ 1 -eq 1 ; then echo 'unclosed'",
+                Path::new("."),
+                &token,
+            )
             .await;
 
         // This should fail due to invalid shell syntax
@@ -1341,7 +1324,11 @@ mod tests {
 
         // Generate a large amount of output to test buffering
         let result = runner
-            .execute("for i in $(seq 1 1000); do echo \"Line $i\"; done", &token)
+            .execute(
+                "for i in $(seq 1 1000); do echo \"Line $i\"; done",
+                Path::new("."),
+                &token,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1357,7 +1344,9 @@ mod tests {
         let token = token();
 
         // Test that our output methods work correctly
-        let result = runner.execute("echo 'test output'", &token).await;
+        let result = runner
+            .execute("echo 'test output'", Path::new("."), &token)
+            .await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -1375,7 +1364,7 @@ mod tests {
         let token = token();
 
         // Command that exits with non-zero status
-        let result = runner.execute("exit 42", &token).await;
+        let result = runner.execute("exit 42", Path::new("."), &token).await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -1582,6 +1571,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_streaming_runs_in_the_directory_it_was_given() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("marker.txt"), "").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+        let output = runner
+            .execute_streaming(
+                "test -f marker.txt",
+                dir.path(),
+                Duration::from_secs(5),
+                tx,
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_success());
+    }
+
+    #[tokio::test]
+    async fn a_streaming_command_in_a_missing_directory_runs_no_line() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        let markers = tempfile::tempdir().unwrap();
+        let (command, first, second) = test_common::two_marking_lines(markers.path());
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+        let error = runner
+            .execute_streaming(&command, &missing, Duration::from_secs(5), tx, &token())
+            .await
+            .unwrap_err();
+
+        assert_unusable(&error, &missing);
+        assert!(!first.exists(), "the first line ran");
+        assert!(!second.exists(), "the second line ran");
+    }
+
+    #[tokio::test]
     async fn execute_for_content_names_a_missing_directory() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
@@ -1625,27 +1656,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_timeout_still_inherits_the_current_directory() {
-        let runner =
-            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
-        let expected = std::env::current_dir().unwrap().canonicalize().unwrap();
-
-        let output = runner
-            .execute_with_timeout("pwd", Duration::from_secs(5), &token())
-            .await
-            .unwrap();
-
-        assert_eq!(output.stdout_str().trim(), expected.to_string_lossy());
-    }
-
-    #[tokio::test]
     async fn test_pre_cancelled_token_returns_cancelled_error() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
         let token = CancellationToken::new();
         token.cancel(); // Pre-cancel
 
-        let result = runner.execute("echo should_not_run", &token).await;
+        let result = runner
+            .execute("echo should_not_run", Path::new("."), &token)
+            .await;
         assert!(matches!(result, Err(CommandError::Cancelled { .. })));
     }
 
@@ -1658,7 +1677,13 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let result = runner
-            .execute_streaming("echo should_not_run", Duration::from_secs(5), tx, &token)
+            .execute_streaming(
+                "echo should_not_run",
+                Path::new("."),
+                Duration::from_secs(5),
+                tx,
+                &token,
+            )
             .await;
         assert!(matches!(result, Err(CommandError::Cancelled { .. })));
     }
@@ -1963,6 +1988,7 @@ mod tests {
             Duration::from_secs(20),
             runner.execute_streaming(
                 BOTH_PIPES_PAST_THE_BUFFER,
+                Path::new("."),
                 Duration::from_secs(20),
                 tx,
                 &token(),
@@ -2009,7 +2035,13 @@ mod tests {
         });
 
         let output = runner
-            .execute_streaming(SPLIT_CHARACTER, Duration::from_secs(20), tx, &token())
+            .execute_streaming(
+                SPLIT_CHARACTER,
+                Path::new("."),
+                Duration::from_secs(20),
+                tx,
+                &token(),
+            )
             .await
             .expect("command failed");
         let text = relayed.await.unwrap();
@@ -2038,7 +2070,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
 
         let result = runner
-            .execute_streaming("sleep 30", Duration::from_millis(200), tx, &token())
+            .execute_streaming(
+                "sleep 30",
+                Path::new("."),
+                Duration::from_millis(200),
+                tx,
+                &token(),
+            )
             .await;
 
         assert!(
@@ -2062,6 +2100,7 @@ mod tests {
         let result = runner
             .execute_streaming(
                 "sleep 8 & echo started",
+                Path::new("."),
                 Duration::from_secs(2),
                 tx,
                 &token(),

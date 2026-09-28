@@ -34,7 +34,7 @@ pub use fixtures::{
 pub use locked::LockedDir;
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use runner::FakeCommandRunner;
-pub use scripts::write_executable;
+pub use scripts::{two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;
 pub use service::{
     create_cli_service, create_service_test_service, create_test_service,

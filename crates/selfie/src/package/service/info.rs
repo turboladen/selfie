@@ -573,7 +573,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -653,7 +653,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -750,7 +750,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -843,7 +843,7 @@ mod tests {
 
         let mut mock_runner = MockCommandRunner::new();
         // Main package check succeeds, dep check fails
-        mock_runner.expect_execute().returning(|cmd, _| {
+        mock_runner.expect_execute().returning(|cmd, _, _| {
             let success = cmd != "false";
             Box::pin(async move { Ok(mock_command_output(success)) })
         });
@@ -913,7 +913,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);

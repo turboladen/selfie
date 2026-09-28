@@ -2995,6 +2995,7 @@ dependencies = [
  "futures",
  "selfie",
  "serde-saphyr",
+ "shlex",
  "tempfile",
  "tokio",
  "tokio-util",

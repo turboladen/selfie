@@ -489,19 +489,10 @@ mod tests {
         async fn execute(
             &self,
             command: &str,
+            working_dir: &Path,
             token: &CancellationToken,
         ) -> Result<CommandOutput, CommandError> {
-            self.execute_in_dir(command, Path::new("."), TIMEOUT, token)
-                .await
-        }
-
-        async fn execute_with_timeout(
-            &self,
-            command: &str,
-            timeout: Duration,
-            token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
-            self.execute_in_dir(command, Path::new("."), timeout, token)
+            self.execute_in_dir(command, working_dir, TIMEOUT, token)
                 .await
         }
 
@@ -545,6 +536,7 @@ mod tests {
         async fn execute_streaming(
             &self,
             _command: &str,
+            _working_dir: &Path,
             _timeout: Duration,
             _output_sender: tokio::sync::mpsc::Sender<crate::commands::OutputChunk>,
             _token: &CancellationToken,

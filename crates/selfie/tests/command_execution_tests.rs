@@ -3,6 +3,7 @@ use selfie::commands::{
     runner::{CommandRunner, OutputChunk},
 };
 use std::{
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -20,7 +21,10 @@ async fn test_command_execution_with_long_output() {
     // Generate a command that produces a lot of output
     let command = "for i in $(seq 1 1000); do echo \"Line $i\"; done";
 
-    let output = runner.execute(command, &token()).await.unwrap();
+    let output = runner
+        .execute(command, Path::new("."), &token())
+        .await
+        .unwrap();
 
     // Should capture all output lines
     let output_lines = output.stdout_str().lines().count();
@@ -49,7 +53,13 @@ async fn test_command_streaming_captures_all_output() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx, &token())
+        .execute_streaming(
+            command,
+            Path::new("."),
+            Duration::from_secs(10),
+            tx,
+            &token(),
+        )
         .await
         .unwrap();
 
@@ -109,7 +119,7 @@ async fn test_command_timeout() {
     // Command that runs longer than the timeout
     let command = "sleep 5";
 
-    let result = runner.execute(command, &token()).await;
+    let result = runner.execute(command, Path::new("."), &token()).await;
 
     // Should timeout
     assert!(matches!(
@@ -142,7 +152,13 @@ async fn test_command_streaming_timeout() {
     });
 
     let result = runner
-        .execute_streaming(command, Duration::from_millis(100), tx, &token())
+        .execute_streaming(
+            command,
+            Path::new("."),
+            Duration::from_millis(100),
+            tx,
+            &token(),
+        )
         .await;
 
     let _ = collect_task.await;
@@ -181,7 +197,13 @@ async fn test_command_streaming_stderr_capture() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(5), tx, &token())
+        .execute_streaming(
+            command,
+            Path::new("."),
+            Duration::from_secs(5),
+            tx,
+            &token(),
+        )
         .await
         .unwrap();
 
@@ -227,7 +249,13 @@ async fn test_command_streaming_preserves_order() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx, &token())
+        .execute_streaming(
+            command,
+            Path::new("."),
+            Duration::from_secs(10),
+            tx,
+            &token(),
+        )
         .await
         .unwrap();
 
@@ -300,7 +328,13 @@ async fn test_command_streaming_stdout_stderr_interleaving() {
     });
 
     let output = runner
-        .execute_streaming(command, Duration::from_secs(10), tx, &token())
+        .execute_streaming(
+            command,
+            Path::new("."),
+            Duration::from_secs(10),
+            tx,
+            &token(),
+        )
         .await
         .unwrap();
 

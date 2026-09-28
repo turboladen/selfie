@@ -269,7 +269,12 @@ where
 {
     let finder_command = format!("which {package_name}");
 
-    match command_runner.execute(&finder_command, token).await {
+    // `which` is selfie's own lookup, not a command the package file configured,
+    // so it runs where selfie was started rather than in the package directory.
+    match command_runner
+        .execute(&finder_command, std::path::Path::new("."), token)
+        .await
+    {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {
             let executable_path = output.stdout_str().trim().to_string();
             sender

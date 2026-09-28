@@ -201,7 +201,13 @@ where
 
     // Execute the wrapped command with streaming channel
     let result = command_runner
-        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx, token)
+        .execute_streaming(
+            &wrapped_cmd,
+            std::path::Path::new("."),
+            config.command_timeout(),
+            tx,
+            token,
+        )
         .await;
 
     // Wait for the output task to finish and handle any task errors

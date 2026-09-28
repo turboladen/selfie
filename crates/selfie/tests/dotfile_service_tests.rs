@@ -6632,15 +6632,7 @@ mod secret_bearing {
             async fn execute(
                 &self,
                 command: &str,
-                token: &CancellationToken,
-            ) -> Result<CommandOutput, CommandError> {
-                self.answer(command, token)
-            }
-
-            async fn execute_with_timeout(
-                &self,
-                command: &str,
-                _timeout: Duration,
+                _working_dir: &Path,
                 token: &CancellationToken,
             ) -> Result<CommandOutput, CommandError> {
                 self.answer(command, token)
@@ -6659,6 +6651,7 @@ mod secret_bearing {
             async fn execute_streaming(
                 &self,
                 command: &str,
+                _working_dir: &Path,
                 _timeout: Duration,
                 _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
                 token: &CancellationToken,

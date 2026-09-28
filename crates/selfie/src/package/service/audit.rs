@@ -335,7 +335,10 @@ where
         };
     };
 
-    match command_runner.execute(cmd, token).await {
+    match command_runner
+        .execute(cmd, std::path::Path::new("."), token)
+        .await
+    {
         Ok(output) => {
             if output.is_success() {
                 let stdout = output.stdout_str().to_string();
@@ -544,7 +547,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("test-pkg\n", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("test-pkg\n", true)) }));
 
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
@@ -598,7 +601,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("", true)) }));
 
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
@@ -652,7 +655,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("", false)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("", false)) }));
 
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
@@ -715,7 +718,7 @@ mod tests {
         });
 
         let mut mock_runner = MockCommandRunner::new();
-        mock_runner.expect_execute().returning(|_, _| {
+        mock_runner.expect_execute().returning(|_, _, _| {
             Box::pin(async {
                 Ok(CommandOutput {
                     output: Output {
@@ -798,7 +801,7 @@ mod tests {
         });
 
         let mut mock_runner = MockCommandRunner::new();
-        mock_runner.expect_execute().returning(|_, _| {
+        mock_runner.expect_execute().returning(|_, _, _| {
             Box::pin(async {
                 Err(CommandError::Timeout {
                     command: "Z".repeat(MAX_BOUNDED_BYTES * 3),
@@ -879,7 +882,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("Bun\n", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("Bun\n", true)) }));
 
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
@@ -956,7 +959,7 @@ mod tests {
         // Only pkg-a has an audit command; pkg-b will get NoAuditCommand
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
 
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(1);
@@ -1035,7 +1038,7 @@ mod tests {
         });
 
         let mut mock_runner = MockCommandRunner::new();
-        mock_runner.expect_execute().returning(|cmd, _| {
+        mock_runner.expect_execute().returning(|cmd, _, _| {
             let output = match cmd {
                 "clean" => mock_command_output("clean-pkg\n", true),
                 "conflict" => mock_command_output("other-manager\n", true),
@@ -1117,7 +1120,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
 
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(1);
@@ -1224,7 +1227,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
 
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(1);
@@ -1361,7 +1364,7 @@ mod tests {
         });
 
         let mut mock_runner = MockCommandRunner::new();
-        mock_runner.expect_execute().returning(|_, _| {
+        mock_runner.expect_execute().returning(|_, _, _| {
             Box::pin(async { Ok(mock_command_output("unexpected-source\n", true)) })
         });
 
@@ -1423,6 +1426,7 @@ mod tests {
             async fn execute(
                 &self,
                 _command: &str,
+                _working_dir: &std::path::Path,
                 _token: &CancellationToken,
             ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
             {
@@ -1441,30 +1445,21 @@ mod tests {
                 })
             }
 
-            async fn execute_with_timeout(
-                &self,
-                command: &str,
-                _timeout: std::time::Duration,
-                token: &CancellationToken,
-            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
-            {
-                self.execute(command, token).await
-            }
-
             async fn execute_in_dir(
                 &self,
                 command: &str,
-                _working_dir: &std::path::Path,
+                working_dir: &std::path::Path,
                 _timeout: std::time::Duration,
                 token: &CancellationToken,
             ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
             {
-                self.execute(command, token).await
+                self.execute(command, working_dir, token).await
             }
 
             async fn execute_streaming(
                 &self,
                 _command: &str,
+                _working_dir: &std::path::Path,
                 _timeout: std::time::Duration,
                 _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
                 _token: &CancellationToken,

@@ -286,6 +286,7 @@ mod tests {
         async fn execute(
             &self,
             _command: &str,
+            _working_dir: &std::path::Path,
             _token: &CancellationToken,
         ) -> Result<CommandOutput, CommandError> {
             let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
@@ -305,28 +306,20 @@ mod tests {
             })
         }
 
-        async fn execute_with_timeout(
-            &self,
-            command: &str,
-            _timeout: std::time::Duration,
-            token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
-            self.execute(command, token).await
-        }
-
         async fn execute_in_dir(
             &self,
             command: &str,
-            _working_dir: &std::path::Path,
+            working_dir: &std::path::Path,
             _timeout: std::time::Duration,
             token: &CancellationToken,
         ) -> Result<CommandOutput, CommandError> {
-            self.execute(command, token).await
+            self.execute(command, working_dir, token).await
         }
 
         async fn execute_streaming(
             &self,
             _command: &str,
+            _working_dir: &std::path::Path,
             _timeout: std::time::Duration,
             _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
             _token: &CancellationToken,

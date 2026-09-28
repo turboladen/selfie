@@ -258,7 +258,10 @@ where
     CR: CommandRunner,
 {
     if let Some(cmd) = check_command {
-        match command_runner.execute(cmd, token).await {
+        match command_runner
+            .execute(cmd, std::path::Path::new("."), token)
+            .await
+        {
             Ok(output) => {
                 // Any exit status is an answer, whatever produced it: the user's
                 // shell reports a check killed by a signal as an ordinary non-zero
