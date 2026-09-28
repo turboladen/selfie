@@ -103,7 +103,10 @@ the test can report.
 
 A `SURVIVED` still needs a human judgment: check in `mutation.diff` that the mutated line is
 reachable and that its value is observed, because a substitution the compiler can discard changes
-nothing and survives.
+nothing and survives. The dep-info check does not settle reachability either: it records source
+files, not `#[cfg]` items. A mutation inside a library's `#[cfg(test)]` code, scored against an
+integration-test target, passes the check because the file is compiled, but the mutated code is not
+in that binary, so it survives.
 
 `--self-test` mutates `crates/xtask/src/control.rs` at HEAD with eight controls: a value flip that
 must be caught, a comment edit that must survive, and six that must never run. Those six cover an
