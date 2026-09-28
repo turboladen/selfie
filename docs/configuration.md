@@ -577,7 +577,8 @@ before the command runs. This is a **warning, not an error** — the rest of the
 and the command still runs. A key that was renamed says what replaced it; anything else is reported
 as unrecognized.
 
-`selfie config validate` lists the same keys and does not call such a file valid.
+`selfie config validate` lists the same keys and does not call such a file valid: it says the
+configuration is usable, with warnings, and exits `3`.
 
 **Solution:** rename or remove the key. Supported top-level keys are `environment`,
 `package_directory`, `dotfiles_directory`, `state_directory`, `command_timeout`, `stop_on_error` and

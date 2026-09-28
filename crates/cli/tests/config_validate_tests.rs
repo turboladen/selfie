@@ -116,7 +116,9 @@ fn test_validate_config_with_nonexistent_directory_shows_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
+    // An error is a failure, which exits 1.
     cmd.assert()
+        .code(1)
         .stderr(predicates::str::contains("Validation failed."))
         .stderr(predicates::str::contains("does not exist"));
 }

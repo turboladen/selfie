@@ -778,7 +778,11 @@ pub enum OperationSuccess {
     SpecsValidated {
         validated_count: usize,
         error_count: usize,
+        /// Specs validated with warnings.
         warning_count: usize,
+        /// Warnings about the run that belong to no validated spec, such as a
+        /// spec file that could not be used or a missing dotfiles directory.
+        other_warning_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1303,10 +1307,11 @@ impl std::fmt::Display for OperationSuccess {
                 validated_count,
                 error_count,
                 warning_count,
+                other_warning_count,
                 steps_completed,
                 ..
             } => {
-                let status = if *error_count > 0 {
+                let mut status = if *error_count > 0 {
                     format!(
                         "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings"
                     )
@@ -1315,6 +1320,9 @@ impl std::fmt::Display for OperationSuccess {
                 } else {
                     format!("{validated_count} package(s) validated successfully")
                 };
+                if *other_warning_count > 0 {
+                    status.push_str(&format!(", {other_warning_count} other warning(s)"));
+                }
                 write!(f, "Spec validation completed: {status} {steps_completed}")
             }
             OperationSuccess::DotfilesApplied {
@@ -1582,6 +1590,7 @@ impl OperationSuccess {
         validated_count: usize,
         error_count: usize,
         warning_count: usize,
+        other_warning_count: usize,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
@@ -1589,6 +1598,7 @@ impl OperationSuccess {
             validated_count,
             error_count,
             warning_count,
+            other_warning_count,
             environment,
             steps_completed,
         }
@@ -1925,8 +1935,24 @@ impl OperationSuccess {
                 CheckVerdict::Installed => Outcome::Clean,
                 CheckVerdict::NotInstalled { .. } => Outcome::Found,
             },
+            OperationSuccess::PackageValidated { status, .. } => status.outcome(),
+            // `error_count` is never above zero here today: a run with an error
+            // completes as a failure instead.
+            OperationSuccess::SpecsValidated {
+                error_count,
+                warning_count,
+                other_warning_count,
+                ..
+            } => {
+                if *error_count > 0 {
+                    Outcome::Failed
+                } else if *warning_count > 0 || *other_warning_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
             OperationSuccess::PackageInstalled { .. }
-            | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
             | OperationSuccess::PackageListGenerated { .. }
@@ -1934,7 +1960,6 @@ impl OperationSuccess {
             | OperationSuccess::PackageUpdated { .. }
             | OperationSuccess::PackageRemoved { .. }
             | OperationSuccess::SpecListGenerated { .. }
-            | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfileTracked { .. }
             | OperationSuccess::SyncPushComplete { .. }
             | OperationSuccess::SyncPullComplete { .. }
@@ -2809,6 +2834,18 @@ pub enum ValidationStatus {
     HasErrors,
 }
 
+impl ValidationStatus {
+    /// How a validation with this status scores; see [`Outcome`].
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            ValidationStatus::Valid => Outcome::Clean,
+            ValidationStatus::HasWarnings => Outcome::Found,
+            ValidationStatus::HasErrors => Outcome::Failed,
+        }
+    }
+}
+
 /// Individual validation issue
 #[derive(Debug, Clone)]
 pub struct ValidationIssueData {
@@ -3054,6 +3091,27 @@ mod tests {
         }
     }
 
+    fn validated(status: ValidationStatus) -> OperationSuccess {
+        OperationSuccess::PackageValidated {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            status,
+            warning_count: None,
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn specs_validated(errors: usize, warnings: usize) -> OperationSuccess {
+        OperationSuccess::SpecsValidated {
+            validated_count: 3,
+            error_count: errors,
+            warning_count: warnings,
+            other_warning_count: 0,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
     fn audited_all(
         conflicts: usize,
         not_installed: usize,
@@ -3123,6 +3181,44 @@ mod tests {
             (
                 "audit no command",
                 audited(AuditResult::NoAuditCommand),
+                Outcome::Failed,
+            ),
+            (
+                "validated",
+                validated(ValidationStatus::Valid),
+                Outcome::Clean,
+            ),
+            (
+                "validated with warnings",
+                validated(ValidationStatus::HasWarnings),
+                Outcome::Found,
+            ),
+            (
+                "validated with errors",
+                validated(ValidationStatus::HasErrors),
+                Outcome::Failed,
+            ),
+            ("all validated", specs_validated(0, 0), Outcome::Clean),
+            (
+                "all validated with warnings about the run",
+                OperationSuccess::specs_validated(
+                    3,
+                    0,
+                    0,
+                    1,
+                    "test".to_string(),
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Found,
+            ),
+            (
+                "all validated with warnings",
+                specs_validated(0, 2),
+                Outcome::Found,
+            ),
+            (
+                "all validated with errors",
+                specs_validated(1, 2),
                 Outcome::Failed,
             ),
             ("audit all clean", audited_all(0, 0, 0, 0), Outcome::Clean),

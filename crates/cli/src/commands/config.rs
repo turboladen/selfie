@@ -4,7 +4,11 @@ use selfie::{
 };
 use tracing::info;
 
-use crate::{display_manager::DisplayManager, tables::ValidationTableReporter};
+use selfie::package::event::Outcome;
+
+use crate::{
+    display_manager::DisplayManager, event_processor::Exit, tables::ValidationTableReporter,
+};
 
 /// Report what the configuration file on disk says, and whether it is valid.
 ///
@@ -19,7 +23,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         Ok(c) => c,
         Err(e) => {
             display.print_error(format!("Failed to load configuration: {e}"));
-            return 1;
+            return Exit::Failed.code();
         }
     };
 
@@ -39,7 +43,13 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         display.print_info(note.message());
     }
 
-    if result.issues().has_errors() {
+    // A `cli:` notice is an ignored key like any other, so it counts as a warning.
+    let outcome = match result.issues().outcome() {
+        Outcome::Clean if !cli_notices.is_empty() => Outcome::Found,
+        outcome => outcome,
+    };
+
+    if outcome == Outcome::Failed {
         display.print_error("Validation failed.");
 
         let mut table_reporter = ValidationTableReporter::new(display.use_colors());
@@ -49,7 +59,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             .add_validation_warnings(&result.issues().warnings())
             .print();
         crate::config::report_config_notices(&cli_notices, display);
-        1
+        Exit::Failed.code()
     } else {
         if result.issues().has_warnings() {
             let mut table_reporter = ValidationTableReporter::new(display.use_colors());
@@ -60,9 +70,10 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         }
         crate::config::report_config_notices(&cli_notices, display);
 
-        // Only when nothing at all was reported, `cli:` notices included.
-        if !result.issues().has_warnings() && cli_notices.is_empty() {
+        if outcome == Outcome::Clean {
             display.print_success("Configuration is valid.");
+        } else {
+            display.print_warning("Configuration is usable, with warnings.");
         }
 
         // Each value as a run would take it from the file: `~` expanded and
@@ -119,7 +130,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         report_with_style(display, "verbose:", cli_load.section.verbose);
         report_with_style(display, "use_colors:", cli_load.section.use_colors);
 
-        0
+        Exit::from(outcome).code()
     }
 }
 

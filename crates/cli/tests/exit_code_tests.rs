@@ -5,7 +5,10 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_test_config_with_state_directory as sandbox};
+use common::{
+    SELFIE_ENV, sandboxed_command, setup_default_test_config,
+    setup_test_config_with_state_directory as sandbox,
+};
 
 const CLEAN: i32 = 0;
 const FAILED: i32 = 1;
@@ -334,4 +337,150 @@ fn check_exits_one_for_a_package_not_declared_here() {
 
     let (code, output) = run(&temp, &["package", "check", "elsewhere"]);
     assert_eq!(code, Some(FAILED), "{output}");
+}
+
+// ── spec validate ───────────────────────────────────────────────────────────
+
+#[test]
+fn spec_validate_exits_clean_for_a_valid_spec() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+}
+
+// Backticks draw a warning: the spec is usable, and the warning is the finding.
+#[test]
+fn spec_validate_exits_three_on_a_warning() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo `true`\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+
+    let (code, output) = run(&temp, &["spec", "validate", "--all"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+}
+
+// An unparsable dotfiles/ spec that a packages/ spec of the same name shadows is
+// reported as a warning, and a run that reports one is not clean.
+#[test]
+fn spec_validate_all_exits_three_over_a_shadowed_unparsable_spec() {
+    let temp = sandbox();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("dotfiles_directory: {}\n", dotfiles.display()));
+    std::fs::write(config, text).unwrap();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+    std::fs::write(dotfiles.join("tool.yaml"), "name: tool\nenvironments: [\n").unwrap();
+
+    let (code, output) = run(&temp, &["spec", "validate", "--all"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+    // The one validated spec is clean, and the summary does not count it as a
+    // spec with warnings.
+    assert!(
+        output.contains("1 package(s) validated successfully"),
+        "{output}"
+    );
+    assert!(output.contains("other warning(s)"), "{output}");
+}
+
+// A command-sourced dotfile draws a notice that apply will run commands. Every
+// such spec carries one, so it must not count as a warning.
+#[test]
+fn spec_validate_exits_clean_over_a_notice_alone() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!(
+            "name: tool\ndotfiles:\n  - command: \"echo value\"\n    target: \"~/.toolrc\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    );
+
+    let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    assert!(
+        output.contains("'selfie apply' executes 1 command(s)"),
+        "the notice must still be shown: {output}"
+    );
+}
+
+// An invalid homepage is an error found by validation itself, on a spec that
+// parses.
+#[test]
+fn spec_validate_exits_one_on_an_error() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!(
+            "name: tool\nhomepage: \"not a url\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    );
+
+    let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(output.contains("Invalid URL"), "{output}");
+}
+
+// A spec missing its install command does not parse, which is a failure before
+// validation runs.
+#[test]
+fn spec_validate_exits_one_on_a_spec_that_does_not_parse() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    check: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+}
+
+// ── config validate ─────────────────────────────────────────────────────────
+
+// The default config names no state directory, so no "not there yet" warning
+// can make the clean case a finding.
+#[test]
+fn config_validate_exits_clean_for_a_clean_file() {
+    let temp = setup_default_test_config();
+
+    let (code, output) = run(&temp, &["config", "validate"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    assert!(output.contains("Configuration is valid."), "{output}");
+}
+
+// An unknown top-level key is a warning: the file is usable, and says so.
+#[test]
+fn config_validate_exits_three_on_a_warning() {
+    let temp = setup_default_test_config();
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("configs_directory: /tmp\n");
+    std::fs::write(config, text).unwrap();
+
+    let (code, output) = run(&temp, &["config", "validate"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+    assert!(
+        output.contains("Configuration is usable, with warnings."),
+        "{output}"
+    );
+    assert!(!output.contains("Configuration is valid."), "{output}");
 }

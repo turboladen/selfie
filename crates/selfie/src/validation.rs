@@ -43,6 +43,22 @@ impl ValidationIssues {
         self.has_errors() || self.has_warnings()
     }
 
+    /// How a validation scores: [`Failed`](crate::package::event::Outcome::Failed)
+    /// on an error, [`Found`](crate::package::event::Outcome::Found) on a
+    /// warning, and clean otherwise. Informational notices do not count.
+    #[must_use]
+    pub fn outcome(&self) -> crate::package::event::Outcome {
+        use crate::package::event::Outcome;
+
+        if self.has_errors() {
+            Outcome::Failed
+        } else if self.has_warnings() {
+            Outcome::Found
+        } else {
+            Outcome::Clean
+        }
+    }
+
     /// Returns true if the validation has errors
     ///
     /// Errors indicate validation failures that should prevent further processing.
@@ -292,4 +308,54 @@ pub enum ValidationErrorCategory {
     /// say) mislabels it in every table and JSON payload that shows the
     /// category.
     Advisory,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::event::Outcome;
+
+    fn issue(level: ValidationLevel) -> ValidationIssue {
+        ValidationIssue {
+            category: ValidationErrorCategory::Advisory,
+            field: "f".to_string(),
+            message: "m".to_string(),
+            level,
+            suggestion: None,
+            location: None,
+        }
+    }
+
+    // A notice alone must stay clean: every package with a command-sourced
+    // dotfile carries one, and scoring it would fail every such package.
+    #[test]
+    fn a_validation_scores_by_its_worst_issue_and_ignores_notices() {
+        let cases = [
+            ("nothing", vec![], Outcome::Clean),
+            (
+                "notice only",
+                vec![issue(ValidationLevel::Info)],
+                Outcome::Clean,
+            ),
+            (
+                "warning",
+                vec![
+                    issue(ValidationLevel::Info),
+                    issue(ValidationLevel::Warning),
+                ],
+                Outcome::Found,
+            ),
+            (
+                "error",
+                vec![
+                    issue(ValidationLevel::Warning),
+                    issue(ValidationLevel::Error),
+                ],
+                Outcome::Failed,
+            ),
+        ];
+        for (name, issues, expected) in cases {
+            assert_eq!(ValidationIssues::from(issues).outcome(), expected, "{name}");
+        }
+    }
 }

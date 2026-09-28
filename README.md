@@ -226,6 +226,8 @@ something to act on" from "the check itself did not work":
 - `selfie package audit`, when a package is installed from a source it does not expect, or is not
   installed at all. With `--all`, when any package is; an audit that could not run, or a spec
   `--all` had to leave out, makes it exit `1` instead.
+- `selfie spec validate` and `selfie config validate`, when there are warnings but no errors. An
+  informational notice, such as the one saying `apply` runs a spec's commands, is not a warning.
 - `selfie package check`, when the package is not installed: its check command ran and exited
   non-zero, 127 included, since `tool --version` exits 127 when `tool` is missing. A check that
   cannot run, times out, is killed, or is not defined exits `1`.
