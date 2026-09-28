@@ -554,6 +554,23 @@ impl EventSender {
         .await;
     }
 
+    /// Send a dotfile-orphaned event
+    pub(crate) async fn send_dotfile_orphaned(
+        &self,
+        source: impl fmt::Display,
+        target: impl fmt::Display,
+        package: Option<&str>,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::DotfileOrphaned {
+            operation_info,
+            source: source.to_string(),
+            target: target.to_string(),
+            package: package.map(str::to_string),
+        })
+        .await;
+    }
+
     /// Send a dotfile-drift-detected event
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
@@ -776,6 +793,9 @@ pub enum OperationSuccess {
         /// *declined* by selfie rather than failing, and `perform_deploy` is
         /// explicit that a refusal is not a failure.
         refused_count: usize,
+        /// Recorded targets no entry deploys to any more whose files are still
+        /// there. Reported, never removed, and not a refusal.
+        orphan_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -804,6 +824,9 @@ pub enum OperationSuccess {
         // Counting one as a refusal would fail every drift check on a machine that
         // has one (ADR-0003).
         unverified_count: usize,
+        /// Recorded targets no entry deploys to any more whose files are still
+        /// there. Not drift and not a refusal.
+        orphan_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1103,6 +1126,16 @@ pub fn listing_counts(valid: usize, invalid: usize, refused: usize, noun: &str) 
     }
 }
 
+// Said only when there is one, so a summary with no orphans carries no orphan
+// clause.
+fn orphaned_clause(orphan_count: usize) -> String {
+    if orphan_count == 0 {
+        String::new()
+    } else {
+        format!(", {orphan_count} orphaned")
+    }
+}
+
 impl std::fmt::Display for OperationSuccess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1262,12 +1295,14 @@ impl std::fmt::Display for OperationSuccess {
                 skipped_count,
                 conflict_count,
                 refused_count,
+                orphan_count,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
-                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused {steps_completed}"
+                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused{} {steps_completed}",
+                    orphaned_clause(*orphan_count)
                 )
             }
             OperationSuccess::DotfileDriftChecked {
@@ -1275,13 +1310,15 @@ impl std::fmt::Display for OperationSuccess {
                 total_count,
                 refused_count,
                 unverified_count,
+                orphan_count,
                 steps_completed,
                 ..
             } => {
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused, {unverified_count} not verifiable {steps_completed}"
+                     {refused_count} refused, {unverified_count} not verifiable{} {steps_completed}",
+                    orphaned_clause(*orphan_count)
                 )
             }
             OperationSuccess::DotfileTracked {
@@ -1751,6 +1788,36 @@ impl OperationSuccess {
             // `None`.
             OperationSuccess::DotfilesApplied { .. }
             | OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => None,
+        }
+    }
+
+    /// How many orphaned targets whose files are still there the operation
+    /// reported, for the two that look for them. `None` for every other
+    /// operation.
+    #[must_use]
+    pub fn orphan_count(&self) -> Option<usize> {
+        match self {
+            OperationSuccess::DotfilesApplied { orphan_count, .. }
+            | OperationSuccess::DotfileDriftChecked { orphan_count, .. } => Some(*orphan_count),
+            // Every variant listed, as in `refused_count`.
+            OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
@@ -2284,6 +2351,18 @@ pub enum PackageEvent {
         source: String,
         target: String,
         diff: String,
+    },
+
+    /// A target selfie deployed that no entry deploys to any more, whose file is
+    /// still there. selfie leaves the file alone.
+    DotfileOrphaned {
+        operation_info: OperationInfo,
+        /// The source the target was last deployed from, as its spec spelled it.
+        source: String,
+        target: String,
+        /// The spec name of the package that last deployed it, or `None` where
+        /// the record does not say.
+        package: Option<String>,
     },
 
     /// Drift detected between deployed file and repo source

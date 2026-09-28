@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::package::{Package, port::PackageRepository};
 
+use super::orphan::Shortfall;
 use super::warning::{ApplyWarning, CollectionRefusal, NameCollision};
 
 /// What collecting the packages an operation covers found.
@@ -21,6 +22,29 @@ pub(crate) struct Collected {
     /// none of the files is used, so a run asking for one by name still fails as
     /// ambiguous, as install does. Each with its files, sorted.
     pub(crate) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
+    /// Names of dotfiles/ specs left unused because packages/ claims the same
+    /// name.
+    pub(crate) set_aside: Vec<String>,
+}
+
+impl Collected {
+    /// What collection knows to be missing from `packages`, or `None` if it
+    /// holds every spec there is.
+    pub(crate) fn shortfall(&self) -> Option<Shortfall> {
+        if let Some(refusal) = self.refusals.first() {
+            Some(Shortfall::Refused(refusal.clone()))
+        } else if let Some(name) = self.set_aside.first() {
+            Some(Shortfall::SetAside(name.clone()))
+        } else if self
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, ApplyWarning::AbsentDotfilesDirectory { .. }))
+        {
+            Some(Shortfall::AbsentDotfilesDirectory)
+        } else {
+            None
+        }
+    }
 }
 
 /// Collect packages from both the main package repository and the dotfiles
@@ -132,6 +156,7 @@ pub(super) fn collect_packages<R: PackageRepository>(
             warnings,
             refusals,
             unrefused_ambiguities: Vec::new(),
+            set_aside: Vec::new(),
         });
     }
 
@@ -174,8 +199,12 @@ pub(super) fn collect_packages<R: PackageRepository>(
     // copy in its place would apply a file the user did not mean. The reason names
     // the first thing to fix in packages/: an ambiguity before a failed parse.
     let dotfiles_claims = claims(&dotfiles_packages, &unparsable_in_dotfiles);
+    let mut set_aside = Vec::new();
     for (name, paths) in &dotfiles_claims {
         if let Some(in_packages) = packages_claims.get(name) {
+            // The packages/ spec may deploy nothing this one does, so nothing
+            // collected stands in for this file's entries.
+            set_aside.push(name.clone());
             let why = if in_packages.len() > 1 {
                 format!(
                     "Not using '{name}' from dotfiles/: packages/ has more than one spec by that \
@@ -230,6 +259,7 @@ pub(super) fn collect_packages<R: PackageRepository>(
         warnings,
         refusals,
         unrefused_ambiguities,
+        set_aside,
     })
 }
 

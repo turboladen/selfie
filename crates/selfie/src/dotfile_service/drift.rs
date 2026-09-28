@@ -15,28 +15,28 @@ use crate::{
         state::{DeployState, DriftType},
     },
     fs::filesystem::FileSystem,
-    package::{
-        Package,
-        event::{EventSender, OperationResult, OperationSuccess, StepCount},
-    },
+    package::event::{EventSender, OperationResult, OperationSuccess, StepCount},
 };
 
 use super::classify::{
     Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry, read_repo_file,
 };
+use super::orphan::{self, Catalog};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
 /// Core logic for checking drift, or `None` if the run was cancelled part way.
 ///
-/// `None` says the loops were left early and the counts are partial. Only the
-/// caller can report that, and it must not infer it from the token: a run whose
-/// last entry completed is a whole answer even if the token was cancelled after it,
-/// and a collection failure is not a cancellation whatever the token says.
+/// `None` says the run was left early and the counts are partial. Only the
+/// caller can report that, and it must not infer it from the token: a run that
+/// finished its orphan check is a whole answer even if the token was cancelled
+/// after it, and a collection failure is not a cancellation whatever the token
+/// says.
 ///
-/// `collection_refusals` counts what collecting `packages` refused, such as a
-/// dotfiles directory it could not list or a name several spec files claim.
+/// `collection_refusals` counts what collecting the catalog's packages refused,
+/// such as a dotfiles directory it could not list or a name several spec files
+/// claim.
 pub(super) async fn handle_check_drift<F>(
-    packages: &[Package],
+    catalog: Catalog<'_>,
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
@@ -70,17 +70,17 @@ where
         ..DriftTally::default()
     };
 
-    // Three guards, one per case, because a `for` body's first statement never runs
-    // over an empty set: this one covers no packages at all, and a cancel arriving
-    // before or during the state load above. Without it such a run reported
-    // `DotfileDriftChecked` with zero counts and exit 0 — a clean bill of health for
-    // a check that examined nothing (found by Copilot on PR #185).
+    // A guard at each place a cancel can land, because a `for` body's first
+    // statement never runs over an empty set. This one stops a cancel that arrived
+    // before or during the state load above before any package is read, so such a
+    // run never reports zero counts and exit 0 for a check that examined nothing.
     if token.is_cancelled() {
         return None;
     }
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
+    let packages = catalog.packages;
 
     for package in packages {
         // Between packages, for a run whose entries are few or absent.
@@ -173,7 +173,7 @@ where
 
             tally.compared += 1;
             let drift = deploy_state.detect_drift(
-                &repo.target.display().to_string(),
+                &repo.target.state_key(),
                 &source_checksum,
                 &target_checksum,
             );
@@ -184,6 +184,29 @@ where
                 tally.drifted += 1;
             }
         }
+    }
+
+    // The orphan check is part of the answer, so a cancel that arrives before it
+    // leaves the answer partial.
+    if token.is_cancelled() {
+        return None;
+    }
+    // Drift reports and writes nothing, so a gone orphan's record is left for an
+    // apply to drop.
+    tally.orphaned = orphan::check(
+        filesystem,
+        catalog,
+        config.environment(),
+        &deploy_state,
+        None,
+        sender,
+    )
+    .await
+    .reported;
+    // The token is asked again after the orphans are reported: a cancel that
+    // arrived while they were being checked leaves the answer partial.
+    if token.is_cancelled() {
+        return None;
     }
 
     Some(OperationResult::Success(
@@ -201,6 +224,8 @@ struct DriftTally {
     compared: usize,
     refused: usize,
     unverified: usize,
+    /// Orphaned targets whose files are still there. Neither drift nor a refusal.
+    orphaned: usize,
 }
 
 impl DriftTally {
@@ -210,6 +235,7 @@ impl DriftTally {
             total_count: self.compared,
             refused_count: self.refused,
             unverified_count: self.unverified,
+            orphan_count: self.orphaned,
             environment: environment.to_string(),
             steps_completed: StepCount::new(self.compared, self.compared),
         }

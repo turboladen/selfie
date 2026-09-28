@@ -31,11 +31,17 @@ pub struct DeployState {
 // One checksum, because the repository file is written to the target as it is:
 // the two are equal at the moment of deployment, and secret-bearing entries
 // record nothing.
+//
+// `package` is optional because records written before it existed lack it, and
+// a required field would make every such state file fail to parse, which
+// refuses every apply. An apply fills it in for a target its package produces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployEntry {
     source: String,
     checksum: String,
     deployed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,17 +80,45 @@ impl DeployState {
         self.deployed.get(target)
     }
 
-    /// Record that `source` was deployed to `target` with `checksum`, replacing
-    /// any earlier record for the same target.
-    pub fn record_deployment(&mut self, target: &str, source: &str, checksum: &str) {
+    /// Record that `source` was deployed to `target` with `checksum` by the
+    /// package named `package`, replacing any earlier record for the same target.
+    ///
+    /// `package` is the package's spec name, case folded, or `None` for a
+    /// package with no spec file behind it.
+    pub fn record_deployment(
+        &mut self,
+        target: &str,
+        source: &str,
+        checksum: &str,
+        package: Option<&str>,
+    ) {
         self.deployed.insert(
             target.to_string(),
             DeployEntry {
                 source: source.to_string(),
                 checksum: checksum.to_string(),
                 deployed_at: chrono::Utc::now().to_rfc3339(),
+                package: package.map(str::to_string),
             },
         );
+    }
+
+    /// Name `package` as the one that deployed `target`, replacing whatever the
+    /// record named. Returns whether the record changed; a target with no
+    /// record gains none.
+    pub fn attribute(&mut self, target: &str, package: &str) -> bool {
+        match self.deployed.get_mut(target) {
+            Some(entry) if entry.package.as_deref() != Some(package) => {
+                entry.package = Some(package.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop the record for `target`. Returns whether there was one.
+    pub fn remove(&mut self, target: &str) -> bool {
+        self.deployed.remove(target).is_some()
     }
 
     pub fn detect_drift(
@@ -117,6 +151,12 @@ impl DeployEntry {
     /// The checksum of the content written.
     pub fn checksum(&self) -> &str {
         &self.checksum
+    }
+
+    /// The spec name of the package that deployed the target, or `None` if the
+    /// record does not say.
+    pub fn package(&self) -> Option<&str> {
+        self.package.as_deref()
     }
 }
 
@@ -215,6 +255,7 @@ mod tests {
             "/home/user/.config/fish/conf.d/fnm.fish",
             "fnm/fish-conf.fish",
             "abc123",
+            None,
         );
         let entry = state
             .get("/home/user/.config/fish/conf.d/fnm.fish")
@@ -232,8 +273,8 @@ mod tests {
     #[test]
     fn one_source_deployed_to_two_targets_is_two_records() {
         let mut state = DeployState::empty();
-        state.record_deployment("/home/user/.zshrc", "shell/rc", "h1");
-        state.record_deployment("/home/user/.bashrc", "shell/rc", "h2");
+        state.record_deployment("/home/user/.zshrc", "shell/rc", "h1", None);
+        state.record_deployment("/home/user/.bashrc", "shell/rc", "h2", None);
         assert_eq!(state.entries().len(), 2);
         assert_eq!(state.get("/home/user/.zshrc").unwrap().checksum(), "h1");
         assert_eq!(state.get("/home/user/.bashrc").unwrap().checksum(), "h2");
@@ -242,7 +283,7 @@ mod tests {
     #[test]
     fn the_written_shape_round_trips_keyed_by_target() {
         let mut state = DeployState::empty();
-        state.record_deployment("/home/user/b.txt", "a/b.txt", "hash1");
+        state.record_deployment("/home/user/b.txt", "a/b.txt", "hash1", None);
         let yaml = serde_saphyr::to_string(&state).unwrap();
         assert!(
             yaml.contains("/home/user/b.txt:") && yaml.contains("source: a/b.txt"),
@@ -253,10 +294,56 @@ mod tests {
         assert_eq!(loaded.get("/home/user/b.txt").unwrap().checksum(), "hash1");
     }
 
+    // A record written before `package` existed must still parse: a required
+    // field would make the whole file unparsable, and apply refuses such a file.
+    #[test]
+    fn a_record_without_a_package_parses_and_names_none() {
+        let yaml = "deployed:\n  /home/u/.npmrc:\n    source: npm/npmrc\n    checksum: abc\n    deployed_at: '2026-01-01T00:00:00Z'\n";
+        let state: DeployState = crate::yaml::parse(yaml).expect("a legacy record parses");
+        assert_eq!(state.get("/home/u/.npmrc").unwrap().package(), None);
+    }
+
+    #[test]
+    fn the_recorded_package_round_trips_and_an_absent_one_is_not_written() {
+        let mut state = DeployState::empty();
+        state.record_deployment("/t/a", "a/a", "h1", Some("alpha"));
+        state.record_deployment("/t/b", "b/b", "h2", None);
+        let yaml = serde_saphyr::to_string(&state).unwrap();
+        assert_eq!(yaml.matches("package:").count(), 1, "{yaml}");
+        let loaded: DeployState = crate::yaml::parse(&yaml).unwrap();
+        assert_eq!(loaded.get("/t/a").unwrap().package(), Some("alpha"));
+        assert_eq!(loaded.get("/t/b").unwrap().package(), None);
+    }
+
+    #[test]
+    fn attributing_names_the_package_and_reports_only_a_change() {
+        let mut state = DeployState::empty();
+        state.record_deployment("/t/legacy", "x", "h", None);
+        state.record_deployment("/t/owned", "y", "h", Some("first"));
+        assert!(state.attribute("/t/legacy", "second"));
+        assert!(state.attribute("/t/owned", "second"));
+        assert!(!state.attribute("/t/owned", "second"));
+        assert!(!state.attribute("/t/absent", "second"));
+        assert_eq!(state.get("/t/legacy").unwrap().package(), Some("second"));
+        assert_eq!(state.get("/t/owned").unwrap().package(), Some("second"));
+        assert!(state.get("/t/absent").is_none());
+    }
+
+    #[test]
+    fn removing_drops_only_the_named_record() {
+        let mut state = DeployState::empty();
+        state.record_deployment("/t/a", "a", "h", None);
+        state.record_deployment("/t/b", "b", "h", None);
+        assert!(state.remove("/t/a"));
+        assert!(!state.remove("/t/a"));
+        assert!(state.get("/t/a").is_none());
+        assert!(state.get("/t/b").is_some());
+    }
+
     #[test]
     fn test_detect_drift_no_change() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1");
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash1", "hash1"),
             DriftType::None
@@ -266,7 +353,7 @@ mod tests {
     #[test]
     fn test_detect_drift_repo_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1");
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash1"),
             DriftType::RepoChanged
@@ -276,7 +363,7 @@ mod tests {
     #[test]
     fn test_detect_drift_target_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1");
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash1", "hash_different"),
             DriftType::TargetChanged
@@ -286,7 +373,7 @@ mod tests {
     #[test]
     fn test_detect_drift_both_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1");
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash3"),
             DriftType::BothChanged

@@ -26,6 +26,7 @@ use crate::{
 use super::apply::{ApplyContext, Scope, handle_apply};
 use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
+use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
 use super::warning::{ApplyWarning, NameCollision, no_such_package};
@@ -176,22 +177,30 @@ where
             sender.send_started().await;
 
             let result = match prepared {
-                Ok(Collected {
-                    packages,
-                    warnings,
-                    refusals,
-                    unrefused_ambiguities,
-                }) => {
-                    let selected: Vec<Package> = match filter.as_deref() {
-                        Some(name) => {
+                Ok(collected) => {
+                    let shortfall = collected.shortfall();
+                    let Collected {
+                        packages,
+                        warnings,
+                        refusals,
+                        unrefused_ambiguities,
+                        ..
+                    } = collected;
+                    // Kept whole beside the selection: whether a record is
+                    // orphaned is asked of every package, since another may
+                    // deploy to the same target.
+                    let named: Vec<Package> = filter
+                        .as_deref()
+                        .map(|name| {
                             let folded_name = name.to_lowercase();
                             packages
-                                .into_iter()
+                                .iter()
                                 .filter(|package| is_named(package, &folded_name))
+                                .cloned()
                                 .collect()
-                        }
-                        None => packages,
-                    };
+                        })
+                        .unwrap_or_default();
+                    let selected: &[Package] = if filter.is_some() { &named } else { &packages };
                     // A name matching nothing has nothing to deploy. Completing
                     // as a success with every count at zero would read as
                     // "already up to date" to a user who mistyped the name.
@@ -235,12 +244,15 @@ where
                     // and counts what collection refused as refusals. A named
                     // apply that finds its package lost nothing to those, so it
                     // counts none.
-                    let scope = if filter.is_none() {
-                        Scope::All(refusals)
-                    } else {
-                        Scope::Named
+                    let scope = match filter.as_deref() {
+                        None => Scope::All(refusals),
+                        Some(name) => Scope::Named(name.to_lowercase()),
                     };
-                    handle_apply(&selected, &ctx, scope).await
+                    let catalog = Catalog {
+                        packages: &packages,
+                        shortfall,
+                    };
+                    handle_apply(selected, &ctx, scope, catalog).await
                 }
                 Err(failure) => OperationResult::Failure(failure),
             };
@@ -290,12 +302,14 @@ where
             sender.send_started().await;
 
             let outcome = match collected {
-                Ok(Collected {
-                    packages,
-                    warnings,
-                    refusals,
-                    ..
-                }) => {
+                Ok(collected) => {
+                    let shortfall = collected.shortfall();
+                    let Collected {
+                        packages,
+                        warnings,
+                        refusals,
+                        ..
+                    } = collected;
                     // Carries on with what it could collect, and
                     // `handle_check_drift` counts what collection refused.
                     for warning in warnings {
@@ -304,8 +318,11 @@ where
                     for refusal in &refusals {
                         refusal.send(&sender).await;
                     }
-                    handle_check_drift(&packages, &fs, &config, &sender, &token, refusals.len())
-                        .await
+                    let catalog = Catalog {
+                        packages: &packages,
+                        shortfall,
+                    };
+                    handle_check_drift(catalog, &fs, &config, &sender, &token, refusals.len()).await
                 }
                 Err(e) => Some(OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -313,9 +330,9 @@ where
             };
 
             // The handler says whether it stopped part way; the token is not asked
-            // again here. A run whose last entry completed is a whole answer even if
-            // the token was cancelled after it, and a collection failure is a
-            // failure however the token stands.
+            // again here. A run that finished is a whole answer even if the token
+            // was cancelled after it, and a collection failure is a failure however
+            // the token stands.
             match outcome {
                 Some(result) => sender.send_completed(result).await,
                 None => sender.send_canceled("Drift check cancelled").await,

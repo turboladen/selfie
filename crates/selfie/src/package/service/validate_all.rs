@@ -40,6 +40,7 @@ where
         warnings,
         refusals,
         unrefused_ambiguities,
+        set_aside: _,
     } = match collect_all_packages(
         repo,
         dotfiles_repo,

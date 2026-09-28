@@ -89,6 +89,11 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     {
         result_data["unverified_count"] = count.into();
     }
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let Some(count) = s.orphan_count()
+    {
+        result_data["orphan_count"] = count.into();
+    }
 
     EventCollectorResult {
         success,
@@ -456,6 +461,19 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "target": target,
             "drift_type": drift_type,
         })),
+        PackageEvent::DotfileOrphaned {
+            source,
+            target,
+            package,
+            ..
+        } => Some(serde_json::json!({
+            "type": "dotfile_orphaned",
+            "source": source,
+            "target": target,
+            // Null when the record does not say, so an assistant can tell that
+            // from a field this server forgot to send.
+            "package": package,
+        })),
         PackageEvent::PostInstallNote {
             package_name, note, ..
         } => Some(serde_json::json!({
@@ -684,6 +702,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 1,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -721,6 +740,7 @@ mod tests {
                 total_count: 0,
                 refused_count: 1,
                 unverified_count: 0,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(0, 0),
             }),
@@ -767,6 +787,45 @@ mod tests {
         );
     }
 
+    // An orphan is a row of its own and a count in the result, and leaves the
+    // result a success.
+    #[tokio::test]
+    async fn an_orphan_is_a_row_and_a_count_and_stays_a_success() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![
+            PackageEvent::DotfileOrphaned {
+                operation_info: test_op_info(),
+                source: "git/config".to_string(),
+                target: "/home/u/.gitconfig".to_string(),
+                package: Some("git".to_string()),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                    deployed_count: 0,
+                    skipped_count: 1,
+                    conflict_count: 0,
+                    refused_count: 0,
+                    orphan_count: 1,
+                    environment: "test".to_string(),
+                    steps_completed: StepCount::new(1, 1),
+                }),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "success");
+        assert_eq!(result.data["result"]["orphan_count"], 1);
+        let row = &result.data["data"][0];
+        assert_eq!(row["type"], "dotfile_orphaned");
+        assert_eq!(row["source"], "git/config");
+        assert_eq!(row["target"], "/home/u/.gitconfig");
+        assert_eq!(row["package"], "git");
+    }
+
     // Control: an apply with nothing refused is still a success result.
     #[tokio::test]
     async fn an_apply_that_refused_nothing_is_a_success_result() {
@@ -779,6 +838,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -827,6 +887,7 @@ mod tests {
                 total_count: 1,
                 refused_count: 0,
                 unverified_count: 2,
+                orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),

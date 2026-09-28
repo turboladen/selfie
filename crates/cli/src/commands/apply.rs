@@ -345,6 +345,7 @@ mod tests {
             skipped_count: 0,
             conflict_count: 0,
             refused_count,
+            orphan_count: 0,
             environment: "test".to_string(),
             steps_completed: StepCount::new(1, 1),
         })

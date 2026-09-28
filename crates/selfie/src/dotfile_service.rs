@@ -22,6 +22,7 @@
 //! - [`state`] — `DeployState` persistence: per-machine checksum tracking and drift detection
 //! - [`diff`] — Unified diff generation for conflict display
 //! - `directory` — What selfie says about the standalone dotfiles directory
+//! - `orphan` — Recorded targets no entry deploys to any more
 //! - `resolve` — Apply-time content resolution for secret-bearing entries
 //! - `refusal` — What is at a deploy target, and how a refused deploy is worded
 //! - `secret` — Deploying the secret-bearing entries of one package
@@ -39,6 +40,7 @@ mod deploy_entry;
 pub mod diff;
 pub(crate) mod directory;
 mod drift;
+mod orphan;
 pub mod port;
 mod refusal;
 pub(crate) mod resolve;

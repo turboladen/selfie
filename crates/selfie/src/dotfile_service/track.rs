@@ -666,10 +666,13 @@ where
     }
 
     let checksum = compute_checksum(content.as_bytes());
+    // The folded name from the spec's path, as apply records it. `spec.name` is
+    // the name as typed, which may differ in case.
     loaded.state_mut().record_deployment(
-        &expanded_target.display().to_string(),
+        &expanded_target.state_key(),
         &relative_source,
         &checksum,
+        crate::package::spec_name_of(&spec.spec_path).as_deref(),
     );
     // Last, and nothing is rolled back for it: the copy and the entry are both
     // correct and only the record is missing, so the failure names what exists and

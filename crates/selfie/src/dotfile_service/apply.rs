@@ -34,9 +34,12 @@ use super::classify::{
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
 };
+use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
 use super::secret::{SecretApply, SecretOutcome, programs_of};
-use super::state_file::{LoadedState, StateLoad, load_deploy_state, read_only_state_warning};
+use super::state_file::{
+    LoadedState, StateLoad, load_deploy_state, read_only_state_warning, save_deploy_state,
+};
 use super::warning::CollectionRefusal;
 
 /// What an apply covers.
@@ -44,9 +47,9 @@ pub(super) enum Scope {
     /// Every package. Carries what collecting them refused, each counted as one
     /// refusal before any package is looked at.
     All(Vec<CollectionRefusal>),
-    /// Packages asked for by name. Collection's refusals are no part of it, and a
-    /// package with nothing to apply here is worth saying so.
-    Named,
+    /// Packages asked for by name, with case folded. Collection's refusals are no
+    /// part of it, and a package with nothing to apply here is worth saying so.
+    Named(String),
 }
 
 /// Why an apply stopped before its last entry.
@@ -124,6 +127,9 @@ struct ApplyTally {
     /// Entries, packages and directories this run was asked to deploy and did
     /// not.
     refused: usize,
+    /// Orphaned targets whose files are still there. Not an outcome of any entry,
+    /// so no part of the step count.
+    orphaned: usize,
 }
 
 impl ApplyTally {
@@ -163,6 +169,7 @@ impl ApplyTally {
             skipped_count: self.skipped,
             conflict_count: self.conflicts,
             refused_count: self.refused,
+            orphan_count: self.orphaned,
             environment: environment.to_string(),
             steps_completed: StepCount::new(total, total),
         }
@@ -192,6 +199,7 @@ pub(super) async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
     scope: Scope,
+    catalog: Catalog<'_>,
 ) -> OperationResult
 where
     F: FileSystem,
@@ -260,7 +268,7 @@ where
     // here.
     let refusals = match &scope {
         Scope::All(refusals) => refusals.as_slice(),
-        Scope::Named => &[],
+        Scope::Named(_) => &[],
     };
     for refusal in refusals {
         stopped = tally.refuse(config, token, Stop::Collection(refusal.clone()));
@@ -304,6 +312,7 @@ where
         }
 
         let dotfiles = package.effective_dotfiles(Some(config.environment()));
+        let package_name = package.spec_name();
         let collisions = PackageCollisions::of(package, &home, config.environment());
 
         if dotfiles.is_empty() {
@@ -312,7 +321,7 @@ where
             // date". The run says so instead, and does not fail: on a machine
             // where the package declares nothing, nothing to apply is the right
             // answer.
-            if matches!(scope, Scope::Named) {
+            if matches!(scope, Scope::Named(_)) {
                 sender
                     .send_warning(format!(
                         "Package '{}' has no dotfiles for environment '{}'; nothing to apply",
@@ -426,7 +435,7 @@ where
 
                 // State is keyed by the expanded target, the one path that has one
                 // file and one checksum however many sources name it.
-                let target_key = target_path.display().to_string();
+                let target_key = target_path.state_key();
                 let unit = DeployUnit {
                     source_path: &source_path,
                     target_path: &target_path,
@@ -434,6 +443,7 @@ where
                     source_content: &source_content,
                     source_checksum: &source_checksum,
                     source,
+                    package: package_name.as_deref(),
                     backups: backups_root.as_deref(),
                 };
 
@@ -606,6 +616,43 @@ where
 
     if let Some(stop) = stopped {
         return OperationResult::Failure(OperationFailure::Generic(stop.to_string()));
+    }
+
+    // Orphans are judged after the entries, so a record this run just wrote is
+    // judged as written. A run that stopped part way neither reports nor drops
+    // anything.
+    let owner = match &scope {
+        Scope::All(_) => None,
+        Scope::Named(name) => Some(name.as_str()),
+    };
+    let findings = orphan::check(
+        filesystem,
+        catalog,
+        config.environment(),
+        loaded.as_ref().map_or(&empty, LoadedState::state),
+        owner,
+        sender,
+    )
+    .await;
+    // The token is asked again after the orphans are reported: a cancel that
+    // arrived while they were being sent must still stop the run before it writes.
+    if token.is_cancelled() {
+        return OperationResult::Failure(OperationFailure::Generic(Stop::Cancelled.to_string()));
+    }
+    tally.orphaned = findings.reported;
+    // A dry run has no state to change, or leaves the one it read alone.
+    if !options.dry_run
+        && let Some(loaded) = loaded.as_mut()
+        && findings.settle(loaded.state_mut())
+        && let Err(e) = save_deploy_state(filesystem, loaded)
+    {
+        // Every deployment is already recorded; only the housekeeping is lost,
+        // and the next run redoes it.
+        sender
+            .send_warning(format!(
+                "Could not tidy the deploy state after the run, so the next apply tries again: {e}"
+            ))
+            .await;
     }
 
     OperationResult::Success(tally.into_success(config.environment()))

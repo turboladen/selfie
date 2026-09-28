@@ -367,6 +367,8 @@ Selfie is actively developed and ready for daily use. Current features:
 - ✅ Login shell execution for install/check/audit commands
 - ✅ Dotfile tracking: `selfie dotfiles track`, `selfie package track-dotfile`, `selfie track`
 - ✅ Dotfile drift detection: `selfie dotfiles drift`
+- ✅ Orphaned targets: `apply` and `dotfiles drift` report a file selfie deployed that no entry
+  deploys to any more, and never delete it
 - ✅ Sudo refusal: `apply`, the track commands and `sync push`/`pull` decline to run under `sudo`,
   with `--allow-sudo` as the deliberate override
 - ✅ Dotfile listing: `selfie dotfiles list`
