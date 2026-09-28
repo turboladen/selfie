@@ -54,9 +54,11 @@ pushing — the rewrite's existence is the trigger, not a judgment about its siz
 what failed on #157: the same check ran after #155's fold and was skipped after #157's because the
 fold felt smaller, and two commits reached `main` uncertified.
 
-The per-commit check is `just clippy` on every commit below the tip, each in its own archive and
-target directory (below). It type-checks every crate and test target, which is what a bisect needs.
-The tests, the docs gate and the rest of `just check` run once, at the tip.
+The per-commit check is `just percommit <base>`, with `--self-test` the first time on a branch. It
+runs HEAD's `just clippy` on every commit below the tip, each in its own archive and target
+directory (below), and scores each ok, FAIL or NEVER-RAN. It type-checks every crate and test
+target, which is what a bisect needs. The tests, the docs gate and the rest of `just check` run
+once, at the tip. `crates/xtask/README.md` says what each verdict means.
 
 A green tip cannot stand in for it. A commit that fails to build is invisible at the tip whenever a
 later commit fixes it, which is the ordinary shape of a fold.
@@ -67,6 +69,7 @@ sees nothing to rebuild and runs the tip's binary against the older commit's sou
 reports a test that does not exist at that commit as passing. Two reviewers hit this in one session.
 A fresh directory per commit is the fix; a run that prints no `Compiling selfie v` or
 `Checking selfie v` line never built anything and must be scored as never-ran, not as passed.
+`just percommit` does both, and this paragraph is why it must keep doing them.
 
 ## Messages
 

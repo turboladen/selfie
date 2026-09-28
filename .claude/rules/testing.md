@@ -41,9 +41,11 @@ invariant and confirm the named test fails.** Then revert. Record the result.
 
 ## Run each mutation once, against the test that should catch it
 
-Scope the run to the target holding the named test: `cargo test -p selfie --test <file> <test>`, or
-`--lib` for a unit test. A workspace-wide run per mutation adds minutes and no information. Assert
-the named test ran, because a filter that matches nothing passes.
+Run mutations with `just mutate <spec.toml>`; `crates/xtask/README.md` gives the spec format. Each
+mutation names the one target holding its tests, such as `--test <file>` or `--lib` for a unit test.
+A workspace-wide run per mutation adds minutes and no information. The runner asserts the named test
+ran, because a filter that matches nothing passes, and matches it by the qualified path libtest
+prints.
 
 A mutation runs when its test is written. After a later change, re-run only the mutations whose
 mutated lines or named test that change touched. A review fold elsewhere on the branch does not
@@ -56,6 +58,9 @@ A batched mutation runner that writes a file and invokes `cargo` within the same
 cargo's mtime staleness check and test a **stale binary**, silently reporting the wrong answer in
 either direction. A false "no failure" wastes an investigation; a false "bites" lets a real gap
 through and nobody learns.
+
+`just mutate` is that runner, and `just mutate-self-test` proves it can score every verdict. Do not
+hand-write another. What follows is what it must keep doing, and why.
 
 Run one mutation per invocation, in a `git archive` copy with its own `CARGO_TARGET_DIR`, assert the
 mutation's anchor before substituting, distinguish a rustc error from a test failure, and assert

@@ -20,6 +20,8 @@ just fmt                                       # cargo fmt + dprint fmt (Markdow
 just fmt-check                                 # Verify both without modifying
 cargo run -- <args>                            # Run the CLI (from workspace root)
 just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
+just percommit <base>                          # just clippy on every commit below the tip
+just mutate <spec.toml>                        # Mutation runner (crates/xtask/README.md)
 ```
 
 CI runs these same recipes (`.github/workflows/ci.yml`), so `Justfile` is the one place a gate's
@@ -138,7 +140,8 @@ There are multiple crates in the repo, all under the `crates/` subdirectory:
 2. `selfie` which is the library containing the core logic for selfie,
 3. `selfie-mcp` (in `mcp-server/`) which is an MCP server exposing selfie to AI assistants,
 4. `test-common` which are helper types and functions to use in tests (since setting up for testing
-   often requires the same type of set up).
+   often requires the same type of set up),
+5. `xtask`, the verification instruments behind `just percommit` and `just mutate`.
 
 The CLI and MCP server are both "driving adapters" in hexagonal terms — they consume the same
 `PackageService` trait but present results differently (terminal output vs structured JSON). Keep
