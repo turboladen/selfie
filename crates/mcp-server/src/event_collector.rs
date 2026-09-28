@@ -2,7 +2,7 @@ use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, CheckResult, EventStream, NoSuchPackageReason, OperationFailure, OperationResult,
-    PackageEvent,
+    Outcome, PackageEvent,
 };
 use serde_json::Value;
 
@@ -37,15 +37,27 @@ fn failure_json(failure: &OperationFailure) -> Value {
     payload
 }
 
+/// The `outcome` field's value.
+fn outcome_label(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Clean => "clean",
+        Outcome::Found => "found",
+        Outcome::Failed => "failed",
+    }
+}
+
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     let mut final_result = None;
+    let mut cancelled = None;
     let mut data_events: Vec<Value> = Vec::new();
 
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
-        if let PackageEvent::Completed { result, .. } = &event {
-            final_result = Some(result.clone());
+        match &event {
+            PackageEvent::Completed { result, .. } => final_result = Some(result.clone()),
+            PackageEvent::Canceled { reason, .. } => cancelled = Some(reason.clone()),
+            _ => {}
         }
 
         if let Some(json) = event_to_json(&event) {
@@ -53,34 +65,58 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
         }
     }
 
+    // The envelope follows the library's verdict: a Failed outcome is an error
+    // result, and a finding is a successful call whose `status` says what it
+    // found. The payload's `status` moves in step with the envelope, so a caller
+    // never reads `"status": "success"` inside a result flagged as an error.
     let (success, mut result_data) = match &final_result {
-        // An operation that completed while refusing part of its work is
-        // reported as an error result, the same call the CLI answers with exit
-        // code 1. The payload's `status` moves in step with the envelope: a
-        // caller reading `"status": "success"` inside a result flagged as an
-        // error gets the same two-meanings-in-one-field problem selfie-c28 is
-        // about, one layer up.
-        // `refused` is its own field, not just a number inside `message`: the
-        // tool description promises a count, and an assistant should not have to
-        // parse one out of prose.
-        Some(OperationResult::Success(s)) if s.had_refusals() => (
-            false,
-            serde_json::json!({
-                "status": "refused",
-                "refused": s.refused_count(),
-                "message": format!("{s}"),
-            }),
-        ),
-        Some(OperationResult::Success(s)) => (
-            true,
-            serde_json::json!({ "status": "success", "message": format!("{s}") }),
-        ),
+        Some(OperationResult::Success(s)) => match s.outcome() {
+            Outcome::Clean => (
+                true,
+                serde_json::json!({ "status": "success", "message": format!("{s}") }),
+            ),
+            Outcome::Found => (
+                true,
+                serde_json::json!({ "status": "found", "message": format!("{s}") }),
+            ),
+            // `refused` is its own field, not just a number inside `message`: the
+            // tool description promises a count, and an assistant should not have
+            // to parse one out of prose.
+            Outcome::Failed if s.had_refusals() => (
+                false,
+                serde_json::json!({
+                    "status": "refused",
+                    "refused": s.refused_count(),
+                    "message": format!("{s}"),
+                }),
+            ),
+            // A result that ran and could not answer, such as an audit whose
+            // command failed.
+            Outcome::Failed => (
+                false,
+                serde_json::json!({ "status": "failed", "message": format!("{s}") }),
+            ),
+        },
         Some(OperationResult::Failure(f)) => (false, failure_json(f)),
-        None => (
-            false,
-            serde_json::json!({ "status": "unknown", "error": "No completion event received" }),
-        ),
+        None => match cancelled {
+            Some(reason) => (
+                false,
+                serde_json::json!({ "status": "cancelled", "reason": reason, "outcome": "cancelled" }),
+            ),
+            // An operation that reported nothing did not do what was asked.
+            None => (
+                false,
+                serde_json::json!({
+                    "status": "unknown",
+                    "error": "No completion event received",
+                    "outcome": outcome_label(Outcome::Failed),
+                }),
+            ),
+        },
     };
+    if let Some(result) = &final_result {
+        result_data["outcome"] = outcome_label(result.outcome()).into();
+    }
     // A structured field for the same reason `refused` is one: an assistant should
     // not have to parse a count out of `message`. Informational, so it leaves
     // `status` alone.
@@ -508,6 +544,8 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             refused_count,
             warned,
             unverified_count,
+            orphan_count,
+            drift_outcome,
             ..
         } => Some(serde_json::json!({
             "type": "sync_drift_summary",
@@ -516,6 +554,8 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "refused_count": refused_count,
             "warned": warned,
             "unverified_count": unverified_count,
+            "orphan_count": orphan_count,
+            "drift_outcome": outcome_label(*drift_outcome),
         })),
         PackageEvent::SyncCommitCreated {
             package_name,
@@ -861,6 +901,8 @@ mod tests {
                 refused_count: 0,
                 warned: 1,
                 unverified_count: 0,
+                orphan_count: 0,
+                drift_outcome: Outcome::Clean,
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -909,6 +951,8 @@ mod tests {
                 refused_count: 0,
                 warned: 0,
                 unverified_count: 2,
+                orphan_count: 1,
+                drift_outcome: Outcome::Found,
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -919,6 +963,73 @@ mod tests {
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         assert_eq!(result.data["data"][0]["unverified_count"], 2);
+        assert_eq!(result.data["data"][0]["orphan_count"], 1);
+        assert_eq!(result.data["data"][0]["drift_outcome"], "found");
+    }
+
+    // A drift check that found drift answered the question, so the call succeeds
+    // and `status` names the finding.
+    #[tokio::test]
+    async fn a_drift_finding_is_a_successful_call_with_a_found_status() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 1,
+                total_count: 1,
+                refused_count: 0,
+                unverified_count: 0,
+                orphan_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "found");
+        assert_eq!(result.data["result"]["outcome"], "found");
+    }
+
+    // An audit whose command failed is a success value that cannot answer the
+    // question and refused nothing: an error result, with a status of its own.
+    #[tokio::test]
+    async fn an_audit_that_could_not_run_is_an_error_result_with_a_failed_status() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::PackageAudited {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                audit_result: AuditResult::Error("spawn failed".to_string()),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "failed");
+        assert_eq!(result.data["result"]["outcome"], "failed");
+    }
+
+    // A cancelled operation says so instead of reporting a missing completion.
+    #[tokio::test]
+    async fn a_cancelled_operation_is_reported_as_cancelled() {
+        let events = vec![PackageEvent::Canceled {
+            operation_info: test_op_info(),
+            reason: "Apply cancelled".to_string(),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["status"], "cancelled");
+        assert_eq!(result.data["result"]["reason"], "Apply cancelled");
+        assert_eq!(result.data["result"]["outcome"], "cancelled");
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load

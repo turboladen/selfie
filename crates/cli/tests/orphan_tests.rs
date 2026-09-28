@@ -3,21 +3,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
-
-// A config with its own state directory, so the deploy state lands in the
-// sandbox whatever `XDG_STATE_HOME` the suite inherits.
-fn sandbox() -> tempfile::TempDir {
-    let temp = setup_default_test_config();
-    let config = temp.path().join(".config/selfie/config.yaml");
-    let mut text = std::fs::read_to_string(&config).unwrap();
-    text.push_str(&format!(
-        "state_directory: {}\n",
-        temp.path().join("state").display()
-    ));
-    std::fs::write(config, text).unwrap();
-    temp
-}
+use common::{SELFIE_ENV, sandboxed_command, setup_test_config_with_state_directory as sandbox};
 
 fn write_package(temp: &tempfile::TempDir, target: &str) {
     let packages = temp.path().join("packages");
@@ -84,16 +70,17 @@ fn apply_names_the_orphan_and_exits_zero() {
     );
 }
 
-// Drift's summary is a warning, not a success, when it found an orphan.
+// Drift's summary is a warning, not a success, when it found an orphan, and an
+// orphan is a finding drift was asked to look for.
 #[test]
-fn drift_warns_in_its_summary_and_exits_zero() {
+fn drift_warns_in_its_summary_and_exits_three() {
     let temp = moved_target();
     // Deploys the new target, so the orphan is the only thing drift can find.
     let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
     assert_eq!(code, Some(0), "{stdout}{stderr}");
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(3), "{stdout}{stderr}");
     assert!(stderr.contains("Orphaned"), "{stderr}");
     assert!(
         stderr.contains("1 orphaned") && !stdout.contains("1 orphaned"),

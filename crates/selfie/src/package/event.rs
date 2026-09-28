@@ -640,6 +640,35 @@ pub enum OperationResult {
     Failure(OperationFailure),
 }
 
+impl OperationResult {
+    /// How the operation scores; see [`Outcome`].
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        // The one verdict: the CLI's exit code and the MCP envelope both come
+        // from here, so neither decides for itself what a result means.
+        match self {
+            OperationResult::Success(success) => success.outcome(),
+            OperationResult::Failure(_) => Outcome::Failed,
+        }
+    }
+}
+
+/// How an operation ended: clean, a finding, or a failure.
+///
+/// A cancelled operation has no outcome: it ends with
+/// [`PackageEvent::Canceled`] rather than a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Did everything it was asked, and found nothing to report.
+    Clean,
+    /// Finished, and its answer is a finding: something it was asked to look
+    /// for, such as drift or an audit conflict, is there.
+    Found,
+    /// Did not do everything it was asked: it failed, or refused part of the
+    /// work.
+    Failed,
+}
+
 /// Typed success information for operations
 #[derive(Debug, Clone)]
 pub enum OperationSuccess {
@@ -756,9 +785,8 @@ pub enum OperationSuccess {
         /// listed also contributes 1 and no entries. So this counts *outcomes*, matching
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
-        /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
-        /// what every adapter reads to decide that the run did not do what was
-        /// asked. Named for the common case: most of what lands here was
+        /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed: the run
+        /// did not do what was asked. Named for the common case: most of what lands here was
         /// *declined* by selfie rather than failing, and `perform_deploy` is
         /// explicit that a refusal is not a failure.
         refused_count: usize,
@@ -1685,12 +1713,11 @@ impl OperationSuccess {
 
     /// Whether this success also refused to do something it was asked to do.
     ///
-    /// The one place that question is answered, so the CLI's exit code and the
-    /// MCP server's result envelope cannot disagree about it. An operation that
-    /// completed while declining part of its work is still a completed
-    /// operation — which is why this is a property of a success rather than a
-    /// failure — so a caller that reads only the completion has to ask this to
-    /// learn that part of the work did not happen.
+    /// The one place that question is answered. [`outcome`](Self::outcome)
+    /// scores such a success Failed, and that is what decides an exit code or a
+    /// result envelope; ask this only to tell a refusal apart from other
+    /// failures. An operation that completed while declining part of its work is
+    /// still a completed operation, which is why this is a property of a success.
     ///
     /// True only for the variants [`refused_count`](Self::refused_count) answers for;
     /// every other variant is false. Give a variant a refusal count when it gains
@@ -1804,6 +1831,63 @@ impl OperationSuccess {
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
+        }
+    }
+
+    /// How this success scores; see [`Outcome`].
+    ///
+    /// [`Outcome::Failed`] when the operation refused part of its work, and
+    /// [`Outcome::Found`] when it finished and found what it was asked to look
+    /// for. A refusal outranks a finding: an answer with a hole in it is not a
+    /// complete answer, whatever else it found.
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        // Refusals are answered once, by `had_refusals`, for every variant.
+        if self.had_refusals() {
+            return Outcome::Failed;
+        }
+        // Every variant listed, as in `refused_count`, so a variant added later has
+        // to say how it scores rather than inherit `Clean`.
+        match self {
+            OperationSuccess::DotfileDriftChecked {
+                drift_count,
+                orphan_count,
+                ..
+            } => {
+                if *drift_count > 0 || *orphan_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
+            // Apply is asked to deploy, not to find anything. A conflict left for
+            // the user and an orphan are reported, and the README promises neither
+            // makes the exit code non-zero.
+            OperationSuccess::DotfilesApplied { .. } => Outcome::Clean,
+            OperationSuccess::PackageAudited { audit_result, .. } => match audit_result {
+                AuditResult::Clean { .. } => Outcome::Clean,
+                AuditResult::Conflicts { .. } | AuditResult::NotInstalled => Outcome::Found,
+                // Neither can answer the question: one audit did not run, and the
+                // other has nothing to run.
+                AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
+            },
+            OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => Outcome::Clean,
         }
     }
 
@@ -2384,6 +2468,12 @@ pub enum PackageEvent {
         /// verifying, since checking one would run its commands. Not counted in
         /// `total_deployed` or `refused_count`.
         unverified_count: usize,
+        /// Recorded targets no entry deploys to any more whose files are still
+        /// there. Not drift and not a refusal.
+        orphan_count: usize,
+        /// How the drift check itself scored: [`Outcome::Failed`] when it refused
+        /// something, failed, or ended without a result.
+        drift_outcome: Outcome,
     },
 
     /// A commit was created during sync push
@@ -2846,5 +2936,114 @@ mod tests {
         // The exhaustive match above is the real test — it forces a compile
         // error when new variants are added to PackageError.
         let _ = categorize;
+    }
+
+    fn drift(drift: usize, orphan: usize, refused: usize, unverified: usize) -> OperationSuccess {
+        OperationSuccess::DotfileDriftChecked {
+            drift_count: drift,
+            total_count: 3,
+            refused_count: refused,
+            unverified_count: unverified,
+            orphan_count: orphan,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn applied(conflict: usize, orphan: usize, refused: usize) -> OperationSuccess {
+        OperationSuccess::DotfilesApplied {
+            deployed_count: 1,
+            skipped_count: 0,
+            conflict_count: conflict,
+            refused_count: refused,
+            orphan_count: orphan,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn audited(result: AuditResult) -> OperationSuccess {
+        OperationSuccess::PackageAudited {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            audit_result: result,
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    // Each counted variant along every axis that scores it, plus a mixed case
+    // per variant so the precedence is pinned, not just each axis alone.
+    #[test]
+    fn each_success_scores_by_what_it_found() {
+        let cases = [
+            ("drift clean", drift(0, 0, 0, 0), Outcome::Clean),
+            ("drift unverified only", drift(0, 0, 0, 2), Outcome::Clean),
+            ("drift drifted", drift(1, 0, 0, 0), Outcome::Found),
+            ("drift orphan", drift(0, 1, 0, 0), Outcome::Found),
+            ("drift refused", drift(0, 0, 1, 0), Outcome::Failed),
+            (
+                "drift refused and drifted",
+                drift(2, 1, 1, 0),
+                Outcome::Failed,
+            ),
+            ("apply clean", applied(0, 0, 0), Outcome::Clean),
+            ("apply conflict", applied(1, 0, 0), Outcome::Clean),
+            ("apply orphan", applied(0, 1, 0), Outcome::Clean),
+            ("apply refused", applied(0, 0, 1), Outcome::Failed),
+            (
+                "apply refused and conflicted",
+                applied(1, 1, 1),
+                Outcome::Failed,
+            ),
+            (
+                "audit clean",
+                audited(AuditResult::Clean {
+                    sources: vec!["brew".to_string()],
+                }),
+                Outcome::Clean,
+            ),
+            (
+                "audit conflict",
+                audited(AuditResult::Conflicts {
+                    sources: vec!["npm".to_string()],
+                    expected: vec!["brew".to_string()],
+                }),
+                Outcome::Found,
+            ),
+            (
+                "audit not installed",
+                audited(AuditResult::NotInstalled),
+                Outcome::Found,
+            ),
+            (
+                "audit error",
+                audited(AuditResult::Error("boom".to_string())),
+                Outcome::Failed,
+            ),
+            (
+                "audit no command",
+                audited(AuditResult::NoAuditCommand),
+                Outcome::Failed,
+            ),
+            (
+                "generic",
+                OperationSuccess::Generic("done".to_string()),
+                Outcome::Clean,
+            ),
+        ];
+        for (name, success, expected) in cases {
+            assert_eq!(success.outcome(), expected, "{name}");
+            assert_eq!(
+                OperationResult::Success(success).outcome(),
+                expected,
+                "{name}, through OperationResult"
+            );
+        }
+    }
+
+    #[test]
+    fn every_failure_is_failed() {
+        let failure = OperationResult::Failure(OperationFailure::Generic("no".to_string()));
+        assert_eq!(failure.outcome(), Outcome::Failed);
     }
 }

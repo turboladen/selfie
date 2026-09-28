@@ -49,11 +49,8 @@ pub(crate) async fn handle_list(
             // and the completion line repeats the count the table just gave.
             // `spec search` suppresses its own for the same reason.
             //
-            // Only a SUCCESSFUL completion. `process_events` skips its default
-            // handler for anything a custom handler claims, and that default
-            // handler is the only thing that writes the exit code -- so claiming
-            // a failure here would print nothing and exit 0, which is the bug
-            // PR #155 fixed for this very command.
+            // Only a SUCCESSFUL completion: a failure must still print, and only
+            // the default handler renders one.
             PackageEvent::Started { .. }
             | PackageEvent::Completed {
                 result: OperationResult::Success(_),

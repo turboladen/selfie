@@ -4,10 +4,7 @@
 //! all deployed dotfiles for drift between repo sources, deployed targets,
 //! and the last-known deploy state checksums.
 
-use selfie::{
-    dotfile_service::port::DotfileService,
-    package::event::{OperationResult, OperationSuccess, PackageEvent},
-};
+use selfie::dotfile_service::port::DotfileService;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -31,42 +28,10 @@ pub(crate) async fn handle_drift(
     let service = create_dotfile_service(config, cancellation_token);
     let event_stream = service.check_drift().await;
 
-    let display_for_handler = display.clone();
+    // The default rendering prints the summary at the level of the library's
+    // verdict: drift or an orphan found is a warning, a refusal an error.
     let processor = EventProcessor::new(display.clone());
-    let result = processor
-        .process_events(event_stream, |event| match event {
-            // The summary is green when nothing drifted or was orphaned, and yellow
-            // otherwise. A success carrying a refusal is not claimed here:
-            // `process_events` skips its default handler for any event a custom
-            // handler returns `true` for, and only that handler writes the exit
-            // code. Claiming a refusal would print the warning and exit 0, while
-            // the MCP server, which reads `had_refusals`, reports the run as
-            // refused. `commands/apply.rs` leaves refusals to the default handler
-            // for the same reason.
-            PackageEvent::Completed {
-                result: OperationResult::Success(success),
-                ..
-            } if !success.had_refusals() => {
-                // Drift or an orphan found is worth the reader's attention. An unverified
-                // entry is not: it is unverifiable by design, and the summary
-                // names the count. Anything refused, including a spec that could
-                // not be loaded, never reaches here: it fails the check above.
-                let unclean = matches!(
-                    success,
-                    OperationSuccess::DotfileDriftChecked { drift_count, orphan_count, .. }
-                        if *drift_count > 0 || *orphan_count > 0
-                );
-
-                if unclean {
-                    display_for_handler.print_warning(success.to_string());
-                } else {
-                    display_for_handler.print_success(success.to_string());
-                }
-                true
-            }
-            _ => false,
-        })
-        .await;
+    let result = processor.process_events(event_stream, |_event| false).await;
 
     result.exit_code
 }

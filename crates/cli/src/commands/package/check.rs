@@ -31,7 +31,6 @@ pub(crate) async fn handle_check(
 
     let event_stream = service.check(package_name).await;
 
-    let mut env_error_handled = false;
     let verbose = config.verbose();
 
     let processor = EventProcessor::new(display.clone());
@@ -75,7 +74,6 @@ pub(crate) async fn handle_check(
                         OperationResult::Success(_) => true,
                         OperationResult::Failure(failure) if failure.is_environment_error() => {
                             display_environment_error(package_name, failure, config, display);
-                            env_error_handled = true;
                             true
                         }
                         _ => false,
@@ -86,11 +84,7 @@ pub(crate) async fn handle_check(
         })
         .await;
 
-    if env_error_handled {
-        1
-    } else {
-        result.exit_code
-    }
+    result.exit_code
 }
 
 /// Display environment error with helpful suggestions from the typed failure data

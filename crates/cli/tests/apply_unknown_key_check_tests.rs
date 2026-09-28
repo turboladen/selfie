@@ -117,12 +117,8 @@ fn apply_fails_the_run_when_an_unchecked_file_deploys_nothing() {
 // `dotfiles drift` asks the same question apply does, and a refusal has to reach
 // the exit status there too.
 //
-// This is the half no library test can see. `process_events` skips its default
-// handler for any event a custom handler claims, and that default handler is the
-// only thing that writes the exit code -- so drift's own renderer, which claims
-// every successful completion, would print the refusal and exit 0 while the MCP
-// server reported the same run as refused. A `refused_count` assertion in the
-// library passes either way.
+// This is the half no library test can see: a `refused_count` assertion in the
+// library passes whatever the CLI makes of it.
 #[test]
 fn drift_fails_the_run_for_an_unchecked_file() {
     let temp = setup_default_test_config();

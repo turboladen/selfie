@@ -711,9 +711,10 @@ It never deletes or changes one: the file may still be something you want. `self
 ⚠   Orphaned ~/.config/old.toml: deployed from myapp/config.toml by package 'myapp', and no entry deploys to it now. selfie leaves it in place; check whether you still need it
 ```
 
-The summary counts them as `N orphaned`. An orphan is neither drift nor a refusal, so it does not
-change the exit status. The warning repeats on every run until you delete the file or point an entry
-at it again.
+The summary counts them as `N orphaned`. An orphan is neither drift nor a refusal. `selfie apply`
+still exits `0` over one, since it was asked to deploy, and `selfie dotfiles drift` exits `3`, since
+finding one is what it was asked to do (see [Exit codes](../README.md#exit-codes)). The warning
+repeats on every run until you delete the file or point an entry at it again.
 
 A target counts as orphaned when no entry of any package deploys to it in the current environment,
 whether or not that entry could deploy this time. A target only another environment deploys to is
@@ -1179,12 +1180,12 @@ Consequences worth knowing before you adopt this:
 - `selfie dotfiles drift` reports these entries as provider-sourced and unverifiable rather than
   checking them. Checking would mean resolving, which would run your commands from a read-only
   command. They are counted as not verifiable, apart from the entries drift compared, and are not
-  refusals, so they do not make the check exit `1`. An entry `selfie apply` would refuse without
-  running anything — a target it will not write to, a template escaping the package directory or
-  missing, unreadable or a fifo, a directory or a fifo at the target, a target it cannot read, a
-  target below a regular file or a dangling symlink — is reported by drift as that same refusal,
-  worded for a check that writes and runs nothing, and does make it exit `1`. A symlink at the
-  target is reported as unverifiable whatever it points at: drift does not follow it.
+  refusals, so they do not make the check exit non-zero. An entry `selfie apply` would refuse
+  without running anything — a target it will not write to, a template escaping the package
+  directory or missing, unreadable or a fifo, a directory or a fifo at the target, a target it
+  cannot read, a target below a regular file or a dangling symlink — is reported by drift as that
+  same refusal, worded for a check that writes and runs nothing, and does make it exit `1`. A
+  symlink at the target is reported as unverifiable whatever it points at: drift does not follow it.
 - Overwriting one keeps **no copy** of what was there, unlike
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section

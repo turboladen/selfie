@@ -202,15 +202,34 @@ selfie --help
 
 ## Exit codes
 
-A `selfie` command that runs exits with one of these three codes. Scripts and CI steps should branch
-on them rather than on output text. A command line selfie cannot parse — an unknown flag, a missing
-argument — is rejected by the argument parser before any of this applies, and exits `2`.
+Every `selfie` command exits with one of these codes. Scripts and CI steps should branch on them
+rather than on output text.
 
-| Code  | Meaning                                                                       |
-| ----- | ----------------------------------------------------------------------------- |
-| `0`   | The command did everything it was asked to do.                                |
-| `1`   | The command failed, **or refused part of its work**. See below.               |
-| `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
+| Code  | Meaning                                                                           |
+| ----- | --------------------------------------------------------------------------------- |
+| `0`   | The command did everything it was asked to do, and found nothing to report.       |
+| `1`   | The command failed, **refused part of its work**, or could not answer. See below. |
+| `2`   | The command line could not be parsed: an unknown flag or a missing argument.      |
+| `3`   | The command finished and **found what it was asked to look for**. See below.      |
+| `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value.     |
+
+A code is never renumbered or reused. A new one takes the next free value from `3` to `63`; `64` to
+`78` (the `sysexits.h` codes) and `126` and up (reserved by shells) are never used.
+
+### A finding exits 3
+
+A command asked to look for something exits `3` when it found it, so a script can tell "there is
+something to act on" from "the check itself did not work":
+
+- `selfie dotfiles drift`, when a deployed target drifted from its source, or a target no entry
+  deploys to any more is still there.
+- `selfie package audit`, when a package is installed from a source it does not expect, or is not
+  installed at all.
+
+A refusal outranks a finding. A check that refused part of its work exits `1` even if it also found
+something, since its answer has a hole in it.
+
+A command that ends without reporting a result, as it does if the operation crashes, exits `1`.
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
 `selfie package install` does. A name that matches no package, names a package file that could not
@@ -273,7 +292,11 @@ still reported, and still exits `1`. A preview whose job is to tell you what `ap
 not report success for a run that would refuse.
 
 The MCP server applies the same contract: a refusal comes back as an error result with
-`"status": "refused"`, so an assistant is not told the deploy worked.
+`"status": "refused"`, so an assistant is not told the deploy worked. A result that could not answer
+without refusing anything, such as an audit whose command failed, is an error result with
+`"status": "failed"`. A finding is a successful call with `"status": "found"`, and a cancelled
+operation an error result with `"status": "cancelled"`. Every result also carries `outcome`:
+`"clean"`, `"found"` or `"failed"`, or `"cancelled"` for a cancelled operation.
 
 ## Documentation
 

@@ -205,23 +205,17 @@ impl ConflictResolver for InteractiveConflictResolver {
 /// The completion summary apply renders itself, if it renders this one.
 ///
 /// `Some` only for a clean success, which apply prints as info (blue) rather
-/// than success (green) so it does not blend with diff additions.
-///
-/// `None` sends the event to `EventProcessor`'s default handler, and that is
-/// load-bearing rather than cosmetic: `handle_event` is the only thing that
-/// writes `exit_code`, and `process_events` skips it entirely for any event a
-/// custom handler claims. A success carrying a refusal handled *here* would be
-/// printed prettily and exit 0. So the exit code for a
-/// refusal cannot be fixed in `event_processor.rs` alone; this function is the
-/// other half.
+/// than success (green) so it does not blend with diff additions. Anything else
+/// takes the default rendering, which prints it at the level of its verdict.
 fn summary_to_render(
     result: &selfie::package::event::OperationResult,
 ) -> Option<&selfie::package::event::OperationSuccess> {
     match result {
-        selfie::package::event::OperationResult::Success(success) if !success.had_refusals() => {
+        selfie::package::event::OperationResult::Success(success)
+            if success.outcome() == selfie::package::event::Outcome::Clean =>
+        {
             Some(success)
         }
-        // Failures, and successes carrying a refusal.
         _ => None,
     }
 }
@@ -357,11 +351,8 @@ mod tests {
         assert!(summary_to_render(&applied(0)).is_some());
     }
 
-    // A success carrying a refusal is handed on, so the exit code gets set.
-    //
-    // Claiming it here would print the summary and swallow the event, and
-    // `EventProcessor::handle_event` — the only writer of `exit_code` — would
-    // never see it.
+    // A success carrying a refusal is handed on, so it prints as an error rather
+    // than as apply's informational summary.
     #[test]
     fn a_success_carrying_a_refusal_falls_through_to_the_default_handler() {
         assert!(summary_to_render(&applied(1)).is_none());

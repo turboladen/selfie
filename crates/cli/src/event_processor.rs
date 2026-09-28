@@ -7,28 +7,64 @@
 
 use futures::StreamExt;
 use selfie::package::{
-    event::{ConsoleOutput, EventStream, OperationResult, PackageEvent},
+    event::{ConsoleOutput, EventStream, OperationResult, Outcome, PackageEvent},
     port::{PackageError, PackageParseKind},
 };
 
 use crate::display_manager::{DisplayManager, ErrorDetail};
 
-/// Result of processing events, including metadata about what was encountered
+/// How a command's run ended, as the process reports it.
+///
+/// | code | meaning |
+/// | ---- | ------- |
+/// | 0    | clean |
+/// | 1    | failed, refused part of its work, or could not answer |
+/// | 2    | usage error (set by clap, never here) |
+/// | 3    | found what it was asked to look for |
+/// | 130  | cancelled (128 + SIGINT) |
+// A new code takes the next free value in 3-63, never 64-78 (`sysexits.h`) or
+// 126 and up (reserved by the shell), and no code is renumbered or reused. The
+// README's exit-code table is the public contract and changes with this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// Did everything asked, and found nothing to report.
+    Clean,
+    /// Finished, and found what it was asked to look for.
+    Found,
+    /// Failed, refused part of its work, or ended without saying how it went.
+    Failed,
+    /// Interrupted.
+    Cancelled,
+}
+
+impl Exit {
+    /// The process exit code.
+    pub(crate) fn code(self) -> i32 {
+        match self {
+            Exit::Clean => 0,
+            Exit::Failed => 1,
+            Exit::Found => 3,
+            // 128 + 2 (SIGINT), the Unix convention for Ctrl+C termination.
+            Exit::Cancelled => 130,
+        }
+    }
+}
+
+impl From<Outcome> for Exit {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Clean => Exit::Clean,
+            Outcome::Found => Exit::Found,
+            Outcome::Failed => Exit::Failed,
+        }
+    }
+}
+
+/// What processing a stream decided.
 #[derive(Debug, Clone)]
 pub struct EventProcessingResult {
     /// The exit code for the operation
     pub exit_code: i32,
-    /// Whether any errors were encountered during processing
-    pub had_errors: bool,
-}
-
-impl EventProcessingResult {
-    fn new() -> Self {
-        Self {
-            exit_code: 0,
-            had_errors: false,
-        }
-    }
 }
 
 /// A reusable event processor for handling package operation events
@@ -68,46 +104,50 @@ impl EventProcessor {
     where
         F: FnMut(&PackageEvent) -> bool,
     {
-        let mut result = EventProcessingResult::new();
-        let mut finished = false;
+        let mut ending = None;
 
         while let Some(event) = stream.next().await {
-            // Asked before the custom handler, which may claim either event.
-            finished |= matches!(
-                event,
-                PackageEvent::Completed { .. } | PackageEvent::Canceled { .. }
-            );
+            // Scored before the custom handler, which may claim either event: the
+            // exit code is the library's verdict, whoever renders it.
+            let cancelled = match &event {
+                PackageEvent::Completed { result, .. } => {
+                    ending = Some(Exit::from(result.outcome()));
+                    false
+                }
+                PackageEvent::Canceled { .. } => {
+                    ending = Some(Exit::Cancelled);
+                    true
+                }
+                _ => false,
+            };
 
-            // Try custom handler first
-            if custom_handler(&event) {
-                // Custom handler handled the event, continue to next event
-                continue;
+            if !custom_handler(&event) {
+                self.handle_event(event);
             }
 
-            // Fall back to default handling
-            if self.handle_event(event, &mut result) {
+            // Nothing after a cancellation is read, whoever rendered it.
+            if cancelled {
                 break;
             }
         }
 
         // A stream that ends without saying how the operation went, as one does when
         // the task running it panics, is a failure: nothing reported the work done.
-        if !finished {
+        let exit = ending.unwrap_or_else(|| {
             self.display
                 .print_error("The operation ended without reporting a result");
-            result.exit_code = 1;
-            result.had_errors = true;
-        }
+            Exit::Failed
+        });
 
         self.display.finish();
 
-        result
+        EventProcessingResult {
+            exit_code: exit.code(),
+        }
     }
 
-    /// Handle a single event and update the result as needed
-    ///
-    /// Returns true if processing should stop (early termination)
-    fn handle_event(&self, event: PackageEvent, result: &mut EventProcessingResult) -> bool {
+    /// Render one event the default way.
+    fn handle_event(&self, event: PackageEvent) {
         match event {
             PackageEvent::Started { operation_info } => {
                 // Handle list operations differently since they don't have a specific package name
@@ -163,27 +203,24 @@ impl EventProcessor {
                 operation_info,
                 result: op_result,
             } => match op_result {
-                // A completed operation that refused part of its work is not a
-                // success to a script reading the exit code: `selfie apply` would
-                // otherwise report 0 having deployed nothing (selfie-c28). The
-                // library decides whether refusals happened; this only decides
-                // what that means for a terminal.
-                OperationResult::Success(success) if success.had_refusals() => {
-                    self.display.collect_error(ErrorDetail {
-                        package_name: operation_info.package_name,
-                        operation: operation_info.operation_type.to_string(),
-                        command: None,
-                        exit_code: None,
-                        stderr: None,
-                        message: success.to_string(),
-                    });
-                    self.display.print_error(success.to_string());
-                    result.exit_code = 1;
-                    result.had_errors = true;
-                }
-                OperationResult::Success(success) => {
-                    self.display.print_success(success.to_string());
-                }
+                // The level follows the library's verdict, so a run that refused
+                // part of its work reads as an error and one that found drift as
+                // a warning. The exit code was scored in `process_events`.
+                OperationResult::Success(success) => match success.outcome() {
+                    Outcome::Clean => self.display.print_success(success.to_string()),
+                    Outcome::Found => self.display.print_warning(success.to_string()),
+                    Outcome::Failed => {
+                        self.display.collect_error(ErrorDetail {
+                            package_name: operation_info.package_name,
+                            operation: operation_info.operation_type.to_string(),
+                            command: None,
+                            exit_code: None,
+                            stderr: None,
+                            message: success.to_string(),
+                        });
+                        self.display.print_error(success.to_string());
+                    }
+                },
                 OperationResult::Failure(err) => {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
@@ -323,18 +360,12 @@ impl EventProcessor {
                             self.display.print_error(err.to_string());
                         }
                     }
-                    result.exit_code = 1;
-                    result.had_errors = true;
                 }
             },
 
             PackageEvent::Canceled { reason, .. } => {
                 self.display
                     .print_warning(format!("Operation canceled: {reason}"));
-                // 128 + 2 (SIGINT) is the Unix convention for Ctrl+C termination
-                result.exit_code = 130;
-                result.had_errors = true;
-                return true; // Stop processing after cancellation
             }
 
             PackageEvent::RecommendStarted { recommend_name, .. } => {
@@ -476,8 +507,6 @@ impl EventProcessor {
                 // If no custom handler processed them, just continue
             }
         }
-
-        false // Continue processing
     }
 }
 
@@ -545,7 +574,6 @@ mod tests {
 
         // Nothing reported a result, so nothing reported success either.
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
     }
 
     // A stream that starts and then stops, as one does when the task running the
@@ -562,6 +590,67 @@ mod tests {
             .await;
 
         assert_eq!(result.exit_code, 1);
+    }
+
+    fn drift_checked(drift: usize, refused: usize) -> PackageEvent {
+        use selfie::package::event::{OperationResult, OperationSuccess, StepCount};
+
+        PackageEvent::Completed {
+            operation_info: make_operation_info("drift"),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: drift,
+                total_count: 1,
+                refused_count: refused,
+                unverified_count: 0,
+                orphan_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }
+    }
+
+    // The verdict is taken before the command's own handler sees the event, so a
+    // handler that renders the completion itself cannot lose the exit code.
+    #[tokio::test]
+    async fn a_claimed_completion_still_exits_with_its_outcome() {
+        for (event, expected) in [
+            (drift_checked(0, 0), 0),
+            (drift_checked(1, 0), 3),
+            (drift_checked(1, 1), 1),
+        ] {
+            let processor = EventProcessor::new(DisplayManager::new(false));
+            let result = processor
+                .process_events(Box::pin(stream::iter(vec![event])), |_event| true)
+                .await;
+            assert_eq!(result.exit_code, expected);
+        }
+    }
+
+    // A cancellation a handler claims still exits 130, and nothing after it is
+    // read.
+    #[tokio::test]
+    async fn a_claimed_cancellation_exits_130_and_stops() {
+        let events = vec![
+            PackageEvent::Canceled {
+                operation_info: make_operation_info("cancelled"),
+                reason: "Ctrl+C".to_string(),
+            },
+            drift_checked(0, 0),
+        ];
+
+        let mut completions_seen = 0;
+        let processor = EventProcessor::new(DisplayManager::new(false));
+        let result = processor
+            .process_events(Box::pin(stream::iter(events)), |event| {
+                if matches!(event, PackageEvent::Completed { .. }) {
+                    completions_seen += 1;
+                }
+                true
+            })
+            .await;
+
+        assert_eq!(result.exit_code, 130);
+        assert_eq!(completions_seen, 0);
     }
 
     // Control: a custom handler claiming the completion still counts as a result,
@@ -653,7 +742,6 @@ mod tests {
         let result = processor.process_events(event_stream, |_event| false).await;
 
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
     }
 
     // The CLI half of the sudo refusal: exit non-zero, and put the two halves of
@@ -690,7 +778,6 @@ mod tests {
         let result = processor.process_events(event_stream, |_event| false).await;
 
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
 
         // The collected detail carries both halves, so `--verbose` summaries and
         // the MCP server's JSON still say what to do about it.
@@ -760,7 +847,6 @@ mod tests {
         assert_eq!(progress_events_seen, 2);
         assert_eq!(completed_events_seen, 1);
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
     }
 
     #[tokio::test]
@@ -805,7 +891,6 @@ mod tests {
 
         // Should use exit code 130 (128 + SIGINT)
         assert_eq!(result.exit_code, 130);
-        assert!(result.had_errors);
         // Completed event after Canceled should not have been processed
         assert_eq!(events_after_cancel, 0);
     }
@@ -869,7 +954,6 @@ mod tests {
         let result = processor.process_events(event_stream, |_event| false).await;
 
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
         assert_eq!(
             display_clone.collected_errors().len(),
             1,
@@ -904,7 +988,6 @@ mod tests {
         let result = processor.process_events(event_stream, |_event| false).await;
 
         assert_eq!(result.exit_code, 0);
-        assert!(!result.had_errors);
     }
 
     #[tokio::test]
