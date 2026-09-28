@@ -603,6 +603,7 @@ mod tests {
                 refused_count: refused,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),

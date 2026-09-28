@@ -845,6 +845,9 @@ pub enum OperationSuccess {
         /// Recorded targets no entry deploys to any more whose files are still
         /// there. Not drift and not a refusal.
         orphan_count: usize,
+        /// Recorded targets the orphan check could not judge, because something
+        /// it warned about kept it from seeing every entry. Not a refusal.
+        unjudged_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1346,13 +1349,20 @@ impl std::fmt::Display for OperationSuccess {
                 refused_count,
                 unverified_count,
                 orphan_count,
+                unjudged_count,
                 steps_completed,
                 ..
             } => {
+                let unjudged = if *unjudged_count == 0 {
+                    String::new()
+                } else {
+                    format!(", {unjudged_count} not checked for orphans")
+                };
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused, {unverified_count} not verifiable{} {steps_completed}",
+                     {refused_count} refused, {unverified_count} not verifiable{}{unjudged} \
+                     {steps_completed}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -1893,12 +1903,15 @@ impl OperationSuccess {
         // Every variant listed, as in `refused_count`, so a variant added later has
         // to say how it scores rather than inherit `Clean`.
         match self {
+            // Records the orphan check could not judge leave part of the question
+            // unanswered, which the run warned about: a finding, not a refusal.
             OperationSuccess::DotfileDriftChecked {
                 drift_count,
                 orphan_count,
+                unjudged_count,
                 ..
             } => {
-                if *drift_count > 0 || *orphan_count > 0 {
+                if *drift_count > 0 || *orphan_count > 0 || *unjudged_count > 0 {
                     Outcome::Found
                 } else {
                     Outcome::Clean
@@ -2553,6 +2566,8 @@ pub enum PackageEvent {
         /// Recorded targets no entry deploys to any more whose files are still
         /// there. Not drift and not a refusal.
         orphan_count: usize,
+        /// Recorded targets the drift check could not judge for orphans.
+        unjudged_count: usize,
         /// How the drift check itself scored: [`Outcome::Failed`] when it refused
         /// something, failed, or ended without a result.
         drift_outcome: Outcome,
@@ -3065,6 +3080,7 @@ mod tests {
             refused_count: refused,
             unverified_count: unverified,
             orphan_count: orphan,
+            unjudged_count: 0,
             environment: "test".to_string(),
             steps_completed: StepCount::new(1, 1),
         }
@@ -3139,6 +3155,20 @@ mod tests {
             ("drift drifted", drift(1, 0, 0, 0), Outcome::Found),
             ("drift orphan", drift(0, 1, 0, 0), Outcome::Found),
             ("drift refused", drift(0, 0, 1, 0), Outcome::Failed),
+            (
+                "drift with unjudged records",
+                OperationSuccess::DotfileDriftChecked {
+                    drift_count: 0,
+                    total_count: 3,
+                    refused_count: 0,
+                    unverified_count: 0,
+                    orphan_count: 0,
+                    unjudged_count: 2,
+                    environment: "test".to_string(),
+                    steps_completed: StepCount::new(1, 1),
+                },
+                Outcome::Found,
+            ),
             (
                 "drift refused and drifted",
                 drift(2, 1, 1, 0),

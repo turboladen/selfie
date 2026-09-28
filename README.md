@@ -205,38 +205,37 @@ selfie --help
 Every `selfie` command exits with one of these codes. Scripts and CI steps should branch on them
 rather than on output text.
 
-| Code  | Meaning                                                                           |
-| ----- | --------------------------------------------------------------------------------- |
-| `0`   | The command did everything it was asked to do, and found nothing to report.       |
-| `1`   | The command failed, **refused part of its work**, or could not answer. See below. |
-| `2`   | The command line could not be parsed: an unknown flag or a missing argument.      |
-| `3`   | The command finished and **found what it was asked to look for**. See below.      |
-| `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value.     |
+| Code  | Meaning                                                                                         |
+| ----- | ----------------------------------------------------------------------------------------------- |
+| `0`   | Clean: the command did what it was asked and found nothing to report.                           |
+| `1`   | Failed: an error, **a refusal**, a declined `spec create`, or a run that ends without a result. |
+| `2`   | Usage: the command line could not be parsed.                                                    |
+| `3`   | Found: the command did what it was asked, and **found what it was asked to look for**.          |
+| `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                                     |
 
-A code is never renumbered or reused. A new one takes the next free value from `3` to `63`; `64` to
-`78` (the `sysexits.h` codes) and `126` and up (reserved by shells) are never used.
+A failure outranks a finding: a command that refused part of its work exits `1` even if it also
+found something, since its answer has a hole in it. A code is never renumbered or reused. A new one
+takes the next free value from `3` to `63`; `64` to `78` (the `sysexits.h` codes) and `126` and up
+(reserved by shells) are never used.
 
-### A finding exits 3
+### What each command reports
 
-A command asked to look for something exits `3` when it found it, so a script can tell "there is
-something to act on" from "the check itself did not work":
+| Command               | Clean (`0`)                                                             | Found (`3`)                                                               | Failed (`1`)                                                             |
+| --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `apply`               | deployed, up to date, or conflicts skipped                              | never                                                                     | a refused entry; an error; a write that could not be recorded            |
+| `dotfiles drift`      | in sync; nothing deploys on this machine                                | drift; an orphaned target; the orphan check could not finish and said why | a refused entry; an error                                                |
+| `package check`       | the check command exited 0                                              | the check command exited non-zero, for any reason (not installed)         | no check command; selfie's own timeout; the command could not be started |
+| `package audit`       | no conflict                                                             | a conflict; not installed                                                 | the audit command exited non-zero; no audit command                      |
+| `package audit --all` | every audited package clean; a package with no audit command is skipped | a conflict; not installed                                                 | an audit command exited non-zero; a spec left out                        |
+| `spec validate`       | no warnings                                                             | warnings                                                                  | errors; the spec does not parse                                          |
+| `config validate`     | no warnings                                                             | warnings, including unrecognized keys                                     | errors; the file cannot be loaded                                        |
+| `spec create`         | created                                                                 | never                                                                     | declined, because the name already exists; an error                      |
 
-- `selfie dotfiles drift`, when a deployed target drifted from its source, or a target no entry
-  deploys to any more is still there.
-- `selfie package audit`, when a package is installed from a source it does not expect, or is not
-  installed at all. With `--all`, when any package is; an audit that could not run, or a spec
-  `--all` had to leave out, makes it exit `1` instead.
-- `selfie spec validate` and `selfie config validate`, when there are warnings but no errors. An
-  informational notice, such as the one saying `apply` runs a spec's commands, is not a warning.
-- `selfie package check`, when the package is not installed: its check command ran and exited
-  non-zero, 127 included, since `tool --version` exits 127 when `tool` is missing. A check that
-  cannot run, times out, is killed, or is not defined exits `1`.
-
-A refusal outranks a finding. A check that refused part of its work exits `1` even if it also found
-something, since its answer has a hole in it.
-
-A command that ends without reporting a result, as it does if the operation crashes, exits `1`. So
-does `selfie spec create` when it declines to create a name that already exists.
+A configured command's exit status is all selfie knows about it. Your shell reports a command killed
+by a signal as an ordinary non-zero status, so a check that was killed reads as "not installed". An
+audit reports "not installed" when its command exits 0 and prints no source; an audit command that
+exits non-zero is a failure. An informational note, such as the one saying `apply` runs a spec's
+commands, never makes a run exit `3`.
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
 `selfie package install` does. A name that matches no package, names a package file that could not

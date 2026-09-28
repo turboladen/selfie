@@ -229,6 +229,7 @@ where
                     warned,
                     unverified_count: summary.unverified,
                     orphan_count: summary.orphan_count,
+                    unjudged_count: summary.unjudged_count,
                     // A check that reported no result is a failed one.
                     drift_outcome: summary.outcome.unwrap_or(Outcome::Failed),
                 })
@@ -1310,6 +1311,8 @@ struct DriftSummary {
     unverified: usize,
     /// How many orphaned targets the check reported.
     orphan_count: usize,
+    /// How many recorded targets the check could not judge for orphans.
+    unjudged_count: usize,
     /// How the check scored, when it reported a result.
     outcome: Option<Outcome>,
     /// The failure message, when the check failed.
@@ -1358,6 +1361,7 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                             refused_count,
                             unverified_count,
                             orphan_count,
+                            unjudged_count,
                             ..
                         },
                     ),
@@ -1367,6 +1371,7 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary.refused_count = refused_count;
                 summary.unverified = unverified_count;
                 summary.orphan_count = orphan_count;
+                summary.unjudged_count = unjudged_count;
                 summary.outcome = Some(success.outcome());
             }
             PackageEvent::Completed {
@@ -1464,6 +1469,7 @@ mod tests {
                 refused_count: refused,
                 unverified_count: 0,
                 orphan_count: orphan,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -2096,6 +2102,7 @@ mod tests {
                     refused_count: 0,
                     unverified_count: 0,
                     orphan_count: 0,
+                    unjudged_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(0, 0),
                 }),
@@ -2144,6 +2151,7 @@ mod tests {
                 refused_count: 2,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(4, 4),
             }),
@@ -2175,6 +2183,7 @@ mod tests {
                 refused_count: 0,
                 unverified_count: 3,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(1, 1),
             }),
@@ -2208,6 +2217,7 @@ mod tests {
                     refused_count: 0,
                     unverified_count: 0,
                     orphan_count: 0,
+                    unjudged_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
                 }),
@@ -2365,6 +2375,7 @@ mod tests {
                         refused_count: 1,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2542,6 +2553,7 @@ mod tests {
                         refused_count: 2,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2632,6 +2644,7 @@ mod tests {
                         refused_count: 0,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2798,6 +2811,7 @@ mod tests {
                         refused_count: 2,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),

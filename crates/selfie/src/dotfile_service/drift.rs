@@ -196,7 +196,7 @@ where
     }
     // Drift reports and writes nothing, so a gone orphan's record is left for an
     // apply to drop.
-    tally.orphaned = orphan::check(
+    let findings = orphan::check(
         filesystem,
         catalog,
         config.environment(),
@@ -204,8 +204,9 @@ where
         None,
         sender,
     )
-    .await
-    .reported;
+    .await;
+    tally.orphaned = findings.reported;
+    tally.unjudged = findings.unjudged;
     // The token is asked again after the orphans are reported: a cancel that
     // arrived while they were being checked leaves the answer partial.
     if token.is_cancelled() {
@@ -229,6 +230,8 @@ struct DriftTally {
     unverified: usize,
     /// Orphaned targets whose files are still there. Neither drift nor a refusal.
     orphaned: usize,
+    /// Recorded targets the orphan check could not judge.
+    unjudged: usize,
 }
 
 impl DriftTally {
@@ -239,6 +242,7 @@ impl DriftTally {
             refused_count: self.refused,
             unverified_count: self.unverified,
             orphan_count: self.orphaned,
+            unjudged_count: self.unjudged,
             environment: environment.to_string(),
             steps_completed: StepCount::new(self.compared, self.compared),
         }

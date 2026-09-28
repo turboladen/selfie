@@ -112,6 +112,67 @@ fn drift_exits_one_when_it_refused_an_entry() {
     assert_eq!(code, Some(FAILED), "{output}");
 }
 
+// Deploys `app` to `~/.old`, then moves the entry to `~/.new` without applying
+// again, so the record for `~/.old` is one no entry produces.
+fn retargeted() -> tempfile::TempDir {
+    let temp = sandbox();
+    write_dotfile_package(&temp, "app", "~/.old");
+    let (code, output) = run(&temp, &["apply", "-y"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    write_dotfile_package(&temp, "app", "~/.new");
+    temp
+}
+
+// A configured dotfiles directory that is missing keeps the orphan check from
+// seeing every entry. Drift says so, and a run that could not answer part of
+// what it was asked is not clean. It is not a refusal either.
+#[test]
+fn drift_exits_three_when_it_could_not_check_for_orphans() {
+    let temp = retargeted();
+    // Deploys the new target. Left undeployed it is drift, which exits 3 by
+    // itself and hides whether the unjudged record is counted at all.
+    let (code, output) = run(&temp, &["apply", "-y"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "dotfiles_directory: {}\n",
+        temp.path().join("no-such-dir").display()
+    ));
+    std::fs::write(config, text).unwrap();
+
+    let (code, output) = run(&temp, &["dotfiles", "drift"]);
+    assert!(
+        output.contains("Not checking 1 deployed target(s) for orphans"),
+        "{output}"
+    );
+    assert!(output.contains("0 drifted"), "{output}");
+    assert!(output.contains("1 not checked for orphans"), "{output}");
+    assert_eq!(code, Some(FOUND), "{output}");
+}
+
+// Control: with nothing deployable in this environment there is nothing the check
+// missed, so it stays clean.
+#[test]
+fn drift_exits_clean_when_nothing_deploys_here() {
+    let temp = sandbox();
+    write_dotfile_package(&temp, "app", "~/.apprc");
+    let (code, output) = run(&temp, &["apply", "-y"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    write_spec(
+        &temp,
+        "app",
+        &format!("name: app\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["dotfiles", "drift"]);
+    assert!(
+        output.contains("Not checking 1 deployed target(s) for orphans"),
+        "{output}"
+    );
+    assert_eq!(code, Some(CLEAN), "{output}");
+}
+
 // A refusal outranks a finding: the answer has a hole in it, whatever else it
 // found.
 #[test]

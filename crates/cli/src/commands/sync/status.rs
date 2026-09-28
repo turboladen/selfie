@@ -108,6 +108,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             warned,
             unverified_count: unverified,
             orphan_count,
+            unjudged_count,
             drift_outcome,
             ..
         } => {
@@ -156,6 +157,12 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 display.print_warning(format!(
                     "{orphan_count} orphaned target(s): no entry deploys to them now -- run \
                      'selfie dotfiles drift' for details"
+                ));
+            }
+            if *unjudged_count > 0 {
+                display.print_warning(format!(
+                    "{unjudged_count} deployed target(s) not checked for orphans -- see the \
+                     warnings above"
                 ));
             }
             true
@@ -330,6 +337,7 @@ mod tests {
             warned: 0,
             unverified_count: 0,
             orphan_count: 0,
+            unjudged_count: 0,
             drift_outcome: Outcome::Clean,
         };
 
@@ -347,6 +355,7 @@ mod tests {
             warned: 0,
             unverified_count: 0,
             orphan_count: 0,
+            unjudged_count: 0,
             drift_outcome: Outcome::Clean,
         };
 
@@ -366,6 +375,7 @@ mod tests {
             warned: 0,
             unverified_count: 0,
             orphan_count: 0,
+            unjudged_count: 0,
             drift_outcome: Outcome::Failed,
         };
 

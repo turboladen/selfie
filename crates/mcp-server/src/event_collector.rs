@@ -130,6 +130,13 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     {
         result_data["orphan_count"] = count.into();
     }
+    // What made a drift check with no drift and no orphan a finding.
+    if let Some(OperationResult::Success(
+        selfie::package::event::OperationSuccess::DotfileDriftChecked { unjudged_count, .. },
+    )) = &final_result
+    {
+        result_data["unjudged_count"] = (*unjudged_count).into();
+    }
 
     EventCollectorResult {
         success,
@@ -545,6 +552,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             warned,
             unverified_count,
             orphan_count,
+            unjudged_count,
             drift_outcome,
             ..
         } => Some(serde_json::json!({
@@ -555,6 +563,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "warned": warned,
             "unverified_count": unverified_count,
             "orphan_count": orphan_count,
+            "unjudged_count": unjudged_count,
             "drift_outcome": outcome_label(*drift_outcome),
         })),
         PackageEvent::SyncCommitCreated {
@@ -780,6 +789,7 @@ mod tests {
                 refused_count: 1,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(0, 0),
             }),
@@ -902,6 +912,7 @@ mod tests {
                 warned: 1,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 drift_outcome: Outcome::Clean,
             },
             PackageEvent::Completed {
@@ -929,6 +940,7 @@ mod tests {
                 refused_count: 0,
                 unverified_count: 2,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -952,6 +964,7 @@ mod tests {
                 warned: 0,
                 unverified_count: 2,
                 orphan_count: 1,
+                unjudged_count: 0,
                 drift_outcome: Outcome::Found,
             },
             PackageEvent::Completed {
@@ -981,6 +994,7 @@ mod tests {
                 refused_count: 0,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
             }),
@@ -1041,6 +1055,32 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.data["result"]["status"], "found");
         assert_eq!(result.data["result"]["outcome"], "found");
+    }
+
+    // A drift check whose only finding is a record it could not judge for orphans
+    // names that count, since drift and orphan counts are both zero.
+    #[tokio::test]
+    async fn a_drift_result_carries_the_unjudged_count() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: 0,
+                total_count: 1,
+                refused_count: 0,
+                unverified_count: 0,
+                orphan_count: 0,
+                unjudged_count: 2,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(result.data["result"]["status"], "found");
+        assert_eq!(result.data["result"]["unjudged_count"], 2);
     }
 
     // A cancelled operation says so instead of reporting a missing completion.

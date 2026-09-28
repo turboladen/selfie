@@ -747,7 +747,9 @@ spec files claim a name selfie would deploy from, a dotfiles/ spec is unused bec
 spec by the same name, a package is refused whole, a dotfiles directory cannot be read, a configured
 `dotfiles_directory` is missing, or a `~` target cannot be resolved for want of a home directory. It
 also happens when no package deploys anything in the current environment, which is what a mistyped
-`package_directory` looks like.
+`package_directory` looks like. `selfie dotfiles drift` exits `3` when it could not judge a record,
+since part of what it was asked went unanswered, except when no package deploys anything here: then
+there was nothing to judge, and it exits `0`.
 
 ### How targets are written
 
