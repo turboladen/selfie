@@ -50,3 +50,5 @@ docker-compose.override.yaml
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 .beads/issues.jsonl
+# bd leaves this lock file at the repository root while it holds its gate.
+.beads.gate.lock

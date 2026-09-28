@@ -174,6 +174,28 @@ sandbox-run *ARGS:
     # given to run. `[positional-arguments]` is what puts the arguments in `$@`.
     run "$@"
 
+# The xtask binary builds into its own target directory, so a recipe below
+# does not wait on the lock of the workspace's `target/`, which a watcher or
+# another agent's build may hold.
+xtask_target := justfile_directory() / "target" / "xtask"
+
+# Run `just clippy` on every commit in BASE..HEAD below the tip: `just percommit main`
+[positional-arguments]
+percommit base *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask percommit "$@"
+
+# Run each mutation in a spec in its own archive: `just mutate spec.toml`
+[no-cd]
+[positional-arguments]
+mutate spec *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate "$@"
+
+# Prove the mutation runner scores caught, survived and never-ran correctly
+[no-cd]
+[positional-arguments]
+mutate-self-test *args:
+    CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate --self-test "$@"
+
 # Generate and open documentation
 docs:
     cargo doc --open
