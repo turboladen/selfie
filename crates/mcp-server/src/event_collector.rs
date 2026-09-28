@@ -553,8 +553,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
-        | PackageEvent::Debug { .. }
-        | PackageEvent::Error { .. } => None,
+        | PackageEvent::Debug { .. } => None,
     }
 }
 

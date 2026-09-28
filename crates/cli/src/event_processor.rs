@@ -143,24 +143,6 @@ impl EventProcessor {
                 // Warnings don't set failure exit code by default
             }
 
-            PackageEvent::Error {
-                operation_info,
-                message,
-                error,
-            } => {
-                self.display.collect_error(ErrorDetail {
-                    package_name: operation_info.package_name,
-                    operation: operation_info.operation_type.to_string(),
-                    command: None,
-                    exit_code: None,
-                    stderr: None,
-                    message: format!("{message}: {error}"),
-                });
-                self.display.print_error(format!("{message}: {error}"));
-                result.exit_code = 1;
-                result.had_errors = true;
-            }
-
             PackageEvent::Completed {
                 operation_info,
                 result: op_result,
@@ -590,10 +572,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_error_event_produces_failure_result() {
-        use selfie::package::event::StreamedError;
+    async fn a_failed_completion_produces_a_failure_result() {
         use selfie::package::event::{OperationFailure, OperationResult};
-        use selfie::package::port::PackageRepoError;
 
         let op = make_operation_info("nonexistent-test-package");
 
@@ -607,16 +587,6 @@ mod tests {
                 total_steps: 2,
                 percent_complete: 0.5,
                 message: "Loading package file".to_string(),
-            },
-            PackageEvent::Error {
-                operation_info: op.clone(),
-                error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
-                    selfie::fs::FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "package not found",
-                    ))),
-                )),
-                message: "Package not found".to_string(),
             },
             PackageEvent::Completed {
                 operation_info: op,
@@ -787,38 +757,6 @@ mod tests {
         assert!(result.had_errors);
         // Completed event after Canceled should not have been processed
         assert_eq!(events_after_cancel, 0);
-    }
-
-    #[tokio::test]
-    async fn test_error_event_collects_error_detail() {
-        use selfie::package::event::StreamedError;
-        use selfie::package::port::PackageRepoError;
-
-        let op = make_operation_info("broken-pkg");
-
-        let events: Vec<PackageEvent> = vec![PackageEvent::Error {
-            operation_info: op,
-            error: StreamedError::PackageRepoError(PackageRepoError::FileSystemError(
-                selfie::fs::FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "file missing",
-                ))),
-            )),
-            message: "Could not load".to_string(),
-        }];
-
-        let display = DisplayManager::new(false);
-        let display_clone = display.clone();
-        let processor = EventProcessor::new(display);
-        let event_stream = Box::pin(stream::iter(events));
-        processor.process_events(event_stream, |_event| false).await;
-
-        let errors = display_clone.collected_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].package_name, "broken-pkg");
-        assert_eq!(errors[0].operation, "package_check");
-        assert!(errors[0].message.contains("Could not load"));
-        assert!(errors[0].command.is_none());
     }
 
     #[tokio::test]

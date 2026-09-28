@@ -5,10 +5,8 @@
 //! to a terminal while the MCP server collects the same events into JSON, with
 //! neither choice reaching into the library.
 
-pub mod error;
 pub mod metadata;
 
-pub use self::error::StreamedError;
 pub use self::metadata::OperationType;
 
 /// Represents the completion status of steps in an operation
@@ -242,35 +240,6 @@ impl EventSender {
         self.send(PackageEvent::Info {
             operation_info,
             output,
-        })
-        .await;
-    }
-
-    /// Send an error event
-    ///
-    /// Currently unused — terminal errors flow through `OperationResult::Failure`
-    /// via `send_completed`. Retained for future non-terminal error events.
-    #[allow(dead_code)]
-    pub(crate) async fn send_error<SE>(&self, error: SE, message: impl fmt::Display)
-    where
-        StreamedError: From<SE>,
-    {
-        let operation_info = self.touch_operation_info();
-        let msg = message.to_string();
-        let streamed_error = StreamedError::from(error);
-
-        tracing::error!(
-            operation_type = operation_info.operation_type.to_string(),
-            package_name = &operation_info.package_name,
-            environment = &operation_info.environment,
-            message = &msg,
-            error = %streamed_error,
-        );
-
-        self.send(PackageEvent::Error {
-            operation_info,
-            error: streamed_error,
-            message: msg,
         })
         .await;
     }
@@ -2190,13 +2159,6 @@ pub enum PackageEvent {
     /// Warning message
     Warning {
         operation_info: OperationInfo,
-        message: String,
-    },
-
-    /// Error occurred but operation continues
-    Error {
-        operation_info: OperationInfo,
-        error: StreamedError,
         message: String,
     },
 
