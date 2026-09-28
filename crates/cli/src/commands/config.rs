@@ -33,6 +33,12 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     let cli_notices = cli_load.notices;
     let raw_config = loaded.config();
 
+    // Notes need nothing done, so they neither fail validation nor stop it
+    // reporting the file as valid.
+    for note in result.issues().infos() {
+        display.print_info(note.message());
+    }
+
     if result.issues().has_errors() {
         display.print_error("Validation failed.");
 
@@ -145,6 +151,14 @@ mod tests {
         "#;
         fs.mock_config_file(config_dir, config_yaml);
         fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+        // No deploy state has been written yet.
+        fs.expect_read_file()
+            .withf(|path| path.ends_with("deploy-state.yml"))
+            .returning(|_| {
+                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
         // The report and the validation both resolve the default state
         // directory under the home directory when the file names none.
         mock_home(&mut fs);
@@ -202,6 +216,14 @@ mod tests {
         mock_home(&mut fs);
         fs.mock_directories_exist();
         fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+        // No deploy state has been written yet.
+        fs.expect_read_file()
+            .withf(|path| path.ends_with("deploy-state.yml"))
+            .returning(|_| {
+                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
 
         let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);

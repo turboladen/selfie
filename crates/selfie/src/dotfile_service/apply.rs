@@ -218,21 +218,22 @@ where
     // proceeding would deploy files it can never record, and the next run would
     // re-evaluate every one of them as untracked. A dry run writes nothing, so it
     // warns instead and previews against an empty state.
-    let mut loaded = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => {
-            if let Some(warning) = loaded.directory_warning() {
-                sender.send_warning(warning.to_string()).await;
+    let mut loaded =
+        match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
+            StateLoad::Usable(loaded) => {
+                if let Some(warning) = loaded.directory_warning() {
+                    sender.send_warning(warning.to_string()).await;
+                }
+                Some(loaded)
             }
-            Some(loaded)
-        }
-        StateLoad::Unusable(failure) if options.dry_run => {
-            sender.send_warning(read_only_state_warning(&failure)).await;
-            None
-        }
-        StateLoad::Unusable(failure) => {
-            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
-        }
-    };
+            StateLoad::Unusable(failure) if options.dry_run => {
+                sender.send_warning(read_only_state_warning(&failure)).await;
+                None
+            }
+            StateLoad::Unusable(failure) => {
+                return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+            }
+        };
     // What a dry run over an unusable state file reads drift against. Only a dry
     // run leaves `loaded` as `None`, and a dry run records nothing.
     let empty = DeployState::empty();

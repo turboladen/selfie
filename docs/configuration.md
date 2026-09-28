@@ -552,10 +552,13 @@ them, and reported as those commands treat what they find:
   path it could not check, such as a symlink loop, since they refuse to go on. A missing directory
   is also refused by `dotfiles track`, which validate still reports as a warning.
 
-`state_directory` gets the verdict a run reaches over the same path, in the run's own words. A
-missing one is a warning that it is not there yet, since selfie creates it on first use, and that
-the path may be a typo. Anything else in its way, or a path selfie could not check, is an error,
-because every command that records a deploy refuses to run over it.
+`state_directory` gets the verdict a run reaches over the same path, in the run's own words:
+validate loads the deploy state as a run does. A missing directory is an informational note, not a
+warning, that it is not there yet, since selfie creates it on first use, and that the path may be a
+typo; it does not stop the file validating. Anything else in its way, a path selfie could not check,
+a state file it cannot read (such as one inside a mode `000` directory), and a state file that is
+empty or does not parse are errors, because every command that records a deploy refuses to run over
+them.
 
 When `dotfiles_directory` or `state_directory` is not set, the default the commands use is checked
 the same way. Nothing at an unset default is not reported, since that is the ordinary state of a

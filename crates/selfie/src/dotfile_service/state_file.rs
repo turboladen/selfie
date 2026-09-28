@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
-    config::SelfieConfig,
     dotfile_service::state::DeployState,
     fs::{
         AbsentReason, DirectoryState,
@@ -29,7 +28,7 @@ const BACKUPS_DIRNAME: &str = "backups";
 ///
 /// An absent file and a loaded one are the same case here: both may be saved,
 /// and a first run has nothing on disk to protect.
-pub(super) struct LoadedState {
+pub(crate) struct LoadedState {
     path: TargetPath,
     state: DeployState,
     directory_warning: Option<String>,
@@ -45,7 +44,7 @@ impl LoadedState {
     /// Present when a configured `state_directory` is not there. Every caller sends
     /// it, because the load succeeds either way and an empty state that arrives
     /// silently is indistinguishable from a machine where nothing is deployed.
-    pub(super) fn directory_warning(&self) -> Option<&str> {
+    pub(crate) fn directory_warning(&self) -> Option<&str> {
         self.directory_warning.as_deref()
     }
 
@@ -68,7 +67,7 @@ impl LoadedState {
 }
 
 /// What loading the deploy state produced.
-pub(super) enum StateLoad {
+pub(crate) enum StateLoad {
     /// A state that may be read and written back.
     Usable(LoadedState),
     /// A file selfie could not use, or no location to look for one.
@@ -207,14 +206,10 @@ pub(crate) fn not_there_yet_warning(directory: &Path) -> String {
 /// worth making.
 fn deploy_state_path<F: FileSystem>(
     filesystem: &F,
-    config: &SelfieConfig,
+    state_directory: Option<&Path>,
 ) -> Result<(TargetPath, Option<String>), StateLoadFailure> {
-    let path = state_file_path(
-        filesystem,
-        config.state_directory().map(PathBuf::as_path),
-        DEPLOY_STATE_FILENAME,
-    )
-    .map_err(StateLoadFailure::Locate)?;
+    let path = state_file_path(filesystem, state_directory, DEPLOY_STATE_FILENAME)
+        .map_err(StateLoadFailure::Locate)?;
     // The state directory is selfie's own, so selfie creates it — whether the user
     // configured the path or took the default. `write_file_private` creates the
     // parent on the first write, so an absent directory needs nothing done here
@@ -235,9 +230,7 @@ fn deploy_state_path<F: FileSystem>(
         // instead of reporting conflicts. An unnamed default needs no warning, since
         // a first run is its ordinary state and nothing was typed to get it wrong.
         StateDirectoryVerdict::NotThereYet => {
-            let warning = config
-                .state_directory()
-                .map(|_| not_there_yet_warning(directory));
+            let warning = state_directory.map(|_| not_there_yet_warning(directory));
             Ok((path, warning))
         }
         StateDirectoryVerdict::Refused(failure) => Err(failure),
@@ -249,8 +242,11 @@ fn deploy_state_path<F: FileSystem>(
 /// An absent file is the ordinary first run and is usable with nothing in it.
 /// A file that cannot be located, read or parsed, or that is empty, is
 /// unusable, and the failure says which because the fixes differ.
-pub(super) fn load_deploy_state<F: FileSystem>(filesystem: &F, config: &SelfieConfig) -> StateLoad {
-    let (path, directory_warning) = match deploy_state_path(filesystem, config) {
+pub(crate) fn load_deploy_state<F: FileSystem>(
+    filesystem: &F,
+    state_directory: Option<&Path>,
+) -> StateLoad {
+    let (path, directory_warning) = match deploy_state_path(filesystem, state_directory) {
         Ok(pair) => pair,
         Err(failure) => return StateLoad::Unusable(failure),
     };
@@ -373,14 +369,6 @@ mod tests {
     const STATE_DIR: &str = "/state";
     const STATE_FILE: &str = "/state/deploy-state.yml";
 
-    fn config_with_state_dir() -> SelfieConfig {
-        SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory("/packages")
-            .state_directory(PathBuf::from(STATE_DIR))
-            .build()
-    }
-
     // A filesystem on which the state directory is a directory. Every test whose
     // subject is the state file rather than the directory starts here.
     fn under_a_state_directory() -> MockFileSystem {
@@ -405,7 +393,7 @@ mod tests {
             )))
         });
 
-        let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let state = state_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             state.entries().is_empty(),
@@ -428,7 +416,7 @@ mod tests {
             )))
         });
 
-        let StateLoad::Usable(loaded) = load_deploy_state(&fs, &config_with_state_dir()) else {
+        let StateLoad::Usable(loaded) = load_deploy_state(&fs, Some(Path::new(STATE_DIR))) else {
             panic!("a directory that is not there is selfie's to create");
         };
         let warning = loaded
@@ -462,7 +450,9 @@ mod tests {
             .package_directory("/packages")
             .build();
 
-        let StateLoad::Usable(loaded) = load_deploy_state(&fs, &config) else {
+        let StateLoad::Usable(loaded) =
+            load_deploy_state(&fs, config.state_directory().map(PathBuf::as_path))
+        else {
             panic!("the default is selfie's to create");
         };
 
@@ -492,7 +482,10 @@ mod tests {
             .package_directory("/packages")
             .build();
 
-        let state = state_of(load_deploy_state(&fs, &config));
+        let state = state_of(load_deploy_state(
+            &fs,
+            config.state_directory().map(PathBuf::as_path),
+        ));
 
         assert!(state.entries().is_empty(), "got: {state:?}");
     }
@@ -508,7 +501,7 @@ mod tests {
             kind: "regular file",
         }));
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             message.contains(STATE_DIR) && message.contains("is a regular file"),
@@ -529,7 +522,7 @@ mod tests {
             std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         )));
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             message.contains(STATE_DIR) && message.contains("could not be checked"),
@@ -616,7 +609,7 @@ mod tests {
     fn a_valid_state_file_loads_its_entries() {
         let fs = filesystem_holding(VALID_STATE_YAML);
 
-        let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let state = state_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(state.get("/home/u/.config/app.toml").is_some());
     }
@@ -629,7 +622,7 @@ mod tests {
     fn an_absent_state_file_is_usable_and_empty() {
         let fs = filesystem_without_the_state_file();
 
-        let state = state_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let state = state_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(state.entries().is_empty());
     }
@@ -648,7 +641,7 @@ mod tests {
             )))
         });
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             message.contains("Cannot read deploy state") && message.contains(STATE_FILE),
@@ -665,7 +658,7 @@ mod tests {
         for (name, content) in [("zero bytes", ""), ("whitespace only", "\n  \n")] {
             let fs = filesystem_holding(content);
 
-            let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+            let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
             assert!(
                 message.contains("is empty") && message.contains(STATE_FILE),
@@ -682,7 +675,7 @@ mod tests {
         for (name, content) in [("comment only", "# nothing here\n"), ("null", "~\n")] {
             let fs = filesystem_holding(content);
 
-            let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+            let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
             assert!(
                 message.contains("Cannot parse"),
@@ -695,7 +688,7 @@ mod tests {
     fn an_unparsable_state_file_is_named_in_the_message() {
         let fs = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             message.contains(STATE_FILE),
@@ -718,10 +711,10 @@ mod tests {
             )))
         });
         let unreadable_message =
-            failure_of(load_deploy_state(&unreadable, &config_with_state_dir()));
+            failure_of(load_deploy_state(&unreadable, Some(Path::new(STATE_DIR))));
 
         let corrupt = filesystem_holding("{{{{not valid yaml!!! garbage $$$");
-        let corrupt_message = failure_of(load_deploy_state(&corrupt, &config_with_state_dir()));
+        let corrupt_message = failure_of(load_deploy_state(&corrupt, Some(Path::new(STATE_DIR))));
 
         assert!(
             unreadable_message.contains("Cannot read"),
@@ -750,7 +743,7 @@ mod tests {
             })
         });
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             message.contains("named pipe (fifo)") && message.contains(STATE_FILE),
@@ -780,7 +773,10 @@ mod tests {
             .package_directory("/packages")
             .build();
 
-        let message = failure_of(load_deploy_state(&fs, &config));
+        let message = failure_of(load_deploy_state(
+            &fs,
+            config.state_directory().map(PathBuf::as_path),
+        ));
 
         assert!(
             message.contains("Cannot locate"),
@@ -805,7 +801,7 @@ mod tests {
     fn a_duplicate_key_does_not_reach_the_message() {
         let fs = filesystem_holding(&duplicate_key(KEY));
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         assert!(
             !message.contains(KEY),
@@ -943,7 +939,7 @@ mod tests {
         for (name, yaml, condition) in shapes {
             let fs = filesystem_holding(&yaml);
 
-            let message = match load_deploy_state(&fs, &config_with_state_dir()) {
+            let message = match load_deploy_state(&fs, Some(Path::new(STATE_DIR))) {
                 StateLoad::Unusable(failure) => failure.to_string(),
                 StateLoad::Usable(_) => {
                     panic!("{name}: stopped being an error, so this row no longer tests anything")
@@ -976,7 +972,7 @@ mod tests {
     fn a_parse_failure_names_its_condition() {
         let condition = |yaml: &str| {
             let fs = filesystem_holding(yaml);
-            let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+            let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
             let at = message
                 .find(" at line ")
                 .unwrap_or_else(|| panic!("a parse failure must say where it happened: {message}"));
@@ -1006,7 +1002,7 @@ mod tests {
         ] {
             let fs = filesystem_holding(&yaml);
 
-            let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+            let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
             assert!(
                 message.contains(expected),
@@ -1030,7 +1026,7 @@ mod tests {
         let key = "k".repeat(2500);
         let fs = filesystem_holding(&format!("? {key}\n: 1\n? {key}\n: 2\n"));
 
-        let message = failure_of(load_deploy_state(&fs, &config_with_state_dir()));
+        let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
 
         // Control: if this fixture stops producing a duplicate-key error, the
         // huge-key path goes untested and everything below still passes.
@@ -1067,7 +1063,7 @@ mod tests {
                 std::io::Error::other("disk full"),
             )))
         });
-        let loaded = match load_deploy_state(&fs, &config_with_state_dir()) {
+        let loaded = match load_deploy_state(&fs, Some(Path::new(STATE_DIR))) {
             StateLoad::Usable(loaded) => loaded,
             StateLoad::Unusable(failure) => panic!("an absent file must be usable: {failure}"),
         };

@@ -74,13 +74,12 @@ impl ConfigFile {
         }
 
         match super::setting_path(self.state_directory.as_deref()) {
+            // A relative path is reported as one, and not loaded from as well.
             Some(path) => issues.extend(
                 validate_directory_path(fs, "state_directory", path, Unresolved::Refused)
-                    .map_or_else(Some, |path| {
-                        state_directory_issue("state_directory", &path, fs.directory_state(&path))
-                    }),
+                    .map_or_else(Some, |path| deploy_state_issue(fs, Some(&path))),
             ),
-            None => issues.extend(default_state_directory_issue(fs)),
+            None => issues.extend(deploy_state_issue(fs, None)),
         }
 
         if let Some(issue) = validate_command_timeout(self.command_timeout) {
@@ -340,56 +339,33 @@ fn directory_suggestion(path: &Path, state: &DirectoryState) -> String {
     }
 }
 
-/// What to report about the state directory, whose state is `state`: the
-/// verdict a run reaches over the same path, in the run's own words.
-fn state_directory_issue(
-    field_name: &str,
-    path: &Path,
-    state: DirectoryState,
+/// What to report about the deploy state a run loads from `state_directory`,
+/// or from the default location when that is `None`: the run's own verdict, in
+/// its own words.
+fn deploy_state_issue(
+    fs: &impl FileSystem,
+    state_directory: Option<&Path>,
 ) -> Option<ValidationIssue> {
-    use crate::dotfile_service::state_file::{
-        StateDirectoryVerdict, not_there_yet_warning, state_directory_verdict,
-    };
+    use crate::dotfile_service::state_file::{StateLoad, load_deploy_state};
 
-    match state_directory_verdict(path, state) {
-        StateDirectoryVerdict::InUse => None,
-        StateDirectoryVerdict::NotThereYet => Some(ValidationIssue::warning(
-            ValidationErrorCategory::Advisory,
-            field_name,
-            &not_there_yet_warning(path),
-            None,
-        )),
-        // An error, because a run refuses it.
-        StateDirectoryVerdict::Refused(failure) => Some(ValidationIssue::error(
-            ValidationErrorCategory::PathFormat,
-            field_name,
-            &failure.to_string(),
-            None,
-        )),
-    }
-}
-
-/// What to report about the default state directory an unset
-/// `state_directory` takes.
-fn default_state_directory_issue(fs: &impl FileSystem) -> Option<ValidationIssue> {
-    use crate::dotfile_service::state_file::{StateDirectoryVerdict, state_directory_verdict};
-
-    let directory = match crate::fs::target::state_directory(fs, None) {
-        Ok(directory) => directory,
-        Err(error) => {
-            return Some(ValidationIssue::warning(
+    // The load a run makes, reading the file as well as classifying its
+    // directory, so a mode 000 directory is caught by the read that refuses it.
+    // Listing the directory instead would refuse a 0o300 one, which a run can
+    // read the file from and write to.
+    match load_deploy_state(fs, state_directory) {
+        // Present only for a configured directory that is not there yet. A
+        // note, not a warning: selfie creates it on the first write, so a fresh
+        // machine needs nothing done.
+        StateLoad::Usable(loaded) => loaded.directory_warning().map(|note| {
+            ValidationIssue::info(
                 ValidationErrorCategory::Advisory,
                 "state_directory",
-                &format!("The default `state_directory` could not be checked: {error}"),
+                note,
                 None,
-            ));
-        }
-    };
-    // The run's own verdict. A default that is not there yet is its ordinary
-    // first run, and the typo it may be applies only to a path the user typed.
-    match state_directory_verdict(&directory, fs.directory_state(&directory)) {
-        StateDirectoryVerdict::InUse | StateDirectoryVerdict::NotThereYet => None,
-        StateDirectoryVerdict::Refused(failure) => Some(ValidationIssue::error(
+            )
+        }),
+        // An error, because every command that records a deploy refuses it.
+        StateLoad::Unusable(failure) => Some(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             "state_directory",
             &failure.to_string(),
@@ -428,6 +404,16 @@ mod tests {
     // Every directory the port calls a directory lists, empty.
     fn listable(fs: &mut crate::fs::MockFileSystem) {
         fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+    }
+
+    // No deploy state has been written yet, which a run loads as an empty one.
+    fn no_deploy_state(fs: &mut crate::fs::MockFileSystem) {
+        fs.expect_irregular_target_refusal().returning(|_| None);
+        fs.expect_read_file().returning(|_| {
+            Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )))
+        });
     }
 
     // The file that would name exactly what `config` holds, so the fixtures below
@@ -620,6 +606,7 @@ mod tests {
         fs.expect_directory_state()
             .returning(|_| crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Empty));
         listable(&mut fs);
+        no_deploy_state(&mut fs);
 
         let result = as_file(&config).validate(&fs);
         let dir_errors: Vec<_> = result
@@ -883,10 +870,10 @@ mod tests {
         assert!(issues.is_empty());
     }
 
-    // A missing state directory on the real file system warns without offering
-    // `mkdir`, since selfie creates it on first use.
+    // A missing state directory on the real file system is a note, not a
+    // warning, and offers no `mkdir`, since selfie creates it on first use.
     #[test]
-    fn state_directory_absolute_nonexistent_warns_that_it_is_not_there_yet() {
+    fn state_directory_absolute_nonexistent_notes_that_it_is_not_there_yet() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
 
@@ -899,14 +886,16 @@ mod tests {
         let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
-            .warnings()
-            .into_iter()
+            .all_issues()
+            .iter()
             .filter(|i| i.field == "state_directory")
             .collect();
 
         assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].level, ValidationLevel::Info, "{issues:?}");
         assert_eq!(issues[0].category, ValidationErrorCategory::Advisory);
         assert!(issues[0].message.contains("not there yet"), "{issues:?}");
+        assert!(!result.issues().has_warnings(), "{:?}", result.issues());
     }
 
     // An empty value is unset, as it is to a run, so the default is checked.
@@ -1015,9 +1004,13 @@ mod tests {
 
     #[test]
     fn valid_config_has_no_issues() {
+        // A state directory of its own, so the result does not depend on the
+        // deploy state of the machine running the test.
+        let state = tempfile::tempdir().unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("macos")
             .package_directory("/tmp")
+            .state_directory(state.path().to_path_buf())
             .build();
 
         let result = as_file(&config).validate(&crate::fs::RealFileSystem);
@@ -1074,6 +1067,7 @@ mod tests {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(state);
         listable(&mut fs);
+        no_deploy_state(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1211,6 +1205,7 @@ mod tests {
     fn unlistable_issue(field: &str) -> Option<ValidationIssue> {
         let mut fs = MockFileSystem::default();
         fs.mock_directories_exist();
+        no_deploy_state(&mut fs);
         fs.expect_list_directory().returning(|_| {
             Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(
                 std::io::Error::from(std::io::ErrorKind::PermissionDenied),
@@ -1249,17 +1244,17 @@ mod tests {
     }
 
     // The state directory gets the verdict a run reaches over the same path. A
-    // missing one is created on first use, so it warns only that the path may be
-    // a typo, in the run's own words.
+    // missing one is created on first use, so it is only a note that the path
+    // may be a typo, in the run's own words.
     #[test]
-    fn a_missing_state_directory_warns_that_it_is_not_there_yet() {
+    fn a_missing_state_directory_notes_that_it_is_not_there_yet() {
         let issue = directory_issue(
             "state_directory",
             DirectoryState::Absent(AbsentReason::Empty),
         )
         .expect("an issue");
 
-        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert_eq!(issue.level, ValidationLevel::Info);
         assert_eq!(issue.category, ValidationErrorCategory::Advisory);
         assert!(issue.message.contains("is not there yet"), "{issue:?}");
         assert!(issue.message.contains("typo"), "{issue:?}");
@@ -1301,6 +1296,7 @@ mod tests {
         fs.expect_directory_state()
             .returning(|_| DirectoryState::Directory);
         listable(&mut fs);
+        no_deploy_state(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1330,6 +1326,7 @@ mod tests {
             let mut fs = MockFileSystem::default();
             fs.mock_directories_exist();
             listable(&mut fs);
+            no_deploy_state(&mut fs);
             let config = SelfieConfigBuilder::default()
                 .environment("linux")
                 .package_directory("/nowhere/packages")
@@ -1360,6 +1357,7 @@ mod tests {
             .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
         fs.mock_directories_exist();
         listable(&mut fs);
+        no_deploy_state(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1445,6 +1443,7 @@ mod tests {
             .returning(move |_| state_default.clone());
         fs.mock_directories_exist();
         listable(&mut fs);
+        no_deploy_state(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1499,5 +1498,148 @@ mod tests {
         );
 
         assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    // A run with no home directory has nowhere to put the default state and
+    // refuses, so validate reports it as an error.
+    #[test]
+    fn a_default_state_directory_that_cannot_be_located_is_an_error() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path()
+            .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
+        fs.mock_directories_exist();
+        listable(&mut fs);
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .build();
+
+        let result = as_file(&config).validate(&fs);
+
+        let issue = result
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "state_directory")
+            .cloned()
+            .expect("an issue");
+        assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
+        assert!(issue.message.contains("Cannot locate"), "{issue:?}");
+    }
+
+    // --- the deploy state a run loads, on a real file system ---
+
+    // The one `state_directory` issue for a file naming `state` as its state
+    // directory, with a package directory that exists.
+    fn state_issue(state: &std::path::Path) -> Option<ValidationIssue> {
+        let packages = tempfile::tempdir().unwrap();
+        let file = ConfigFile {
+            environment: Some("linux".to_string()),
+            package_directory: Some(packages.path().to_path_buf()),
+            dotfiles_directory: Some(packages.path().to_path_buf()),
+            state_directory: Some(state.to_path_buf()),
+            ..ConfigFile::default()
+        };
+        file.validate(&crate::fs::RealFileSystem)
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "state_directory")
+            .cloned()
+    }
+
+    fn with_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    // A run refuses a state directory it cannot read the state file from, so
+    // the check of the configuration does too. An lstat alone calls it a
+    // directory in use.
+    #[test]
+    fn a_mode_000_state_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("deploy-state.yml"), "deployed: {}\n").unwrap();
+        with_mode(&state, 0o000);
+        // Root reads through a 0o000 directory, so the case cannot be built.
+        if std::fs::read_to_string(state.join("deploy-state.yml")).is_ok() {
+            with_mode(&state, 0o755);
+            eprintln!("SKIP: this user can read through a 0o000 directory");
+            return;
+        }
+
+        let issue = state_issue(&state);
+        with_mode(&state, 0o755);
+
+        let issue = issue.expect("an issue");
+        assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
+        assert!(
+            issue.message.contains("Cannot read deploy state"),
+            "{issue:?}"
+        );
+    }
+
+    // The control: a directory selfie can write into and read the state file
+    // from, but cannot list. A run uses it, so it is no issue, which a check by
+    // listing would get wrong.
+    #[test]
+    fn a_write_only_state_directory_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("deploy-state.yml"), "deployed: {}\n").unwrap();
+        with_mode(&state, 0o300);
+        // The premise: listing fails while the file still reads.
+        let listing_fails = std::fs::read_dir(&state).is_err();
+        let file_reads = std::fs::read_to_string(state.join("deploy-state.yml")).is_ok();
+
+        let issue = state_issue(&state);
+        with_mode(&state, 0o755);
+
+        if !listing_fails {
+            eprintln!("SKIP: this user can list a 0o300 directory");
+            return;
+        }
+        assert!(
+            file_reads,
+            "the premise: the state file reads through 0o300"
+        );
+        assert_eq!(issue, None);
+    }
+
+    #[test]
+    fn a_corrupt_deploy_state_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("deploy-state.yml"), "deployed: [\n").unwrap();
+
+        let issue = state_issue(dir.path()).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
+        assert!(
+            issue.message.contains("Cannot parse deploy state"),
+            "{issue:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_deploy_state_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("deploy-state.yml"), "").unwrap();
+
+        let issue = state_issue(dir.path()).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
+        assert!(issue.message.contains("is empty"), "{issue:?}");
+    }
+
+    // Its control: a state that loads is no issue.
+    #[test]
+    fn a_readable_deploy_state_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("deploy-state.yml"), "deployed: {}\n").unwrap();
+
+        assert_eq!(state_issue(dir.path()), None);
     }
 }

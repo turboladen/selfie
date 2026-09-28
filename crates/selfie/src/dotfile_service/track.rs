@@ -578,17 +578,18 @@ where
     // Ahead of every write below. Track ends by recording the deployment, and a
     // state file it could not load is one it must not write over, so the copy
     // and the spec are not created for a record that cannot be kept.
-    let mut loaded = match load_deploy_state(filesystem, config) {
-        StateLoad::Usable(loaded) => {
-            if let Some(warning) = loaded.directory_warning() {
-                sender.send_warning(warning.to_string()).await;
+    let mut loaded =
+        match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
+            StateLoad::Usable(loaded) => {
+                if let Some(warning) = loaded.directory_warning() {
+                    sender.send_warning(warning.to_string()).await;
+                }
+                loaded
             }
-            loaded
-        }
-        StateLoad::Unusable(failure) => {
-            return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
-        }
-    };
+            StateLoad::Unusable(failure) => {
+                return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+            }
+        };
 
     let filename = expanded_target
         .path()

@@ -143,3 +143,27 @@ fn a_flag_does_not_change_the_cli_settings_this_reports() {
         .stdout(predicates::str::contains("use_colors: true"))
         .stdout(predicates::str::contains("verbose: true"));
 }
+
+// A fresh machine: the named state directory is not there yet, and selfie
+// creates it on the first write. That needs nothing done, so it is a note and
+// the file still validates.
+#[test]
+fn a_state_directory_not_there_yet_is_a_note_not_a_warning() {
+    let packages = tempfile::tempdir().unwrap();
+    let state = packages.path().join("state-not-there-yet");
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"\nstate_directory: \"{}\"\n",
+        packages.path().display(),
+        state.display()
+    );
+
+    let temp_dir = setup_test_config(&yaml);
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["config", "validate"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("is not there yet"))
+        .stdout(predicates::str::contains("Configuration is valid."))
+        .stderr(predicates::str::contains("Validation failed.").not());
+}
