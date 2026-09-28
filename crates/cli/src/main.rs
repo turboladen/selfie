@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         let (selfie_config, mut notices, cli_load) = match YamlLoader::new(&fs).load_config() {
             Ok(loaded) => {
                 let notices = crate::config::library_config_notices(loaded.ignored_keys());
-                // From the same parse, not a second read of the same file.
+                // From the text the library read, not a second read of the file.
                 let cli_load = crate::config::cli_section(&loaded);
                 (loaded.into_config(), notices, cli_load)
             }

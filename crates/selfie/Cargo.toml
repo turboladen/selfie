@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 chrono.workspace = true
-config = { version = "0.15.9", features = ["yaml"] }
 dunce.workspace = true
 etcetera.workspace = true
 futures.workspace = true

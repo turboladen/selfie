@@ -42,9 +42,13 @@ fn test_invalid_yaml_config_error() {
     cmd.env("SELFIE_CONFIG_DIR", config_dir);
     cmd.args(["config", "validate"]);
 
+    // The parser's own sentence and where it stopped, never the line itself.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("while parsing a flow sequence"));
+        .stderr(predicate::str::contains(
+            "unclosed bracket '[' at line 1, column 15",
+        ))
+        .stderr(predicate::str::contains("invalid_yaml").not());
 }
 
 #[test]

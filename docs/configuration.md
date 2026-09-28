@@ -18,6 +18,21 @@ Selfie looks for configuration files in this order:
 You can also override the configuration directory using the `SELFIE_CONFIG_DIR` environment
 variable.
 
+### How the file is read
+
+Each setting is read as its own type:
+
+- `stop_on_error` takes `true` or `false`. `1` and `0` are refused.
+- `command_timeout` and `max_concurrency` take whole numbers, so `60.0` is refused.
+- `environment` is text exactly as written, so `environment: 010` names the environment `010`.
+
+A YAML merge key (`<<: *anchor`) is merged into the mapping it sits in. A key spelled with a dot,
+such as `cli.verbose: true`, is a key of that name and not a path: selfie reports it as an
+unrecognized setting and does not read it as `verbose` under `cli:`.
+
+When the file cannot be parsed, selfie names the kind of problem and the line and column where it
+is, and never quotes the file.
+
 ## Environment Variables
 
 Selfie recognizes several environment variables that affect its behavior:

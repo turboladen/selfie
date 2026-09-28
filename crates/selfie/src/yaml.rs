@@ -1,11 +1,9 @@
 //! Reading YAML, and describing a file that would not parse.
 //!
 //! Every YAML file selfie deserializes into its own types comes through
-//! [`parse`], which suppresses serde-saphyr's source snippets and answers a
-//! [`ParseFailure`] rather than the parser's own error. No parse failure here
-//! quotes the text it was reading. Selfie's own config file is the one YAML it
-//! reads by another route: [`config::yaml`](crate::config::yaml) hands it to the
-//! `config` crate, which classifies nothing.
+//! [`parse`] or [`parse_reporting_ignored`], which suppress serde-saphyr's source
+//! snippets and answer a [`ParseFailure`] rather than the parser's own error. No
+//! parse failure here quotes the text it was reading.
 //!
 //! What still escapes is a failure class, a noun drawn from the deserializer's
 //! own vocabulary, a line and column, and -- where the scanner's own sentence is
@@ -38,14 +36,32 @@ use serde::de::DeserializeOwned;
 ///
 /// [`ParseFailure`] when `content` is not valid YAML, or does not describe a `T`.
 pub fn parse<T: DeserializeOwned>(content: &str) -> Result<T, ParseFailure> {
+    // One route to the parser, so a file read either way is parsed alike.
+    parse_reporting_ignored(content, |_| {})
+}
+
+/// Read `content` as `T`, as [`parse`] does, and hand `ignored` the path of
+/// every key `T` did not consume.
+///
+/// An ignored mapping is reported once, at its own key, and not key by key
+/// inside it.
+///
+/// # Errors
+///
+/// [`ParseFailure`] when `content` is not valid YAML, or does not describe a `T`.
+pub fn parse_reporting_ignored<T: DeserializeOwned>(
+    content: &str,
+    mut ignored: impl FnMut(&serde_ignored::Path<'_>),
+) -> Result<T, ParseFailure> {
     // `ParseFailure` is what keeps the file's text out of the answer; suppressing
     // the snippet means the parser never builds the quoted window in the first
     // place. Set here rather than at each call site so a new caller cannot omit it.
-    let parsed = serde_saphyr::from_str_with_options(
+    let parsed = serde_saphyr::with_deserializer_from_str_with_options(
         content,
         serde_saphyr::options! {
             with_snippet: false
         },
+        |deserializer| serde_ignored::deserialize(deserializer, |path| ignored(&path)),
     );
     parsed.map_err(|e| ParseFailure::of(&e))
 }

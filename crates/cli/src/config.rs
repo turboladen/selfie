@@ -108,12 +108,12 @@ pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayM
     }
 }
 
-/// The `cli:` section, taken from the parse the library already did.
+/// The `cli:` section, parsed from the text the library already read.
 ///
 /// Returns the defaults and a notice when the section is present but is not a
 /// mapping.
 pub(crate) fn cli_section(loaded: &LoadedConfig) -> CliSectionLoad {
-    match loaded.frontend_section::<CliSection>("cli") {
+    match loaded.cli_section::<CliSection>() {
         Ok(Some(section)) => CliSectionLoad {
             notices: section
                 .ignored_keys()

@@ -3,15 +3,13 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
 
-use config::FileFormat;
-
 use crate::{
     config::SelfieConfig,
     fs::{FileSystem, FileSystemError},
 };
 
 use super::{
-    diagnostics::{FRONTEND_SECTIONS, LoadedConfig, library_ignored_keys},
+    diagnostics::{LoadedConfig, ignored_segments, library_ignored_keys},
     loader::{
         ConfigLoadError, ConfigLoader, irregular_config_refusal, unresolvable_config_refusal,
     },
@@ -81,9 +79,6 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
             });
         }
 
-        // Start with default configuration
-        let mut builder = config::Config::builder();
-
         let config_path = &config_paths[0];
 
         // Before the read, not after it. `find_config_file_paths` selects a path
@@ -95,30 +90,18 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
 
         let file_contents = self.fs.read_file(config_path)?;
 
-        builder = builder.add_source(config::File::from_str(&file_contents, FileFormat::Yaml));
-
-        // Build the config
-        let config = builder.build()?;
-
-        // Lift out each frontend's section *before* deserializing, so a frontend
-        // reads its own settings from this parse instead of opening the file
-        // again with a different YAML library.
-        let sections: std::collections::BTreeMap<String, config::Value> = FRONTEND_SECTIONS
-            .iter()
-            .filter_map(|name| {
-                config
-                    .get::<config::Value>(name)
-                    .ok()
-                    .map(|value| ((*name).to_string(), value))
-            })
-            .collect();
-
         // Every key it did not consume, rather than dropping them.
         // `serde_ignored` wraps the deserializer, so the set is serde's own
         // answer and cannot go stale when a field is added here.
         let mut ignored_paths = Vec::new();
         let mut selfie_config: SelfieConfig =
-            serde_ignored::deserialize(config, |path| ignored_paths.push(path.to_string()))?;
+            crate::yaml::parse_reporting_ignored(&file_contents, |path| {
+                ignored_paths.push(ignored_segments(path));
+            })
+            .map_err(|failure| ConfigLoadError::Parse {
+                path: config_path.clone(),
+                failure,
+            })?;
         let ignored_keys = library_ignored_keys(ignored_paths);
 
         // Special handling for ~ expansion on path fields
@@ -139,7 +122,11 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
             selfie_config.state_directory = Some(expanded);
         }
 
-        Ok(LoadedConfig::new(selfie_config, ignored_keys, sections))
+        Ok(LoadedConfig::new(
+            selfie_config,
+            ignored_keys,
+            file_contents,
+        ))
     }
 
     /// Find configuration file paths in standard locations
@@ -421,10 +408,10 @@ mod tests {
             assert!(result.is_err());
             if let Err(err) = result {
                 match err {
-                    ConfigLoadError::ConfigError(_) => {
+                    ConfigLoadError::Parse { .. } => {
                         // Expected error type
                     }
-                    _ => panic!("Expected ConfigError, got: {err:?}"),
+                    _ => panic!("Expected Parse, got: {err:?}"),
                 }
             }
         }
@@ -448,10 +435,10 @@ mod tests {
             assert!(result.is_err());
             if let Err(err) = result {
                 match err {
-                    ConfigLoadError::ConfigError(_) => {
+                    ConfigLoadError::Parse { .. } => {
                         // Expected error type for missing fields
                     }
-                    _ => panic!("Expected ConfigError, got: {err:?}"),
+                    _ => panic!("Expected Parse, got: {err:?}"),
                 }
             }
         }
@@ -471,9 +458,11 @@ mod tests {
             fs.mock_config_file(config_dir, invalid_types_yaml);
 
             let loader = YamlLoader::new(&fs);
-            let result = loader.load_config();
+            let message = loader.load_config().unwrap_err().to_string();
 
-            assert!(result.is_err());
+            // The failure says where, never what was there.
+            assert!(message.contains("line 4"), "got: {message}");
+            assert!(!message.contains("not-a-number"), "got: {message}");
         }
 
         #[test]
@@ -574,10 +563,10 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                ConfigLoadError::ConfigError(_) => {
+                ConfigLoadError::Parse { .. } => {
                     // Expected config error for invalid YAML
                 }
-                _ => panic!("Expected ConfigError for invalid YAML"),
+                _ => panic!("Expected Parse for invalid YAML"),
             }
         }
 
@@ -782,7 +771,7 @@ mod tests {
 
         // The wording and filtering have their own tests beside the types. These
         // drive the real loader instead, because what they pin is the behavior of
-        // `serde_ignored` over the `config` crate's deserializer -- which keys it
+        // `serde_ignored` over serde-saphyr's deserializer -- which keys it
         // reports, and in what shape.
         fn ignored_keys_for(config_yaml: &str) -> Vec<String> {
             let mut fs = MockFileSystem::default();
@@ -889,38 +878,38 @@ mod tests {
             assert!(keys.is_empty(), "expected no diagnostics, got: {keys:?}");
         }
 
-        // The `cli:` section comes back from the parse the library already did,
-        // so a frontend never opens the file a second time with a second YAML
-        // library. These pin what that hands back.
+        // The `cli:` section is parsed from the text the library already read,
+        // through the same entry point, so a frontend never opens the file a
+        // second time with a second YAML library. These pin what that hands back.
         #[derive(Debug, serde::Deserialize)]
         struct FakeSection {
             #[serde(default)]
             verbose: bool,
         }
 
-        fn load_section(config_yaml: &str) -> Result<Option<(bool, Vec<String>)>, ConfigLoadError> {
+        fn load_section(
+            config_yaml: &str,
+        ) -> Result<Option<(bool, Vec<String>)>, crate::yaml::ParseFailure> {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
             fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
-            Ok(loaded
-                .frontend_section::<FakeSection>("cli")?
-                .map(|section| {
-                    let keys = section
-                        .ignored_keys()
-                        .iter()
-                        .map(|k| k.key().to_string())
-                        .collect();
-                    (section.value().verbose, keys)
-                }))
+            Ok(loaded.cli_section::<FakeSection>()?.map(|section| {
+                let keys = section
+                    .ignored_keys()
+                    .iter()
+                    .map(|k| k.key().to_string())
+                    .collect();
+                (section.value().verbose, keys)
+            }))
         }
 
         const BASE: &str = "environment: \"test-env\"\npackage_directory: \"/test/packages\"\n";
 
         #[test]
-        fn a_frontend_section_is_read_from_the_library_s_own_parse() {
+        fn the_cli_section_is_read_from_the_text_the_library_read() {
             let (verbose, ignored) = load_section(&format!("{BASE}cli:\n  verbose: true\n"))
                 .unwrap()
                 .unwrap();
@@ -939,34 +928,87 @@ mod tests {
             assert_eq!(ignored, vec!["verbos".to_string()]);
         }
 
-        // A dotted top-level key is **path syntax** to the `config` crate, not a
-        // key whose name contains a dot: `"cli.verbose": true` is merged into the
-        // `cli` table and read as that section's `verbose`. So it is consumed
-        // rather than ignored, at either level.
-        //
-        // Worth pinning because the obvious reading is the opposite one, and
-        // because it is why a top-level key can no longer be mistaken for one
-        // inside a section: reading the section from this same parse means there
-        // is no second, differently-parsed view to disagree with.
+        // The loaded file keeps its text for the `cli:` section, and a debug print
+        // of it must not carry that text: an unknown key may hold anything.
         #[test]
-        fn a_dotted_top_level_key_is_merged_into_the_section() {
+        fn a_debug_print_leaves_out_the_file_text() {
+            let loaded = load(&format!("{BASE}stray_token: abc-planted-value\n")).unwrap();
+
+            let printed = format!("{loaded:?}");
+
+            assert!(!printed.contains("abc-planted-value"), "{printed}");
+        }
+
+        // A top-level key spelled `cli.verbose` is a key with a dot in its name,
+        // not path syntax. It belongs to no section, so the library reports it and
+        // the CLI section neither reads it nor reports it.
+        #[test]
+        fn a_literal_dotted_key_is_reported_by_the_library() {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
-            fs.mock_config_file(config_dir, &format!("{BASE}\"cli.verbose\": true\n"));
+            fs.mock_config_file(
+                config_dir,
+                &format!("{BASE}\"cli.verbose\": true\ncli:\n  verbose: false\n"),
+            );
             fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
-            let section = loaded
-                .frontend_section::<FakeSection>("cli")
-                .unwrap()
-                .expect("the dotted key creates the section");
+            let keys: Vec<&str> = loaded.ignored_keys().iter().map(|k| k.key()).collect();
+            assert_eq!(keys, vec!["cli.verbose"]);
 
-            assert!(section.value().verbose, "it is read as the section's key");
+            let section = loaded
+                .cli_section::<FakeSection>()
+                .unwrap()
+                .expect("the file has a cli: section");
             assert!(
-                loaded.ignored_keys().is_empty(),
-                "and so is not reported at the top level, got: {:?}",
-                loaded.ignored_keys()
+                section.ignored_keys().is_empty(),
+                "the dotted key is not the section's, got: {:?}",
+                section.ignored_keys()
             );
+            assert!(!section.value().verbose, "and it is not merged into it");
+        }
+
+        // Each pins a value that a reader coercing between types would take
+        // differently.
+        fn load(config_yaml: &str) -> Result<LoadedConfig, ConfigLoadError> {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_file(config_dir, config_yaml);
+            fs.mock_expand_path("/test/packages", "/test/packages");
+            YamlLoader::new(&fs).load_config()
+        }
+
+        #[test]
+        fn a_number_is_not_a_boolean() {
+            let result = load(&format!("{BASE}stop_on_error: 1\n"));
+
+            assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+        }
+
+        #[test]
+        fn a_timeout_with_a_fraction_is_refused() {
+            let result = load(&format!("{BASE}command_timeout: 60.0\n"));
+
+            assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+        }
+
+        #[test]
+        fn a_numeric_looking_environment_is_kept_as_written() {
+            let loaded = load("environment: 010\npackage_directory: \"/test/packages\"\n").unwrap();
+
+            assert_eq!(loaded.config().environment(), "010");
+        }
+
+        #[test]
+        fn a_merge_key_is_merged() {
+            let loaded = load(
+                "defaults: &defaults\n  command_timeout: 90\n<<: *defaults\nenvironment: test-env\npackage_directory: \"/test/packages\"\n",
+            )
+            .unwrap();
+
+            assert_eq!(loaded.config().command_timeout().as_secs(), 90);
+            let keys: Vec<&str> = loaded.ignored_keys().iter().map(|k| k.key()).collect();
+            assert_eq!(keys, vec!["defaults"]);
         }
 
         // An empty section is a legitimate thing to write. It parses as null, and
