@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
+    dotfile_service::directory::{UnlistedDotfilesDirectory, absent_warning},
     fs::{AbsentReason, DirectoryState, FileSystem},
+    package::repository::yaml::list_spec_directory,
     validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues},
 };
 
@@ -58,26 +60,26 @@ impl ConfigFile {
         // An unset directory setting is checked at the default the commands use,
         // since they read it there.
         match super::setting_path(self.dotfiles_directory.as_deref()) {
-            Some(path) => issues.extend(validate_directory_path(
-                fs,
-                "dotfiles_directory",
-                path,
-                Setting::Read,
-            )),
+            Some(path) => issues.extend(
+                validate_directory_path(fs, "dotfiles_directory", path, Unresolved::Tolerated)
+                    .map_or_else(Some, |path| dotfiles_directory_issue(fs, &path, true)),
+            ),
             None => {
-                if let Some(default) = self.default_dotfiles_directory_for_validation(fs) {
-                    issues.extend(default_dotfiles_directory_issue(fs, &default));
+                if let Some(default) = self.default_dotfiles_directory_for_validation(fs)
+                    && default.is_absolute()
+                {
+                    issues.extend(dotfiles_directory_issue(fs, &default, false));
                 }
             }
         }
 
         match super::setting_path(self.state_directory.as_deref()) {
-            Some(path) => issues.extend(validate_directory_path(
-                fs,
-                "state_directory",
-                path,
-                Setting::State,
-            )),
+            Some(path) => issues.extend(
+                validate_directory_path(fs, "state_directory", path, Unresolved::Refused)
+                    .map_or_else(Some, |path| {
+                        state_directory_issue("state_directory", &path, fs.directory_state(&path))
+                    }),
+            ),
             None => issues.extend(default_state_directory_issue(fs)),
         }
 
@@ -194,49 +196,65 @@ fn validate_package_directory(
         )];
     }
 
-    validate_directory_path(fs, "package_directory", package_directory, Setting::Read)
-        .into_iter()
-        .collect()
+    validate_directory_path(
+        fs,
+        "package_directory",
+        package_directory,
+        Unresolved::Refused,
+    )
+    .map_or_else(Some, |path| package_directory_issue(fs, &path))
+    .into_iter()
+    .collect()
 }
 
-/// Says which directory a setting names, which decides what its state means.
+/// What a run does with a directory setting whose `~` it cannot resolve: it
+/// keeps the path as written, which is relative.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Setting {
-    /// A directory selfie reads specs from. A command finds nothing in a missing
-    /// one, so the warning offers to create it.
-    Read,
-    /// The state directory. selfie creates it on first use and refuses a run
-    /// over anything else in its way, so the report is the run's own verdict.
-    State,
+enum Unresolved {
+    /// The reading commands refuse it.
+    Refused,
+    /// The reading commands carry on without what it holds.
+    Tolerated,
 }
 
-/// Validate a directory path: `~` is expanded through `fs`, the result must be
-/// absolute, and what `fs` finds at it is reported when that is not a directory.
+/// Validate a directory path: `~` is expanded through `fs`, and the result must
+/// be absolute. `unresolved` grades a `~` that cannot be resolved.
+///
+/// `Ok` carries the expanded path, for the caller to check what is there.
 fn validate_directory_path(
     fs: &impl FileSystem,
     field_name: &str,
     path: &Path,
-    setting: Setting,
-) -> Option<ValidationIssue> {
+    unresolved: Unresolved,
+) -> Result<PathBuf, ValidationIssue> {
     // The same expansion a run applies, which also says when the home directory
     // could not be found, where a run would keep the path as written.
     let expanded_path = match super::expand_setting(fs, path) {
         Ok(expanded) => expanded,
-        // Nothing is wrong with the setting itself, so this is no error.
         Err(error) => {
-            return Some(ValidationIssue::warning(
-                ValidationErrorCategory::Advisory,
-                field_name,
-                &format!(
-                    "The `{field_name}` path could not be checked: could not resolve ~: {error}"
-                ),
-                None,
-            ));
+            let message = format!(
+                "The `{field_name}` path could not be checked: could not resolve ~: {error}"
+            );
+            return Err(if unresolved == Unresolved::Tolerated {
+                ValidationIssue::warning(
+                    ValidationErrorCategory::Advisory,
+                    field_name,
+                    &message,
+                    None,
+                )
+            } else {
+                ValidationIssue::error(
+                    ValidationErrorCategory::PathFormat,
+                    field_name,
+                    &message,
+                    None,
+                )
+            });
         }
     };
 
     if !expanded_path.is_absolute() {
-        return Some(ValidationIssue::error(
+        return Err(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             field_name,
             &format!("The `{field_name}` path is relative and cannot be resolved"),
@@ -244,71 +262,80 @@ fn validate_directory_path(
         ));
     }
 
-    let state = fs.directory_state(&expanded_path);
-    match setting {
-        Setting::Read => read_directory_issue(field_name, &expanded_path, state),
-        Setting::State => state_directory_issue(field_name, &expanded_path, state),
-    }
+    Ok(expanded_path)
 }
 
-/// What to report about a directory selfie reads specs from, whose state is
-/// `state`.
-fn read_directory_issue(
-    field_name: &str,
+/// What to report about the package directory at `path`: an error whenever it
+/// cannot be listed, since every command reading it fails.
+fn package_directory_issue(fs: &impl FileSystem, path: &Path) -> Option<ValidationIssue> {
+    // Listed the way the repository lists it, so the verdict is the one a
+    // command reaches, `Unlistable` included. `spec create` alone carries on over
+    // a missing directory, creating it, which is why the remedy is still offered.
+    let error = list_spec_directory(fs, path).err()?;
+    Some(ValidationIssue::error(
+        ValidationErrorCategory::PathFormat,
+        "package_directory",
+        &format!("The `package_directory` path {error}"),
+        Some(&directory_suggestion(path, error.state())),
+    ))
+}
+
+/// What to report about the standalone dotfiles directory at `path`, where
+/// `configured` says whether the user named it: what the reading commands do
+/// with it, as they decide it.
+fn dotfiles_directory_issue(
+    fs: &impl FileSystem,
     path: &Path,
-    state: DirectoryState,
+    configured: bool,
 ) -> Option<ValidationIssue> {
-    // Only a path something else occupies is an error, since nothing can be
-    // created there. Every other state warns, as a command reading the directory
-    // warns and carries on.
+    let error = list_spec_directory(fs, path).err()?;
+    let check_it = directory_suggestion(path, error.state());
+    let unlisted = UnlistedDotfilesDirectory::classify(error, configured);
+    let refuses = unlisted.refuses_collection();
+    let (message, suggestion) = match unlisted {
+        UnlistedDotfilesDirectory::OrdinarilyAbsent => return None,
+        // The commands' own sentence already ends with the remedy, so only the
+        // correction of a setting the user typed is suggested beside it.
+        UnlistedDotfilesDirectory::Absent { path, reason } => (
+            absent_warning(&path, &reason),
+            configured.then(|| "Correct the setting if the path is a typo".to_string()),
+        ),
+        UnlistedDotfilesDirectory::Unlistable(error)
+        | UnlistedDotfilesDirectory::Unknown(error) => (
+            format!("The `dotfiles_directory` path {error}"),
+            Some(check_it),
+        ),
+    };
+    Some(if refuses {
+        ValidationIssue::error(
+            ValidationErrorCategory::PathFormat,
+            "dotfiles_directory",
+            &message,
+            suggestion.as_deref(),
+        )
+    } else {
+        ValidationIssue::warning(
+            ValidationErrorCategory::PathFormat,
+            "dotfiles_directory",
+            &message,
+            suggestion.as_deref(),
+        )
+    })
+}
+
+/// What to do about a spec directory at `path` whose state is `state`.
+fn directory_suggestion(path: &Path, state: &DirectoryState) -> String {
     match state {
-        DirectoryState::Directory => None,
-        DirectoryState::Absent(AbsentReason::Occupied { .. }) => Some(ValidationIssue::error(
-            ValidationErrorCategory::PathFormat,
-            field_name,
-            &format!(
-                "The `{field_name}` path {} {}",
-                path.display(),
-                state.clause()
-            ),
-            Some("Provide a path to a directory, not a file"),
-        )),
-        DirectoryState::Absent(AbsentReason::Empty) => Some(ValidationIssue::warning(
-            ValidationErrorCategory::PathFormat,
-            field_name,
-            &format!(
-                "The `{field_name}` path {} {}",
-                path.display(),
-                state.clause()
-            ),
-            Some(&format!(
-                "Correct the setting if the path is a typo, or create it with: mkdir -p -- {}",
-                crate::fs::shell_quote(path)
-            )),
-        )),
-        DirectoryState::Absent(_) => Some(ValidationIssue::warning(
-            ValidationErrorCategory::PathFormat,
-            field_name,
-            &format!(
-                "The `{field_name}` path {} {}",
-                path.display(),
-                state.clause()
-            ),
-            Some("Update the path to name a directory"),
-        )),
-        // `Unlistable` needs a listing to discover, and this answer comes from a
-        // stat, so it is grouped in to keep the match total.
-        DirectoryState::Unlistable(_) | DirectoryState::Unknown(_) => {
-            Some(ValidationIssue::warning(
-                ValidationErrorCategory::Advisory,
-                field_name,
-                &format!(
-                    "The `{field_name}` path {} {}",
-                    path.display(),
-                    state.clause()
-                ),
-                Some("Check the path and each directory above it"),
-            ))
+        DirectoryState::Absent(AbsentReason::Empty) => format!(
+            "Correct the setting if the path is a typo, or create it with: mkdir -p -- {}",
+            crate::fs::shell_quote(path)
+        ),
+        DirectoryState::Absent(AbsentReason::Occupied { .. }) => {
+            "Provide a path to a directory, not a file".to_string()
+        }
+        DirectoryState::Absent(_) => "Update the path to name a directory".to_string(),
+        DirectoryState::Directory | DirectoryState::Unlistable(_) | DirectoryState::Unknown(_) => {
+            "Check the path and each directory above it".to_string()
         }
     }
 }
@@ -339,22 +366,6 @@ fn state_directory_issue(
             &failure.to_string(),
             None,
         )),
-    }
-}
-
-/// What to report about the dotfiles directory at `path`, the default an unset
-/// `dotfiles_directory` takes.
-fn default_dotfiles_directory_issue(fs: &impl FileSystem, path: &Path) -> Option<ValidationIssue> {
-    // A relative package directory is already reported, and its sibling default
-    // names nothing to classify.
-    if !path.is_absolute() {
-        return None;
-    }
-    match fs.directory_state(path) {
-        // Nothing at an unset default is the ordinary state of a setup with no
-        // standalone dotfiles, and the commands say nothing about it either.
-        DirectoryState::Absent(AbsentReason::Empty) => None,
-        state => read_directory_issue("dotfiles_directory", path, state),
     }
 }
 
@@ -413,6 +424,11 @@ mod tests {
 
     use crate::config::{ConfigFile, SelfieConfig, SelfieConfigBuilder};
     use crate::validation::ValidationErrorCategory;
+
+    // Every directory the port calls a directory lists, empty.
+    fn listable(fs: &mut crate::fs::MockFileSystem) {
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+    }
 
     // The file that would name exactly what `config` holds, so the fixtures below
     // can keep using the builder.
@@ -595,8 +611,17 @@ mod tests {
             .environment("macos")
             .package_directory("~/packages")
             .build();
+        let mut fs = crate::fs::MockFileSystem::default();
+        fs.expect_expand_path()
+            .returning(|_| Ok(PathBuf::from("/home/me")));
+        fs.expect_directory_state()
+            .withf(|path| path == std::path::Path::new("/home/me/packages"))
+            .returning(|_| crate::fs::DirectoryState::Directory);
+        fs.expect_directory_state()
+            .returning(|_| crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Empty));
+        listable(&mut fs);
 
-        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&fs);
         let dir_errors: Vec<_> = result
             .issues()
             .errors()
@@ -607,8 +632,10 @@ mod tests {
         assert!(dir_errors.is_empty());
     }
 
+    // Every command that reads the package directory fails without it, so a
+    // missing one is an error, with the remedy offered.
     #[test]
-    fn nonexistent_package_directory_produces_warning() {
+    fn nonexistent_package_directory_produces_error() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
 
@@ -618,16 +645,24 @@ mod tests {
             .build();
 
         let result = as_file(&config).validate(&crate::fs::RealFileSystem);
-        let warnings: Vec<_> = result
+        let errors: Vec<_> = result
             .issues()
-            .warnings()
+            .errors()
             .into_iter()
             .filter(|i| i.field == "package_directory")
             .collect();
 
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
-        assert!(warnings[0].message.contains("does not exist"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
+        assert!(errors[0].message.contains("does not exist"));
+        assert!(
+            errors[0]
+                .suggestion
+                .as_deref()
+                .is_some_and(|s| s.contains("mkdir -p --")),
+            "{:?}",
+            errors[0]
+        );
     }
 
     #[test]
@@ -1038,6 +1073,7 @@ mod tests {
     fn directory_issue(field: &str, state: DirectoryState) -> Option<ValidationIssue> {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(state);
+        listable(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1085,10 +1121,12 @@ mod tests {
         );
     }
 
+    // No command can read specs from a file, and none can create the directory
+    // over it, so the package directory's report is an error.
     #[test]
-    fn a_path_a_file_occupies_is_an_error() {
+    fn a_package_directory_a_file_occupies_is_an_error() {
         let issue = directory_issue(
-            "dotfiles_directory",
+            "package_directory",
             DirectoryState::Absent(AbsentReason::Occupied {
                 kind: "regular file",
             }),
@@ -1098,6 +1136,28 @@ mod tests {
         assert_eq!(issue.level, ValidationLevel::Error);
         assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
         assert!(issue.message.contains("it is a regular file"), "{issue:?}");
+    }
+
+    // The reading commands warn about a file at the dotfiles directory and carry
+    // on without standalone dotfiles, so this reports what they do.
+    #[test]
+    fn a_dotfiles_directory_a_file_occupies_is_a_warning() {
+        let issue = directory_issue(
+            "dotfiles_directory",
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+        )
+        .expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning);
+        assert!(issue.message.contains("it is a regular file"), "{issue:?}");
+        assert!(
+            issue
+                .message
+                .contains("standalone dotfiles will not be read"),
+            "{issue:?}"
+        );
     }
 
     // A dotfiles directory that is not there leaves a command without standalone
@@ -1123,25 +1183,69 @@ mod tests {
         assert_eq!(issue.level, ValidationLevel::Warning);
         assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
         assert!(issue.message.contains("does not exist"), "{issue:?}");
-        assert!(
-            suggestion(&issue).starts_with(
-                "Correct the setting if the path is a typo, or create it with: mkdir -p --"
-            ),
+        assert!(issue.message.contains("mkdir -p --"), "{issue:?}");
+        // Said once, in the message: the suggestion adds only the correction.
+        assert_eq!(
+            suggestion(&issue),
+            "Correct the setting if the path is a typo",
             "{issue:?}"
         );
     }
 
+    // A path that could not be checked may hide standalone dotfiles, and the
+    // reading commands refuse to go on without them. A loop is one such path.
     #[test]
-    fn a_path_that_could_not_be_checked_is_an_advisory_warning() {
+    fn a_looping_dotfiles_directory_is_an_error() {
         let issue = directory_issue("dotfiles_directory", unknown()).expect("an issue");
 
-        assert_eq!(issue.level, ValidationLevel::Warning);
-        assert_eq!(issue.category, ValidationErrorCategory::Advisory);
+        assert_eq!(issue.level, ValidationLevel::Error);
         assert!(issue.message.contains("could not be checked"), "{issue:?}");
         assert_eq!(
             suggestion(&issue),
             "Check the path and each directory above it"
         );
+    }
+
+    // A directory whose entries cannot be read is found only by listing it, as
+    // the commands do. The port calls it a directory.
+    fn unlistable_issue(field: &str) -> Option<ValidationIssue> {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        fs.expect_list_directory().returning(|_| {
+            Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )))
+        });
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .dotfiles_directory(PathBuf::from("/nowhere/dotfiles"))
+            .state_directory(PathBuf::from("/nowhere/state"))
+            .build();
+
+        as_file(&config)
+            .validate(&fs)
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == field)
+            .cloned()
+    }
+
+    #[test]
+    fn an_unlistable_package_directory_is_an_error() {
+        let issue = unlistable_issue("package_directory").expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Error);
+        assert!(issue.message.contains("could not be listed"), "{issue:?}");
+    }
+
+    #[test]
+    fn an_unlistable_dotfiles_directory_is_an_error() {
+        let issue = unlistable_issue("dotfiles_directory").expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Error);
+        assert!(issue.message.contains("could not be listed"), "{issue:?}");
     }
 
     // The state directory gets the verdict a run reaches over the same path. A
@@ -1196,6 +1300,7 @@ mod tests {
             .returning(|_| DirectoryState::Directory);
         fs.expect_directory_state()
             .returning(|_| DirectoryState::Directory);
+        listable(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1224,6 +1329,7 @@ mod tests {
         for setting in ["~user/dotfiles", "~typo"] {
             let mut fs = MockFileSystem::default();
             fs.mock_directories_exist();
+            listable(&mut fs);
             let config = SelfieConfigBuilder::default()
                 .environment("linux")
                 .package_directory("/nowhere/packages")
@@ -1253,6 +1359,7 @@ mod tests {
         fs.expect_expand_path()
             .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
         fs.mock_directories_exist();
+        listable(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1269,6 +1376,33 @@ mod tests {
             .find(|i| i.field == "dotfiles_directory")
             .expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Warning);
+        assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
+    }
+
+    // A run keeps a `~` it cannot resolve as written and refuses the relative
+    // path that leaves, so validate reports an error there too.
+    #[test]
+    fn a_state_directory_whose_home_cannot_be_resolved_is_an_error() {
+        let mut fs = MockFileSystem::default();
+        fs.expect_expand_path()
+            .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
+        fs.mock_directories_exist();
+        listable(&mut fs);
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("/nowhere/packages")
+            .state_directory(PathBuf::from("~/state"))
+            .build();
+
+        let result = as_file(&config).validate(&fs);
+
+        let issue = result
+            .issues()
+            .all_issues()
+            .iter()
+            .find(|i| i.field == "state_directory")
+            .expect("an issue");
+        assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
         assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
     }
 
@@ -1310,6 +1444,7 @@ mod tests {
             .withf(|path| path == std::path::Path::new("/home/me/.local/state/selfie"))
             .returning(move |_| state_default.clone());
         fs.mock_directories_exist();
+        listable(&mut fs);
         let config = SelfieConfigBuilder::default()
             .environment("linux")
             .package_directory("/nowhere/packages")
@@ -1336,7 +1471,7 @@ mod tests {
 
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].field, "dotfiles_directory");
-        assert_eq!(issues[0].level, ValidationLevel::Error);
+        assert_eq!(issues[0].level, ValidationLevel::Warning);
         assert!(
             issues[0].message.contains("/nowhere/dotfiles"),
             "{issues:?}"

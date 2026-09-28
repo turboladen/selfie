@@ -100,8 +100,10 @@ package_directory: "relative/path"
         .stderr(predicates::str::contains("relative and cannot be resolved"));
 }
 
+// Every command that reads the package directory fails without it, so
+// validate reports its absence as an error.
 #[test]
-fn test_validate_config_with_nonexistent_directory_shows_warning() {
+fn test_validate_config_with_nonexistent_directory_shows_error() {
     // Use a guaranteed-nonexistent path under a fresh temp dir
     let pkg_tmp = tempfile::tempdir().unwrap();
     let nonexistent = pkg_tmp.path().join("does-not-exist");
@@ -115,7 +117,7 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .success()
+        .stderr(predicates::str::contains("Validation failed."))
         .stderr(predicates::str::contains("does not exist"));
 }
 
@@ -125,15 +127,13 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
 // `use_colors: true` read back as false.
 #[test]
 fn a_flag_does_not_change_the_cli_settings_this_reports() {
-    let yaml = r#"
-environment: "test-env"
-package_directory: "/test/packages"
-cli:
-  use_colors: true
-  verbose: true
-"#;
+    let packages = tempfile::tempdir().unwrap();
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"\ncli:\n  use_colors: true\n  verbose: true\n",
+        packages.path().display()
+    );
 
-    let temp_dir = setup_test_config(yaml);
+    let temp_dir = setup_test_config(&yaml);
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["--no-color", "config", "validate"]);
 

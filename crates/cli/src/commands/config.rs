@@ -144,6 +144,7 @@ mod tests {
             package_directory: "/test/packages"
         "#;
         fs.mock_config_file(config_dir, config_yaml);
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
         // The report and the validation both resolve the default state
         // directory under the home directory when the file names none.
         mock_home(&mut fs);
@@ -200,6 +201,7 @@ mod tests {
         fs.mock_config_file(config_dir, config_yaml);
         mock_home(&mut fs);
         fs.mock_directories_exist();
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
 
         let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);

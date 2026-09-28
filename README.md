@@ -180,7 +180,8 @@ selfie --help
    package_directory: "~/.selfie/packages"
    EOF
 
-   # Verify your config is valid
+   # Create the package directory, then verify your config is valid
+   mkdir -p ~/.selfie/packages
    selfie config validate
    ```
 
