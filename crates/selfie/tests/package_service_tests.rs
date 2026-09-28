@@ -1248,6 +1248,85 @@ mod recommends_after_the_root_stops_loading {
     }
 }
 
+// A Ctrl+C that lands while a recommend installs ends the stream as a
+// cancellation. The handler itself returns the root's success, since recommends
+// never fail the parent, so this holds only because the operation wrapper asks
+// the token after the handler.
+#[tokio::test]
+async fn a_cancel_during_the_recommends_ends_the_stream_cancelled() {
+    use selfie::{
+        fs::RealFileSystem,
+        package::{
+            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
+    use tokio_util::sync::CancellationToken;
+
+    let temp_dir = TempDir::new().unwrap();
+    let package_dir = temp_dir.path().to_path_buf();
+    std::fs::write(
+        package_dir.join("root.yml"),
+        "name: root\nenvironments:\n  test:\n    check: \"check-root\"\n    install: \
+         \"install-root\"\n    recommends:\n      - rec\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("rec.yml"),
+        "name: rec\nenvironments:\n  test:\n    check: \"check-rec\"\n    install: \
+         \"install-rec\"\n",
+    )
+    .unwrap();
+
+    let token = CancellationToken::new();
+    // The root is installed, so the recommend is the only work left, and the
+    // cancel lands inside it.
+    let runner = FakeCommandRunner::new()
+        .succeeding("check-root", b"")
+        .succeeding("check-rec", b"")
+        .cancelling("check-rec", &token);
+    let config = service_test_config_with_dir(&package_dir);
+    let service = PackageServiceImpl::new(
+        YamlPackageRepository::new(
+            RealFileSystem,
+            package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        ),
+        YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        ),
+        runner.clone(),
+        GixGitStatusProvider,
+        config,
+        token,
+    );
+
+    let events = collect_events(service.install("root", InstallOptions::default()).await).await;
+
+    assert!(
+        runner
+            .calls()
+            .iter()
+            .any(|(command, _)| command == "check-rec"),
+        "the recommend never ran, so the cancel never landed: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Canceled { .. })),
+        "a cancelled install must say so: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Completed { .. })),
+        "a cancelled install must not also report a result: {events:?}"
+    );
+}
+
 // `spec info` reports where each dotfile's content comes from, and how many
 // commands apply would run here to produce it. The fixture varies the count
 // along each axis a wrong count could take: a template with two vars (counted
