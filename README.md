@@ -235,7 +235,8 @@ something to act on" from "the check itself did not work":
 A refusal outranks a finding. A check that refused part of its work exits `1` even if it also found
 something, since its answer has a hole in it.
 
-A command that ends without reporting a result, as it does if the operation crashes, exits `1`.
+A command that ends without reporting a result, as it does if the operation crashes, exits `1`. So
+does `selfie spec create` when it declines to create a name that already exists.
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
 `selfie package install` does. A name that matches no package, names a package file that could not

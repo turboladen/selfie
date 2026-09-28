@@ -484,3 +484,30 @@ fn config_validate_exits_three_on_a_warning() {
     );
     assert!(!output.contains("Configuration is valid."), "{output}");
 }
+
+// ── spec create ─────────────────────────────────────────────────────────────
+
+#[test]
+fn spec_create_exits_clean_when_it_writes_the_spec() {
+    let temp = sandbox();
+
+    let (code, output) = run(&temp, &["spec", "create", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+    assert!(temp.path().join("packages/tool.yml").exists(), "{output}");
+}
+
+// Without a terminal the "already exists" menu cannot be answered, so the create
+// declines. It wrote nothing, which a script must not read as success.
+#[test]
+fn spec_create_exits_one_when_it_declines() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["spec", "create", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(output.contains("already exists"), "{output}");
+}

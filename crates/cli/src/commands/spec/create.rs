@@ -10,7 +10,11 @@ use selfie::{
 use std::{collections::HashMap, path::PathBuf};
 use tracing::info;
 
-use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
+use crate::{
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
+};
 
 use crate::commands::common;
 
@@ -45,9 +49,11 @@ pub(crate) async fn handle_create(
             let success_message = format!("Package editing completed at {}", path.display());
             return common::open_editor(&path, display, Some(success_message));
         }
+        // A create that wrote nothing did not do what it was asked, so a script
+        // must not read it as success.
         Ok(PackageNameResult::Cancelled) => {
             display.print_info("Package creation cancelled.");
-            return 0;
+            return Exit::Failed.code();
         }
         Err(exit_code) => return exit_code,
     };
@@ -109,19 +115,19 @@ pub(crate) async fn handle_create(
                     display.print_info(
                         "Package created. You can edit it later with 'selfie spec edit'.",
                     );
-                    0
+                    Exit::Clean.code()
                 }
                 Err(_) => {
                     display.print_error("Failed to read user input.");
-                    1
+                    Exit::Failed.code()
                 }
             }
         } else {
-            0
+            Exit::Clean.code()
         }
     } else {
         display.print_info("Package created. Use 'selfie spec edit' to customize it.");
-        0
+        Exit::Clean.code()
     }
 }
 
@@ -144,14 +150,14 @@ fn get_valid_package_name(
         match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
             Err(NamespaceValidationError::LookupFailed(msg)) => {
                 display.print_error(format!("Failed to check namespace: {msg}"));
-                return Err(1);
+                return Err(Exit::Failed.code());
             }
             // Not a retry with a different name: the directory is the problem, not
             // the name, so prompting again would ask the user to guess their way
             // past an unreadable directory.
             Err(error @ NamespaceValidationError::DotfilesDirectoryUnreadable(_)) => {
                 display.print_error(format!("Cannot create '{current_name}': {error}"));
-                return Err(1);
+                return Err(Exit::Failed.code());
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
                 // Name exists somewhere — check if it's in packages/ (editable)
@@ -194,7 +200,7 @@ fn get_valid_package_name(
                     display.print_error(format!(
                         "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
                     ));
-                    return Err(1);
+                    return Err(Exit::Failed.code());
                 }
 
                 let new_name: String = if let Ok(name) = Input::with_theme(&SimpleTheme)
@@ -206,7 +212,7 @@ fn get_valid_package_name(
                     name
                 } else {
                     display.print_error("Failed to read package name.");
-                    return Err(1);
+                    return Err(Exit::Failed.code());
                 };
                 current_name = new_name;
                 continue;
@@ -278,7 +284,7 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read package name.");
-            1
+            Exit::Failed.code()
         })
 }
 
@@ -289,7 +295,7 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read homepage.");
-            1
+            Exit::Failed.code()
         })?;
 
     Ok(if homepage.trim().is_empty() {
@@ -306,7 +312,7 @@ fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read description.");
-            1
+            Exit::Failed.code()
         })?;
 
     Ok(if description.trim().is_empty() {
@@ -360,7 +366,7 @@ fn prompt_environment_name(
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read environment name.");
-            1
+            Exit::Failed.code()
         })
 }
 
@@ -371,7 +377,7 @@ fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
             .interact()
             .map_err(|_| {
                 display.print_error("Failed to read install command.");
-                1
+                Exit::Failed.code()
             })?;
 
         if !cmd.trim().is_empty() {
@@ -394,7 +400,7 @@ fn prompt_check_command(
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read check command.");
-            1
+            Exit::Failed.code()
         })?;
 
     Ok(if check_cmd.trim().is_empty() {
@@ -436,7 +442,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
 
     let (available_packages, skipped) = available_dependency_names(&repo).map_err(|msg| {
         display.print_error(msg);
-        1
+        Exit::Failed.code()
     })?;
 
     // A dependency is resolved by name, and selfie does not know the name inside
@@ -456,7 +462,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read dependencies.");
-            1
+            Exit::Failed.code()
         })?;
 
     Ok(selected
@@ -472,7 +478,7 @@ fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32>
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read user input.");
-            1
+            Exit::Failed.code()
         })
 }
 
@@ -483,7 +489,7 @@ fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<Stri
         .interact()
         .map_err(|_| {
             display.print_error("Failed to read file name.");
-            1
+            Exit::Failed.code()
         })
 }
 
