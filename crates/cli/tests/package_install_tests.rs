@@ -91,3 +91,38 @@ fn test_no_recommends_flag_skips_recommends() {
         .success()
         .stdout(predicate::str::contains("Installing recommended").not());
 }
+
+// The install command runs with the package directory as its working
+// directory, and still does when that directory's name holds a quote and a
+// space.
+#[test]
+fn package_install_runs_in_a_package_directory_with_a_quote_and_a_space() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let package_dir = temp_dir.path().join("it's a dir");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(package_dir.join("here.marker"), "").unwrap();
+    std::fs::write(
+        package_dir.join("marked.yaml"),
+        format!(
+            "name: marked\nenvironments:\n  {SELFIE_ENV}:\n    install: \"test -f ./here.marker\"\n"
+        ),
+    )
+    .unwrap();
+    let config_dir = temp_dir.path().join(".config").join("selfie");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            package_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["package", "install", "marked"]);
+
+    cmd.assert().success().stdout(predicate::str::contains(
+        "Package 'marked' installation completed successfully",
+    ));
+}

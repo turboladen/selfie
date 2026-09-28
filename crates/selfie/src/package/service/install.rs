@@ -242,8 +242,14 @@ where
         // we're skipping the actual installation for this package.
         progress.reduce_total_steps(4);
 
-        let executable_path =
-            find_executable_path(package_name, command_runner, sender, token).await;
+        let executable_path = find_executable_path(
+            package_name,
+            config.package_directory(),
+            command_runner,
+            sender,
+            token,
+        )
+        .await;
 
         return Some(OperationResult::Success(
             OperationSuccess::package_installed(
@@ -260,6 +266,7 @@ where
 
 async fn find_executable_path<CR>(
     package_name: &str,
+    package_dir: &std::path::Path,
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
@@ -267,12 +274,16 @@ async fn find_executable_path<CR>(
 where
     CR: CommandRunner,
 {
-    let finder_command = format!("which {package_name}");
+    let finder_command = format!(
+        "which {}",
+        shlex::try_quote(package_name).unwrap_or(package_name.into())
+    );
 
-    // `which` is selfie's own lookup, not a command the package file configured,
-    // so it runs where selfie was started rather than in the package directory.
+    // In the package directory, which the install has just run in. The runner
+    // has no way to run a command where selfie was started without entering it
+    // again, and selfie's own directory may be one it cannot enter.
     match command_runner
-        .execute(&finder_command, std::path::Path::new("."), token)
+        .execute(&finder_command, package_dir, token)
         .await
     {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {
@@ -390,8 +401,14 @@ where
     // Verify installation if check command is available
     verify_installation(&context, command_runner, sender, progress, token).await;
 
-    let executable_path =
-        find_executable_path(context.package_name, command_runner, sender, token).await;
+    let executable_path = find_executable_path(
+        context.package_name,
+        context.config.package_directory(),
+        command_runner,
+        sender,
+        token,
+    )
+    .await;
 
     // Emit post-install note if this was a fresh install and the package has one
     if !matches!(
