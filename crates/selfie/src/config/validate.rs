@@ -4,7 +4,7 @@
 //! ensuring that configuration values are valid and complete before use.
 
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -13,7 +13,7 @@ use crate::{
     validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues},
 };
 
-use super::SelfieConfig;
+use super::ConfigFile;
 
 /// Maximum recommended command timeout in seconds before a warning is emitted.
 const MAX_RECOMMENDED_TIMEOUT_SECS: u64 = 600;
@@ -33,9 +33,11 @@ impl ValidationResult {
     }
 }
 
-impl SelfieConfig {
-    /// Validate every configuration field: environment name, package directory,
-    /// the optional directories, and the command timeout.
+impl ConfigFile {
+    /// Validate every setting the file holds: environment name, package
+    /// directory, the optional directories, and the command timeout. A required
+    /// setting the file leaves out is an error, since a run has nothing to fill
+    /// it from unless a flag supplies it.
     ///
     /// The [`ValidationResult`] separates errors, which stop the configuration
     /// being used, from warnings, which flag a potential problem. `fs` answers
@@ -44,29 +46,33 @@ impl SelfieConfig {
     pub fn validate(&self, fs: &impl FileSystem) -> ValidationResult {
         let mut issues = Vec::new();
 
-        if let Some(issue) = validate_environment(&self.environment) {
+        if let Some(issue) = validate_environment(self.environment.as_deref()) {
             issues.push(issue);
         }
 
-        issues.extend(validate_package_directory(fs, &self.package_directory));
+        issues.extend(validate_package_directory(
+            fs,
+            self.package_directory.as_deref(),
+        ));
 
         // An unset directory setting is checked at the default the commands use,
         // since they read it there.
-        match self.dotfiles_directory {
-            Some(ref path) => issues.extend(validate_optional_directory(
+        match super::setting_path(self.dotfiles_directory.as_deref()) {
+            Some(path) => issues.extend(validate_directory_path(
                 fs,
                 "dotfiles_directory",
                 path,
                 Setting::Read,
             )),
-            None => issues.extend(default_dotfiles_directory_issue(
-                fs,
-                &self.dotfiles_directory(),
-            )),
+            None => {
+                if let Some(default) = self.default_dotfiles_directory_for_validation(fs) {
+                    issues.extend(default_dotfiles_directory_issue(fs, &default));
+                }
+            }
         }
 
-        match self.state_directory {
-            Some(ref path) => issues.extend(validate_optional_directory(
+        match super::setting_path(self.state_directory.as_deref()) {
+            Some(path) => issues.extend(validate_directory_path(
                 fs,
                 "state_directory",
                 path,
@@ -82,6 +88,17 @@ impl SelfieConfig {
         ValidationResult {
             issues: issues.into(),
         }
+    }
+
+    // The default beside the package directory, with `~` expanded the way the
+    // package directory's own check expands it. `None` when the package
+    // directory is unset or cannot be resolved, which is reported on its own.
+    fn default_dotfiles_directory_for_validation(&self, fs: &impl FileSystem) -> Option<PathBuf> {
+        let package_directory = super::setting_path(self.package_directory.as_deref())?;
+        let expanded = super::yaml::expand_tilde_only(fs, package_directory)
+            .ok()?
+            .unwrap_or_else(|| package_directory.to_path_buf());
+        Some(super::default_dotfiles_directory(&expanded))
     }
 }
 
@@ -130,26 +147,45 @@ pub enum ConfigValidationError {
 
 /// Validate the environment field
 ///
-/// Ensures the environment name is not empty, as it's required for
+/// Ensures the environment name is set and not empty, as it's required for
 /// determining which package installation commands to use.
-fn validate_environment(environment: &str) -> Option<ValidationIssue> {
-    environment.is_empty().then(|| {
-        ValidationIssue::error(
+fn validate_environment(environment: Option<&str>) -> Option<ValidationIssue> {
+    match environment {
+        None => Some(missing_setting_issue("environment", "`environment: macos`")),
+        Some(value) if value.trim().is_empty() => Some(ValidationIssue::error(
             ValidationErrorCategory::RequiredField,
             "environment",
             "The `environment` field exists, but has no value",
             Some("Set a value for `environment`. Ex. `environment: macos`"),
-        )
-    })
+        )),
+        Some(_) => None,
+    }
+}
+
+/// The error for a required setting the file leaves out, where `example` is a
+/// line that would set it.
+fn missing_setting_issue(field_name: &str, example: &str) -> ValidationIssue {
+    ValidationIssue::error(
+        ValidationErrorCategory::RequiredField,
+        field_name,
+        &format!("The `{field_name}` setting is missing"),
+        Some(&format!("Add `{field_name}` to the file. Ex. {example}")),
+    )
 }
 
 /// Validate the package directory path: it must be set, absolute after `~`
 /// expansion, and a directory, as [`validate_directory_path`] reports.
 fn validate_package_directory(
     fs: &impl FileSystem,
-    package_directory: &Path,
+    package_directory: Option<&Path>,
 ) -> Vec<ValidationIssue> {
-    if package_directory.as_os_str().is_empty() {
+    let Some(package_directory) = package_directory else {
+        return vec![missing_setting_issue(
+            "package_directory",
+            "`package_directory: ~/dev/selfie-packages`",
+        )];
+    };
+    if super::setting_path(Some(package_directory)).is_none() {
         return vec![ValidationIssue::error(
             ValidationErrorCategory::RequiredField,
             "package_directory",
@@ -174,30 +210,6 @@ enum Setting {
     /// The state directory. selfie creates it on first use and refuses a run
     /// over anything else in its way, so the report is the run's own verdict.
     State,
-}
-
-/// Validate an optional directory path: it must not be empty, and it is
-/// checked as [`validate_directory_path`] checks a directory.
-fn validate_optional_directory(
-    fs: &impl FileSystem,
-    field_name: &str,
-    path: &Path,
-    setting: Setting,
-) -> Vec<ValidationIssue> {
-    if path.as_os_str().is_empty() {
-        return vec![ValidationIssue::error(
-            ValidationErrorCategory::RequiredField,
-            field_name,
-            &format!("The `{field_name}` field exists, but has no value"),
-            Some(&format!(
-                "Set a value for `{field_name}` or remove the field to use the default"
-            )),
-        )];
-    }
-
-    validate_directory_path(fs, field_name, path, setting)
-        .into_iter()
-        .collect()
 }
 
 /// Validate a directory path: `~` is expanded through `fs`, the result must be
@@ -378,7 +390,8 @@ fn default_state_directory_issue(fs: &impl FileSystem) -> Option<ValidationIssue
 /// Validate the command timeout value
 ///
 /// Warns if the timeout exceeds the recommended maximum.
-fn validate_command_timeout(timeout: NonZeroU64) -> Option<ValidationIssue> {
+fn validate_command_timeout(timeout: Option<NonZeroU64>) -> Option<ValidationIssue> {
+    let timeout = timeout?;
     (timeout.get() > MAX_RECOMMENDED_TIMEOUT_SECS).then(|| {
         ValidationIssue::warning(
             ValidationErrorCategory::InvalidValue,
@@ -398,8 +411,22 @@ fn validate_command_timeout(timeout: NonZeroU64) -> Option<ValidationIssue> {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::config::SelfieConfigBuilder;
+    use crate::config::{ConfigFile, SelfieConfig, SelfieConfigBuilder};
     use crate::validation::ValidationErrorCategory;
+
+    // The file that would name exactly what `config` holds, so the fixtures below
+    // can keep using the builder.
+    fn as_file(config: &SelfieConfig) -> ConfigFile {
+        ConfigFile {
+            environment: Some(config.environment.clone()),
+            package_directory: Some(config.package_directory.clone()),
+            dotfiles_directory: config.dotfiles_directory.clone(),
+            state_directory: config.state_directory.clone(),
+            command_timeout: Some(config.command_timeout),
+            stop_on_error: Some(config.stop_on_error),
+            max_concurrency: Some(config.max_concurrency),
+        }
+    }
 
     use super::ConfigValidationError;
 
@@ -412,7 +439,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let env_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -430,7 +457,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let env_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -445,6 +472,35 @@ mod tests {
         );
     }
 
+    // A file may leave a required setting to a flag, but `config validate`
+    // reports the file, so the gap is an error there.
+    #[test]
+    fn a_missing_environment_is_an_error() {
+        let file = ConfigFile {
+            package_directory: Some(PathBuf::from("/tmp")),
+            ..ConfigFile::default()
+        };
+
+        let result = file.validate(&crate::fs::RealFileSystem);
+        let env_issues: Vec<_> = result
+            .issues()
+            .errors()
+            .into_iter()
+            .filter(|i| i.field == "environment")
+            .collect();
+
+        assert_eq!(env_issues.len(), 1, "{:?}", result.issues());
+        assert_eq!(
+            env_issues[0].category,
+            ValidationErrorCategory::RequiredField
+        );
+        assert!(
+            env_issues[0].message.contains("is missing"),
+            "{:?}",
+            env_issues[0]
+        );
+    }
+
     // --- validate_package_directory tests ---
 
     #[test]
@@ -454,7 +510,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let dir_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -472,7 +528,7 @@ mod tests {
             .package_directory("")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let dir_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -488,6 +544,30 @@ mod tests {
         assert_eq!(required.len(), 1);
     }
 
+    // Whitespace names no directory, so it is as empty as nothing, not relative.
+    #[test]
+    fn whitespace_package_directory_produces_error() {
+        let config = SelfieConfigBuilder::default()
+            .environment("linux")
+            .package_directory("  ")
+            .build();
+
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
+        let dir_issues: Vec<_> = result
+            .issues()
+            .all_issues()
+            .iter()
+            .filter(|i| i.field == "package_directory")
+            .cloned()
+            .collect();
+
+        assert_eq!(dir_issues.len(), 1, "{dir_issues:?}");
+        assert_eq!(
+            dir_issues[0].category,
+            ValidationErrorCategory::RequiredField
+        );
+    }
+
     #[test]
     fn relative_package_directory_produces_error() {
         let config = SelfieConfigBuilder::default()
@@ -495,7 +575,7 @@ mod tests {
             .package_directory("packages")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let path_issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -516,7 +596,7 @@ mod tests {
             .package_directory("~/packages")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let dir_errors: Vec<_> = result
             .issues()
             .errors()
@@ -537,7 +617,7 @@ mod tests {
             .package_directory(&nonexistent)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -561,7 +641,7 @@ mod tests {
             .package_directory(&file_path)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -583,7 +663,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -602,7 +682,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("relative/dotfiles"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -622,7 +702,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("/tmp"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -644,7 +724,7 @@ mod tests {
             .dotfiles_directory(nonexistent)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -657,24 +737,37 @@ mod tests {
         assert!(warnings[0].message.contains("does not exist"));
     }
 
+    // An empty value is unset, as it is to a run, so the default is checked.
     #[test]
-    fn dotfiles_directory_empty_produces_error() {
+    fn dotfiles_directory_empty_takes_the_default() {
+        // A file at the default, so checking it is visible as a row.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("packages")).unwrap();
+        std::fs::write(dir.path().join("dotfiles"), "not a directory").unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("macos")
-            .package_directory("/tmp")
+            .package_directory(dir.path().join("packages"))
             .dotfiles_directory(PathBuf::from(""))
+            .state_directory(dir.path().join("state"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
-        let errors: Vec<_> = result
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
+        let issues: Vec<_> = result
             .issues()
-            .errors()
-            .into_iter()
+            .all_issues()
+            .iter()
             .filter(|i| i.field == "dotfiles_directory")
+            .cloned()
             .collect();
 
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].category, ValidationErrorCategory::RequiredField);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_ne!(issues[0].category, ValidationErrorCategory::RequiredField);
+        assert!(
+            issues[0]
+                .message
+                .contains(&dir.path().join("dotfiles").display().to_string()),
+            "{issues:?}"
+        );
     }
 
     #[test]
@@ -685,7 +778,7 @@ mod tests {
             .dotfiles_directory(PathBuf::from("~/dotfiles"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -705,7 +798,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -724,7 +817,7 @@ mod tests {
             .state_directory(PathBuf::from("relative/state"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let errors: Vec<_> = result
             .issues()
             .errors()
@@ -744,7 +837,7 @@ mod tests {
             .state_directory(PathBuf::from("/tmp"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -768,7 +861,7 @@ mod tests {
             .state_directory(nonexistent)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .warnings()
@@ -781,24 +874,47 @@ mod tests {
         assert!(issues[0].message.contains("not there yet"), "{issues:?}");
     }
 
+    // An empty value is unset, as it is to a run, so the default is checked.
     #[test]
-    fn state_directory_empty_produces_error() {
+    fn state_directory_empty_takes_the_default() {
+        // A file at the default under the home directory, so checking it is
+        // visible as a row.
+        let mut fs = crate::fs::MockFileSystem::default();
+        fs.expect_expand_path()
+            .withf(|path| path == std::path::Path::new("~"))
+            .returning(|_| Ok(PathBuf::from("/home/me")));
+        fs.expect_directory_state()
+            .withf(|path| path == std::path::Path::new("/home/me/.local/state/selfie"))
+            .returning(|_| {
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                })
+            });
+        fs.expect_directory_state()
+            .returning(|_| crate::fs::DirectoryState::Directory);
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+        fs.expect_irregular_target_refusal().returning(|_| None);
         let config = SelfieConfigBuilder::default()
             .environment("macos")
-            .package_directory("/tmp")
+            .package_directory("/nowhere/packages")
             .state_directory(PathBuf::from(""))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
-        let errors: Vec<_> = result
+        let result = as_file(&config).validate(&fs);
+        let issues: Vec<_> = result
             .issues()
-            .errors()
-            .into_iter()
+            .all_issues()
+            .iter()
             .filter(|i| i.field == "state_directory")
+            .cloned()
             .collect();
 
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].category, ValidationErrorCategory::RequiredField);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_ne!(issues[0].category, ValidationErrorCategory::RequiredField);
+        assert!(
+            issues[0].message.contains("/home/me/.local/state/selfie"),
+            "{issues:?}"
+        );
     }
 
     // --- validate_command_timeout tests ---
@@ -810,7 +926,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -829,7 +945,7 @@ mod tests {
             .command_timeout_unchecked(600)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -848,7 +964,7 @@ mod tests {
             .command_timeout_unchecked(601)
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         let warnings: Vec<_> = result
             .issues()
             .warnings()
@@ -860,7 +976,7 @@ mod tests {
         assert_eq!(warnings[0].category, ValidationErrorCategory::InvalidValue);
     }
 
-    // --- SelfieConfig::validate() integration tests ---
+    // --- ConfigFile::validate() integration tests ---
 
     #[test]
     fn valid_config_has_no_issues() {
@@ -869,7 +985,7 @@ mod tests {
             .package_directory("/tmp")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         assert!(!result.issues().has_issues());
         assert!(result.issues().is_valid());
     }
@@ -881,7 +997,7 @@ mod tests {
             .package_directory("")
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         // At minimum: empty environment + empty package_directory + non-absolute path
         assert!(result.issues().has_errors());
         assert!(result.issues().all_issues().len() >= 2);
@@ -929,7 +1045,7 @@ mod tests {
             .state_directory(PathBuf::from("/nowhere/state"))
             .build();
 
-        let result = config.validate(&fs);
+        let result = as_file(&config).validate(&fs);
         let mut issues: Vec<_> = result
             .issues()
             .all_issues()
@@ -1087,7 +1203,7 @@ mod tests {
             .state_directory(PathBuf::from("/nowhere/state"))
             .build();
 
-        let result = config.validate(&fs);
+        let result = as_file(&config).validate(&fs);
 
         assert!(
             result
@@ -1115,7 +1231,7 @@ mod tests {
                 .state_directory(PathBuf::from("/nowhere/state"))
                 .build();
 
-            let result = config.validate(&fs);
+            let result = as_file(&config).validate(&fs);
 
             assert!(
                 result
@@ -1144,7 +1260,7 @@ mod tests {
             .state_directory(PathBuf::from("/nowhere/state"))
             .build();
 
-        let result = config.validate(&fs);
+        let result = as_file(&config).validate(&fs);
 
         let issue = result
             .issues()
@@ -1164,7 +1280,7 @@ mod tests {
             .state_directory(PathBuf::from("state"))
             .build();
 
-        let result = config.validate(&crate::fs::RealFileSystem);
+        let result = as_file(&config).validate(&crate::fs::RealFileSystem);
         assert!(
             result
                 .issues()
@@ -1199,7 +1315,7 @@ mod tests {
             .package_directory("/nowhere/packages")
             .build();
 
-        config
+        as_file(&config)
             .validate(&fs)
             .issues()
             .all_issues()

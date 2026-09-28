@@ -63,9 +63,9 @@ command_timeout: 30
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("environment"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "The `environment` setting is missing",
+    ));
 }
 
 #[test]

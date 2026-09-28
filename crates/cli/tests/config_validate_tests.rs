@@ -1,6 +1,7 @@
 pub mod common;
 
 use common::{sandboxed_command, setup_default_test_config, setup_test_config};
+use predicates::prelude::*;
 
 #[test]
 fn test_validate_valid_config() {
@@ -52,9 +53,32 @@ package_directory: "/test/packages"
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
+    // Validate's own row, not the refusal every other command gives.
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("environment"));
+        .stderr(predicates::str::contains("Validation failed."))
+        .stderr(predicates::str::contains(
+            "The `environment` setting is missing",
+        ));
+}
+
+// A flag does not fill the gap for this command, which reports the file. Nor
+// does the gap stop it: the other commands refuse such a file before they run.
+#[test]
+fn a_missing_environment_is_reported_as_a_row() {
+    let packages = tempfile::tempdir().unwrap();
+    let yaml = format!("package_directory: \"{}\"\n", packages.path().display());
+
+    let temp_dir = setup_test_config(&yaml);
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["--environment", "flag-env", "config", "validate"]);
+
+    cmd.assert()
+        .stderr(predicates::str::contains("Validation failed."))
+        .stderr(predicates::str::contains(
+            "The `environment` setting is missing",
+        ))
+        .stderr(predicates::str::contains("does not set every required setting").not());
 }
 
 #[test]

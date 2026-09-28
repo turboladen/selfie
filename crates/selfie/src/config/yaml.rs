@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
-    config::SelfieConfig,
+    config::ConfigFile,
     fs::{FileSystem, FileSystemError},
 };
 
@@ -18,7 +18,7 @@ use super::{
 /// YAML-based configuration loader implementation
 ///
 /// Loads application configuration from YAML files in standard locations.
-/// Supports both `.yaml` and `.yml` file extensions and handles path expansion.
+/// Supports both `.yaml` and `.yml` file extensions.
 pub struct YamlLoader<'a, F: FileSystem> {
     /// File system abstraction for reading files and paths
     fs: &'a F,
@@ -36,7 +36,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// Load configuration from YAML files in standard locations
     ///
     /// Searches for `config.yaml` or `config.yml` in the user's configuration directory
-    /// and loads the first one found. Performs path expansion for the package directory.
+    /// and loads the first one found. A file that omits a setting still loads.
     ///
     /// # Errors
     ///
@@ -45,7 +45,6 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// - Multiple configuration files are found (both .yaml and .yml)
     /// - File system access fails
     /// - YAML content is malformed or invalid
-    /// - Required configuration fields are missing
     /// - Configuration field types are incorrect
     fn load_config(&self) -> Result<LoadedConfig, ConfigLoadError> {
         let config_paths = match self.find_config_file_paths() {
@@ -94,36 +93,18 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         // `serde_ignored` wraps the deserializer, so the set is serde's own
         // answer and cannot go stale when a field is added here.
         let mut ignored_paths = Vec::new();
-        let mut selfie_config: SelfieConfig =
-            crate::yaml::parse_reporting_ignored(&file_contents, |path| {
-                ignored_paths.push(ignored_segments(path));
-            })
-            .map_err(|failure| ConfigLoadError::Parse {
-                path: config_path.clone(),
-                failure,
-            })?;
+        let config: ConfigFile = crate::yaml::parse_reporting_ignored(&file_contents, |path| {
+            ignored_paths.push(ignored_segments(path));
+        })
+        .map_err(|failure| ConfigLoadError::Parse {
+            path: config_path.clone(),
+            failure,
+        })?;
         let ignored_keys = library_ignored_keys(ignored_paths);
 
-        // Special handling for ~ expansion on path fields
-        if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
-            selfie_config.package_directory = expanded;
-        }
-        // For dotfiles_directory and state_directory, expand ~ without canonicalizing.
-        // These directories may not exist yet (especially state_directory on first run),
-        // so canonicalize() would fail. Instead, resolve just "~" and join the rest.
-        if let Some(ref dotfiles_dir) = selfie_config.dotfiles_directory
-            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, dotfiles_dir)
-        {
-            selfie_config.dotfiles_directory = Some(expanded);
-        }
-        if let Some(ref state_dir) = selfie_config.state_directory
-            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, state_dir)
-        {
-            selfie_config.state_directory = Some(expanded);
-        }
-
         Ok(LoadedConfig::new(
-            selfie_config,
+            config_path.clone(),
+            config,
             ignored_keys,
             file_contents,
         ))
@@ -331,7 +312,12 @@ mod tests {
             fs.mock_expand_path(&package_dir, &package_dir);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check the loaded values
             assert_eq!(config.environment, "test-env");
@@ -376,7 +362,12 @@ mod tests {
             fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check basic settings
             assert_eq!(config.environment, "test-env");
@@ -428,19 +419,20 @@ mod tests {
     "#;
 
             fs.mock_config_file(config_dir, incomplete_yaml);
+            fs.mock_expand_path("/test/packages", "/test/packages");
 
-            let loader = YamlLoader::new(&fs);
-            let result = loader.load_config();
+            // A partial file loads; what it lacks is named when it is resolved,
+            // where an override may still supply it.
+            let loaded = YamlLoader::new(&fs).load_config().unwrap();
+            let error = loaded
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap_err();
 
-            assert!(result.is_err());
-            if let Err(err) = result {
-                match err {
-                    ConfigLoadError::Parse { .. } => {
-                        // Expected error type for missing fields
-                    }
-                    _ => panic!("Expected Parse, got: {err:?}"),
-                }
-            }
+            assert_eq!(
+                error.missing(),
+                [crate::config::RequiredSetting::Environment]
+            );
         }
 
         #[test]
@@ -483,7 +475,12 @@ mod tests {
             fs.mock_expand_path(Path::new("~/packages"), &expanded_path);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             assert_eq!(config.package_directory, expanded_path);
         }
@@ -509,7 +506,12 @@ mod tests {
             fs.mock_expand_path(Path::new("/test/packages"), Path::new("/test/packages"));
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check defaults were properly applied
             assert_eq!(config.environment, "test-env");
@@ -996,7 +998,7 @@ mod tests {
         fn a_numeric_looking_environment_is_kept_as_written() {
             let loaded = load("environment: 010\npackage_directory: \"/test/packages\"\n").unwrap();
 
-            assert_eq!(loaded.config().environment(), "010");
+            assert_eq!(loaded.config().environment(), Some("010"));
         }
 
         #[test]

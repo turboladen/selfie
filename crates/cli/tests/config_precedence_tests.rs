@@ -1,7 +1,7 @@
 //! These tests check which directory each command actually reads when a flag
 //! and the configuration file disagree.
 //!
-//! The unit tests over `build_cli_config` prove that function applies its
+//! The unit tests over `resolve_config` prove that function applies its
 //! overrides. They would all still pass if nothing downstream ever received the
 //! result, so these drive the real binary instead and assert on what it printed
 //! or wrote.
@@ -182,6 +182,95 @@ fn without_a_flag_the_config_files_package_directory_decides() {
         .success()
         .stdout(predicate::str::contains("from-config-pkg"))
         .stdout(predicate::str::contains("from-flag-pkg").not());
+}
+
+// A file may carry only some settings and leave the rest to flags.
+#[test]
+fn a_partial_config_file_takes_the_rest_from_flags() {
+    let temp = fixture();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        "cli:\n  verbose: false\n",
+    )
+    .unwrap();
+
+    sandboxed_command(&temp)
+        .args(["--environment", SELFIE_ENV, "-p"])
+        .arg(temp.path().join("flag-packages"))
+        .args(["package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-flag-pkg"));
+}
+
+// Its control: with nothing to fill the gap, the run names both settings, the
+// file and the flag for each.
+#[test]
+fn a_partial_config_file_without_flags_names_both_settings() {
+    let temp = fixture();
+    let config = temp.path().join(".config/selfie/config.yaml");
+    fs::write(&config, "cli:\n  verbose: false\n").unwrap();
+
+    sandboxed_command(&temp)
+        .args(["package", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(config.display().to_string()))
+        .stderr(predicate::str::contains("`environment:` (--environment)"))
+        .stderr(predicate::str::contains(
+            "`package_directory:` (--package-directory)",
+        ))
+        .stderr(predicate::str::contains("No configuration file found").not());
+}
+
+// A misspelled key is reported before the refusal it leads to, since it is
+// likely the setting the run is missing.
+#[test]
+fn a_misspelled_required_key_is_named_before_the_refusal() {
+    let temp = fixture();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "envronment: {SELFIE_ENV}\npackage_directory: {}\n",
+            temp.path().join("config-packages").display()
+        ),
+    )
+    .unwrap();
+
+    sandboxed_command(&temp)
+        .args(["package", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`envronment` is not a recognized setting",
+        ))
+        .stderr(predicate::str::contains("`environment:` (--environment)"));
+}
+
+// An empty flag counts as not given, so the file's value stands. Taken as given,
+// `--environment ''` would match no package and list nothing as relevant.
+#[test]
+fn an_empty_environment_flag_keeps_the_files_value() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .args(["--environment", "", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-config-pkg"));
+}
+
+// The path flags never deliver an empty value: the argument parser refuses one
+// before selfie sees it, unlike `--environment`.
+#[test]
+fn an_empty_package_directory_flag_is_refused_by_the_parser() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .args(["-p", "", "package", "list"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("a value is required"));
 }
 
 #[test]

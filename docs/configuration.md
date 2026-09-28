@@ -440,14 +440,16 @@ settings: `dotfiles_directory` falls back to a sibling of the package directory 
 `state_directory` to `~/.local/state/selfie`. Supply neither flag and selfie names **both**, along
 with the directory it searched.
 
-This applies only to a file that is **absent**. A config file that exists but cannot be read, cannot
-be parsed, or is not a regular file is still an error — the flags do not paper over a file you are
-in the middle of editing.
+Flags also fill _gaps_ in a file that exists. A file holding only a `cli:` section, or only one of
+the two required settings, works when the flags supply the rest. When neither the file nor a flag
+supplies a required setting, selfie names each one, with the key and the flag that would set it.
 
-Nor do flags fill _gaps_ in a file that exists. A configuration file must carry both `environment`
-and `package_directory` itself; a file holding only a `cli:` section fails even with both flags
-supplied. Flags override settings that are present and stand in for a file that is not there — they
-are not merged into a partial one. Making them merge is tracked separately.
+An empty value counts as not given, whether it is in the file or on the command line.
+`--environment ''` leaves the file's `environment` in force, and `environment: ""` in the file with
+no flag is reported as missing. The path flags cannot be given an empty value at all.
+
+A config file that exists but cannot be read, cannot be parsed, or is not a regular file is still an
+error — the flags do not paper over a file you are in the middle of editing.
 
 **The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
 colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
@@ -483,11 +485,12 @@ absolute path. `selfie config validate` reads only the file, so it checks no fla
 
 **`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
 what is on disk and applies no overrides, including to `verbose` and `use_colors`, so that a flag
-cannot hide a problem in the file it is masking. It therefore still fails when there is no config
-file at all, even on a run that would otherwise succeed from flags — there is no file for it to
-report on. Passing `-p` and reading back the file's `package_directory` is expected — it is not the
-flag being ignored. Use `selfie package list`, which prints the package directory it actually read,
-to see the effective value.
+cannot hide a problem in the file it is masking. A required setting the file leaves out is reported
+as an error even when a flag supplies it on this run. It still fails when there is no config file at
+all, even on a run that would otherwise succeed from flags — there is no file for it to report on.
+Passing `-p` and reading back the file's `package_directory` is expected — it is not the flag being
+ignored. Use `selfie package list`, which prints the package directory it actually read, to see the
+effective value.
 
 **Two paths are not covered by any flag.** A dotfile `target` beginning with `~`, and the
 deploy-state fallback used when no `state_directory` is configured, both resolve against `HOME`.

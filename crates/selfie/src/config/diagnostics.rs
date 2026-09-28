@@ -162,7 +162,8 @@ impl<T> SectionLoad<T> {
 /// frontend decides how to show them.
 #[derive(Clone)]
 pub struct LoadedConfig {
-    config: super::SelfieConfig,
+    path: std::path::PathBuf,
+    config: super::ConfigFile,
     ignored_keys: Vec<IgnoredKey>,
     // The text rather than a parsed tree. A frontend's section is parsed from it
     // through the same entry point as the library's settings, so the two parses
@@ -190,11 +191,13 @@ struct CliOnly<T> {
 
 impl LoadedConfig {
     pub(crate) fn new(
-        config: super::SelfieConfig,
+        path: std::path::PathBuf,
+        config: super::ConfigFile,
         ignored_keys: Vec<IgnoredKey>,
         text: String,
     ) -> Self {
         Self {
+            path,
             config,
             ignored_keys,
             text,
@@ -239,9 +242,16 @@ impl LoadedConfig {
         }))
     }
 
-    /// The settings themselves.
+    /// The file that was read.
     #[must_use]
-    pub fn config(&self) -> &super::SelfieConfig {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// What the file says. Resolve it into the settings a run uses with
+    /// [`ConfigFile::resolve`](super::ConfigFile::resolve).
+    #[must_use]
+    pub fn config(&self) -> &super::ConfigFile {
         &self.config
     }
 
@@ -249,14 +259,6 @@ impl LoadedConfig {
     #[must_use]
     pub fn ignored_keys(&self) -> &[IgnoredKey] {
         &self.ignored_keys
-    }
-
-    /// Take the settings, discarding the diagnostics.
-    ///
-    /// For a caller that has already reported them, or one that has no way to.
-    #[must_use]
-    pub fn into_config(self) -> super::SelfieConfig {
-        self.config
     }
 }
 
