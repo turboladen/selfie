@@ -25,6 +25,9 @@ pub struct ClapCli {
     ///
     /// Specifies the directory where package definition files are located.
     ///
+    /// A leading `~` is expanded, and a relative path is taken from the current
+    /// directory.
+    ///
     /// Example: --package-directory=/path/to/packages
     #[clap(long, short = 'p', global = true)]
     pub(crate) package_directory: Option<PathBuf>,
@@ -33,6 +36,9 @@ pub struct ClapCli {
     ///
     /// Specifies the directory for dotfile source files used by `selfie apply`.
     ///
+    /// A leading `~` is expanded, and a relative path is taken from the current
+    /// directory.
+    ///
     /// Example: --dotfiles-directory=/path/to/dotfiles
     #[clap(long, global = true)]
     pub(crate) dotfiles_directory: Option<PathBuf>,
@@ -40,6 +46,9 @@ pub struct ClapCli {
     /// Override the state directory from configuration file
     ///
     /// Specifies the directory for deploy state tracking: checksums, drift detection.
+    ///
+    /// A leading `~` is expanded, and a relative path is taken from the current
+    /// directory.
     ///
     /// Example: --state-directory=/path/to/state
     #[clap(long, global = true)]

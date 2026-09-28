@@ -22,9 +22,11 @@ fn test_validate_valid_config() {
 #[test]
 fn config_validate_reports_the_dotfiles_and_state_directories() {
     let temp_dir = setup_default_test_config();
-    // The loader canonicalizes the package directory and the home directory,
-    // so both derived paths print in canonical form: `/private/var/...` where
-    // the sandbox was minted as `/var/...` on macOS.
+    // The package directory prints as written, so the dotfiles default beside
+    // it does too. The home directory is canonicalized when `~` is resolved, so
+    // the state default prints as `/private/var/...` where the sandbox was minted
+    // as `/var/...` on macOS.
+    let written = temp_dir.path();
     let root = temp_dir.path().canonicalize().unwrap();
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
@@ -33,7 +35,7 @@ fn config_validate_reports_the_dotfiles_and_state_directories() {
         .success()
         .stdout(predicates::str::contains(format!(
             "dotfiles_directory: {}",
-            root.join("dotfiles").display()
+            written.join("dotfiles").display()
         )))
         .stdout(predicates::str::contains(format!(
             "state_directory: {}",

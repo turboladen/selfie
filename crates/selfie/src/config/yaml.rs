@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -152,8 +152,8 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
 /// Expand a leading `~` or `~/` to the home directory without canonicalizing,
 /// so a directory that does not exist yet still expands.
 ///
-/// `Ok(None)` when the path has no such prefix and is used as written: `~user/x`,
-/// `~typo` and `~//x` are not expanded.
+/// `~//x` is `~/x`. `Ok(None)` when the path has no such prefix and is used as
+/// written: `~user/x` and `~typo` are not expanded.
 ///
 /// # Errors
 ///
@@ -163,19 +163,20 @@ pub(super) fn expand_tilde_only(
     fs: &impl FileSystem,
     path: &Path,
 ) -> Result<Option<PathBuf>, FileSystemError> {
-    let path_str = path.to_string_lossy();
-    let rest = match path_str.strip_prefix('~') {
-        Some("") => None,
-        Some(rest) => match rest.strip_prefix('/') {
-            Some(rest) if !rest.starts_with('/') => Some(rest.to_string()),
-            _ => return Ok(None),
-        },
-        None => return Ok(None),
-    };
-    let home = fs.expand_path(&PathBuf::from("~"))?;
-    Ok(Some(match rest {
-        Some(rest) if !rest.is_empty() => home.join(rest),
-        _ => home,
+    // By component rather than as text, so a path that is not UTF-8 passes
+    // through intact, and extra slashes after `~/` fall away as a shell reads
+    // them. Joined as text, `~//x` makes `/x` replace the home directory.
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::Normal(first)) if first == "~" => {}
+        _ => return Ok(None),
+    }
+    let rest = components.as_path();
+    let home = fs.expand_path(Path::new("~"))?;
+    Ok(Some(if rest.as_os_str().is_empty() {
+        home
+    } else {
+        home.join(rest)
     }))
 }
 
@@ -309,7 +310,6 @@ mod tests {
 
             let package_dir = Path::new("/test/packages");
             fs.mock_path_exists(&package_dir, true);
-            fs.mock_expand_path(&package_dir, &package_dir);
 
             let loader = YamlLoader::new(&fs);
             let config = loader
@@ -359,7 +359,6 @@ mod tests {
         "#;
 
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loader = YamlLoader::new(&fs);
             let config = loader
@@ -419,7 +418,6 @@ mod tests {
     "#;
 
             fs.mock_config_file(config_dir, incomplete_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             // A partial file loads; what it lacks is named when it is resolved,
             // where an override may still supply it.
@@ -472,7 +470,7 @@ mod tests {
             let expanded_path = home_dir.join("packages");
 
             fs.mock_config_file(config_dir, tilde_yaml);
-            fs.mock_expand_path(Path::new("~/packages"), &expanded_path);
+            fs.mock_expand_path(Path::new("~"), home_dir);
 
             let loader = YamlLoader::new(&fs);
             let config = loader
@@ -503,7 +501,6 @@ mod tests {
             fs.mock_path_exists(&config_dir.join("config.yml"), false);
             fs.mock_read_file(&config_path, minimal_yaml);
             mock_regular_file(&mut fs);
-            fs.mock_expand_path(Path::new("/test/packages"), Path::new("/test/packages"));
 
             let loader = YamlLoader::new(&fs);
             let config = loader
@@ -779,7 +776,6 @@ mod tests {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             YamlLoader::new(&fs)
                 .load_config()
@@ -895,7 +891,6 @@ mod tests {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
             Ok(loaded.cli_section::<FakeSection>()?.map(|section| {
@@ -952,7 +947,6 @@ mod tests {
                 config_dir,
                 &format!("{BASE}\"cli.verbose\": true\ncli:\n  verbose: false\n"),
             );
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
             let keys: Vec<&str> = loaded.ignored_keys().iter().map(|k| k.key()).collect();
@@ -976,7 +970,6 @@ mod tests {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
             YamlLoader::new(&fs).load_config()
         }
 
@@ -1063,9 +1056,9 @@ mod tests {
         }
     }
 
-    // Only `~` and `~/` name the home directory. `~user` is another user's, which
-    // this does not look up, and `~typo` and `~//x` are not the home directory
-    // either, so each is left as written.
+    // Only `~` and `~/` name the home directory, however many slashes follow.
+    // `~user` is another user's, which this does not look up, and `~typo` is not
+    // the home directory either, so each is left as written.
     mod expand_tilde_only {
         use std::path::{Path, PathBuf};
 
@@ -1089,11 +1082,41 @@ mod tests {
             );
         }
 
+        // A second slash must not make the rest absolute: joined as `/x`, it
+        // would name `/x` instead of a path under the home directory.
         #[test]
-        fn leaves_another_user_a_typo_and_a_double_slash_as_written() {
+        fn extra_slashes_after_the_tilde_name_the_same_directory() {
+            for (path, expanded) in [
+                ("~//x", "/home/me/x"),
+                ("~///x", "/home/me/x"),
+                ("~//", "/home/me"),
+            ] {
+                assert_eq!(
+                    super::super::expand_tilde_only(&home(), Path::new(path)).unwrap(),
+                    Some(PathBuf::from(expanded)),
+                    "{path}"
+                );
+            }
+        }
+
+        // A name that is not UTF-8 after `~/` is kept byte for byte.
+        #[test]
+        fn a_path_that_is_not_utf8_expands_intact() {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+            let path = Path::new(OsStr::from_bytes(b"~/x\xe9"));
+
+            assert_eq!(
+                super::super::expand_tilde_only(&home(), path).unwrap(),
+                Some(Path::new("/home/me").join(OsStr::from_bytes(b"x\xe9")))
+            );
+        }
+
+        #[test]
+        fn leaves_another_user_and_a_typo_as_written() {
             // No expansion is mocked here, so asking the port would fail.
             let fs = MockFileSystem::default();
-            for path in ["~user/x", "~typo", "~//x"] {
+            for path in ["~user/x", "~typo"] {
                 assert_eq!(
                     super::super::expand_tilde_only(&fs, Path::new(path)).unwrap(),
                     None,

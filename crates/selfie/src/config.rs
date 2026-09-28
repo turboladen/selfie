@@ -237,8 +237,7 @@ impl ConfigFile {
     /// The package directory the file names, with a leading `~` expanded.
     #[must_use]
     pub fn package_directory(&self, fs: &impl FileSystem) -> Option<PathBuf> {
-        setting_path(self.package_directory.as_deref())
-            .map(|path| expand_package_directory(fs, path))
+        setting_path(self.package_directory.as_deref()).map(|path| expanded(fs, path))
     }
 
     /// The standalone dotfiles directory: the one the file names, or the
@@ -246,22 +245,19 @@ impl ConfigFile {
     /// neither.
     #[must_use]
     pub fn dotfiles_directory(&self, fs: &impl FileSystem) -> Option<PathBuf> {
-        self.configured_dotfiles_directory(fs).or_else(|| {
-            self.package_directory(fs)
-                .map(|package_directory| default_dotfiles_directory(&package_directory))
-        })
-    }
-
-    fn configured_dotfiles_directory(&self, fs: &impl FileSystem) -> Option<PathBuf> {
         setting_path(self.dotfiles_directory.as_deref())
-            .map(|path| expand_other_directory(fs, path))
+            .map(|path| expanded(fs, path))
+            .or_else(|| {
+                self.package_directory(fs)
+                    .map(|package_directory| default_dotfiles_directory(&package_directory))
+            })
     }
 
     /// The deploy state directory the file names, with a leading `~` expanded.
     /// `None` when it names none and the default applies.
     #[must_use]
     pub fn state_directory(&self, fs: &impl FileSystem) -> Option<PathBuf> {
-        setting_path(self.state_directory.as_deref()).map(|path| expand_other_directory(fs, path))
+        setting_path(self.state_directory.as_deref()).map(|path| expanded(fs, path))
     }
 
     /// The command timeout, or its default.
@@ -297,12 +293,20 @@ impl ConfigFile {
         fs: &impl FileSystem,
         overrides: &Overrides,
     ) -> Result<SelfieConfig, MissingSettings> {
+        // Chosen first and expanded after, so a flag's `~` is expanded exactly as
+        // the file's is.
+        let chosen = |flag: Option<&PathBuf>, file: Option<&PathBuf>| {
+            setting_path(flag.map(PathBuf::as_path))
+                .or_else(|| setting_path(file.map(PathBuf::as_path)))
+                .map(|path| expanded(fs, path))
+        };
         let environment = setting_str(overrides.environment.as_deref())
             .or_else(|| self.environment())
             .map(str::to_string);
-        let package_directory = setting_path(overrides.package_directory.as_deref())
-            .map(Path::to_path_buf)
-            .or_else(|| self.package_directory(fs));
+        let package_directory = chosen(
+            overrides.package_directory.as_ref(),
+            self.package_directory.as_ref(),
+        );
 
         let mut missing = Vec::new();
         if environment.is_none() {
@@ -318,12 +322,14 @@ impl ConfigFile {
         Ok(SelfieConfig {
             environment,
             package_directory,
-            dotfiles_directory: setting_path(overrides.dotfiles_directory.as_deref())
-                .map(Path::to_path_buf)
-                .or_else(|| self.configured_dotfiles_directory(fs)),
-            state_directory: setting_path(overrides.state_directory.as_deref())
-                .map(Path::to_path_buf)
-                .or_else(|| self.state_directory(fs)),
+            dotfiles_directory: chosen(
+                overrides.dotfiles_directory.as_ref(),
+                self.dotfiles_directory.as_ref(),
+            ),
+            state_directory: chosen(
+                overrides.state_directory.as_ref(),
+                self.state_directory.as_ref(),
+            ),
             command_timeout: self.command_timeout.unwrap_or_else(default_command_timeout),
             stop_on_error: self.stop_on_error(),
             max_concurrency: self.max_concurrency(),
@@ -331,19 +337,28 @@ impl ConfigFile {
     }
 }
 
-// The package directory is canonicalized when it resolves, and kept as written
-// when it does not, such as when nothing is there yet.
-fn expand_package_directory(fs: &impl FileSystem, path: &Path) -> PathBuf {
-    fs.expand_path(path).unwrap_or_else(|_| path.to_path_buf())
+/// `path` with a leading `~` or `~/` expanded to the home directory, and as
+/// written when it has neither.
+///
+/// Nothing is canonicalized: a directory that does not exist yet still expands,
+/// and a symlink stays as written.
+///
+/// # Errors
+///
+/// The [`FileSystemError`](crate::fs::FileSystemError) from resolving the home
+/// directory, when the path needs it and it cannot be resolved.
+fn expand_setting(
+    fs: &impl FileSystem,
+    path: &Path,
+) -> Result<PathBuf, crate::fs::FileSystemError> {
+    Ok(self::yaml::expand_tilde_only(fs, path)?.unwrap_or_else(|| path.to_path_buf()))
 }
 
-// The other directories may not exist yet, so only `~` is resolved. A home
-// directory that cannot be found leaves the path as written.
-fn expand_other_directory(fs: &impl FileSystem, path: &Path) -> PathBuf {
-    match self::yaml::expand_tilde_only(fs, path) {
-        Ok(Some(expanded)) => expanded,
-        _ => path.to_path_buf(),
-    }
+// A home directory that cannot be found leaves the path as written. For the
+// state directory that is then refused as not absolute, which is the safe
+// outcome: the other choice is a default nobody named.
+fn expanded(fs: &impl FileSystem, path: &Path) -> PathBuf {
+    expand_setting(fs, path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Builder pattern for `SelfieConfig` testing
@@ -665,6 +680,53 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 "Missing required settings: environment, package_directory"
+            );
+        }
+
+        fn home() -> MockFileSystem {
+            let mut fs = MockFileSystem::default();
+            fs.expect_expand_path()
+                .withf(|path| path == Path::new("~"))
+                .returning(|_| Ok(PathBuf::from("/home/me")));
+            fs
+        }
+
+        // Every directory, from the file or an override, has its `~` expanded
+        // the same way. An override taken as written would name `./~/state`.
+        #[test]
+        fn a_tilde_state_directory_is_expanded() {
+            let with_state = ConfigFile {
+                state_directory: Some(PathBuf::from("~/file-state")),
+                ..file("env", "~/packages")
+            };
+
+            let from_file = with_state.resolve(&home(), &Overrides::default()).unwrap();
+            let from_flag = with_state
+                .resolve(
+                    &home(),
+                    &Overrides {
+                        state_directory: Some(PathBuf::from("~/flag-state")),
+                        dotfiles_directory: Some(PathBuf::from("~/flag-dotfiles")),
+                        ..Overrides::default()
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(
+                from_file.state_directory(),
+                Some(&PathBuf::from("/home/me/file-state"))
+            );
+            assert_eq!(
+                from_file.package_directory(),
+                Path::new("/home/me/packages")
+            );
+            assert_eq!(
+                from_flag.state_directory(),
+                Some(&PathBuf::from("/home/me/flag-state"))
+            );
+            assert_eq!(
+                from_flag.dotfiles_directory(),
+                PathBuf::from("/home/me/flag-dotfiles")
             );
         }
 

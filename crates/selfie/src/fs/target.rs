@@ -367,7 +367,7 @@ pub enum StatePathError {
     NoHome,
     /// The configured `state_directory` is not an absolute path.
     #[error(
-        "state_directory '{}' is not an absolute path. Use an absolute path; `~` is expanded only in the config file, and only when the home directory can be determined",
+        "state_directory '{}' is not an absolute path. Use an absolute path; a leading `~` or `~/` is expanded, but only when the home directory can be determined, and `~user` is not",
         .0.display()
     )]
     NotAbsolute(PathBuf),
@@ -386,8 +386,8 @@ pub fn state_directory<H: HomeDir + ?Sized>(
 ) -> Result<PathBuf, StatePathError> {
     // Used exactly as given, so what comes back is only as unresolved as the
     // caller was configured with. A relative value would resolve against the
-    // process working directory, and a flag's `~` is never expanded, so
-    // `--state-directory='~/state'` would otherwise land in `./~/state`.
+    // process working directory, and a `~` naming another user is left as
+    // written, so `~user/state` would otherwise land in `./~user/state`.
     if let Some(configured) = configured {
         if !configured.is_absolute() {
             return Err(StatePathError::NotAbsolute(configured.to_path_buf()));

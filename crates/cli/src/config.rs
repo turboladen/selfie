@@ -268,15 +268,32 @@ impl std::fmt::Display for MissingRequiredSettings {
 
 impl std::error::Error for MissingRequiredSettings {}
 
+// A blank value is dropped first, by the library's own rule: it counts as not
+// given, as it does in the file, and `std::path::absolute` would turn one into
+// `./ `. A value starting with `~` is left for the library to expand, so
+// `~user/x` stays as written, exactly as the same value in the file does,
+// instead of becoming `./~user/x`.
+fn flag_path(path: Option<&PathBuf>) -> Option<PathBuf> {
+    let path = path.filter(|path| !selfie::config::is_blank(path.as_os_str()))?;
+    let names_home = path.as_os_str().as_encoded_bytes().first() == Some(&b'~');
+    if path.is_absolute() || names_home {
+        return Some(path.clone());
+    }
+    Some(std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+}
+
 impl ClapCli {
     /// The settings given on the command line, which take precedence over the
     /// configuration file's.
+    ///
+    /// A relative path is taken from the working directory, as a path argument
+    /// to any command is.
     pub(crate) fn overrides(&self) -> Overrides {
         Overrides {
             environment: self.environment.clone(),
-            package_directory: self.package_directory.clone(),
-            dotfiles_directory: self.dotfiles_directory.clone(),
-            state_directory: self.state_directory.clone(),
+            package_directory: flag_path(self.package_directory.as_ref()),
+            dotfiles_directory: flag_path(self.dotfiles_directory.as_ref()),
+            state_directory: flag_path(self.state_directory.as_ref()),
         }
     }
 

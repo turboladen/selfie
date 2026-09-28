@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config, setup_test_config};
 
 // A configured package directory that does not exist is an ordinary mistake — a
 // typo, a machine where the dotfiles repo has not been cloned yet — and the fix
@@ -128,15 +128,18 @@ fn a_listing_command_still_gives_the_same_guidance() {
 // symlink. `mkdir -p` cannot create through the link, so the sentence names the link
 // as the component in the way and offers no creation command. The relative spelling
 // matters: its shallowest ancestor is the empty path, which must not read as missing.
+// It is written in the file, because a relative flag is made absolute first.
 #[test]
 fn a_relative_package_directory_below_a_dangling_symlink_names_the_link() {
-    let temp_dir = setup_default_test_config();
+    let temp_dir = setup_test_config(&format!(
+        "environment: {SELFIE_ENV}\npackage_directory: dl/pkgs\n"
+    ));
     std::os::unix::fs::symlink(temp_dir.path().join("nowhere"), temp_dir.path().join("dl"))
         .unwrap();
 
     let output = sandboxed_command(&temp_dir)
         .current_dir(temp_dir.path())
-        .args(["-p", "dl/pkgs", "spec", "list"])
+        .args(["spec", "list"])
         .assert()
         .get_output()
         .clone();
@@ -164,13 +167,11 @@ fn spec_remove_names_a_file_at_the_package_directory() {
 
     let output = output_of(&temp_dir, &["spec", "remove", "vim"]);
 
-    // The configured path is canonicalized when the configuration loads, so the
-    // sentence names the resolved spelling.
-    let named = std::fs::canonicalize(&packages).unwrap();
+    // The configured path is named as written.
     assert!(
         output.contains(&format!(
             "Cannot remove 'vim': {} is not a directory, it is a regular file",
-            named.display()
+            packages.display()
         )),
         "the directory and what is there must be named, got: {output}"
     );

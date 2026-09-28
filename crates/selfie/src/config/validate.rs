@@ -90,14 +90,12 @@ impl ConfigFile {
         }
     }
 
-    // The default beside the package directory, with `~` expanded the way the
-    // package directory's own check expands it. `None` when the package
-    // directory is unset or cannot be resolved, which is reported on its own.
+    // The default beside the package directory. `None` when the package
+    // directory is unset or its `~` cannot be resolved, which is reported on its
+    // own.
     fn default_dotfiles_directory_for_validation(&self, fs: &impl FileSystem) -> Option<PathBuf> {
         let package_directory = super::setting_path(self.package_directory.as_deref())?;
-        let expanded = super::yaml::expand_tilde_only(fs, package_directory)
-            .ok()?
-            .unwrap_or_else(|| package_directory.to_path_buf());
+        let expanded = super::expand_setting(fs, package_directory).ok()?;
         Some(super::default_dotfiles_directory(&expanded))
     }
 }
@@ -220,8 +218,10 @@ fn validate_directory_path(
     path: &Path,
     setting: Setting,
 ) -> Option<ValidationIssue> {
-    let expanded_path = match super::yaml::expand_tilde_only(fs, path) {
-        Ok(expanded) => expanded.unwrap_or_else(|| path.to_path_buf()),
+    // The same expansion a run applies, which also says when the home directory
+    // could not be found, where a run would keep the path as written.
+    let expanded_path = match super::expand_setting(fs, path) {
+        Ok(expanded) => expanded,
         // Nothing is wrong with the setting itself, so this is no error.
         Err(error) => {
             return Some(ValidationIssue::warning(

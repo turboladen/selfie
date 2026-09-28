@@ -159,8 +159,10 @@ package_directory: /home/user/my-packages
 package_directory: ~/dev-packages
 ```
 
-A leading `~` or `~/` is expanded to your home directory. `~user` and environment variables are not
-expanded.
+A leading `~` or `~/` is expanded to your home directory, and extra slashes after it are ignored, so
+`~//dev-packages` is `~/dev-packages`. `~user` and environment variables are not expanded. Nothing
+else is resolved: a symlinked path is used and shown as written, and a relative path is relative to
+the directory selfie runs in, which `selfie config validate` reports as an error.
 
 ## Optional Settings
 
@@ -233,10 +235,11 @@ never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` h
 state_directory: ~/.local/state/selfie
 ```
 
-A directory you name must be an absolute path, as `package_directory` must. It does not have to
-exist: selfie creates it on the first write that needs it, whether you name the path here or leave
-the setting out and take the default. `selfie config validate` reports the directory in effect
-either way.
+A directory you name in the file must be an absolute path, as `package_directory` must;
+`--state-directory` takes a relative path from the current directory. It does not have to exist:
+selfie creates it on the first write that needs it, whether you name the path here or leave the
+setting out and take the default. `selfie config validate` reports the directory in effect either
+way.
 
 What selfie will not do is put its state where something else already is. A path occupied by a file,
 or by a symlink whose destination is gone, is refused before any dotfile is deployed, naming what is
@@ -462,26 +465,17 @@ the tracing level is chosen from the flag before the file is read.
 read; the flags override _fields_ in whatever file that was. Setting both is normal, and the flag
 still wins for the field it names.
 
-**A flag value is not processed the way the same value in the file is.** `~` is expanded for the
-path settings in the configuration file; a flag value is used exactly as typed. Your shell expands a
-bare `~/packages`, but neither bash nor zsh expands `--package-directory=~/packages`, so that form
-reaches selfie as the literal string and fails with `Package directory not found: ~/packages` even
-though the identical value works in the file. Use the separated form (`-p ~/packages`) or an
-absolute path. `selfie config validate` reads only the file, so it checks no flag value; a relative
-`--state-directory` is refused when the command runs instead.
+**A path flag is processed the way the same value in the file is, and a relative one is made
+absolute.** `~` is expanded in `--package-directory`, `--dotfiles-directory` and
+`--state-directory`, including in the `--package-directory=~/packages` form that no shell expands. A
+relative path is taken from the current directory when selfie starts, as any command's path argument
+is. `~user` is not expanded, so `--state-directory=~user/state` is refused as not absolute and
+creates nothing.
 
-`--package-directory` and `--state-directory` fail loudly; `--dotfiles-directory` does not:
-
-- `--state-directory='~/state'` is refused as not absolute, so
-  `selfie --state-directory='~/state' apply -y` exits 1 and creates nothing. An absolute path that
-  does not exist is **not** refused: selfie creates the directory on the first write that needs it,
-  by flag exactly as by config file. What it will not do is put its state where something else
-  already is, so an absolute path occupied by a file, or one selfie cannot read, is refused before
-  anything is deployed.
-- `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
-  dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
-  `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,
-  because the path was given rather than defaulted — the run's exit status does not change.
+An absolute state directory that does not exist is **not** refused: selfie creates the directory on
+the first write that needs it, by flag exactly as by config file. What it will not do is put its
+state where something else already is, so a path occupied by a file, or one selfie cannot read, is
+refused before anything is deployed.
 
 **`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
 what is on disk and applies no overrides, including to `verbose` and `use_colors`, so that a flag

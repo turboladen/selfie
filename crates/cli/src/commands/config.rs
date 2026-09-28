@@ -144,11 +144,6 @@ mod tests {
             package_directory: "/test/packages"
         "#;
         fs.mock_config_file(config_dir, config_yaml);
-        // The report asks for the package directory more than once: for itself
-        // and for the dotfiles directory beside it.
-        fs.expect_expand_path()
-            .withf(|path| path == Path::new("/test/packages"))
-            .returning(|path| Ok(path.to_path_buf()));
         // The report and the validation both resolve the default state
         // directory under the home directory when the file names none.
         mock_home(&mut fs);
@@ -203,7 +198,6 @@ mod tests {
             package_directory: "/test/packages"
         "#;
         fs.mock_config_file(config_dir, config_yaml);
-        fs.mock_expand_path("/test/packages", "/test/packages");
         mock_home(&mut fs);
         fs.mock_directories_exist();
 

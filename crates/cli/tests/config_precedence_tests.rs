@@ -478,24 +478,44 @@ fn a_state_directory_flag_naming_a_file_is_refused() {
     );
 }
 
-// A `~` in a flag value is not expanded, so `--state-directory='~/state'` is a
-// relative path. It is refused as one, and no directory named `~` appears in
-// the working directory.
+// A `~` in a flag value is expanded as it is in the file. No shell expands the
+// `~` after `=`, so taken as written it would name `./~/state` under the working
+// directory.
 #[test]
-fn a_literal_tilde_state_directory_is_refused_and_creates_nothing() {
+fn a_tilde_state_directory_flag_lands_under_home() {
     let temp = fixture();
 
     sandboxed_command(&temp)
         .current_dir(temp.path())
         .args(["--state-directory=~/state", "apply", "-y"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("~/state"))
-        .stderr(predicate::str::contains("not an absolute path"));
+        .success();
 
+    assert_state_records_the_fixture(&temp.path().join("state/deploy-state.yml"), temp.path());
     assert!(
         !temp.path().join("~").exists(),
         "a directory literally named `~` was created in the working directory"
+    );
+}
+
+// `~name` is another user's home, which selfie does not look up, so it stays
+// relative and is refused as one. It is not taken from the working directory,
+// which would create `./~nosuchuser`.
+#[test]
+fn a_tilde_user_state_directory_is_refused_and_creates_nothing() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["--state-directory=~nosuchuser/state", "apply", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("~nosuchuser/state"))
+        .stderr(predicate::str::contains("not an absolute path"));
+
+    assert!(
+        !temp.path().join("~nosuchuser").exists(),
+        "a directory named `~nosuchuser` was created in the working directory"
     );
     assert!(
         !temp.path().join("sentinel-target").exists(),
@@ -503,8 +523,49 @@ fn a_literal_tilde_state_directory_is_refused_and_creates_nothing() {
     );
 }
 
-// Its control. Also pins the rest of the order for this field: the file's value
-// beats the home fallback.
+// Whitespace names no directory, so the flag counts as not given and the
+// file's value stands, as it does for `--environment`.
+#[test]
+fn a_whitespace_package_directory_flag_keeps_the_files_value() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["-p", " ", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-config-pkg"));
+}
+
+// A relative path flag is taken from the working directory, as any command's
+// path argument is.
+#[test]
+fn a_relative_package_directory_flag_is_taken_from_the_working_directory() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["-p", "flag-packages", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-flag-pkg"));
+}
+
+// A relative state directory would move with the working directory. Made
+// absolute when it is given, it cannot.
+#[test]
+fn a_relative_state_directory_flag_is_taken_from_the_working_directory() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["--state-directory", "rel-state", "apply", "-y"])
+        .assert()
+        .success();
+
+    assert_state_records_the_fixture(&temp.path().join("rel-state/deploy-state.yml"), temp.path());
+}
+
 #[test]
 fn without_a_flag_the_config_files_state_directory_decides() {
     let temp = fixture_naming_both_directories_in_the_config_file();
