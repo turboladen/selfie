@@ -50,9 +50,12 @@ impl std::fmt::Debug for ResolvedContent {
 
 /// Why an entry's content could not be resolved.
 ///
-/// Every variant names commands and var names, which are references drawn from
-/// the package file, and stderr, which is forwarded on failure only. None
-/// includes resolved content.
+/// Names the command, var, template or target involved, drawn from the
+/// package file — except `TooLarge`, which names nothing. `CommandFailed`
+/// and `BindingFailed` carry the command's stderr when it exited non-zero,
+/// and otherwise the runner's error message when no completed exit is
+/// available, for example a timeout or a failure to start. None includes
+/// resolved content.
 #[derive(Debug, Error)]
 pub(crate) enum ResolveError {
     #[error("dotfile command '{command}' failed: {stderr}")]
@@ -290,7 +293,10 @@ where
     }
 }
 
-/// Run a command in `base_dir`, returning its own stdout, or stderr on failure.
+/// Run a command in `base_dir`, returning its stdout on success. On failure,
+/// returns the command's own stderr when it exited non-zero, and otherwise
+/// the runner's error message when no completed exit is available, for
+/// example a timeout or a failure to start.
 ///
 /// **stderr only on failure**: a command run with a verbose flag can echo secret
 /// material there, and on the success path it has no purpose. Render a

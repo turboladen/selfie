@@ -15,7 +15,9 @@ use std::path::{Component, Path, PathBuf};
 /// file system.
 ///
 /// Unlike `canonicalize`, this works on paths that do not exist yet. It
-/// processes components left to right, popping on `..` and skipping `.`.
+/// processes components left to right, popping on `..` and skipping `.`. A
+/// leading `..` with nothing left to pop is dropped, not kept: `../etc`
+/// normalizes to `etc`, not to itself.
 #[must_use]
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     let mut parts: Vec<Component<'_>> = Vec::new();
@@ -24,6 +26,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::ParentDir => {
                 // Only pop Normal components; never pop past root or a prefix.
+                // So reason about containment only from an absolute path.
                 if matches!(parts.last(), Some(Component::Normal(_))) {
                     parts.pop();
                 }

@@ -137,7 +137,7 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
     }
 
     let mut table = common::create_formatted_table();
-    table.set_header(vec!["Environment", "Source", "Target"]);
+    table.set_header(vec!["Environment", "Content", "Target"]);
     for dotfile in &package_info.dotfiles {
         table.add_row(vec![
             match (&dotfile.environment, dotfile.refused) {

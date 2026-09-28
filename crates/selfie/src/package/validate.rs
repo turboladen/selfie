@@ -717,8 +717,10 @@ impl Package {
 
         let count_of = |entries: &[DotfileEntry]| -> usize { entries.iter().map(declared).sum() };
 
-        // The shared set is the effective set for an environment that declares no
-        // dotfiles of its own, so it is a candidate in its own right.
+        // Chaining the shared set's count in guarantees at least one candidate
+        // even when `environments()` is empty, so `max()` cannot return `None`
+        // and drop the notice. A spec with no environments, which is what a
+        // standalone dotfile spec is, depends on this.
         let command_count = self
             .environments()
             .keys()

@@ -172,9 +172,8 @@ impl ApplyTally {
 /// Everything an apply needs that does not vary from package to package.
 ///
 /// Grouped because they travel together: `handle_apply` needs all six, and
-/// builds a [`SecretApply`] from them once per package. Passing them
-/// individually put the argument count over clippy's limit once the cancellation
-/// token joined them.
+/// builds a [`SecretApply`] from them once per package.
+// Passed individually, these exceed clippy's too_many_arguments limit.
 #[derive(Clone, Copy)]
 pub(super) struct ApplyContext<'a, F, CR> {
     pub(super) filesystem: &'a F,

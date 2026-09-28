@@ -51,8 +51,8 @@ pub trait PackageRepository: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`FileSystemError`] if the file does not exist, cannot be read, or
-    /// is not valid UTF-8.
+    /// Returns [`FileSystemError`] if the file does not exist, cannot be read, is
+    /// not valid UTF-8, or names a path outside the package directory.
     fn read_referenced_file(
         &self,
         package_path: &Path,
@@ -565,7 +565,10 @@ pub enum PackageError {
 ///
 /// Contains the results of attempting to load all packages from the repository.
 /// This includes both successfully loaded packages and any parse errors that
-/// occurred, allowing callers to handle partial failures gracefully.
+/// occurred, allowing callers to handle partial failures gracefully. Every
+/// package that failed to parse is included whatever environment is
+/// selected, because a spec that failed to parse has no environment list to
+/// filter on.
 #[derive(Debug)]
 pub struct ListPackagesOutput(pub(crate) Vec<Result<Package, PackageParseError>>);
 

@@ -77,6 +77,12 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
         stdout.contains("bat/config"),
         "the ordinary entry must list normally, got:\n{stdout}"
     );
+    // The column holds a command or a rendered template for a secret-bearing
+    // entry, not a source path, so its header must not say "Source".
+    assert!(
+        stdout.contains("Content"),
+        "the table's third column must be headed 'Content', got:\n{stdout}"
+    );
 }
 
 // There is deliberately no test here asserting that listing runs no command.
