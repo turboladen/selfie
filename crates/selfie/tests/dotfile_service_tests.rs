@@ -3522,7 +3522,7 @@ async fn a_cancelled_drift_check_stops_between_entries_of_one_package() {
 
     let events = collect_events(service.check_drift().await).await;
 
-    assert_cancelled_without_counts(&events);
+    assert_cancelled_without_counts(&events, "Drift");
     let examined = events
         .iter()
         .filter(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }))
@@ -3549,7 +3549,7 @@ async fn a_cancelled_drift_check_over_no_packages_reports_the_cancellation() {
 
     let events = collect_events(service.check_drift().await).await;
 
-    assert_cancelled_without_counts(&events);
+    assert_cancelled_without_counts(&events, "Drift");
 }
 
 // The other guard. A package with no entries for this environment never enters the
@@ -3587,13 +3587,16 @@ async fn a_cancelled_drift_check_stops_between_packages() {
 
     // With no guard on the package loop the entry-less packages are walked and the
     // run completes, reporting counts for a run the user interrupted.
-    assert_cancelled_without_counts(&events);
+    assert_cancelled_without_counts(&events, "Drift");
 }
 
 // Reported as a cancellation, not as a failure carrying prose: that is the event the
 // CLI turns into exit 130, which is what Ctrl+C is supposed to produce. A completion
 // carrying counts must not arrive alongside it.
-fn assert_cancelled_without_counts(events: &[PackageEvent]) {
+// `operation` is the word the cancellation's reason must carry, naming the
+// operation the user ran.
+#[track_caller]
+fn assert_cancelled_without_counts(events: &[PackageEvent], operation: &str) {
     let canceled = events
         .iter()
         .find_map(|e| match e {
@@ -3602,7 +3605,7 @@ fn assert_cancelled_without_counts(events: &[PackageEvent]) {
         })
         .unwrap_or_else(|| panic!("no cancellation was reported: {events:?}"));
     assert!(
-        canceled.contains("Drift"),
+        canceled.contains(operation),
         "the cancellation must name the operation the user ran: {canceled}"
     );
     assert!(
@@ -6696,19 +6699,10 @@ mod secret_bearing {
             )
         }
 
-        // Assert the run ended in a failure whose message names cancellation.
+        // Assert the run ended as a cancellation naming apply, with no result.
         #[track_caller]
         fn assert_cancelled(events: &[PackageEvent]) {
-            let result = get_operation_result(events)
-                .expect("a cancelled run still has to emit its Completed event");
-            let OperationResult::Failure(failure) = result else {
-                panic!("expected a failure, got: {result:?}");
-            };
-            let rendered = failure.to_string();
-            assert!(
-                rendered.to_lowercase().contains("cancel"),
-                "the run must report cancellation, got: {rendered}"
-            );
+            super::super::assert_cancelled_without_counts(events, "Apply");
         }
 
         // ── The token has to reach the runner ────────────────────────────────
@@ -17057,7 +17051,7 @@ mod orphans {
         let service =
             dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
-        assert!(failure_message(&events).contains("cancelled"), "{events:?}");
+        assert_cancelled_without_counts(&events, "Apply");
         assert!(recorded(&dirs, &target(&dirs, "gone")));
 
         // Drift writes nothing, but a cancel during its check still makes the
@@ -17066,7 +17060,7 @@ mod orphans {
         let service =
             dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
         let events = collect_events(service.check_drift().await).await;
-        assert_cancelled_without_counts(&events);
+        assert_cancelled_without_counts(&events, "Drift");
     }
 
     // A relative key names no one file, so it is never judged or dropped.

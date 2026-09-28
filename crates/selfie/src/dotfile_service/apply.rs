@@ -52,6 +52,9 @@ pub(super) enum Scope {
     Named(String),
 }
 
+/// The reason a cancelled apply gives.
+pub(super) const APPLY_CANCELLED: &str = "Apply cancelled";
+
 /// Why an apply stopped before its last entry.
 ///
 /// Each cause is worded once, in `Display`, so no two sites that stop a run can
@@ -74,7 +77,7 @@ enum Stop {
 impl std::fmt::Display for Stop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => f.write_str("Apply cancelled"),
+            Self::Cancelled => f.write_str(APPLY_CANCELLED),
             Self::Entry(target) => write!(
                 f,
                 "Stopped after failing to apply dotfile '{target}' (stop_on_error is enabled)"
@@ -194,13 +197,15 @@ pub(super) struct ApplyContext<'a, F, CR> {
 
 /// Core logic for applying config files
 ///
-/// Applies every package in `packages`, over the scope `scope` says.
+/// Applies every package in `packages`, over the scope `scope` says. `None`
+/// when the run was cancelled part way, so the caller reports a cancellation
+/// rather than a result.
 pub(super) async fn handle_apply<F, CR>(
     packages: &[Package],
     ctx: &ApplyContext<'_, F, CR>,
     scope: Scope,
     catalog: Catalog<'_>,
-) -> OperationResult
+) -> Option<OperationResult>
 where
     F: FileSystem,
     CR: CommandRunner,
@@ -231,7 +236,9 @@ where
                 None
             }
             StateLoad::Unusable(failure) => {
-                return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+                return Some(OperationResult::Failure(OperationFailure::Generic(
+                    failure.to_string(),
+                )));
             }
         };
     // What a dry run over an unusable state file reads drift against. Only a dry
@@ -616,7 +623,12 @@ where
     }
 
     if let Some(stop) = stopped {
-        return OperationResult::Failure(OperationFailure::Generic(stop.to_string()));
+        return match stop {
+            Stop::Cancelled => None,
+            stop => Some(OperationResult::Failure(OperationFailure::Generic(
+                stop.to_string(),
+            ))),
+        };
     }
 
     // Orphans are judged after the entries, so a record this run just wrote is
@@ -638,7 +650,7 @@ where
     // The token is asked again after the orphans are reported: a cancel that
     // arrived while they were being sent must still stop the run before it writes.
     if token.is_cancelled() {
-        return OperationResult::Failure(OperationFailure::Generic(Stop::Cancelled.to_string()));
+        return None;
     }
     tally.orphaned = findings.reported;
     // A dry run has no state to change, or leaves the one it read alone.
@@ -656,5 +668,7 @@ where
             .await;
     }
 
-    OperationResult::Success(tally.into_success(config.environment()))
+    Some(OperationResult::Success(
+        tally.into_success(config.environment()),
+    ))
 }
