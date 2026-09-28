@@ -14,6 +14,7 @@ use crate::{
         service::ProgressTracker,
     },
 };
+use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
 pub(super) async fn handle_check<PR, CR>(
@@ -60,6 +61,7 @@ where
         package_name,
         config.environment(),
         check_command.as_deref(),
+        config.package_directory(),
         command_runner,
         sender,
         progress,
@@ -213,7 +215,7 @@ fn create_operation_result(
     }
 }
 
-/// Execute a check command and return structured results
+/// Execute a check command in `package_dir` and return structured results
 ///
 /// This function can be reused by other services that need to run check commands
 /// without duplicating the package loading and environment validation logic.
@@ -222,6 +224,7 @@ pub(super) async fn execute_check_command<CR>(
     package_name: &str,
     environment: &str,
     check_command: Option<&str>,
+    package_dir: &Path,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -237,13 +240,14 @@ where
         package_name,
         environment,
         check_command,
+        package_dir,
         command_runner,
         token,
     )
     .await
 }
 
-/// Execute a check command without updating progress
+/// Execute a check command in `package_dir` without updating progress
 ///
 /// This is useful for bulk operations like package listing where individual
 /// check progress updates would be too noisy.
@@ -251,6 +255,7 @@ pub(super) async fn execute_check_command_quiet<CR>(
     package_name: &str,
     environment: &str,
     check_command: Option<&str>,
+    package_dir: &Path,
     command_runner: &CR,
     token: &CancellationToken,
 ) -> CheckResultData
@@ -258,10 +263,7 @@ where
     CR: CommandRunner,
 {
     if let Some(cmd) = check_command {
-        match command_runner
-            .execute(cmd, std::path::Path::new("."), token)
-            .await
-        {
+        match command_runner.execute(cmd, package_dir, token).await {
             Ok(output) => {
                 // Any exit status is an answer, whatever produced it: the user's
                 // shell reports a check killed by a signal as an ordinary non-zero

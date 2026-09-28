@@ -10,7 +10,7 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         SpecOrigin,
-        event::{OperationResult, PackageEvent},
+        event::{CheckResult, EnvironmentStatus, OperationResult, PackageEvent},
         git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{InstallOptions, PackageService, PackageServiceImpl},
@@ -21,6 +21,9 @@ use test_common::{FakeCommandRunner, collect_events};
 use tokio_util::sync::CancellationToken;
 
 const INSTALL_CMD: &str = "install-pkg";
+const CHECK_CMD: &str = "check-pkg";
+const DEP_CHECK_CMD: &str = "check-dep";
+const REC_CHECK_CMD: &str = "check-rec";
 
 // A service reading specs from `spec_dir`, with `package_directory` configured as
 // `package_dir`. The two are the same directory except in a test that needs the
@@ -150,5 +153,131 @@ async fn install_in_a_missing_package_directory_fails_naming_it() {
     assert!(
         !rendered.to_lowercase().contains("not found"),
         "the directory is not a missing command: {rendered}"
+    );
+}
+
+// The commands every route through a check asked the runner for, with the
+// directory each was asked to run in.
+#[tokio::test]
+async fn every_check_route_is_asked_to_run_in_the_package_directory() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!(
+            "    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n    dependencies:\n      - dep\n    recommends:\n      - rec\n"
+        ),
+    );
+    for (name, check) in [("dep", DEP_CHECK_CMD), ("rec", REC_CHECK_CMD)] {
+        std::fs::write(
+            temp.path().join(format!("{name}.yml")),
+            format!("name: {name}\nenvironments:\n  test:\n    install: \"true\"\n    check: \"{check}\"\n"),
+        )
+        .unwrap();
+    }
+    // The check fails, so install runs both its checks and its install command.
+    let runner = FakeCommandRunner::new()
+        .failing(CHECK_CMD, b"")
+        .succeeding(DEP_CHECK_CMD, b"")
+        .succeeding(REC_CHECK_CMD, b"")
+        .succeeding(INSTALL_CMD, b"");
+    let service = || service(temp.path(), temp.path(), runner.clone());
+
+    collect_events(service().check("pkg").await).await;
+    collect_events(service().list(false).await).await;
+    collect_events(service().status("pkg").await).await;
+    // The dependency and the recommend each report themselves present.
+    collect_events(service().install("pkg", InstallOptions::default()).await).await;
+
+    let calls = runner.calls();
+    let checks = calls
+        .iter()
+        .filter(|(command, _)| command == CHECK_CMD)
+        .count();
+    // One each from check, list and status, and two from install.
+    assert_eq!(checks, 5, "{calls:?}");
+    for other in [DEP_CHECK_CMD, REC_CHECK_CMD] {
+        assert!(
+            calls.iter().any(|(command, _)| command == other),
+            "{other} never ran: {calls:?}"
+        );
+    }
+    for (command, dir) in &calls {
+        assert_eq!(
+            dir,
+            temp.path(),
+            "{command} ran outside the package directory"
+        );
+    }
+}
+
+#[tokio::test]
+async fn check_finds_a_relative_path_in_a_package_directory_with_a_quote_and_a_space() {
+    let temp = TempDir::new().unwrap();
+    let package_dir = quoted_package_dir(&temp);
+    write_spec(
+        &package_dir,
+        "    install: \"true\"\n    check: \"test -f ./here.marker\"\n",
+    );
+
+    let events = collect_events(
+        service(&package_dir, &package_dir, real_runner())
+            .check("pkg")
+            .await,
+    )
+    .await;
+
+    let verdict = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::CheckResultCompleted { check_result, .. } => Some(&check_result.result),
+            _ => None,
+        })
+        .expect("the check should report a result");
+    assert!(
+        matches!(verdict, CheckResult::Success { .. }),
+        "{verdict:?}"
+    );
+}
+
+#[tokio::test]
+async fn status_reports_a_package_and_its_dependency_installed_from_a_relative_check() {
+    let temp = TempDir::new().unwrap();
+    let package_dir = quoted_package_dir(&temp);
+    write_spec(
+        &package_dir,
+        "    install: \"true\"\n    check: \"test -f ./here.marker\"\n    dependencies:\n      - dep\n",
+    );
+    std::fs::write(
+        package_dir.join("dep.yml"),
+        "name: dep\nenvironments:\n  test:\n    install: \"true\"\n    check: \"test -f ./here.marker\"\n",
+    )
+    .unwrap();
+
+    let events = collect_events(
+        service(&package_dir, &package_dir, real_runner())
+            .status("pkg")
+            .await,
+    )
+    .await;
+
+    let status = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } => Some(environment_status),
+            _ => None,
+        })
+        .expect("status should report the environment");
+    assert!(
+        matches!(status.status, Some(EnvironmentStatus::Installed)),
+        "{status:?}"
+    );
+    assert!(
+        matches!(
+            status.dependency_statuses.as_slice(),
+            [dep] if matches!(dep.status, EnvironmentStatus::Installed)
+        ),
+        "{status:?}"
     );
 }

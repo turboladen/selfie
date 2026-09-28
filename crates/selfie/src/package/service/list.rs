@@ -104,6 +104,7 @@ where
 
     // Limit concurrent subprocess spawns to avoid exhausting file descriptors.
     let semaphore = Arc::new(Semaphore::new(config.max_concurrency().get()));
+    let package_dir: Arc<std::path::Path> = Arc::from(config.package_directory().as_path());
 
     // Create parallel tasks for status checking with order preservation
     // Collect package metadata for JoinError handling (values move into spawned tasks)
@@ -130,6 +131,7 @@ where
             let supports_current_env = env_config.is_some();
 
             let command_runner = command_runner.clone();
+            let package_dir = Arc::clone(&package_dir);
             let sender = sender.clone();
             let token = token.clone();
             let semaphore = semaphore.clone();
@@ -145,6 +147,7 @@ where
                         &package_name,
                         &current_env,
                         Some(cmd.as_str()),
+                        &package_dir,
                         &command_runner,
                         &token,
                     )

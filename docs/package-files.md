@@ -1123,8 +1123,8 @@ descriptor **is** the command's stdout, so writing to it is writing to stdout �
 there a command could not already reach.
 
 A command that `cd`s, or a profile that does, still changes the working directory the command ends
-up in — that has always been true. The same holds for install commands: they start in the package
-directory, and a login profile that `cd`s moves them before they run.
+up in — that has always been true. The same holds for install and check commands: they start in the
+package directory, and a login profile that `cd`s moves them before they run.
 
 Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
 your existing target lacks it you will get a conflict on first apply. Strip it in your own command
