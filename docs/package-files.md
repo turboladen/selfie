@@ -134,7 +134,8 @@ reason.
 
 The `~user/…` form — another user's home directory — is **not** supported. selfie expands `~/` for
 whoever is running it and nothing else. `selfie spec validate` reports a `~alice/.gemrc` target as
-an error, and `selfie apply` refuses it rather than deploying it somewhere.
+an error, and `selfie apply` refuses it rather than deploying it somewhere. Extra slashes after the
+`~` change nothing, as in a shell: `~//.gemrc` is `~/.gemrc`.
 
 ```yaml
 dotfiles:
