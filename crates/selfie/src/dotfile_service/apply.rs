@@ -32,7 +32,7 @@ use super::classify::{
     read_repo_file,
 };
 use super::deploy_entry::{
-    Decided, DeployOutcome, DeployUnit, Recorded, deploy_and_record, record_and_save,
+    Decided, DeployOutcome, DeployUnit, Ledger, Recorded, deploy_and_record, record_and_save,
 };
 use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
@@ -223,17 +223,21 @@ where
     // proceeding would deploy files it can never record, and the next run would
     // re-evaluate every one of them as untracked. A dry run writes nothing, so it
     // warns instead and previews against an empty state.
-    let mut loaded =
+    let mut ledger =
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
                     sender.send_warning(warning.to_string()).await;
                 }
-                Some(loaded)
+                if options.dry_run {
+                    Ledger::Preview(Some(loaded))
+                } else {
+                    Ledger::Record(loaded)
+                }
             }
             StateLoad::Unusable(failure) if options.dry_run => {
                 sender.send_warning(read_only_state_warning(&failure)).await;
-                None
+                Ledger::Preview(None)
             }
             StateLoad::Unusable(failure) => {
                 return Some(OperationResult::Failure(OperationFailure::Generic(
@@ -241,19 +245,18 @@ where
                 )));
             }
         };
-    // What a dry run over an unusable state file reads drift against. Only a dry
-    // run leaves `loaded` as `None`, and a dry run records nothing.
+    // What a dry run over an unusable state file reads drift against.
     let empty = DeployState::empty();
 
-    // Owned rather than borrowed from `loaded`, which is mutably borrowed inside
+    // Owned rather than borrowed from `ledger`, which is mutably borrowed inside
     // the loop. Taken from the loaded state rather than resolved again, so the
     // copies land beside the state file this run is updating.
     //
     // `None` only where the state could not be loaded at all, which is a dry run
     // and nothing else. A dry run over a state file selfie *can* read still has a
-    // root here; what keeps it from writing a copy is `perform_deploy` returning
-    // on `dry_run` before it reaches one.
-    let backups_root: Option<PathBuf> = loaded.as_ref().map(LoadedState::backups_root);
+    // root here; what keeps it from writing a copy is its preview ledger, under
+    // which `deploy_and_record` never reaches the write.
+    let backups_root: Option<PathBuf> = ledger.loaded().map(LoadedState::backups_root);
     // Targets this run has settled, and where each one's former content went.
     let mut backed_up: HashMap<String, Option<PathBuf>> = HashMap::new();
 
@@ -455,8 +458,8 @@ where
                     backups: backups_root.as_deref(),
                 };
 
-                let drift = loaded
-                    .as_ref()
+                let drift = ledger
+                    .loaded()
                     .map_or(&empty, LoadedState::state)
                     .detect_drift(&target_key, &source_checksum, &target_checksum);
                 let decision =
@@ -472,15 +475,10 @@ where
                         // `DriftType::None`. A symlinked target never reaches here: the
                         // guard above refused it before the read.
                         if drift == DriftType::NotTracked
-                            && !options.dry_run
-                            && let Some(reason) = record_and_save(
-                                filesystem,
-                                &mut loaded,
-                                sender,
-                                Recorded::InSync,
-                                &unit,
-                            )
-                            .await
+                            && let Ledger::Record(loaded) = &mut ledger
+                            && let Some(reason) =
+                                record_and_save(filesystem, loaded, sender, Recorded::InSync, &unit)
+                                    .await
                         {
                             break 'entry EntryOutcome::Unrecorded(reason);
                         }
@@ -573,10 +571,9 @@ where
                 match deploy_and_record(
                     filesystem,
                     sender,
-                    &mut loaded,
+                    &mut ledger,
                     &unit,
                     decided,
-                    options.dry_run,
                     &mut backed_up,
                 )
                 .await
@@ -642,7 +639,7 @@ where
         filesystem,
         catalog,
         config.environment(),
-        loaded.as_ref().map_or(&empty, LoadedState::state),
+        ledger.loaded().map_or(&empty, LoadedState::state),
         owner,
         sender,
     )
@@ -654,8 +651,7 @@ where
     }
     tally.orphaned = findings.reported;
     // A dry run has no state to change, or leaves the one it read alone.
-    if !options.dry_run
-        && let Some(loaded) = loaded.as_mut()
+    if let Ledger::Record(loaded) = &mut ledger
         && findings.settle(loaded.state_mut())
         && let Err(e) = save_deploy_state(filesystem, loaded)
     {

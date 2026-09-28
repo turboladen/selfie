@@ -34,8 +34,8 @@ pub(super) struct DeployUnit<'a> {
     pub(super) package: Option<&'a str>,
     /// Where copies of overwritten targets go, or `None` if there is nowhere to
     /// put one. `Some` does not mean a copy will be made.
-    // A dry run has a root here and writes nothing: `perform_deploy` returns on
-    // `dry_run` before it reaches one.
+    // A dry run can have a root here and writes nothing: under a preview ledger
+    // `deploy_and_record` never reaches the write.
     pub(super) backups: Option<&'a Path>,
 }
 
@@ -65,30 +65,62 @@ pub(super) enum DeployOutcome {
     Unrecorded(String),
 }
 
+/// The deploy state an apply reads, and whether the run writes and records.
+///
+/// Only a real run holds [`Record`](Self::Record), so only a real run writes a
+/// repository-file entry, and every such write has a state to be recorded in.
+/// A secret-bearing entry's write is not gated by this type.
+pub(super) enum Ledger {
+    /// A real run: writes targets, and records each write in this state.
+    Record(LoadedState),
+    /// A dry run: writes and records nothing. Holds the state it previews
+    /// against, when one could be read.
+    Preview(Option<LoadedState>),
+}
+
+impl Ledger {
+    /// The state this run reads, if it has one.
+    pub(super) fn loaded(&self) -> Option<&LoadedState> {
+        match self {
+            Ledger::Record(loaded) => Some(loaded),
+            Ledger::Preview(loaded) => loaded.as_ref(),
+        }
+    }
+}
+
 /// Write `unit` to its target and record it, emitting the events for each step.
 ///
 /// The one path from a decision to deploy to a recorded deployment, whatever
-/// made the decision: the entry's own drift, or an accepted conflict.
+/// made the decision: the entry's own drift, or an accepted conflict. Under a
+/// [`Ledger::Preview`] it reports what it would do and writes nothing.
 ///
 /// `backed_up` carries what this run has already copied aside, keyed by target,
 /// so a target two entries deploy to is copied once.
 pub(super) async fn deploy_and_record<F: FileSystem>(
     filesystem: &F,
     sender: &EventSender,
-    loaded: &mut Option<LoadedState>,
+    ledger: &mut Ledger,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
-    dry_run: bool,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> DeployOutcome {
-    match perform_deploy(filesystem, sender, unit, decided, dry_run, backed_up).await {
+    let Ledger::Record(loaded) = ledger else {
+        sender
+            .send_dotfile_skipped(
+                unit.source_path.display(),
+                unit.target_path.display(),
+                "dry run",
+            )
+            .await;
+        return DeployOutcome::Previewed;
+    };
+    match perform_deploy(filesystem, sender, unit, decided, backed_up).await {
         Wrote::Written => {
             match record_and_save(filesystem, loaded, sender, Recorded::Deployed, unit).await {
                 Some(reason) => DeployOutcome::Unrecorded(reason),
                 None => DeployOutcome::Deployed,
             }
         }
-        Wrote::Previewed => DeployOutcome::Previewed,
         Wrote::Refused => DeployOutcome::Refused,
     }
 }
@@ -96,8 +128,6 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
 /// What a write did, before anything is recorded.
 enum Wrote {
     Written,
-    /// A dry run: reported, and nothing written.
-    Previewed,
     /// Refused or failed, and already reported as whichever it was.
     Refused,
 }
@@ -109,20 +139,8 @@ async fn perform_deploy<F: FileSystem>(
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
-    dry_run: bool,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> Wrote {
-    if dry_run {
-        sender
-            .send_dotfile_skipped(
-                unit.source_path.display(),
-                unit.target_path.display(),
-                "dry run",
-            )
-            .await;
-        return Wrote::Previewed;
-    }
-
     sender
         .send_dotfile_deploying(unit.source_path.display(), unit.target_path.display())
         .await;
@@ -287,7 +305,7 @@ impl std::fmt::Display for Recorded {
 
 /// Record `unit` in the loaded state and write the state back. On failure,
 /// warns with what happened to the target and returns the reason the run stops.
-// A dry run has no loaded state and records nothing. The state is written
+// Only a real run's ledger hands out the state this takes. The state is written
 // after every record, so a run that cannot write it has recorded everything
 // before the failing entry. Stopping on the first failure keeps the
 // unrecorded set to one entry: a state directory that refused this write
@@ -297,12 +315,11 @@ impl std::fmt::Display for Recorded {
 // changed since is asked about.
 pub(super) async fn record_and_save<F: FileSystem>(
     filesystem: &F,
-    loaded: &mut Option<LoadedState>,
+    loaded: &mut LoadedState,
     sender: &EventSender,
     recorded: Recorded,
     unit: &DeployUnit<'_>,
 ) -> Option<String> {
-    let loaded = loaded.as_mut()?;
     loaded.state_mut().record_deployment(
         unit.target_key,
         unit.source,
