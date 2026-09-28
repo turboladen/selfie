@@ -102,6 +102,7 @@ impl ShellCommandRunner {
             .stderr(Stdio::piped());
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
+            set_pwd(&mut cmd, dir);
         }
         cmd
     }
@@ -127,6 +128,7 @@ impl ShellCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .current_dir(working_dir);
+        set_pwd(&mut cmd, working_dir);
         cmd
     }
 
@@ -430,6 +432,19 @@ impl CommandRunner for ShellCommandRunner {
                 working_directory: working_dir.to_path_buf(),
             }),
         }
+    }
+}
+
+/// Give the shell `dir` as `PWD`, so `pwd` and `$PWD` report the directory as
+/// given rather than with its symlinks resolved.
+// `current_dir` leaves the child selfie's own `PWD`. sh, bash, zsh, dash and fish
+// each accept an inherited `PWD` only when it names the directory they started
+// in, and otherwise fall back to the physical path, so a stale value is harmless
+// and a correct one keeps the logical path a `cd` would have given. It must be
+// absolute for any of them to accept it.
+fn set_pwd(cmd: &mut Command, dir: &Path) {
+    if let Ok(absolute) = std::path::absolute(dir) {
+        cmd.env("PWD", absolute);
     }
 }
 
@@ -1373,20 +1388,70 @@ mod tests {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
         let dir = tempfile::tempdir().unwrap();
-        // Canonicalize: on macOS the temp dir is under a symlinked /var, and `pwd`
-        // in a shell reports the resolved path.
-        let expected = dir.path().canonicalize().unwrap();
+        std::fs::write(dir.path().join("marker.txt"), "").unwrap();
 
         let output = runner
-            .execute_in_dir("pwd", dir.path(), Duration::from_secs(5), &token())
+            .execute_in_dir(
+                "test -f marker.txt",
+                dir.path(),
+                Duration::from_secs(5),
+                &token(),
+            )
             .await
             .unwrap();
 
-        assert!(output.is_success());
-        assert_eq!(
-            output.stdout_str().trim(),
-            expected.to_string_lossy(),
+        assert!(
+            output.is_success(),
             "command should run in the directory it was given"
+        );
+    }
+
+    // A directory reached through a symlink, and the link's path.
+    fn linked_dir(temp: &Path) -> PathBuf {
+        let real = temp.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = temp.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        link
+    }
+
+    #[tokio::test]
+    async fn pwd_reports_the_directory_as_given_not_resolved() {
+        // Without `PWD` set, the shell reports the physical path, `real`.
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let temp = tempfile::tempdir().unwrap();
+        let link = linked_dir(temp.path());
+
+        let output = runner
+            .execute_in_dir(
+                "pwd; echo \"$PWD\"",
+                &link,
+                Duration::from_secs(5),
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        let expected = format!("{0}\n{0}\n", link.display());
+        assert_eq!(output.stdout_str(), expected);
+    }
+
+    #[tokio::test]
+    async fn a_content_command_s_pwd_is_the_directory_as_given() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let temp = tempfile::tempdir().unwrap();
+        let link = linked_dir(temp.path());
+
+        let output = runner
+            .execute_for_content("pwd", &link, Duration::from_secs(5), &token())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(output.into_stdout()).unwrap(),
+            format!("{}\n", link.display())
         );
     }
 
