@@ -69,8 +69,15 @@ impl EventProcessor {
         F: FnMut(&PackageEvent) -> bool,
     {
         let mut result = EventProcessingResult::new();
+        let mut finished = false;
 
         while let Some(event) = stream.next().await {
+            // Asked before the custom handler, which may claim either event.
+            finished |= matches!(
+                event,
+                PackageEvent::Completed { .. } | PackageEvent::Canceled { .. }
+            );
+
             // Try custom handler first
             if custom_handler(&event) {
                 // Custom handler handled the event, continue to next event
@@ -81,6 +88,15 @@ impl EventProcessor {
             if self.handle_event(event, &mut result) {
                 break;
             }
+        }
+
+        // A stream that ends without saying how the operation went, as one does when
+        // the task running it panics, is a failure: nothing reported the work done.
+        if !finished {
+            self.display
+                .print_error("The operation ended without reporting a result");
+            result.exit_code = 1;
+            result.had_errors = true;
         }
 
         self.display.finish();
@@ -527,9 +543,44 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        // Empty stream should return success
+        // Nothing reported a result, so nothing reported success either.
+        assert_eq!(result.exit_code, 1);
+        assert!(result.had_errors);
+    }
+
+    // A stream that starts and then stops, as one does when the task running the
+    // operation panics, exits 1 rather than 0.
+    #[tokio::test]
+    async fn a_stream_that_ends_without_a_result_exits_one() {
+        let events = vec![PackageEvent::Started {
+            operation_info: make_operation_info("panicked"),
+        }];
+
+        let processor = EventProcessor::new(DisplayManager::new(false));
+        let result = processor
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+
+        assert_eq!(result.exit_code, 1);
+    }
+
+    // Control: a custom handler claiming the completion still counts as a result,
+    // so the check above cannot be satisfied by failing every claimed stream.
+    #[tokio::test]
+    async fn a_claimed_completion_is_still_a_result() {
+        use selfie::package::event::{OperationResult, OperationSuccess};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: make_operation_info("claimed"),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        }];
+
+        let processor = EventProcessor::new(DisplayManager::new(false));
+        let result = processor
+            .process_events(Box::pin(stream::iter(events)), |_event| true)
+            .await;
+
         assert_eq!(result.exit_code, 0);
-        assert!(!result.had_errors);
     }
 
     #[tokio::test]
@@ -549,7 +600,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, 1);
         // Handler should not be called for empty stream
         assert!(!handler_called);
     }
