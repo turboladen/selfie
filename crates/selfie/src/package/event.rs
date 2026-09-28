@@ -676,7 +676,7 @@ pub enum OperationSuccess {
     PackageChecked {
         package_name: String,
         environment: String,
-        check_result: CheckResult,
+        verdict: CheckVerdict,
         steps_completed: StepCount,
     },
     /// Package audit operation completed
@@ -1138,12 +1138,12 @@ impl std::fmt::Display for OperationSuccess {
         match self {
             OperationSuccess::PackageChecked {
                 package_name,
-                check_result,
+                verdict,
                 steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' check completed {check_result} {steps_completed}"
+                "Package '{package_name}' check completed {verdict} {steps_completed}"
             ),
             OperationSuccess::PackageAudited {
                 package_name,
@@ -1455,13 +1455,13 @@ impl OperationSuccess {
     pub fn package_checked(
         package_name: String,
         environment: String,
-        check_result: CheckResult,
+        verdict: CheckVerdict,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageChecked {
             package_name,
             environment,
-            check_result,
+            verdict,
             steps_completed,
         }
     }
@@ -1871,8 +1871,11 @@ impl OperationSuccess {
                 // other has nothing to run.
                 AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
             },
-            OperationSuccess::PackageChecked { .. }
-            | OperationSuccess::PackageInstalled { .. }
+            OperationSuccess::PackageChecked { verdict, .. } => match verdict {
+                CheckVerdict::Installed => Outcome::Clean,
+                CheckVerdict::NotInstalled { .. } => Outcome::Found,
+            },
+            OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
@@ -2676,6 +2679,35 @@ pub enum CheckResult {
     Error(String),
 }
 
+/// What a check that ran found.
+///
+/// Carries no stdout, since a check command may print a credential. The full
+/// output travels only in [`PackageEvent::CheckResultCompleted`].
+#[derive(Debug, Clone)]
+pub enum CheckVerdict {
+    /// The check command succeeded.
+    Installed,
+    /// The check command ran and exited non-zero.
+    NotInstalled {
+        command: String,
+        exit_code: Option<i32>,
+        stderr: crate::commands::BoundedText,
+    },
+}
+
+impl std::fmt::Display for CheckVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckVerdict::Installed => f.write_str("successfully"),
+            CheckVerdict::NotInstalled {
+                exit_code: Some(code),
+                ..
+            } => write!(f, "and found it not installed (exit code {code})"),
+            CheckVerdict::NotInstalled { .. } => f.write_str("and found it not installed"),
+        }
+    }
+}
+
 /// Structured data for audit results
 #[derive(Debug, Clone)]
 pub struct AuditResultData {
@@ -2879,10 +2911,7 @@ mod tests {
         let success = OperationSuccess::PackageChecked {
             package_name: "test-package".to_string(),
             environment: "test".to_string(),
-            check_result: CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+            verdict: CheckVerdict::Installed,
             steps_completed: step_count,
         };
 
@@ -3024,6 +3053,30 @@ mod tests {
                 "audit no command",
                 audited(AuditResult::NoAuditCommand),
                 Outcome::Failed,
+            ),
+            (
+                "check installed",
+                OperationSuccess::package_checked(
+                    "p".to_string(),
+                    "test".to_string(),
+                    CheckVerdict::Installed,
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Clean,
+            ),
+            (
+                "check not installed",
+                OperationSuccess::package_checked(
+                    "p".to_string(),
+                    "test".to_string(),
+                    CheckVerdict::NotInstalled {
+                        command: "false".to_string(),
+                        exit_code: Some(1),
+                        stderr: crate::commands::BoundedText::bound(b""),
+                    },
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Found,
             ),
             (
                 "generic",

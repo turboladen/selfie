@@ -1016,6 +1016,33 @@ mod tests {
         assert_eq!(result.data["result"]["outcome"], "failed");
     }
 
+    // A check that ran and found the package missing answered the question, so
+    // the call succeeds and `status` names the finding.
+    #[tokio::test]
+    async fn a_package_that_is_not_installed_is_a_found_check() {
+        use selfie::package::event::{CheckVerdict, OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::package_checked(
+                "p".to_string(),
+                "test".to_string(),
+                CheckVerdict::NotInstalled {
+                    command: "false".to_string(),
+                    exit_code: Some(1),
+                    stderr: selfie::commands::BoundedText::bound(b""),
+                },
+                StepCount::new(1, 1),
+            )),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "found");
+        assert_eq!(result.data["result"]["outcome"], "found");
+    }
+
     // A cancelled operation says so instead of reporting a missing completion.
     #[tokio::test]
     async fn a_cancelled_operation_is_reported_as_cancelled() {
@@ -1131,10 +1158,7 @@ mod tests {
                 result: OperationResult::Success(OperationSuccess::package_checked(
                     "test-pkg".to_string(),
                     "test".to_string(),
-                    CheckResult::Success {
-                        stdout: "found".to_string(),
-                        stderr: String::new(),
-                    },
+                    selfie::package::event::CheckVerdict::Installed,
                     StepCount::new(3, 3),
                 )),
             },

@@ -240,9 +240,13 @@ fn test_package_check_command_failure() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "failing-check-package"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "Command error: Command `exit 1` failed with exit code 1",
-    ));
+    // A check that ran and exited non-zero answered the question: not installed.
+    // That is the finding `check` was asked for, so it exits 3 and reports the
+    // result, not a command error.
+    cmd.assert()
+        .code(3)
+        .stderr(predicate::str::contains("Check failed"))
+        .stderr(predicate::str::contains("Command error").not());
 }
 
 #[test]
@@ -266,7 +270,9 @@ fn test_package_check_command_timeout() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "timeout-package"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
+    // A check that never finished could not answer, so it is a failure, not a
+    // finding.
+    cmd.assert().code(1).stderr(predicate::str::contains(
         "Command timed out after 1s: sleep 5",
     ));
 }

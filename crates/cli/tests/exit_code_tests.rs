@@ -219,6 +219,71 @@ fn audit_exits_one_for_a_package_not_declared_here() {
     assert_eq!(code, Some(FAILED), "{output}");
 }
 
+// ── package check ───────────────────────────────────────────────────────────
+
+fn write_checked_package(temp: &tempfile::TempDir, check: &str) {
+    write_spec(
+        temp,
+        "tool",
+        &format!(
+            "name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \"{check}\"\n"
+        ),
+    );
+}
+
+#[test]
+fn check_exits_clean_when_installed() {
+    let temp = sandbox();
+    write_checked_package(&temp, "true");
+
+    let (code, output) = run(&temp, &["package", "check", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+}
+
+#[test]
+fn check_exits_three_when_not_installed() {
+    let temp = sandbox();
+    write_checked_package(&temp, "false");
+
+    let (code, output) = run(&temp, &["package", "check", "tool"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+}
+
+// A check that exits 127, as `tool --version` does when tool is missing, has
+// answered: not installed.
+#[test]
+fn check_exits_three_when_its_command_is_missing() {
+    let temp = sandbox();
+    write_checked_package(&temp, "exit 127");
+
+    let (code, output) = run(&temp, &["package", "check", "tool"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+}
+
+// A check killed by a signal exited non-zero like any other: not installed. The
+// shell kills itself, so nothing outside the check is touched.
+#[test]
+fn check_exits_three_when_its_command_is_killed() {
+    let temp = sandbox();
+    write_checked_package(&temp, "kill -TERM $$");
+
+    let (code, output) = run(&temp, &["package", "check", "tool"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+}
+
+#[test]
+fn check_exits_one_without_a_check_command() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["package", "check", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+}
+
 #[test]
 fn check_exits_one_for_a_package_not_declared_here() {
     let temp = sandbox();

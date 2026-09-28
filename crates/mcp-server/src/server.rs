@@ -523,7 +523,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_check",
-        description = "Check if a package is installed in the current environment by running its configured check command"
+        description = "Check if a package is installed in the current environment by running its configured check command. A check command that exits non-zero for any reason, a kill included, means the package is not installed: a successful call with status 'found'. No check command, selfie's own timeout, or a command that could not be started comes back as an ERROR result. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_check(
         &self,

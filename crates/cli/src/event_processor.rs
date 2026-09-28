@@ -869,7 +869,7 @@ mod tests {
                 result: OperationResult::Success(OperationSuccess::package_checked(
                     "cancel-test-package".to_string(),
                     "test".to_string(),
-                    selfie::package::event::CheckResult::NoCheckCommand,
+                    selfie::package::event::CheckVerdict::Installed,
                     (1, 1).into(),
                 )),
             },

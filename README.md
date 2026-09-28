@@ -225,6 +225,9 @@ something to act on" from "the check itself did not work":
   deploys to any more is still there.
 - `selfie package audit`, when a package is installed from a source it does not expect, or is not
   installed at all.
+- `selfie package check`, when the package is not installed: its check command ran and exited
+  non-zero, 127 included, since `tool --version` exits 127 when `tool` is missing. A check that
+  cannot run, times out, is killed, or is not defined exits `1`.
 
 A refusal outranks a finding. A check that refused part of its work exits `1` even if it also found
 something, since its answer has a hole in it.

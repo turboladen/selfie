@@ -75,11 +75,8 @@ fn completed(events: &[PackageEvent]) -> &OperationResult {
 
 // The verdict a check reported, as carried by its own event.
 //
-// `create_operation_result` turns `CheckResult::Error` into an
-// `OperationResult::Failure`, so the `Completed` event cannot distinguish "the
-// check said not-installed" from "selfie could not read what the check said" —
-// both are failures there. This event is where the distinction survives, so it
-// is what the tests below assert on.
+// This event carries the check's own result with its output, where the
+// completion carries only a verdict, so the tests below assert on it.
 fn check_verdict(events: &[PackageEvent]) -> &CheckResult {
     events
         .iter()
