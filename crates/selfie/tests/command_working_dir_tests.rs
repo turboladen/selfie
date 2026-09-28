@@ -10,7 +10,7 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         SpecOrigin,
-        event::{CheckResult, EnvironmentStatus, OperationResult, PackageEvent},
+        event::{AuditResult, CheckResult, EnvironmentStatus, OperationResult, PackageEvent},
         git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{InstallOptions, PackageService, PackageServiceImpl},
@@ -24,6 +24,7 @@ const INSTALL_CMD: &str = "install-pkg";
 const CHECK_CMD: &str = "check-pkg";
 const DEP_CHECK_CMD: &str = "check-dep";
 const REC_CHECK_CMD: &str = "check-rec";
+const AUDIT_CMD: &str = "audit-pkg";
 
 // A service reading specs from `spec_dir`, with `package_directory` configured as
 // `package_dir`. The two are the same directory except in a test that needs the
@@ -280,4 +281,54 @@ async fn status_reports_a_package_and_its_dependency_installed_from_a_relative_c
         ),
         "{status:?}"
     );
+}
+
+#[tokio::test]
+async fn audit_and_audit_all_are_asked_to_run_in_the_package_directory() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"true\"\n    audit: \"{AUDIT_CMD}\"\n"),
+    );
+    let runner = FakeCommandRunner::new().succeeding(AUDIT_CMD, b"pkg\n");
+    let service = || service(temp.path(), temp.path(), runner.clone());
+
+    collect_events(service().audit("pkg").await).await;
+    collect_events(service().audit_all().await).await;
+
+    let calls = runner.calls();
+    assert_eq!(
+        calls,
+        vec![
+            (AUDIT_CMD.to_string(), temp.path().to_path_buf()),
+            (AUDIT_CMD.to_string(), temp.path().to_path_buf()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn audit_finds_a_relative_path_in_a_package_directory_with_a_quote_and_a_space() {
+    let temp = TempDir::new().unwrap();
+    let package_dir = quoted_package_dir(&temp);
+    // Prints the package's own name as its source only when it finds the marker.
+    write_spec(
+        &package_dir,
+        "    install: \"true\"\n    audit: \"test -f ./here.marker && echo pkg\"\n",
+    );
+
+    let events = collect_events(
+        service(&package_dir, &package_dir, real_runner())
+            .audit("pkg")
+            .await,
+    )
+    .await;
+
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::AuditResultCompleted { audit_result, .. } => Some(&audit_result.result),
+            _ => None,
+        })
+        .expect("the audit should report a result");
+    assert!(matches!(result, AuditResult::Clean { .. }), "{result:?}");
 }

@@ -58,6 +58,7 @@ where
         config.environment(),
         audit_command.as_deref(),
         &dependencies,
+        config.package_directory(),
         command_runner,
         sender,
         progress,
@@ -261,6 +262,7 @@ where
         config.environment(),
         audit_command.as_deref(),
         &dependencies,
+        config.package_directory(),
         command_runner,
         sender,
         &mut pkg_progress,
@@ -316,6 +318,7 @@ async fn execute_audit_command<CR>(
     environment: &str,
     audit_command: Option<&str>,
     dependencies: &[String],
+    package_dir: &std::path::Path,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -335,10 +338,7 @@ where
         };
     };
 
-    match command_runner
-        .execute(cmd, std::path::Path::new("."), token)
-        .await
-    {
+    match command_runner.execute(cmd, package_dir, token).await {
         Ok(output) => {
             if output.is_success() {
                 let stdout = output.stdout_str().to_string();
