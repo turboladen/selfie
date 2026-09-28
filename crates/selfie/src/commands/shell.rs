@@ -162,11 +162,9 @@ impl ShellCommandRunner {
             });
         }
 
-        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
-            command: reported.to_string(),
-            working_directory: working_directory.clone(),
-            source: Arc::new(e),
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| spawn_error(reported, working_dir, &working_directory, e))?;
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -302,11 +300,9 @@ impl CommandRunner for ShellCommandRunner {
 
         let mut cmd = self.build_command(command, None);
 
-        let mut child = cmd.spawn().map_err(|e| CommandError::IoError {
-            command: command.to_string(),
-            working_directory: working_directory.clone(),
-            source: Arc::new(e),
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| spawn_error(command, None, &working_directory, e))?;
 
         let stdout = child
             .stdout
@@ -434,6 +430,47 @@ impl CommandRunner for ShellCommandRunner {
                 working_directory: working_dir.to_path_buf(),
             }),
         }
+    }
+}
+
+/// The error for a shell that could not be started: `WorkingDirectoryUnusable`
+/// when `working_dir` was the cause, `IoError` otherwise.
+fn spawn_error(
+    command: &str,
+    working_dir: Option<&Path>,
+    working_directory: &Path,
+    source: std::io::Error,
+) -> CommandError {
+    // std applies `current_dir` in the child before exec, and reports a failed
+    // `chdir` as a spawn error with the same errno a missing shell produces, so
+    // the error alone cannot say which failed. The kernel has already refused the
+    // directory and nothing ran; this probe only picks the message, so a race
+    // can misname a failure but never runs a line of the command.
+    if working_dir.is_some_and(is_unenterable) {
+        return CommandError::WorkingDirectoryUnusable {
+            command: command.to_string(),
+            working_directory: working_directory.to_path_buf(),
+            source: Arc::new(source),
+        };
+    }
+    CommandError::IoError {
+        command: command.to_string(),
+        working_directory: working_directory.to_path_buf(),
+        source: Arc::new(source),
+    }
+}
+
+/// Whether `chdir` into `dir` would fail: missing, not a directory, or not
+/// searchable.
+// Searchable, not readable: a 0o300 directory can be entered and commands run
+// in it, as they would after a `cd`. `access` checks the real uid rather than the
+// effective one, which only matters for the message, not for what runs.
+fn is_unenterable(dir: &Path) -> bool {
+    match std::fs::metadata(dir) {
+        Ok(metadata) => {
+            !metadata.is_dir() || nix::unistd::access(dir, nix::unistd::AccessFlags::X_OK).is_err()
+        }
+        Err(_) => true,
     }
 }
 
@@ -1374,8 +1411,23 @@ mod tests {
         assert_eq!(output.stdout_str(), "found-me");
     }
 
+    // Asserts `error` blames `dir`, by variant and in the message a user reads.
+    fn assert_unusable(error: &CommandError, dir: &Path) {
+        match error {
+            CommandError::WorkingDirectoryUnusable {
+                working_directory, ..
+            } => assert_eq!(working_directory, dir),
+            other => panic!("expected WorkingDirectoryUnusable, got: {other:?}"),
+        }
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&dir.display().to_string()),
+            "the message must name the directory: {rendered}"
+        );
+    }
+
     #[tokio::test]
-    async fn execute_in_dir_reports_that_directory_on_failure() {
+    async fn execute_in_dir_names_a_missing_directory() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
         let dir = tempfile::tempdir().unwrap();
@@ -1386,12 +1438,97 @@ mod tests {
             .await
             .unwrap_err();
 
-        match error {
-            CommandError::IoError {
-                working_directory, ..
-            } => assert_eq!(working_directory, missing),
-            other => panic!("Expected IoError for a missing working directory, got: {other:?}"),
+        assert_unusable(&error, &missing);
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_names_a_file_given_as_its_directory() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "").unwrap();
+        // Executable, so only the not-a-directory check can refuse it: a search
+        // permission check alone would pass.
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let error = runner
+            .execute_in_dir("echo hi", &file, Duration::from_secs(5), &token())
+            .await
+            .unwrap_err();
+
+        assert_unusable(&error, &file);
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_names_a_directory_it_cannot_enter() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o000);
+        if !locked.holds() {
+            eprintln!("SKIP execute_in_dir_names_a_directory_it_cannot_enter: still readable");
+            return;
         }
+
+        let error = runner
+            .execute_in_dir("echo hi", locked.path(), Duration::from_secs(5), &token())
+            .await
+            .unwrap_err();
+
+        assert_unusable(&error, locked.path());
+    }
+
+    #[tokio::test]
+    async fn execute_in_dir_runs_in_a_directory_it_can_enter_but_not_list() {
+        // Search permission is what entering needs. A 0o300 directory runs its
+        // commands, as it would after a `cd`.
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let unlistable = test_common::LockedDir::create(&dir.path().join("unlistable"), 0o300);
+
+        let output = runner
+            .execute_in_dir("true", unlistable.path(), Duration::from_secs(5), &token())
+            .await
+            .unwrap();
+
+        assert!(output.is_success());
+    }
+
+    #[tokio::test]
+    async fn a_shell_that_cannot_start_is_not_blamed_on_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = ShellCommandRunner::new(
+            &dir.path().join("no-such-shell").to_string_lossy(),
+            Duration::from_secs(5),
+        );
+
+        let error = runner
+            .execute_in_dir("echo hi", dir.path(), Duration::from_secs(5), &token())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, CommandError::IoError { .. }),
+            "expected IoError, got: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_for_content_names_a_missing_directory() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+
+        let error = runner
+            .execute_for_content("echo hi", &missing, Duration::from_secs(5), &token())
+            .await
+            .unwrap_err();
+
+        assert_unusable(&error, &missing);
     }
 
     #[tokio::test]

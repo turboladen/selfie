@@ -1487,6 +1487,9 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             // never output bytes. `ContentMarkersAbsent` renders the command and
             // nothing else -- it exists because the capture could not be split.
             crate::commands::runner::CommandError::Cancelled { .. }
+            // Renders the command, the directory and an `io::Error`. Kept out of
+            // the `IoError` arm, which would call the directory a missing command.
+            | crate::commands::runner::CommandError::WorkingDirectoryUnusable { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
             | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }
             | crate::commands::runner::CommandError::StdoutSpawn(_)

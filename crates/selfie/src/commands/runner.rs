@@ -97,8 +97,8 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// [`CommandError`], for any of the failures listed on the trait, plus
-    /// [`CommandError::IoError`] if `working_dir` does not exist or is not a
-    /// directory — the shell cannot be spawned there.
+    /// [`CommandError::WorkingDirectoryUnusable`] if `working_dir` cannot be
+    /// entered. Nothing runs in that case.
     fn execute_in_dir(
         &self,
         command: &str,
@@ -419,6 +419,16 @@ pub enum CommandError {
     /// IO error occurred while starting or running the command
     #[error("IO Error executing command '{command}': {source}")]
     IoError {
+        command: String,
+        working_directory: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// The directory the command was to run in could not be entered: it is
+    /// missing, not a directory, or not searchable. No part of the command ran.
+    #[error("Cannot run '{command}' in {}: {source}", working_directory.display())]
+    WorkingDirectoryUnusable {
         command: String,
         working_directory: PathBuf,
         #[source]
