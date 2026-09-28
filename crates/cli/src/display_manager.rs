@@ -12,13 +12,30 @@ use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Shorten a path for display by replacing the home directory with `~`.
+///
+/// Only a path inside the home directory is shortened; anything else comes back
+/// unchanged.
 pub(crate) fn shorten_path(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME")
-        && let Some(rest) = path.strip_prefix(&home)
-    {
-        return format!("~{rest}");
+    match std::env::var("HOME") {
+        Ok(home) => shorten_path_under(path, &home),
+        Err(_) => path.to_string(),
     }
-    path.to_string()
+}
+
+// Split out so a test can supply the home directory rather than set `HOME` for
+// the whole test process.
+//
+// Component-wise, not a string prefix: with a home of `/Users/steve`, the path
+// `/Users/steve2/x` is not inside it, and a string prefix renders it `~2/x`.
+fn shorten_path_under(path: &str, home: &str) -> String {
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match std::path::Path::new(path).strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_string(),
+    }
 }
 
 /// Standard indentation for structured CLI output (e.g., section content,
@@ -627,6 +644,28 @@ impl std::fmt::Debug for DisplayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_inside_home_is_shortened() {
+        assert_eq!(
+            shorten_path_under("/Users/steve/.config/x", "/Users/steve"),
+            "~/.config/x"
+        );
+        assert_eq!(shorten_path_under("/Users/steve", "/Users/steve"), "~");
+    }
+
+    // A sibling whose name starts with the home directory's is not inside it.
+    #[test]
+    fn a_sibling_of_home_is_left_alone() {
+        assert_eq!(
+            shorten_path_under("/Users/steve2/x", "/Users/steve"),
+            "/Users/steve2/x"
+        );
+        assert_eq!(
+            shorten_path_under("/etc/hosts", "/Users/steve"),
+            "/etc/hosts"
+        );
+    }
 
     #[test]
     fn test_display_manager_creation() {
