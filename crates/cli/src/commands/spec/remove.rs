@@ -110,10 +110,11 @@ pub(crate) async fn handle_remove(
     };
 
     if !skip_confirm {
-        let confirm_removal = Confirm::with_theme(&SimpleTheme)
-            .with_prompt(prompt)
-            .default(default_answer)
-            .interact();
+        let confirm_removal = display.prompt(
+            Confirm::with_theme(&SimpleTheme)
+                .with_prompt(prompt)
+                .default(default_answer),
+        );
 
         match confirm_removal {
             Ok(true) => {}

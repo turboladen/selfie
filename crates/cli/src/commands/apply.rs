@@ -108,11 +108,13 @@ impl InteractiveConflictResolver {
             items.push("Reveal the two values, then choose");
         }
 
-        dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("How should this conflict be resolved?")
-            .items(&items)
-            .default(0)
-            .interact()
+        self.display
+            .prompt(
+                dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                    .with_prompt("How should this conflict be resolved?")
+                    .items(&items)
+                    .default(0),
+            )
             .ok()
     }
 
@@ -131,10 +133,13 @@ impl InteractiveConflictResolver {
              in any session recording or shared screen.",
         );
 
-        let confirmed = dialoguer::Confirm::new()
-            .with_prompt("Show values?")
-            .default(false)
-            .interact()
+        let confirmed = self
+            .display
+            .prompt(
+                dialoguer::Confirm::new()
+                    .with_prompt("Show values?")
+                    .default(false),
+            )
             .unwrap_or(false);
 
         if !confirmed {

@@ -74,10 +74,11 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
         display.print_info(format!("Package '{package_name}' does not exist."));
 
         // Prompt user for confirmation before creating
-        let confirm = Confirm::with_theme(&SimpleTheme)
-            .with_prompt(format!("Create new package '{package_name}'?"))
-            .default(false)
-            .interact();
+        let confirm = display.prompt(
+            Confirm::with_theme(&SimpleTheme)
+                .with_prompt(format!("Create new package '{package_name}'?"))
+                .default(false),
+        );
 
         match confirm {
             Ok(true) => {

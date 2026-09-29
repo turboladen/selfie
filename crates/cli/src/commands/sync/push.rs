@@ -174,18 +174,17 @@ fn confirm_commits(
     let mut confirmed = Vec::new();
     for (i, commit) in pending.into_iter().enumerate() {
         let num = i + 1;
-        let edited_message: String =
-            match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        let edited_message: String = match display.prompt(crate::display_manager::TextLine(
+            dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!("Commit message ({num}/{total})"))
-                .with_initial_text(&commit.message)
-                .interact_text()
-            {
-                Ok(msg) => msg,
-                Err(_) => {
-                    display.print_warning("Cancelled");
-                    return None;
-                }
-            };
+                .with_initial_text(&commit.message),
+        )) {
+            Ok(msg) => msg,
+            Err(_) => {
+                display.print_warning("Cancelled");
+                return None;
+            }
+        };
 
         confirmed.push(ConfirmedCommit {
             files: commit.files,

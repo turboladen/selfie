@@ -42,6 +42,82 @@ fn shorten_path_under(path: &str, home: &str) -> String {
 /// result cards, list suggestions, and other indented fields).
 pub(crate) const INDENT: &str = "   ";
 
+/// A terminal prompt [`DisplayManager::prompt`] can ask.
+///
+/// Implemented for each dialoguer prompt the CLI uses. The call that reads the
+/// answer happens inside `prompt`, so nothing else can draw on the terminal
+/// while the user answers.
+pub(crate) trait Prompt {
+    /// What the user's answer is.
+    type Answer;
+
+    /// Ask on the terminal and wait for the answer.
+    ///
+    /// # Errors
+    ///
+    /// When there is no terminal to ask on, or the terminal fails.
+    fn ask(self) -> dialoguer::Result<Self::Answer>;
+}
+
+/// A line of text the user types: printable characters only, with
+/// line-editing keys. For free-form input, prompt with a bare
+/// [`dialoguer::Input`].
+pub(crate) struct TextLine<'a>(pub(crate) dialoguer::Input<'a, String>);
+
+// The one place dialoguer's reading calls are allowed; crates/cli/clippy.toml
+// forbids them everywhere else, so a prompt that bypasses `DisplayManager::prompt`
+// does not build.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "every prompt is asked here, inside DisplayManager::prompt"
+)]
+mod ask {
+    use super::{Prompt, TextLine};
+
+    impl Prompt for dialoguer::Confirm<'_> {
+        type Answer = bool;
+        fn ask(self) -> dialoguer::Result<bool> {
+            self.interact()
+        }
+    }
+
+    impl Prompt for dialoguer::Select<'_> {
+        type Answer = usize;
+        fn ask(self) -> dialoguer::Result<usize> {
+            self.interact()
+        }
+    }
+
+    impl Prompt for dialoguer::MultiSelect<'_> {
+        type Answer = Vec<usize>;
+        fn ask(self) -> dialoguer::Result<Vec<usize>> {
+            self.interact()
+        }
+    }
+
+    // `interact_opt`: escape cancels rather than erroring.
+    impl Prompt for dialoguer::FuzzySelect<'_> {
+        type Answer = Option<usize>;
+        fn ask(self) -> dialoguer::Result<Option<usize>> {
+            self.interact_opt()
+        }
+    }
+
+    impl Prompt for dialoguer::Input<'_, String> {
+        type Answer = String;
+        fn ask(self) -> dialoguer::Result<String> {
+            self.interact()
+        }
+    }
+
+    impl Prompt for TextLine<'_> {
+        type Answer = String;
+        fn ask(self) -> dialoguer::Result<String> {
+            self.0.interact_text()
+        }
+    }
+}
+
 /// Structured error detail for the end-of-operation summary
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorDetail {
@@ -453,6 +529,16 @@ impl DisplayManager {
                 }
             }
         });
+    }
+
+    /// Ask `prompt` on the terminal, with nothing else drawing on it until the
+    /// user answers.
+    ///
+    /// # Errors
+    ///
+    /// When there is no terminal to ask on, or the terminal fails.
+    pub(crate) fn prompt<P: Prompt>(&self, prompt: P) -> dialoguer::Result<P::Answer> {
+        self.mp.suspend(|| prompt.ask())
     }
 
     /// Print a plain line to stdout
