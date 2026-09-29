@@ -971,9 +971,6 @@ pub enum CommandFailure {
         exit_code: Option<i32>,
         stderr: crate::commands::BoundedText,
     },
-    CommandNotFound {
-        command: String,
-    },
     InvalidCommand {
         command: String,
         reason: String,
@@ -1064,9 +1061,6 @@ impl std::fmt::Display for CommandFailure {
                 } else {
                     write!(f, "Command `{command}` failed")
                 }
-            }
-            CommandFailure::CommandNotFound { command } => {
-                write!(f, "Command `{command}` not found")
             }
             CommandFailure::InvalidCommand { command, reason } => {
                 write!(f, "Invalid command `{command}`: {reason}")
@@ -1467,9 +1461,6 @@ impl From<crate::package::port::PackageError> for OperationFailure {
 impl From<crate::commands::runner::CommandError> for OperationFailure {
     fn from(err: crate::commands::runner::CommandError) -> Self {
         match err {
-            crate::commands::runner::CommandError::IoError { command, .. } => {
-                OperationFailure::CommandError(CommandFailure::CommandNotFound { command })
-            }
             crate::commands::runner::CommandError::Timeout { command, .. } => {
                 OperationFailure::CommandError(CommandFailure::InvalidCommand {
                     command,
@@ -1487,9 +1478,13 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             // never output bytes. `ContentMarkersAbsent` renders the command and
             // nothing else -- it exists because the capture could not be split.
             crate::commands::runner::CommandError::Cancelled { .. }
-            // Renders the command, the directory and an `io::Error`. Kept out of
-            // the `IoError` arm, which would call the directory a missing command.
+            // `IoError` comes from a command that started, so it was found; it
+            // renders the command and an `io::Error`.
+            | crate::commands::runner::CommandError::IoError { .. }
+            // Renders the command, the directory and an `io::Error`.
             | crate::commands::runner::CommandError::WorkingDirectoryUnusable { .. }
+            // Names the program that would not start, which is not the command.
+            | crate::commands::runner::CommandError::SpawnFailed { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
             | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }
             | crate::commands::runner::CommandError::StdoutSpawn(_)

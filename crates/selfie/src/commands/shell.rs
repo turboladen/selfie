@@ -157,7 +157,7 @@ impl ShellCommandRunner {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| spawn_error(reported, working_dir, e))?;
+            .map_err(|e| spawn_error(reported, &cmd, working_dir, e))?;
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -280,7 +280,7 @@ impl CommandRunner for ShellCommandRunner {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| spawn_error(command, working_dir, e))?;
+            .map_err(|e| spawn_error(command, &cmd, working_dir, e))?;
 
         let stdout = child
             .stdout
@@ -425,8 +425,13 @@ fn set_pwd(cmd: &mut Command, dir: &Path) {
 }
 
 /// The error for a shell that could not be started: `WorkingDirectoryUnusable`
-/// when `working_dir` was the cause, `IoError` otherwise.
-fn spawn_error(command: &str, working_dir: &Path, source: std::io::Error) -> CommandError {
+/// when `working_dir` was the cause, `SpawnFailed` naming the program otherwise.
+fn spawn_error(
+    command: &str,
+    spawned: &Command,
+    working_dir: &Path,
+    source: std::io::Error,
+) -> CommandError {
     // std applies `current_dir` in the child before exec, and reports a failed
     // `chdir` as a spawn error with the same errno a missing shell produces, so
     // the error alone cannot say which failed. The kernel has already refused the
@@ -439,8 +444,13 @@ fn spawn_error(command: &str, working_dir: &Path, source: std::io::Error) -> Com
             source: Arc::new(source),
         };
     }
-    CommandError::IoError {
+    CommandError::SpawnFailed {
         command: command.to_string(),
+        program: spawned
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .into_owned(),
         working_directory: working_dir.to_path_buf(),
         source: Arc::new(source),
     }
@@ -1564,9 +1574,16 @@ mod tests {
             .await
             .unwrap_err();
 
+        let shell = dir.path().join("no-such-shell");
+        match &error {
+            CommandError::SpawnFailed { program, .. } => {
+                assert_eq!(program, &shell.to_string_lossy());
+            }
+            other => panic!("expected SpawnFailed, got: {other:?}"),
+        }
         assert!(
-            matches!(error, CommandError::IoError { .. }),
-            "expected IoError, got: {error:?}"
+            error.to_string().contains(&shell.display().to_string()),
+            "the message must name the shell: {error}"
         );
     }
 

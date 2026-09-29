@@ -332,3 +332,31 @@ async fn audit_finds_a_relative_path_in_a_package_directory_with_a_quote_and_a_s
         .expect("the audit should report a result");
     assert!(matches!(result, AuditResult::Clean { .. }), "{result:?}");
 }
+
+#[tokio::test]
+async fn install_with_a_shell_that_cannot_start_names_the_shell_not_the_command() {
+    let temp = TempDir::new().unwrap();
+    write_spec(temp.path(), "    install: \"true\"\n");
+    let shell = temp.path().join("no-such-shell");
+    let runner = ShellCommandRunner::new(&shell.to_string_lossy(), Duration::from_secs(5));
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner)
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    let OperationResult::Failure(failure) = completed(&events) else {
+        panic!("install with no shell must fail: {events:?}");
+    };
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&shell.display().to_string()),
+        "the failure must name the shell: {rendered}"
+    );
+    assert!(
+        !rendered.to_lowercase().contains("not found"),
+        "the install command was never looked for: {rendered}"
+    );
+}

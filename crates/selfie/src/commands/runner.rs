@@ -400,10 +400,21 @@ pub enum CommandError {
         working_directory: PathBuf,
     },
 
-    /// IO error occurred while starting or running the command
+    /// IO error occurred while running the command
     #[error("IO Error executing command '{command}': {source}")]
     IoError {
         command: String,
+        working_directory: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// The program that runs the command, normally a shell, could not be
+    /// started. No part of the command ran.
+    #[error("Could not start '{program}' to run '{command}': {source}")]
+    SpawnFailed {
+        command: String,
+        program: String,
         working_directory: PathBuf,
         #[source]
         source: Arc<std::io::Error>,
