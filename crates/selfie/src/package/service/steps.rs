@@ -147,7 +147,8 @@ pub async fn get_command<'a>(
     }
 }
 
-/// Step to execute a command with streaming output for real-time feedback
+/// Step to execute a command in the package directory, streaming its output
+/// for real-time feedback
 pub async fn execute_command_streaming<CR>(
     command_runner: &CR,
     cmd: &str,
@@ -195,13 +196,17 @@ where
         }
     });
 
-    // Wrap the command to run in the package directory
-    let package_dir = config.package_directory();
-    let wrapped_cmd = format!("cd '{}' && {}", package_dir.display(), cmd);
-
-    // Execute the wrapped command with streaming channel
+    // The package directory is the child's working directory, never a `cd`
+    // pasted in front of the command. `cd dir && cmd` guards only the command's
+    // first line: if the `cd` fails, the later lines run wherever selfie started.
     let result = command_runner
-        .execute_streaming(&wrapped_cmd, config.command_timeout(), tx, token)
+        .execute_streaming(
+            cmd,
+            config.package_directory(),
+            config.command_timeout(),
+            tx,
+            token,
+        )
         .await;
 
     // Wait for the output task to finish and handle any task errors
@@ -418,6 +423,110 @@ rm -rf package package.tar.gz";
             }
         } else {
             panic!("Expected warning event to be sent");
+        }
+    }
+
+    // Install commands run through a real `/bin/sh`, in a package directory the
+    // test controls.
+    mod package_directory {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use super::*;
+        use crate::commands::ShellCommandRunner;
+        use crate::config::SelfieConfigBuilder;
+
+        // Run `cmd` as an install command with `package_dir` configured.
+        async fn install(package_dir: &Path, cmd: &str) -> Result<CommandOutput, CommandError> {
+            let config = SelfieConfigBuilder::default()
+                .environment("test")
+                .package_directory(package_dir)
+                .build();
+            let runner = ShellCommandRunner::new(
+                ShellCommandRunner::default_shell(),
+                Duration::from_secs(5),
+            );
+            let (tx, _rx) = mpsc::channel::<PackageEvent>(1000);
+            let sender = EventSender::new_with_context(
+                tx,
+                OperationType::PackageInstall,
+                "test".to_string(),
+                "test".to_string(),
+                OperationContext::default(),
+            );
+            let mut progress = crate::package::service::ProgressTracker::new(1);
+
+            execute_command_streaming(
+                &runner,
+                cmd,
+                "install",
+                &config,
+                &sender,
+                &mut progress,
+                &CancellationToken::new(),
+            )
+            .await
+        }
+
+        fn assert_names(error: &CommandError, dir: &Path) {
+            assert!(
+                matches!(error, CommandError::WorkingDirectoryUnusable { .. }),
+                "expected WorkingDirectoryUnusable, got: {error:?}"
+            );
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(&dir.display().to_string()),
+                "the failure must name the directory: {rendered}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_multi_line_install_in_a_missing_package_directory_runs_no_line() {
+            let temp = tempfile::tempdir().unwrap();
+            let missing = temp.path().join("packages");
+            let markers = tempfile::tempdir().unwrap();
+            let (command, first, second) = test_common::two_marking_lines(markers.path());
+
+            let error = install(&missing, &command).await.unwrap_err();
+
+            assert_names(&error, &missing);
+            assert!(!first.exists(), "the first line ran");
+            assert!(!second.exists(), "the second line ran");
+        }
+
+        #[tokio::test]
+        async fn a_multi_line_install_in_an_unenterable_package_directory_runs_no_line() {
+            let temp = tempfile::tempdir().unwrap();
+            let locked = test_common::LockedDir::create(&temp.path().join("packages"), 0o000);
+            if !locked.holds() {
+                eprintln!(
+                    "SKIP a_multi_line_install_in_an_unenterable_package_directory_runs_no_line: \
+                     still readable"
+                );
+                return;
+            }
+            let markers = tempfile::tempdir().unwrap();
+            let (command, first, second) = test_common::two_marking_lines(markers.path());
+
+            let error = install(locked.path(), &command).await.unwrap_err();
+
+            assert_names(&error, locked.path());
+            assert!(!first.exists(), "the first line ran");
+            assert!(!second.exists(), "the second line ran");
+        }
+
+        #[tokio::test]
+        async fn an_install_runs_in_a_package_directory_whose_name_has_a_quote_and_a_space() {
+            let temp = tempfile::tempdir().unwrap();
+            let package_dir = temp.path().join("it's a dir");
+            std::fs::create_dir(&package_dir).unwrap();
+            std::fs::write(package_dir.join("here.marker"), "").unwrap();
+
+            let output = install(&package_dir, "test -f ./here.marker")
+                .await
+                .unwrap();
+
+            assert!(output.is_success(), "stderr: {}", output.stderr_str());
         }
     }
 }

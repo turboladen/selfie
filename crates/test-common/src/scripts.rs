@@ -1,7 +1,7 @@
 //! Writing executable test fixtures.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Write `body` to `path` and make it executable.
@@ -37,4 +37,26 @@ pub fn write_executable(path: &Path, body: &str) {
 
     let status = child.wait().expect("waiting for the fixture writer");
     assert!(status.success(), "could not write {}", path.display());
+}
+
+/// A two-line shell command whose lines each create a marker file in
+/// `markers`, returned with the paths of the two markers.
+///
+/// `markers` must exist, so either line succeeds wherever it runs. A marker that
+/// exists afterwards is proof that its line ran.
+///
+/// # Panics
+///
+/// If `markers` is not valid UTF-8 or cannot be quoted for a shell.
+#[must_use]
+pub fn two_marking_lines(markers: &Path) -> (String, PathBuf, PathBuf) {
+    let first = markers.join("first");
+    let second = markers.join("second");
+    let quote = |path: &Path| {
+        shlex::try_quote(path.to_str().expect("a UTF-8 marker path"))
+            .expect("a quotable marker path")
+            .into_owned()
+    };
+    let command = format!("touch {}\ntouch {}", quote(&first), quote(&second));
+    (command, first, second)
 }

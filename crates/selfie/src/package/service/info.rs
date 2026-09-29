@@ -7,6 +7,8 @@
 //! `handle_status` — loads the package and checks installation status for the current environment.
 //!
 
+use std::path::Path;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -169,13 +171,21 @@ where
     progress.next(sender, "Checking installation status").await;
 
     if let Some(env_config) = package_blob.package.environments().get(current_env) {
-        let status =
-            get_installation_status(package_name, current_env, env_config, command_runner, token)
-                .await;
+        let package_dir = config.package_directory();
+        let status = get_installation_status(
+            package_name,
+            current_env,
+            env_config,
+            package_dir,
+            command_runner,
+            token,
+        )
+        .await;
         let max_concurrent = config.max_concurrency().get();
         let dependency_statuses = check_dependency_statuses(
             env_config.dependencies(),
             current_env,
+            package_dir,
             repo,
             command_runner,
             token,
@@ -185,6 +195,7 @@ where
         let recommend_statuses = check_dependency_statuses(
             env_config.recommends(),
             current_env,
+            package_dir,
             repo,
             command_runner,
             token,
@@ -227,6 +238,7 @@ where
 async fn check_dependency_statuses<PR, CR>(
     dependencies: &[String],
     current_env: &str,
+    package_dir: &Path,
     repo: &PR,
     command_runner: &CR,
     token: &CancellationToken,
@@ -245,7 +257,14 @@ where
         let futures: Vec<_> = chunk
             .iter()
             .map(|dep_name| {
-                check_single_dependency(dep_name, current_env, repo, command_runner, token)
+                check_single_dependency(
+                    dep_name,
+                    current_env,
+                    package_dir,
+                    repo,
+                    command_runner,
+                    token,
+                )
             })
             .collect();
         results.extend(futures::future::join_all(futures).await);
@@ -256,6 +275,7 @@ where
 async fn check_single_dependency<PR, CR>(
     dep_name: &str,
     current_env: &str,
+    package_dir: &Path,
     repo: &PR,
     command_runner: &CR,
     token: &CancellationToken,
@@ -295,6 +315,7 @@ where
         dep_name,
         current_env,
         check_cmd.as_deref(),
+        package_dir,
         command_runner,
         token,
     )
@@ -322,6 +343,7 @@ async fn get_installation_status(
     package_name: &str,
     environment: &str,
     env_config: &crate::package::EnvironmentConfig,
+    package_dir: &Path,
     command_runner: &impl CommandRunner,
     token: &CancellationToken,
 ) -> Option<EnvironmentStatus> {
@@ -330,6 +352,7 @@ async fn get_installation_status(
         package_name,
         environment,
         check_cmd.as_deref(),
+        package_dir,
         command_runner,
         token,
     )
@@ -573,7 +596,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -653,7 +676,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -750,7 +773,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);
@@ -843,7 +866,7 @@ mod tests {
 
         let mut mock_runner = MockCommandRunner::new();
         // Main package check succeeds, dep check fails
-        mock_runner.expect_execute().returning(|cmd, _| {
+        mock_runner.expect_execute().returning(|cmd, _, _| {
             let success = cmd != "false";
             Box::pin(async move { Ok(mock_command_output(success)) })
         });
@@ -913,7 +936,7 @@ mod tests {
         let mut mock_runner = MockCommandRunner::new();
         mock_runner
             .expect_execute()
-            .returning(|_, _| Box::pin(async { Ok(mock_command_output(true)) }));
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
 
         let (sender, mut rx) = status_test_sender();
         let mut progress = ProgressTracker::new(2);

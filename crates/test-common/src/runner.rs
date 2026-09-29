@@ -190,18 +190,10 @@ impl CommandRunner for FakeCommandRunner {
     async fn execute(
         &self,
         command: &str,
+        working_dir: &Path,
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, Path::new("."))
-    }
-
-    async fn execute_with_timeout(
-        &self,
-        command: &str,
-        _timeout: Duration,
-        _token: &CancellationToken,
-    ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, Path::new("."))
+        self.answer(command, working_dir)
     }
 
     async fn execute_in_dir(
@@ -217,11 +209,12 @@ impl CommandRunner for FakeCommandRunner {
     async fn execute_streaming(
         &self,
         command: &str,
+        working_dir: &Path,
         _timeout: Duration,
         _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, Path::new("."))
+        self.answer(command, working_dir)
     }
 
     /// Answers with the scripted output, already separated.

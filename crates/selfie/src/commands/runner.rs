@@ -35,13 +35,14 @@ pub enum OutputChunk {
 /// A non-zero exit is **not** an error for the `execute*` methods. It is
 /// reported through [`CommandOutput::is_success`], so their `# Errors` sections
 /// list only the ways a command fails to run to completion. Those ways are the
-/// same for all of them: the command cannot be started or dies part-way
-/// through, it times out, it is cancelled via `token`, or an output stream
-/// cannot be read to the end ([`CommandError::OutputReadFailed`]). The last
-/// includes stderr on a command whose correctness depends only on stdout — the
-/// runner reports what it could not read, and does not decide which stream a
-/// caller cared about. Each `execute*` method below names only what it adds to
-/// that set.
+/// same for all of them: its working directory cannot be entered
+/// ([`CommandError::WorkingDirectoryUnusable`], and then no part of it runs), it
+/// cannot be started or dies part-way through, it times out, it is cancelled
+/// via `token`, or an output stream cannot be read to the end
+/// ([`CommandError::OutputReadFailed`]). The last includes stderr on a command
+/// whose correctness depends only on stdout — the runner reports what it could
+/// not read, and does not decide which stream a caller cared about. Each
+/// `execute*` method below names only what it adds to that set.
 ///
 /// They all buffer the command's entire output in memory, and nothing bounds it
 /// — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
@@ -59,11 +60,11 @@ pub trait CommandRunner: Send + Sync {
     /// present — `brew`, `npm`, `apt` — before trying to install with it.
     fn is_command_available(&self, command: &str) -> impl Future<Output = bool> + Send;
 
-    /// Run a command to completion, buffering its output.
+    /// Run a command in `working_dir` to completion, buffering its output.
     ///
     /// For commands that produce little output and need no real-time feedback.
     /// The timeout is whatever the implementation defaults to; use
-    /// [`execute_with_timeout`](CommandRunner::execute_with_timeout) to set one.
+    /// [`execute_in_dir`](CommandRunner::execute_in_dir) to set one.
     ///
     /// # Errors
     ///
@@ -71,6 +72,7 @@ pub trait CommandRunner: Send + Sync {
     fn execute(
         &self,
         command: &str,
+        working_dir: &Path,
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
@@ -80,25 +82,6 @@ pub trait CommandRunner: Send + Sync {
     /// # Errors
     ///
     /// [`CommandError`], for any of the failures listed on the trait.
-    fn execute_with_timeout(
-        &self,
-        command: &str,
-        timeout: Duration,
-        token: &CancellationToken,
-    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
-
-    /// Like [`execute_with_timeout`](CommandRunner::execute_with_timeout), with
-    /// `working_dir` as the command's current directory rather than selfie's own.
-    ///
-    /// For commands whose meaning depends on where they run: dotfile content
-    /// providers resolve against the package file's parent directory, the same
-    /// base repository sources resolve against.
-    ///
-    /// # Errors
-    ///
-    /// [`CommandError`], for any of the failures listed on the trait, plus
-    /// [`CommandError::IoError`] if `working_dir` does not exist or is not a
-    /// directory — the shell cannot be spawned there.
     fn execute_in_dir(
         &self,
         command: &str,
@@ -107,8 +90,8 @@ pub trait CommandRunner: Send + Sync {
         token: &CancellationToken,
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
-    /// Run a command, relaying stdout and stderr through `output_sender` as they
-    /// arrive.
+    /// Run a command in `working_dir`, relaying stdout and stderr through
+    /// `output_sender` as they arrive.
     ///
     /// For long-running commands that need real-time feedback. Chunks are
     /// best-effort: an implementation may drop one rather than block when the
@@ -123,6 +106,7 @@ pub trait CommandRunner: Send + Sync {
     fn execute_streaming(
         &self,
         command: &str,
+        working_dir: &Path,
         timeout: Duration,
         output_sender: mpsc::Sender<OutputChunk>,
         token: &CancellationToken,
@@ -416,9 +400,30 @@ pub enum CommandError {
         working_directory: PathBuf,
     },
 
-    /// IO error occurred while starting or running the command
+    /// IO error occurred while running the command
     #[error("IO Error executing command '{command}': {source}")]
     IoError {
+        command: String,
+        working_directory: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// The program that runs the command, normally a shell, could not be
+    /// started. No part of the command ran.
+    #[error("Could not start '{program}' to run '{command}': {source}")]
+    SpawnFailed {
+        command: String,
+        program: String,
+        working_directory: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// The directory the command was to run in could not be entered: it is
+    /// missing, not a directory, or not searchable. No part of the command ran.
+    #[error("Cannot run '{command}' in {}: {source}", working_directory.display())]
+    WorkingDirectoryUnusable {
         command: String,
         working_directory: PathBuf,
         #[source]

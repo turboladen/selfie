@@ -326,8 +326,8 @@ install: |
     && sudo cp ripgrep-13.0.0-x86_64-unknown-linux-musl/rg /usr/local/bin/
 ```
 
-> **Working Directory**: All install and check commands automatically run in the package directory
-> (where the `.yaml` file is located). This means you can use relative paths like
+> **Working Directory**: All install, check and audit commands automatically run in the package
+> directory (where the `.yaml` file is located). This means you can use relative paths like
 > `./scripts/install.sh` without needing to manually change directories.
 
 **Multi-step with error handling (recommended):**
@@ -428,9 +428,16 @@ keeps installation predictable and avoids deep recursive recommend chains.
 
 ### Working Directory
 
-All install and check commands automatically run in the **package directory** (where the `.yaml`
-file is located). This means you can use relative paths to reference scripts, configuration files,
-or other resources without needing to manually change directories.
+All install, check and audit commands automatically run in the **package directory** (where the
+`.yaml` file is located). This means you can use relative paths to reference scripts, configuration
+files, or other resources without needing to manually change directories.
+
+If selfie cannot enter the package directory, because it is missing, is not a directory, or is not
+searchable, the command fails before any of it runs, and the error names the directory. A directory
+you can enter but not list still runs the command, as it would after a `cd`.
+
+The command runs through your login shell, so a shell startup file that changes directory moves it
+before it runs; see [Working directory and output handling](#working-directory-and-output-handling).
 
 **Example with relative paths:**
 
@@ -1119,7 +1126,9 @@ descriptor **is** the command's stdout, so writing to it is writing to stdout �
 there a command could not already reach.
 
 A command that `cd`s, or a profile that does, still changes the working directory the command ends
-up in — that has always been true.
+up in — that has always been true. The same holds for install, check and audit commands: they start
+in the package directory, and a shell startup file that `cd`s (a login profile, fish's
+`config.fish`, zsh's `.zshenv`, or a file named by `BASH_ENV`) moves them before they run.
 
 Content is written byte for byte, including any trailing newline. `op read` commonly appends one; if
 your existing target lacks it you will get a conflict on first apply. Strip it in your own command
@@ -1825,8 +1834,8 @@ install: |
 
 ### 4. Use External Scripts for Complex Installations
 
-For complex multi-step installations, consider using external shell scripts. Commands automatically
-run in the package directory, so you can reference scripts using relative paths:
+For complex multi-step installations, consider using external shell scripts. Install, check and
+audit commands run in the package directory, so you can reference scripts using relative paths:
 
 ```yaml
 environments:

@@ -3,7 +3,7 @@
 //!
 
 use crate::{
-    commands::runner::CommandRunner,
+    commands::runner::{CommandError, CommandRunner},
     config::SelfieConfig,
     package::{
         EnvironmentConfig,
@@ -140,18 +140,26 @@ where
         Err(result) => return *result,
     };
 
-    // Check if package is already installed
-    let pre_install_check = check::execute_check_command(
+    // Check if package is already installed. A check that could not start,
+    // because nothing can start in the package directory or the operation was
+    // cancelled, ends the install here, rather than as a warning followed by
+    // the same failure from the install.
+    let pre_install_check = match check::execute_check_command(
         package_name,
         config.environment(),
         env_config.check.as_deref(),
+        config.package_directory(),
         command_runner,
         sender,
         progress,
         &format!("Checking if '{package_name}' is already installed"),
         token,
     )
-    .await;
+    .await
+    {
+        Ok(check) => check,
+        Err(err) => return OperationResult::Failure(err.into()),
+    };
 
     // If package is already installed, exit early
     if let Some(result) = handle_already_installed_package(
@@ -242,8 +250,14 @@ where
         // we're skipping the actual installation for this package.
         progress.reduce_total_steps(4);
 
-        let executable_path =
-            find_executable_path(package_name, command_runner, sender, token).await;
+        let executable_path = find_executable_path(
+            package_name,
+            config.package_directory(),
+            command_runner,
+            sender,
+            token,
+        )
+        .await;
 
         return Some(OperationResult::Success(
             OperationSuccess::package_installed(
@@ -260,6 +274,7 @@ where
 
 async fn find_executable_path<CR>(
     package_name: &str,
+    package_dir: &std::path::Path,
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
@@ -267,9 +282,18 @@ async fn find_executable_path<CR>(
 where
     CR: CommandRunner,
 {
-    let finder_command = format!("which {package_name}");
+    let finder_command = format!(
+        "which {}",
+        shlex::try_quote(package_name).unwrap_or(package_name.into())
+    );
 
-    match command_runner.execute(&finder_command, token).await {
+    // In the package directory, which the install has just run in. The runner
+    // has no way to run a command where selfie was started without entering it
+    // again, and selfie's own directory may be one it cannot enter.
+    match command_runner
+        .execute(&finder_command, package_dir, token)
+        .await
+    {
         Ok(output) if output.is_success() && !output.stdout_str().trim().is_empty() => {
             let executable_path = output.stdout_str().trim().to_string();
             sender
@@ -382,11 +406,21 @@ where
         ));
     }
 
-    // Verify installation if check command is available
-    verify_installation(&context, command_runner, sender, progress, token).await;
+    // Verify installation if check command is available. A check that could not
+    // run means nothing else can run there either, so the install fails rather
+    // than reporting a success it never verified.
+    if let Err(err) = verify_installation(&context, command_runner, sender, progress, token).await {
+        return OperationResult::Failure(err.into());
+    }
 
-    let executable_path =
-        find_executable_path(context.package_name, command_runner, sender, token).await;
+    let executable_path = find_executable_path(
+        context.package_name,
+        context.config.package_directory(),
+        command_runner,
+        sender,
+        token,
+    )
+    .await;
 
     // Emit post-install note if this was a fresh install and the package has one
     if !matches!(
@@ -435,13 +469,22 @@ async fn get_environment_config<'a>(
     Ok(env_config)
 }
 
+/// Run the post-install check and report its verdict.
+///
+/// # Errors
+///
+/// The [`CommandError`] that kept the check from starting when nothing can run
+/// in the package directory: it cannot be entered, the shell cannot start, or
+/// the install was cancelled. A check that ran and failed is a warning, not an
+/// error.
 async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) where
+) -> Result<(), CommandError>
+where
     CR: CommandRunner,
 {
     if context.pre_install_check.check_command.is_some() {
@@ -449,13 +492,14 @@ async fn verify_installation<CR>(
             context.package_name,
             context.config.environment(),
             context.env_config.check.as_deref(),
+            context.config.package_directory(),
             command_runner,
             sender,
             progress,
             "Verifying package installation",
             token,
         )
-        .await;
+        .await?;
 
         match post_install_check.result {
             CheckResult::Success { .. } => {
@@ -495,6 +539,7 @@ async fn verify_installation<CR>(
             )
             .await;
     }
+    Ok(())
 }
 
 /// Install recommended (soft) dependencies for a package.
