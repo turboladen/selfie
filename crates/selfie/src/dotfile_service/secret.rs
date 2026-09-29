@@ -67,7 +67,7 @@ pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<String> {
 /// file (1 line vs 12 lines), which is the distinction a user needs in order to
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
-fn secret_conflict_summary(origin: &str, incoming: &[u8], current: &[u8]) -> String {
+fn secret_conflict_summary(incoming: &[u8], current: &[u8]) -> String {
     // Each piece `split_inclusive` yields is one line with its newline, so a
     // trailing newline ends a line rather than starting one, as `wc -l` counts. An
     // unterminated last line is a piece too, which `wc -l` would drop: "0 lines" for
@@ -86,11 +86,13 @@ fn secret_conflict_summary(origin: &str, incoming: &[u8], current: &[u8]) -> Str
     // does keep a copy. A user who has seen that line elsewhere would otherwise
     // assume this overwrite is recoverable too, and accepting is the only way
     // past a secret conflict.
+    //
+    // It does not name the entry's source: every consumer is handed that
+    // separately, and renders it the way its own surface shows sources.
     format!(
-        "  {}\n  target exists and differs from resolved output\n\n  \
+        "  target exists and differs from resolved output\n\n  \
          resolved output : {}\n  current target  : {}\n  (content hidden)\n  \
          no copy of the current target is kept",
-        origin,
         count(incoming),
         count(current),
     )
@@ -321,7 +323,7 @@ where
             ),
         };
         self.sender
-            .send_dotfile_skipped(&target.origin, target.path.display(), reason)
+            .send_dotfile_skipped(&target.source, target.path.display(), reason)
             .await;
         Err(SecretOutcome::Skipped)
     }
@@ -421,7 +423,7 @@ where
             }
             Ok(true) | Err(_) => {
                 self.sender
-                    .send_dotfile_skipped(&target.origin, target.path.display(), "already in sync")
+                    .send_dotfile_skipped(&target.source, target.path.display(), "already in sync")
                     .await;
                 return Err(SecretOutcome::Skipped);
             }
@@ -443,7 +445,7 @@ where
 
         self.sender
             .send_dotfile_skipped(
-                &target.origin,
+                &target.source,
                 target.path.display(),
                 "already in sync (permissions tightened to owner-only)",
             )
@@ -475,7 +477,7 @@ where
         let Some(current) = current else {
             return Ok(());
         };
-        let summary = secret_conflict_summary(&target.origin, &resolved.bytes, current);
+        let summary = secret_conflict_summary(&resolved.bytes, current);
 
         if self.ask_resolver(target, resolved, current, &summary).await {
             return Ok(());
@@ -484,7 +486,7 @@ where
         // Only the summary reaches the event. The values went to the resolver
         // and nowhere else.
         self.sender
-            .send_dotfile_conflict(&target.origin, target.path.display(), &summary)
+            .send_dotfile_conflict(&target.source, target.path.display(), &summary)
             .await;
         Err(SecretOutcome::Conflicted)
     }
@@ -514,6 +516,7 @@ where
 
         let resolver = Arc::clone(resolver);
         let path = target.path.display().to_string();
+        let source = target.source.clone();
         let incoming = resolved.bytes.clone();
         let current = current.to_vec();
         let summary = summary.to_string();
@@ -522,6 +525,7 @@ where
             resolver.resolve(
                 &path,
                 ConflictDetail::Secret {
+                    source: &source,
                     summary: &summary,
                     incoming: &incoming,
                     current: &current,
@@ -555,7 +559,7 @@ where
             // disk, and the former content of a secret target is the credential
             // itself -- worse to persist than the checksum that ADR already
             // refuses. Owner-only permissions do not change that.
-            .send_dotfile_deployed(&target.origin, target.path.display(), None)
+            .send_dotfile_deployed(&target.source, target.path.display(), None)
             .await;
 
         // No deploy state is recorded: a stored checksum of a credential is a
@@ -609,7 +613,7 @@ mod tests {
         let one: &[u8] = b"token";
         let two: &[u8] = b"token\nsecond";
 
-        let summary = secret_conflict_summary("op read x", one, two);
+        let summary = secret_conflict_summary(one, two);
         // The trailing newline is part of the assertion: "1 line" is a prefix of
         // "1 lines", so a match without it would hold for the bug.
         assert!(
@@ -621,7 +625,7 @@ mod tests {
             "the current side is not plural: {summary}"
         );
 
-        let swapped = secret_conflict_summary("op read x", two, one);
+        let swapped = secret_conflict_summary(two, one);
         assert!(
             swapped.contains("resolved output : 2 lines\n"),
             "the resolved side is not plural: {swapped}"
@@ -643,12 +647,12 @@ mod tests {
             (&b""[..], "0 lines\n"),
         ] {
             let other: &[u8] = b"x";
-            let resolved = secret_conflict_summary("op read x", content, other);
+            let resolved = secret_conflict_summary(content, other);
             assert!(
                 resolved.contains(&format!("resolved output : {expected}")),
                 "{content:?}: {resolved}"
             );
-            let current = secret_conflict_summary("op read x", other, content);
+            let current = secret_conflict_summary(other, content);
             assert!(
                 current.contains(&format!("current target  : {expected}")),
                 "{content:?}: {current}"
@@ -666,7 +670,7 @@ mod tests {
         let entry = DotfileEntry::new("creds.tpl", "~/.config/app/creds");
         let target = SecretEntry {
             entry: &entry,
-            origin: "command: op read x".to_string(),
+            source: crate::package::event::DotfileSource::Command("op read x".to_string()),
             path: crate::fs::target::repository_path(std::path::Path::new(
                 "/home/u/.config/app/creds",
             )),

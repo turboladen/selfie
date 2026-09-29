@@ -13,6 +13,11 @@
 //! sharing the same config repository.
 
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    config::SelfieConfig,
+    package::event::{BaseKind, DotfileSource, SourceBase},
+};
 use std::collections::HashMap;
 
 // Keyed by the expanded target path, because the target is what has one file on
@@ -42,6 +47,11 @@ pub struct DeployEntry {
     deployed_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     package: Option<String>,
+    /// The directory `source` is relative to, when the record names one.
+    // Optional because a state file may hold records without it, which must still
+    // parse. Apply fills it in when it finds such a target in sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base: Option<BaseKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +101,7 @@ impl DeployState {
         source: &str,
         checksum: &str,
         package: Option<&str>,
+        base: Option<BaseKind>,
     ) {
         self.deployed.insert(
             target.to_string(),
@@ -99,6 +110,7 @@ impl DeployState {
                 checksum: checksum.to_string(),
                 deployed_at: chrono::Utc::now().to_rfc3339(),
                 package: package.map(str::to_string),
+                base,
             },
         );
     }
@@ -110,6 +122,20 @@ impl DeployState {
         match self.deployed.get_mut(target) {
             Some(entry) if entry.package.as_deref() != Some(package) => {
                 entry.package = Some(package.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record that `target`'s source is `source`, relative to `base`, keeping
+    /// the rest of its record. Returns whether the record changed; a target
+    /// with no record gains none.
+    pub fn place(&mut self, target: &str, source: &str, base: BaseKind) -> bool {
+        match self.deployed.get_mut(target) {
+            Some(entry) if entry.base != Some(base) || entry.source != source => {
+                entry.source = source.to_string();
+                entry.base = Some(base);
                 true
             }
             _ => false,
@@ -157,6 +183,31 @@ impl DeployEntry {
     /// record does not say.
     pub fn package(&self) -> Option<&str> {
         self.package.as_deref()
+    }
+
+    /// The directory the source is relative to, or `None` if the record does
+    /// not say.
+    pub fn base(&self) -> Option<BaseKind> {
+        self.base
+    }
+
+    /// The source as events name it: relative to the configured directory the
+    /// record names, or the recorded spelling when it names none.
+    pub fn event_source(&self, config: &SelfieConfig) -> DotfileSource {
+        match self.base {
+            Some(kind) => DotfileSource::File {
+                base: Some(SourceBase {
+                    kind,
+                    directory: match kind {
+                        BaseKind::PackageDirectory => config.package_directory().clone(),
+                        BaseKind::DotfilesDirectory => config.dotfiles_directory(),
+                    },
+                }),
+                path: self.source.clone().into(),
+                vars: Vec::new(),
+            },
+            None => DotfileSource::Recorded(self.source.clone()),
+        }
     }
 }
 
@@ -256,6 +307,7 @@ mod tests {
             "fnm/fish-conf.fish",
             "abc123",
             None,
+            None,
         );
         let entry = state
             .get("/home/user/.config/fish/conf.d/fnm.fish")
@@ -273,8 +325,8 @@ mod tests {
     #[test]
     fn one_source_deployed_to_two_targets_is_two_records() {
         let mut state = DeployState::empty();
-        state.record_deployment("/home/user/.zshrc", "shell/rc", "h1", None);
-        state.record_deployment("/home/user/.bashrc", "shell/rc", "h2", None);
+        state.record_deployment("/home/user/.zshrc", "shell/rc", "h1", None, None);
+        state.record_deployment("/home/user/.bashrc", "shell/rc", "h2", None, None);
         assert_eq!(state.entries().len(), 2);
         assert_eq!(state.get("/home/user/.zshrc").unwrap().checksum(), "h1");
         assert_eq!(state.get("/home/user/.bashrc").unwrap().checksum(), "h2");
@@ -283,7 +335,7 @@ mod tests {
     #[test]
     fn the_written_shape_round_trips_keyed_by_target() {
         let mut state = DeployState::empty();
-        state.record_deployment("/home/user/b.txt", "a/b.txt", "hash1", None);
+        state.record_deployment("/home/user/b.txt", "a/b.txt", "hash1", None, None);
         let yaml = serde_saphyr::to_string(&state).unwrap();
         assert!(
             yaml.contains("/home/user/b.txt:") && yaml.contains("source: a/b.txt"),
@@ -306,8 +358,8 @@ mod tests {
     #[test]
     fn the_recorded_package_round_trips_and_an_absent_one_is_not_written() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/a", "a/a", "h1", Some("alpha"));
-        state.record_deployment("/t/b", "b/b", "h2", None);
+        state.record_deployment("/t/a", "a/a", "h1", Some("alpha"), None);
+        state.record_deployment("/t/b", "b/b", "h2", None, None);
         let yaml = serde_saphyr::to_string(&state).unwrap();
         assert_eq!(yaml.matches("package:").count(), 1, "{yaml}");
         let loaded: DeployState = crate::yaml::parse(&yaml).unwrap();
@@ -318,8 +370,8 @@ mod tests {
     #[test]
     fn attributing_names_the_package_and_reports_only_a_change() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/legacy", "x", "h", None);
-        state.record_deployment("/t/owned", "y", "h", Some("first"));
+        state.record_deployment("/t/legacy", "x", "h", None, None);
+        state.record_deployment("/t/owned", "y", "h", Some("first"), None);
         assert!(state.attribute("/t/legacy", "second"));
         assert!(state.attribute("/t/owned", "second"));
         assert!(!state.attribute("/t/owned", "second"));
@@ -332,8 +384,8 @@ mod tests {
     #[test]
     fn removing_drops_only_the_named_record() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/a", "a", "h", None);
-        state.record_deployment("/t/b", "b", "h", None);
+        state.record_deployment("/t/a", "a", "h", None, None);
+        state.record_deployment("/t/b", "b", "h", None, None);
         assert!(state.remove("/t/a"));
         assert!(!state.remove("/t/a"));
         assert!(state.get("/t/a").is_none());
@@ -343,7 +395,7 @@ mod tests {
     #[test]
     fn test_detect_drift_no_change() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash1", "hash1"),
             DriftType::None
@@ -353,7 +405,7 @@ mod tests {
     #[test]
     fn test_detect_drift_repo_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash1"),
             DriftType::RepoChanged
@@ -363,7 +415,7 @@ mod tests {
     #[test]
     fn test_detect_drift_target_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash1", "hash_different"),
             DriftType::TargetChanged
@@ -373,7 +425,7 @@ mod tests {
     #[test]
     fn test_detect_drift_both_changed() {
         let mut state = DeployState::empty();
-        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None);
+        state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash3"),
             DriftType::BothChanged
@@ -387,5 +439,49 @@ mod tests {
             state.detect_drift("/t/unknown.txt", "hash1", "hash2"),
             DriftType::NotTracked
         );
+    }
+
+    fn config() -> SelfieConfig {
+        crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/r/packages")
+            .dotfiles_directory(std::path::PathBuf::from("/r/dotfiles"))
+            .build()
+    }
+
+    // A record names the directory its source is relative to, and comes back as a
+    // source in that directory.
+    #[test]
+    fn a_record_with_a_base_names_its_source_in_that_directory() {
+        let mut state = DeployState::empty();
+        state.record_deployment(
+            "/t/rc",
+            "zsh/rc",
+            "h",
+            Some("zsh"),
+            Some(BaseKind::DotfilesDirectory),
+        );
+
+        let source = state.get("/t/rc").unwrap().event_source(&config());
+
+        assert_eq!(
+            source.absolute(),
+            Some(std::path::PathBuf::from("/r/dotfiles/zsh/rc"))
+        );
+    }
+
+    // A record that names no base still parses: the maintainer's own state file
+    // holds such records. Its source comes back as it was spelled, and claims
+    // no path.
+    #[test]
+    fn a_record_without_a_base_parses_and_keeps_its_spelling() {
+        let text = "deployed:\n  /t/old:\n    source: myapp/rc\n    checksum: abc\n    \
+                    deployed_at: \"2026-09-01T00:00:00+00:00\"\n    package: myapp\n";
+        let state: DeployState = crate::yaml::parse(text).expect("a record without a base parses");
+
+        let source = state.get("/t/old").unwrap().event_source(&config());
+
+        assert_eq!(source, DotfileSource::Recorded("myapp/rc".to_string()));
+        assert_eq!(source.absolute(), None);
     }
 }

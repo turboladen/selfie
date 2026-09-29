@@ -15,6 +15,7 @@ use selfie::package::{
 };
 
 use crate::display_manager::{DisplayManager, ErrorDetail};
+use crate::source_paths::{self, Channel};
 
 /// How a command's run ended, as the process reports it.
 ///
@@ -156,6 +157,18 @@ impl EventProcessor {
 
     /// Render one event the default way.
     fn handle_event(&self, event: PackageEvent) {
+        // A line that names a source prints with its heading as one block, so a
+        // conflict prompt printing on the service's thread cannot land between
+        // them.
+        let _block = matches!(
+            event,
+            PackageEvent::DotfileDeploying { .. }
+                | PackageEvent::DotfileDeployed { .. }
+                | PackageEvent::DotfileSkipped { .. }
+                | PackageEvent::DotfileConflict { .. }
+                | PackageEvent::DotfileOrphaned { .. }
+        )
+        .then(|| self.display.hold_block());
         match event {
             // The header and every local step are commentary on a run, shown only
             // under `--verbose`. A step waiting on something outside selfie shows
@@ -413,7 +426,7 @@ impl EventProcessor {
             }
 
             PackageEvent::DotfileDeploying { source, target, .. } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
                     .print_info(format!("  Deploying {short_source} → {short_target}"));
@@ -425,7 +438,7 @@ impl EventProcessor {
                 backup,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
                     .print_success(format!("  {short_source} → {short_target}"));
@@ -444,7 +457,7 @@ impl EventProcessor {
                 reason,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display.print_info(format!(
                     "  ⊘ {short_source} → {short_target} skipped: {reason}"
@@ -457,7 +470,7 @@ impl EventProcessor {
                 diff,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display.println("");
                 self.display
@@ -486,6 +499,15 @@ impl EventProcessor {
                 target,
                 package,
             } => {
+                // An orphan is part of what `dotfiles drift` is asked to find, so
+                // there it is the answer. Elsewhere it is a warning about the run.
+                let answer = matches!(operation_info.operation_type, OperationType::DotfileDrift);
+                let channel = if answer {
+                    Channel::Stdout
+                } else {
+                    Channel::Stderr
+                };
+                let source = source_paths::label(&self.display, channel, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 let by = package
                     .map(|package| format!(" by package '{package}'"))
@@ -494,9 +516,7 @@ impl EventProcessor {
                     "  Orphaned {short_target}: deployed from {source}{by}, and no entry deploys \
                      to it now. selfie leaves it in place; check whether you still need it"
                 );
-                // An orphan is part of what `dotfiles drift` is asked to find, so
-                // there it is the answer. Elsewhere it is a warning about the run.
-                if matches!(operation_info.operation_type, OperationType::DotfileDrift) {
+                if answer {
                     self.display.print_result(Outcome::Found, line);
                 } else {
                     self.display.print_warning(line);
@@ -941,6 +961,38 @@ mod tests {
             "{printed:?}"
         );
         assert!(display.waiting_messages().is_empty());
+    }
+
+    // A line naming a source waits for a block the conflict prompt holds, so it
+    // cannot print between the prompt's heading and its line.
+    #[tokio::test]
+    async fn a_source_line_waits_for_the_prompts_block() {
+        use selfie::package::event::{BaseKind, DotfileSource, SourceBase};
+
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display.clone());
+        let skipped = PackageEvent::DotfileSkipped {
+            operation_info: make_operation_info("bat"),
+            source: DotfileSource::File {
+                base: Some(SourceBase {
+                    kind: BaseKind::PackageDirectory,
+                    directory: "/r/p".into(),
+                }),
+                path: "bat/config".into(),
+                vars: Vec::new(),
+            },
+            target: "/h/.config/bat/config".to_string(),
+            reason: "dry run".to_string(),
+        };
+
+        let held = display.hold_block();
+        let printer = std::thread::spawn(move || processor.handle_event(skipped));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(display.printed().is_empty(), "{:?}", display.printed());
+        drop(held);
+        printer.join().unwrap();
+
+        assert_eq!(display.printed().len(), 2, "{:?}", display.printed());
     }
 
     // A provider command that fails is never shown as done, even though apply

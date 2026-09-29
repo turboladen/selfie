@@ -13,7 +13,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::TargetPath,
     },
-    package::event::EventSender,
+    package::event::{DotfileSource, EventSender},
 };
 
 use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
@@ -21,7 +21,8 @@ use super::state_file::{LoadedState, save_deploy_state};
 
 /// Describes a single config file deployment operation
 pub(super) struct DeployUnit<'a> {
-    pub(super) source_path: &'a Path,
+    /// How events name the source.
+    pub(super) event_source: &'a DotfileSource,
     pub(super) target_path: &'a TargetPath,
     /// `target_path` as the deploy state keys it.
     pub(super) target_key: &'a str,
@@ -106,11 +107,7 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
 ) -> DeployOutcome {
     let Ledger::Record(loaded) = ledger else {
         sender
-            .send_dotfile_skipped(
-                unit.source_path.display(),
-                unit.target_path.display(),
-                "dry run",
-            )
+            .send_dotfile_skipped(unit.event_source, unit.target_path.display(), "dry run")
             .await;
         return DeployOutcome::Previewed;
     };
@@ -142,7 +139,7 @@ async fn perform_deploy<F: FileSystem>(
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> Wrote {
     sender
-        .send_dotfile_deploying(unit.source_path.display(), unit.target_path.display())
+        .send_dotfile_deploying(unit.event_source, unit.target_path.display())
         .await;
 
     // `kept` is `Some` only for the entry that actually made the copy, so only it
@@ -222,7 +219,7 @@ async fn perform_deploy<F: FileSystem>(
 
     sender
         .send_dotfile_deployed(
-            unit.source_path.display(),
+            unit.event_source,
             unit.target_path.display(),
             backup.as_deref(),
         )
@@ -320,11 +317,22 @@ pub(super) async fn record_and_save<F: FileSystem>(
     recorded: Recorded,
     unit: &DeployUnit<'_>,
 ) -> Option<String> {
+    // With a base, the record holds the path relative to it, which is what the
+    // base means; the spec's spelling is relative to the spec file instead.
+    let (source, base) = match unit.event_source {
+        DotfileSource::File {
+            base: Some(base),
+            path,
+            ..
+        } => (path.to_string_lossy(), Some(base.kind)),
+        _ => (std::borrow::Cow::Borrowed(unit.source), None),
+    };
     loaded.state_mut().record_deployment(
         unit.target_key,
-        unit.source,
+        &source,
         unit.source_checksum,
         unit.package,
+        base,
     );
     let Err(e) = save_deploy_state(filesystem, loaded) else {
         return None;

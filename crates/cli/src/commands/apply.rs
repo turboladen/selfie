@@ -4,7 +4,10 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
+use selfie::package::event::DotfileSource;
 
 use selfie::dotfile_service::diff::unified_diff;
 use selfie::dotfile_service::port::{
@@ -19,6 +22,7 @@ use crate::{
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
     event_processor::EventProcessor,
+    source_paths::{Channel, force_heading, relative_text},
 };
 
 /// What [`InteractiveConflictResolver::reveal`] displays.
@@ -65,6 +69,9 @@ fn reveal_body(incoming: &[u8], current: &[u8], target: &str) -> RevealBody {
 /// each side's shape — so it additionally offers to reveal the two values.
 struct InteractiveConflictResolver {
     display: DisplayManager,
+    // The targets whose conflict this has shown, so the conflict event the
+    // library sends after a declined prompt is not shown a second time.
+    shown: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Which conflict is being asked about, and so what accepting costs.
@@ -156,9 +163,31 @@ impl InteractiveConflictResolver {
     }
 }
 
+impl InteractiveConflictResolver {
+    /// Print where the conflicting content comes from, with its base directory
+    /// named inside the block.
+    // Inside the block, not through the event processor's headings: this runs on
+    // the service's thread while the processor may still be printing lines queued
+    // before it, each under its own heading.
+    fn print_source(&self, source: &DotfileSource, short_target: &str) {
+        let _block = self.display.hold_block();
+        if let DotfileSource::File {
+            base: Some(base), ..
+        } = source
+        {
+            force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
+        }
+        self.display
+            .println(format!("  {} → {short_target}", relative_text(source)));
+    }
+}
+
 impl ConflictResolver for InteractiveConflictResolver {
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
         let short_target = shorten_path(target);
+        if let Ok(mut shown) = self.shown.lock() {
+            shown.insert(target.to_string());
+        }
 
         // Blank line for breathing room before the conflict block
         self.display.println("");
@@ -167,8 +196,7 @@ impl ConflictResolver for InteractiveConflictResolver {
 
         match detail {
             ConflictDetail::Diff { source, diff } => {
-                self.display
-                    .println(format!("  {} → {short_target}", shorten_path(source)));
+                self.print_source(source, &short_target);
                 self.display.print_diff(diff);
 
                 match self.prompt(Prompt::RepositoryFile) {
@@ -178,10 +206,12 @@ impl ConflictResolver for InteractiveConflictResolver {
             }
 
             ConflictDetail::Secret {
+                source,
                 summary,
                 incoming,
                 current,
             } => {
+                self.print_source(source, &short_target);
                 self.display.println(summary);
 
                 // Reveal is offered only on a terminal. Without one there is
@@ -237,11 +267,13 @@ pub(crate) async fn handle_apply(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
+    let shown = Arc::new(Mutex::new(HashSet::new()));
     let options = ApplyOptions {
         dry_run: args.dry_run,
         auto_accept: args.yes,
         conflict_resolver: Some(Arc::new(InteractiveConflictResolver {
             display: display.clone(),
+            shown: Arc::clone(&shown),
         })),
     };
 
@@ -261,6 +293,12 @@ pub(crate) async fn handle_apply(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
+            // A declined conflict comes back as an event; the prompt already
+            // showed it.
+            selfie::package::event::PackageEvent::DotfileConflict { target, .. } => shown
+                .lock()
+                .is_ok_and(|shown| shown.contains(target.as_str())),
+
             // Suppress per-file progress lines — the summary is sufficient.
             //
             // A deploy that displaced content is let through, because it is not
@@ -319,6 +357,72 @@ mod tests {
             secret,
             "offering to reveal must not change what accepting costs"
         );
+    }
+
+    // The prompt names the conflicting file's base directory inside its own
+    // block, since it cannot rely on a heading the event processor printed.
+    #[test]
+    fn the_prompt_names_the_base_directory_inside_its_block() {
+        use selfie::package::event::{BaseKind, SourceBase};
+
+        let display = DisplayManager::new(false);
+        let resolver = InteractiveConflictResolver {
+            display: display.clone(),
+            shown: Arc::default(),
+        };
+        let source = DotfileSource::File {
+            base: Some(SourceBase {
+                kind: BaseKind::PackageDirectory,
+                directory: "/r/packages".into(),
+            }),
+            path: "bat/config".into(),
+            vars: Vec::new(),
+        };
+
+        resolver.print_source(&source, "~/.config/bat/config");
+
+        let lines: Vec<String> = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Packages: /r/packages".to_string(),
+                "  bat/config → ~/.config/bat/config".to_string()
+            ]
+        );
+    }
+
+    // The prompt's heading and source line wait for a block another printer
+    // holds, so neither can land inside it.
+    #[test]
+    fn the_prompt_prints_its_source_as_one_block() {
+        use selfie::package::event::{BaseKind, SourceBase};
+
+        let display = DisplayManager::new(false);
+        let resolver = InteractiveConflictResolver {
+            display: display.clone(),
+            shown: Arc::default(),
+        };
+        let source = DotfileSource::File {
+            base: Some(SourceBase {
+                kind: BaseKind::DotfilesDirectory,
+                directory: "/r/dotfiles".into(),
+            }),
+            path: "zshrc".into(),
+            vars: Vec::new(),
+        };
+
+        let held = display.hold_block();
+        let printer = std::thread::spawn(move || resolver.print_source(&source, "~/.zshrc"));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(display.printed().is_empty(), "{:?}", display.printed());
+        drop(held);
+        printer.join().unwrap();
+
+        assert_eq!(display.printed().len(), 2, "{:?}", display.printed());
     }
 
     const SECRET: &str = "s3cr3t-rotated-token";

@@ -113,6 +113,7 @@ where
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let source_base = super::classify::source_base(config, package);
 
         // The same collisions apply refuses, so drift refuses the same entries.
         let collisions = PackageCollisions::of(package, &home, config.environment());
@@ -130,36 +131,42 @@ where
             // send the user looking for a different problem from the one apply
             // reports, and every refusal counts: a green result over an entry drift
             // never examined is a false success.
-            let repo =
-                match classify_entry(filesystem, &base_dir, *scoped, &collisions, Purpose::Check) {
-                    Ok(Classified::RepoFile(repo)) => repo,
-                    // Secret-bearing entries hold no deploy state, so there is nothing
-                    // to compare against, and resolving them here would run the user's
-                    // commands: leaking content into a read-only operation and
-                    // prompting for authentication. Classified first all the same, so
-                    // an entry apply would refuse is reported as refused rather than as
-                    // merely unverifiable.
-                    //
-                    // Reported as unverifiable rather than counted as drift or as a
-                    // refusal. Either would leave `dotfiles drift` permanently dirty on
-                    // any machine with one provider-sourced dotfile (ADR-0003).
-                    Ok(Classified::SecretBearing(secret)) => {
-                        sender
-                            .send_dotfile_skipped(
-                                &secret.origin,
-                                secret.path.display(),
-                                "provider-sourced (not verifiable without resolving)",
-                            )
-                            .await;
-                        tally.unverified += 1;
-                        continue;
-                    }
-                    Err(refused) => {
-                        refused.send(sender).await;
-                        tally.refused += 1;
-                        continue;
-                    }
-                };
+            let repo = match classify_entry(
+                filesystem,
+                &base_dir,
+                source_base.as_ref(),
+                *scoped,
+                &collisions,
+                Purpose::Check,
+            ) {
+                Ok(Classified::RepoFile(repo)) => repo,
+                // Secret-bearing entries hold no deploy state, so there is nothing
+                // to compare against, and resolving them here would run the user's
+                // commands: leaking content into a read-only operation and
+                // prompting for authentication. Classified first all the same, so
+                // an entry apply would refuse is reported as refused rather than as
+                // merely unverifiable.
+                //
+                // Reported as unverifiable rather than counted as drift or as a
+                // refusal. Either would leave `dotfiles drift` permanently dirty on
+                // any machine with one provider-sourced dotfile (ADR-0003).
+                Ok(Classified::SecretBearing(secret)) => {
+                    sender
+                        .send_dotfile_skipped(
+                            &secret.source,
+                            secret.path.display(),
+                            "provider-sourced (not verifiable without resolving)",
+                        )
+                        .await;
+                    tally.unverified += 1;
+                    continue;
+                }
+                Err(refused) => {
+                    refused.send(sender).await;
+                    tally.refused += 1;
+                    continue;
+                }
+            };
             let RepoRead {
                 source_content,
                 current,
@@ -196,15 +203,7 @@ where
     }
     // Drift reports and writes nothing, so a gone orphan's record is left for an
     // apply to drop.
-    let findings = orphan::check(
-        filesystem,
-        catalog,
-        config.environment(),
-        &deploy_state,
-        None,
-        sender,
-    )
-    .await;
+    let findings = orphan::check(filesystem, catalog, config, &deploy_state, None, sender).await;
     tally.orphaned = findings.reported;
     tally.unjudged = findings.unjudged;
     // The token is asked again after the orphans are reported: a cancel that

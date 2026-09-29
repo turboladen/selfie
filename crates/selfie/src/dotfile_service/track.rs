@@ -674,6 +674,16 @@ where
         &relative_source,
         &checksum,
         crate::package::spec_name_of(&spec.spec_path).as_deref(),
+        // The copy sits beside the spec, so its path is relative to the spec's
+        // directory. One directory configured as both is the package directory,
+        // as collection reads it.
+        if base_dir == config.package_directory().as_path() {
+            Some(crate::package::event::BaseKind::PackageDirectory)
+        } else if base_dir == config.dotfiles_directory().as_path() {
+            Some(crate::package::event::BaseKind::DotfilesDirectory)
+        } else {
+            None
+        },
     );
     // Last, and nothing is rolled back for it: the copy and the entry are both
     // correct and only the record is missing, so the failure names what exists and

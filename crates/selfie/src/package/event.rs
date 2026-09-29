@@ -70,6 +70,110 @@ pub enum StepEnding {
     Cancelled,
 }
 
+/// Which configured directory a dotfile's source is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseKind {
+    /// The package directory, where package specs live.
+    PackageDirectory,
+    /// The dotfiles directory, where standalone dotfile specs live.
+    DotfilesDirectory,
+}
+
+/// The directory a source is relative to, and which one it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBase {
+    /// Which configured directory this is.
+    pub kind: BaseKind,
+    /// The directory, as configured.
+    pub directory: std::path::PathBuf,
+}
+
+/// Where a dotfile's content comes from, as events report it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DotfileSource {
+    /// A repository file, or a template rendered from one.
+    File {
+        /// The directory `path` is relative to, or `None` when the file lies under
+        /// neither configured directory, and `path` is then the full path.
+        base: Option<SourceBase>,
+        /// The file, relative to `base`.
+        path: std::path::PathBuf,
+        /// A template's var names; empty for a plain file.
+        vars: Vec<String>,
+    },
+    /// A command whose output is the content.
+    Command(String),
+    /// A source from a deploy record that names no base: the spelling the record
+    /// holds, relative to a directory that is not known.
+    Recorded(String),
+}
+
+impl DotfileSource {
+    /// The file's full path, when the source is a file.
+    #[must_use]
+    pub fn absolute(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::File {
+                base: Some(base),
+                path,
+                ..
+            } => Some(base.directory.join(path)),
+            Self::File {
+                base: None, path, ..
+            } => Some(path.clone()),
+            Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+}
+
+/// The source in full: a file's full path with any var names, the command, or
+/// the recorded spelling.
+impl fmt::Display for DotfileSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, Self::absolute)
+    }
+}
+
+impl DotfileSource {
+    /// The source as a line under its base directory's heading reads it: a
+    /// file's path relative to its base, or in full when it has none; otherwise
+    /// as [`Display`](fmt::Display) shows it.
+    #[must_use]
+    pub fn relative(&self) -> impl fmt::Display + '_ {
+        struct Relative<'a>(&'a DotfileSource);
+        impl fmt::Display for Relative<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.write(f, |source| match source {
+                    DotfileSource::File {
+                        base: Some(_),
+                        path,
+                        ..
+                    } => Some(path.clone()),
+                    _ => source.absolute(),
+                })
+            }
+        }
+        Relative(self)
+    }
+
+    fn write(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        path_of: impl Fn(&Self) -> Option<std::path::PathBuf>,
+    ) -> fmt::Result {
+        match self {
+            Self::File { vars, .. } => {
+                let path = path_of(self).unwrap_or_default();
+                let vars: Vec<&str> = vars.iter().map(String::as_str).collect();
+                crate::package::write_file_source(f, &path.display(), &vars)
+            }
+            Self::Command(command) => crate::package::write_command_source(f, command),
+            Self::Recorded(spelling) => f.write_str(spelling),
+        }
+    }
+}
+
 impl From<(usize, usize)> for StepCount {
     fn from((completed, total): (usize, usize)) -> Self {
         Self::new(completed, total)
@@ -540,13 +644,13 @@ impl EventSender {
     /// Send a dotfile-deploying event
     pub(crate) async fn send_dotfile_deploying(
         &self,
-        source: impl fmt::Display,
+        source: &DotfileSource,
         target: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDeploying {
             operation_info,
-            source: source.to_string(),
+            source: source.clone(),
             target: target.to_string(),
         })
         .await;
@@ -558,14 +662,14 @@ impl EventSender {
     /// nothing was kept.
     pub(crate) async fn send_dotfile_deployed(
         &self,
-        source: impl fmt::Display,
+        source: &DotfileSource,
         target: impl fmt::Display,
         backup: Option<&std::path::Path>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDeployed {
             operation_info,
-            source: source.to_string(),
+            source: source.clone(),
             target: target.to_string(),
             backup: backup.map(|path| path.display().to_string()),
         })
@@ -575,14 +679,14 @@ impl EventSender {
     /// Send a dotfile-skipped event
     pub(crate) async fn send_dotfile_skipped(
         &self,
-        source: impl fmt::Display,
+        source: &DotfileSource,
         target: impl fmt::Display,
         reason: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileSkipped {
             operation_info,
-            source: source.to_string(),
+            source: source.clone(),
             target: target.to_string(),
             reason: reason.to_string(),
         })
@@ -592,14 +696,14 @@ impl EventSender {
     /// Send a dotfile-conflict event
     pub(crate) async fn send_dotfile_conflict(
         &self,
-        source: impl fmt::Display,
+        source: &DotfileSource,
         target: impl fmt::Display,
         diff: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileConflict {
             operation_info,
-            source: source.to_string(),
+            source: source.clone(),
             target: target.to_string(),
             diff: diff.to_string(),
         })
@@ -609,14 +713,14 @@ impl EventSender {
     /// Send a dotfile-orphaned event
     pub(crate) async fn send_dotfile_orphaned(
         &self,
-        source: impl fmt::Display,
+        source: &DotfileSource,
         target: impl fmt::Display,
         package: Option<&str>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileOrphaned {
             operation_info,
-            source: source.to_string(),
+            source: source.clone(),
             target: target.to_string(),
             package: package.map(str::to_string),
         })
@@ -2553,14 +2657,14 @@ pub enum PackageEvent {
     /// A config file is about to be deployed
     DotfileDeploying {
         operation_info: OperationInfo,
-        source: String,
+        source: DotfileSource,
         target: String,
     },
 
     /// A config file was deployed successfully
     DotfileDeployed {
         operation_info: OperationInfo,
-        source: String,
+        source: DotfileSource,
         target: String,
         /// Where the content the target held before this run wrote to it was
         /// copied, so a consumer can tell the user how to get it back.
@@ -2575,7 +2679,7 @@ pub enum PackageEvent {
     /// A config file was skipped (already current or user declined)
     DotfileSkipped {
         operation_info: OperationInfo,
-        source: String,
+        source: DotfileSource,
         target: String,
         reason: String,
     },
@@ -2583,7 +2687,7 @@ pub enum PackageEvent {
     /// A conflict was detected between repo and deployed version
     DotfileConflict {
         operation_info: OperationInfo,
-        source: String,
+        source: DotfileSource,
         target: String,
         diff: String,
     },
@@ -2592,8 +2696,10 @@ pub enum PackageEvent {
     /// still there. selfie leaves the file alone.
     DotfileOrphaned {
         operation_info: OperationInfo,
-        /// The source the target was last deployed from, as its spec spelled it.
-        source: String,
+        /// The source the target was last deployed from, relative to the base
+        /// directory it was recorded against, or as its spec spelled it for a
+        /// record that names no base.
+        source: DotfileSource,
         target: String,
         /// The spec name of the package that last deployed it, or `None` where
         /// the record does not say.

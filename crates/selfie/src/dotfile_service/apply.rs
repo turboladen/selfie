@@ -265,6 +265,8 @@ where
     // conflation is what let `selfie apply` exit 0 having deployed nothing
     // (selfie-c28).
     let mut tally = ApplyTally::default();
+    // Whether a record gained its base, for the one save at the end.
+    let mut placed = false;
 
     // Set when the run stops early. Held rather than returned so every stop
     // reports through the one failure below.
@@ -351,6 +353,7 @@ where
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let source_base = super::classify::source_base(config, package);
 
         let secret_apply = SecretApply {
             base_dir: &base_dir,
@@ -382,6 +385,7 @@ where
                 let classified = match classify_entry(
                     filesystem,
                     &base_dir,
+                    source_base.as_ref(),
                     *scoped,
                     &collisions,
                     Purpose::Deploy,
@@ -436,8 +440,9 @@ where
                 };
                 let RepoFile {
                     source,
-                    source_path,
+                    event_source,
                     target: target_path,
+                    ..
                 } = repo;
                 let source_checksum = compute_checksum(source_content.as_bytes());
 
@@ -448,7 +453,7 @@ where
                 // file and one checksum however many sources name it.
                 let target_key = target_path.state_key();
                 let unit = DeployUnit {
-                    source_path: &source_path,
+                    event_source: &event_source,
                     target_path: &target_path,
                     target_key: &target_key,
                     source_content: &source_content,
@@ -482,13 +487,30 @@ where
                         {
                             break 'entry EntryOutcome::Unrecorded(reason);
                         }
+                        // A tracked record that names no base gains one, so an orphan
+                        // it later becomes can be shown against it. Only in memory:
+                        // the run saves once at its end, and a failure to save it
+                        // costs nothing but the location, so it never stops the run.
+                        if let crate::package::event::DotfileSource::File {
+                            base: Some(base),
+                            path,
+                            ..
+                        } = &event_source
+                            && let Ledger::Record(loaded) = &mut ledger
+                            && loaded
+                                .state()
+                                .get(&target_key)
+                                .is_some_and(|e| e.base().is_none())
+                        {
+                            placed |= loaded.state_mut().place(
+                                &target_key,
+                                &path.to_string_lossy(),
+                                base.kind,
+                            );
+                        }
 
                         sender
-                            .send_dotfile_skipped(
-                                source_path.display(),
-                                target_path.display(),
-                                &reason,
-                            )
+                            .send_dotfile_skipped(&event_source, target_path.display(), &reason)
                             .await;
                         break 'entry EntryOutcome::Skipped;
                     }
@@ -506,7 +528,8 @@ where
                                 &target_content,
                                 &source_content,
                                 &target_path.display().to_string(),
-                                &source_path.to_string_lossy(),
+                                // Relative, as the line above the diff names it.
+                                &event_source.relative().to_string(),
                             )
                         };
                         // Rendered at most once. A declined conflict reaches the
@@ -533,7 +556,7 @@ where
                             // The prompt waits on the user, so what the decision read
                             // may no longer be at the target when the write comes.
                             decided = Decided::BeforePrompt;
-                            let src = source_path.display().to_string();
+                            let src = event_source.clone();
                             let tgt = target_path.display().to_string();
                             let d = rendered.get_or_insert_with(&render).clone();
                             let r = Arc::clone(resolver);
@@ -558,7 +581,7 @@ where
                         } else {
                             sender
                                 .send_dotfile_conflict(
-                                    source_path.display(),
+                                    &event_source,
                                     target_path.display(),
                                     rendered.get_or_insert_with(&render),
                                 )
@@ -638,7 +661,7 @@ where
     let findings = orphan::check(
         filesystem,
         catalog,
-        config.environment(),
+        config,
         ledger.loaded().map_or(&empty, LoadedState::state),
         owner,
         sender,
@@ -652,7 +675,7 @@ where
     tally.orphaned = findings.reported;
     // A dry run has no state to change, or leaves the one it read alone.
     if let Ledger::Record(loaded) = &mut ledger
-        && findings.settle(loaded.state_mut())
+        && (findings.settle(loaded.state_mut()) | placed)
         && let Err(e) = save_deploy_state(filesystem, loaded)
     {
         // Every deployment is already recorded; only the housekeeping is lost,

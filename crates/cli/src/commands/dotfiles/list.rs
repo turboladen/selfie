@@ -7,7 +7,7 @@
 use selfie::dotfile_service::port::DotfileService;
 use selfie::package::{
     Package, SpecOrigin,
-    event::{DotfileListData, OperationResult, PackageEvent},
+    event::{BaseKind, DotfileListData, OperationResult, PackageEvent},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -17,6 +17,7 @@ use crate::{
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
     event_processor::EventProcessor,
+    source_paths::base_directory_line,
 };
 
 /// Handle the `selfie dotfiles list` command
@@ -121,29 +122,18 @@ pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
 
 /// Print the base directories above the table so relative source paths have context.
 fn print_base_directories(config: &CliConfig, display: &DisplayManager, packages: &[Package]) {
-    let has_packages = packages
-        .iter()
-        .any(|p| p.origin() == SpecOrigin::PackageDirectory);
-    let has_dotfiles = packages
-        .iter()
-        .any(|p| p.origin() == SpecOrigin::DotfilesDirectory);
+    let has = |origin| packages.iter().any(|p| p.origin() == origin);
 
-    if has_packages {
-        display.print_info(format!(
-            "Packages: {}",
-            shorten_path(&config.package_directory().display().to_string()),
+    if has(SpecOrigin::PackageDirectory) {
+        display.print_info(base_directory_line(
+            BaseKind::PackageDirectory,
+            config.package_directory(),
         ));
     }
-    if has_dotfiles {
-        display.print_info(format!(
-            "Dotfiles: {}",
-            shorten_path(
-                &config
-                    .selfie_config()
-                    .dotfiles_directory()
-                    .display()
-                    .to_string()
-            ),
+    if has(SpecOrigin::DotfilesDirectory) {
+        display.print_info(base_directory_line(
+            BaseKind::DotfilesDirectory,
+            &config.selfie_config().dotfiles_directory(),
         ));
     }
 }

@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
+    config::SelfieConfig,
     dotfile_service::{deploy::resolve_source_path, resolve::read_template},
     fs::{
         filesystem::{
@@ -17,7 +18,8 @@ use crate::{
         target::{HomeDir, TargetPath, deploy_target, repository_path},
     },
     package::{
-        ContentSource, DotfileEntry, Package, ScopedEntry, TargetCollision, event::EventSender,
+        ContentSource, DotfileEntry, Package, ScopedEntry, SpecOrigin, TargetCollision,
+        event::{BaseKind, DotfileSource, EventSender, SourceBase},
     },
     paths::is_within,
 };
@@ -52,6 +54,8 @@ pub(super) enum Classified<'e> {
 pub(super) struct RepoFile<'e> {
     /// The entry's `source` as the package file spells it.
     pub(super) source: &'e str,
+    /// How events name the source: relative to its base directory.
+    pub(super) event_source: DotfileSource,
     /// `source` resolved against the package file's directory, and inside it.
     pub(super) source_path: PathBuf,
     /// The expanded target, which the target rule accepted and which is neither a
@@ -65,7 +69,7 @@ pub(super) struct SecretEntry<'e> {
     pub(super) entry: &'e DotfileEntry,
     /// How the entry is named in events: the command, or the template and its
     /// var names. A reference drawn from the package file, never a value.
-    pub(super) origin: String,
+    pub(super) source: DotfileSource,
     /// The expanded target, which the target rule accepted.
     pub(super) path: TargetPath,
     /// The symlink at the target as of classification, which the writer
@@ -123,9 +127,11 @@ impl<'p> PackageCollisions<'p> {
 /// Reads what is at the target and, for a template entry, the template; runs no
 /// command. `base_dir` is the directory of the package file the entry came from,
 /// and an entry among `collisions` is refused.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn classify_entry<'e, F: FileSystem>(
     filesystem: &F,
     base_dir: &Path,
+    source_base: Option<&SourceBase>,
     scoped: ScopedEntry<'e>,
     collisions: &PackageCollisions<'_>,
     purpose: Purpose,
@@ -185,6 +191,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
 
             Ok(Classified::RepoFile(RepoFile {
                 source,
+                event_source: file_source(source_base, &source_path, Vec::new()),
                 source_path,
                 target,
             }))
@@ -196,22 +203,27 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
             // The template is read here too, which runs nothing, so a template
             // that is missing, unreadable or a fifo is refused by a check and a
             // dry run exactly where the deploy would refuse it.
-            if let ContentSource::Template { source, .. } = secret {
-                // A check resolves nothing, so it does not say it failed to.
-                let frame = match purpose {
-                    Purpose::Deploy => "Failed to resolve",
-                    Purpose::Check => "Skipping",
-                };
-                let Some(path) = within_package(base_dir, source) else {
-                    return Err(Refused(format!(
-                        "{frame} '{}': dotfile template '{source}' escapes the package directory",
-                        entry.target()
-                    )));
-                };
-                if let Err(e) = read_template(filesystem, source, &path) {
-                    return Err(Refused(format!("{frame} '{}': {e}", entry.target())));
+            let event_source = match secret {
+                ContentSource::Template { source, vars } => {
+                    // A check resolves nothing, so it does not say it failed to.
+                    let frame = match purpose {
+                        Purpose::Deploy => "Failed to resolve",
+                        Purpose::Check => "Skipping",
+                    };
+                    let Some(path) = within_package(base_dir, source) else {
+                        return Err(Refused(format!(
+                            "{frame} '{}': dotfile template '{source}' escapes the package directory",
+                            entry.target()
+                        )));
+                    };
+                    if let Err(e) = read_template(filesystem, source, &path) {
+                        return Err(Refused(format!("{frame} '{}': {e}", entry.target())));
+                    }
+                    file_source(source_base, &path, vars.keys().cloned().collect())
                 }
-            }
+                ContentSource::Provider(command) => DotfileSource::Command(command.to_string()),
+                ContentSource::RepoFile(_) => unreachable!("a repository file takes the arm above"),
+            };
 
             let link = match purpose {
                 Purpose::Deploy => deployable_secret_target(filesystem, entry.target(), &target)?,
@@ -220,11 +232,48 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
 
             Ok(Classified::SecretBearing(SecretEntry {
                 entry,
-                origin: secret.to_string(),
+                source: event_source,
                 path: target,
                 link,
             }))
         }
+    }
+}
+
+/// The directory `package`'s specs are read from, as events name it: `None` for
+/// a package with no spec file behind it.
+pub(super) fn source_base(config: &SelfieConfig, package: &Package) -> Option<SourceBase> {
+    match package.origin() {
+        SpecOrigin::PackageDirectory => Some(SourceBase {
+            kind: BaseKind::PackageDirectory,
+            directory: config.package_directory().clone(),
+        }),
+        SpecOrigin::DotfilesDirectory => Some(SourceBase {
+            kind: BaseKind::DotfilesDirectory,
+            directory: config.dotfiles_directory(),
+        }),
+        SpecOrigin::Memory => None,
+    }
+}
+
+/// How events name the file at `path`: relative to `base` when it lies inside it,
+/// and in full otherwise.
+pub(super) fn file_source(
+    base: Option<&SourceBase>,
+    path: &Path,
+    vars: Vec<String>,
+) -> DotfileSource {
+    match base.and_then(|base| Some((base, path.strip_prefix(&base.directory).ok()?))) {
+        Some((base, relative)) => DotfileSource::File {
+            base: Some(base.clone()),
+            path: relative.to_path_buf(),
+            vars,
+        },
+        None => DotfileSource::File {
+            base: None,
+            path: path.to_path_buf(),
+            vars,
+        },
     }
 }
 
@@ -396,6 +445,7 @@ pub(super) fn read_repo_file<F: FileSystem>(
         source,
         source_path,
         target,
+        ..
     } = entry;
 
     // Immediately ahead of the read, which is what this guards: a fifo source

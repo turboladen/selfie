@@ -12,6 +12,7 @@ mod event_processor;
 mod formatters;
 mod git_style;
 mod snippet;
+mod source_paths;
 mod status_style;
 mod tables;
 

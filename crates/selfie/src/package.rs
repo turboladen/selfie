@@ -122,9 +122,9 @@ pub enum ContentSource<'a> {
     Provider(&'a str),
 }
 
-/// The single wording for "where this content comes from", shared by every
-/// consumer that has to say it: apply's events, `selfie dotfiles list`, and the
-/// MCP server's human-readable fallback.
+/// Where an entry's content comes from, as `selfie dotfiles list` and the MCP
+/// server's human-readable fallback say it. Apply's events carry a
+/// [`DotfileSource`](event::DotfileSource), which words it the same way.
 ///
 /// Renders references only — a repository path, a command string, var *names* —
 /// never a resolved value. Nothing here runs a command or reads a template, so
@@ -133,14 +133,35 @@ pub enum ContentSource<'a> {
 impl std::fmt::Display for ContentSource<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RepoFile(source) => f.write_str(source),
+            Self::RepoFile(source) => write_file_source(f, source, &[]),
             Self::Template { source, vars } => {
                 let names: Vec<&str> = vars.keys().map(String::as_str).collect();
-                write!(f, "{source} (vars: {})", names.join(", "))
+                write_file_source(f, source, &names)
             }
-            Self::Provider(command) => write!(f, "command: {command}"),
+            Self::Provider(command) => write_command_source(f, command),
         }
     }
+}
+
+// The one wording for a file source and a command source, which every
+// `Display` of a source uses so the forms cannot drift apart.
+pub(crate) fn write_file_source(
+    f: &mut std::fmt::Formatter<'_>,
+    path: &dyn std::fmt::Display,
+    vars: &[&str],
+) -> std::fmt::Result {
+    if vars.is_empty() {
+        write!(f, "{path}")
+    } else {
+        write!(f, "{path} (vars: {})", vars.join(", "))
+    }
+}
+
+pub(crate) fn write_command_source(
+    f: &mut std::fmt::Formatter<'_>,
+    command: &str,
+) -> std::fmt::Result {
+    write!(f, "command: {command}")
 }
 
 /// Why an entry has no content source, and therefore cannot be deployed.

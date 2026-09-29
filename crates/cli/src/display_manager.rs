@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use selfie::package::event::{StepEnding, StepId};
+use selfie::package::event::{BaseKind, StepEnding, StepId};
+
+use crate::source_paths::Channel;
 
 /// Shorten a path for display by replacing the home directory with `~`.
 ///
@@ -258,6 +260,12 @@ pub struct DisplayManager {
     // The lines the last failed step showed when it ended, so the failure that
     // reports it does not show them again.
     failed_tail: Arc<Mutex<Vec<String>>>,
+    // The base directory whose heading each stream showed last, shared by every
+    // clone so the conflict prompt and the event processor head against one
+    // another.
+    last_heading: Arc<Mutex<[Option<BaseKind>; 2]>>,
+    // Held while a heading and the line under it print, by every clone.
+    block: Arc<Mutex<()>>,
     // What the printing methods rendered, and to which stream, so a test can
     // assert what a run would have shown. Output goes straight to the terminal,
     // which a test in this process cannot read back.
@@ -293,6 +301,8 @@ impl DisplayManager {
             errors: Arc::new(Mutex::new(ErrorCollector::default())),
             waiting: Arc::new(Mutex::new(BTreeMap::new())),
             failed_tail: Arc::new(Mutex::new(Vec::new())),
+            last_heading: Arc::new(Mutex::new([None, None])),
+            block: Arc::new(Mutex::new(())),
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
         }
@@ -434,6 +444,28 @@ impl DisplayManager {
                 bar.finish_and_clear();
             }
         }
+    }
+
+    /// Record that `channel` now heads its lines with `kind`, and return whether
+    /// it headed them with another base, or none, before.
+    pub(crate) fn swap_heading(&self, channel: Channel, kind: BaseKind) -> bool {
+        let index = match channel {
+            Channel::Stdout => 0,
+            Channel::Stderr => 1,
+        };
+        self.last_heading
+            .lock()
+            .map(|mut last| last[index].replace(kind) != Some(kind))
+            .unwrap_or(true)
+    }
+
+    /// Hold every clone's printing of source lines until the guard drops, so
+    /// a heading and the lines under it print together. Not reentrant: a
+    /// holder must not ask again.
+    pub(crate) fn hold_block(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.block
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Print a failed command's stderr as context for its error (stderr),
