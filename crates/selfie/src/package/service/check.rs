@@ -7,8 +7,8 @@ use crate::{
     package::{
         GetPackage,
         event::{
-            CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
-            OperationResult, OperationSuccess,
+            CheckResult, CheckResultData, CheckVerdict, CommandFailure, EventSender,
+            OperationFailure, OperationResult, OperationSuccess,
         },
         port::{PackageError, PackageRepository},
         service::ProgressTracker,
@@ -169,29 +169,31 @@ fn create_operation_result(
     package_name: &str,
     progress: &ProgressTracker,
 ) -> OperationResult {
-    match &check_result.result {
-        CheckResult::Success { .. } => OperationResult::Success(OperationSuccess::package_checked(
+    let checked = |verdict| {
+        OperationResult::Success(OperationSuccess::package_checked(
             package_name.to_string(),
             check_result.environment.clone(),
-            check_result.result.clone(),
+            verdict,
             (progress.current_step(), progress.total_steps()).into(),
-        )),
-        // `stdout` stays in the `CheckResult` this was built from — which
-        // `selfie package check` displays deliberately — and is not copied into
-        // the failure value, which reaches every adapter.
+        ))
+    };
+    match &check_result.result {
+        CheckResult::Success { .. } => checked(CheckVerdict::Installed),
+        // A check that ran and exited non-zero answered the question: the
+        // package is not installed. `stdout` stays in the `CheckResult` this was
+        // built from, which `selfie package check` displays deliberately, and is
+        // not copied into the completion, which reaches every adapter.
         CheckResult::Failed {
             stderr, exit_code, ..
-        } => {
-            let command = check_result
+        } => checked(CheckVerdict::NotInstalled {
+            command: check_result
                 .check_command
                 .as_deref()
-                .unwrap_or("unknown command");
-            OperationResult::Failure(OperationFailure::command_failed(
-                command.to_string(),
-                *exit_code,
-                stderr,
-            ))
-        }
+                .unwrap_or("unknown command")
+                .to_string(),
+            exit_code: *exit_code,
+            stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
+        }),
         CheckResult::Error(error) => {
             let command = check_result
                 .check_command
@@ -258,6 +260,9 @@ where
     if let Some(cmd) = check_command {
         match command_runner.execute(cmd, token).await {
             Ok(output) => {
+                // Any exit status is an answer, whatever produced it: the user's
+                // shell reports a check killed by a signal as an ordinary non-zero
+                // status, so a kill cannot be told from an exit.
                 if output.is_success() {
                     CheckResultData {
                         package_name: package_name.to_string(),

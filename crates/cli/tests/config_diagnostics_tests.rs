@@ -307,10 +307,16 @@ fn config_validate_reports_an_ignored_key() {
         !combined.contains("Configuration is valid."),
         "a file with an ignored key must not be called valid, got:\n{combined}"
     );
-    // A warning, not an error: the configuration is still usable.
+    // A warning, not an error: the configuration is still usable, so it says so
+    // and exits 3, the code for a finding, rather than 1.
     assert!(
-        output.status.success(),
-        "an ignored key must not fail the command, got:\n{combined}"
+        combined.contains("Configuration is usable, with warnings."),
+        "a file with only warnings must say it is usable, got:\n{combined}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "an ignored key is a finding, not a failure, got:\n{combined}"
     );
 }
 

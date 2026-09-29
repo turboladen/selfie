@@ -143,3 +143,25 @@ pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
 pub fn get_command() -> Command {
     Command::cargo_bin(SELFIE_BIN_NAME).unwrap()
 }
+
+/// The default config plus a `state_directory` inside the sandbox, so the
+/// deploy state lands there whatever `XDG_STATE_HOME` the suite inherits.
+///
+/// The directory itself is not created, and `config validate` warns that it is
+/// not there yet. A test of a clean config uses [`setup_default_test_config`].
+///
+/// # Panics
+///
+/// Panics if the sandbox or its config file cannot be written.
+#[must_use]
+pub fn setup_test_config_with_state_directory() -> TempDir {
+    let temp = setup_default_test_config();
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "state_directory: {}\n",
+        temp.path().join("state").display()
+    ));
+    fs::write(config, text).unwrap();
+    temp
+}

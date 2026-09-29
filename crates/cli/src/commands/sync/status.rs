@@ -4,7 +4,7 @@ use console::style;
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
-    package::event::{OperationResult, OperationSuccess, PackageEvent},
+    package::event::{OperationResult, OperationSuccess, Outcome, PackageEvent},
     sync_service::SyncService,
 };
 
@@ -107,6 +107,9 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             refused_count,
             warned,
             unverified_count: unverified,
+            orphan_count,
+            unjudged_count,
+            drift_outcome,
             ..
         } => {
             display.println("");
@@ -123,7 +126,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             }
             if drifted_targets.is_empty() {
                 let (line, clean) =
-                    no_drift_line(*total_deployed, *refused_count, *warned, *unverified);
+                    no_drift_line(*total_deployed, *drift_outcome, *warned, *unverified);
                 if clean {
                     display.print_success(line);
                 } else {
@@ -149,6 +152,19 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                     "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details",
                 );
             }
+            // Their own line: an orphan is neither drift nor a gap in the check.
+            if *orphan_count > 0 {
+                display.print_warning(format!(
+                    "{orphan_count} orphaned target(s): no entry deploys to them now -- run \
+                     'selfie dotfiles drift' for details"
+                ));
+            }
+            if *unjudged_count > 0 {
+                display.print_warning(format!(
+                    "{unjudged_count} deployed target(s) not checked for orphans -- see the \
+                     warnings above"
+                ));
+            }
             true
         }
 
@@ -167,21 +183,22 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 
 // The wording and the level for a run that found no drift.
 //
-// The check mark may not appear over a run that skipped something: a refusal,
-// such as a spec that could not be loaded, or another relayed warning keeps the
-// line a warning that names what it covers. An unverifiable secret-bearing entry
-// is named and leaves the line clean, since it is unverifiable by design.
+// The check mark may not appear over a run that skipped something: a failed
+// check, such as one that refused a spec it could not load, or another relayed
+// warning keeps the line a warning that names what it covers. An orphan leaves
+// the line clean, since it is reported on a line of its own, and so does an
+// unverifiable secret-bearing entry, which is unverifiable by design.
 //
 // Split out because it is the only part of this renderer a test can see:
 // `DisplayManager` writes through a `MultiProgress`, which a test cannot capture.
 fn no_drift_line(
     total_deployed: usize,
-    refused_count: usize,
+    drift_outcome: Outcome,
     warned: usize,
     unverified: usize,
 ) -> (String, bool) {
     let deployed = deployed_phrase(total_deployed, unverified);
-    if refused_count > 0 || warned > 0 {
+    if drift_outcome == Outcome::Failed || warned > 0 {
         (
             format!("No drift among what could be checked ({deployed})"),
             false,
@@ -259,14 +276,14 @@ mod tests {
     // removes from `dotfiles drift`, reproduced one command over.
     #[test]
     fn a_run_that_skipped_nothing_may_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 0, 0);
+        let (line, clean) = super::no_drift_line(5, Outcome::Clean, 0, 0);
         assert!(clean, "nothing was skipped, so the check mark is earned");
         assert!(line.contains("No dotfile drift"), "got: {line}");
     }
 
     #[test]
     fn a_run_that_skipped_a_package_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 2, 0, 0);
+        let (line, clean) = super::no_drift_line(5, Outcome::Failed, 0, 0);
         assert!(!clean, "a skipped package must not be reported as clean");
         assert!(
             line.contains("could be checked"),
@@ -278,7 +295,7 @@ mod tests {
     // that also set a refusal would pass even if `warned` were never read.
     #[test]
     fn a_relayed_warning_alone_may_not_report_success() {
-        let (line, clean) = super::no_drift_line(5, 0, 1, 0);
+        let (line, clean) = super::no_drift_line(5, Outcome::Clean, 1, 0);
         assert!(!clean, "a relayed warning must not be reported as clean");
         assert!(
             !line.contains("No dotfile drift"),
@@ -286,12 +303,22 @@ mod tests {
         );
     }
 
+    // Orphans alone: the check was complete, so the line keeps its check mark,
+    // and the orphans get a line of their own rather than a claim that the check
+    // covered less than it did.
+    #[test]
+    fn an_orphan_alone_leaves_the_line_clean() {
+        let (line, clean) = super::no_drift_line(5, Outcome::Found, 0, 0);
+        assert!(clean, "an orphan must not read as a partial check");
+        assert_eq!(line, "No dotfile drift (5 deployed)");
+    }
+
     // Entries drift could not verify, and nothing else: a machine whose dotfiles
     // all come from providers. They are unverifiable by design, so the line stays
     // clean and names them.
     #[test]
     fn an_unverified_entry_is_counted_on_a_clean_line() {
-        let (line, clean) = super::no_drift_line(1, 0, 0, 2);
+        let (line, clean) = super::no_drift_line(1, Outcome::Clean, 0, 2);
         assert!(
             clean,
             "an unverified entry must not keep the line off the check mark"
@@ -309,6 +336,9 @@ mod tests {
             refused_count: 0,
             warned: 0,
             unverified_count: 0,
+            orphan_count: 0,
+            unjudged_count: 0,
+            drift_outcome: Outcome::Clean,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -324,6 +354,9 @@ mod tests {
             refused_count: 0,
             warned: 0,
             unverified_count: 0,
+            orphan_count: 0,
+            unjudged_count: 0,
+            drift_outcome: Outcome::Clean,
         };
 
         assert!(handle_status_event(&event, &display, false));
@@ -341,6 +374,9 @@ mod tests {
             refused_count: 1,
             warned: 0,
             unverified_count: 0,
+            orphan_count: 0,
+            unjudged_count: 0,
+            drift_outcome: Outcome::Failed,
         };
 
         // What it renders is asserted against the binary's own output, since

@@ -7,8 +7,8 @@ use crate::{
     package::{
         Package,
         event::{
-            EventSender, OperationResult, OperationSuccess, ValidationIssueData, ValidationLevel,
-            ValidationResultData, ValidationStatus,
+            EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
+            ValidationLevel, ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -129,12 +129,10 @@ where
     let validation_issues = issue_payload(issues);
 
     // Determine overall validation status
-    let status = if issues.has_errors() {
-        ValidationStatus::HasErrors
-    } else if issues.has_warnings() {
-        ValidationStatus::HasWarnings
-    } else {
-        ValidationStatus::Valid
+    let status = match issues.outcome() {
+        Outcome::Failed => ValidationStatus::HasErrors,
+        Outcome::Found => ValidationStatus::HasWarnings,
+        Outcome::Clean => ValidationStatus::Valid,
     };
 
     // Send structured validation result

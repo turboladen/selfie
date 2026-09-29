@@ -50,7 +50,9 @@ The summary reports counts and target paths. Above it, in the order the drift ch
 `sync status` prints everything that check warned about, such as a package it would refuse, and
 every spec it could not load. A spec that could not be loaded is named there and counted among the
 refusals, and any other relayed warning, such as a configured dotfiles directory that does not
-exist, is counted too; the summary line stops claiming no drift when either count is non-zero.
+exist, is counted too; the summary line stops claiming no drift when either count is non-zero. An
+orphaned target, one selfie deployed that no entry deploys to any more, is neither: it gets a line
+of its own, `N orphaned target(s)`, and leaves the summary line as it is.
 
 It does not print how an individual target drifted; `selfie dotfiles drift` shows the drift type
 beside each entry. An entry the drift check refused without comparing, such as a

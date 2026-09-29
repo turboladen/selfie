@@ -1,5 +1,7 @@
 use selfie::package::{
-    event::{AuditResult, AuditResultData, OperationFailure, OperationResult, PackageEvent},
+    event::{
+        AuditResult, AuditResultData, OperationFailure, OperationResult, Outcome, PackageEvent,
+    },
     port::PackageError,
     service::PackageService,
 };
@@ -25,8 +27,6 @@ pub(crate) async fn handle_audit(
 
     let event_stream = service.audit(package_name).await;
 
-    let mut env_error_handled = false;
-
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
@@ -39,11 +39,12 @@ pub(crate) async fn handle_audit(
                 true
             }
             PackageEvent::Progress { .. } => true,
+            // A clean result says nothing the result lines above did not. Anything
+            // else takes the default rendering, at the level of its verdict.
             PackageEvent::Completed { result, .. } => match result {
-                OperationResult::Success(_) => true,
+                OperationResult::Success(success) if success.outcome() == Outcome::Clean => true,
                 OperationResult::Failure(failure) if failure.is_environment_error() => {
                     display_environment_error(package_name, failure, config, display);
-                    env_error_handled = true;
                     true
                 }
                 _ => false,
@@ -52,11 +53,7 @@ pub(crate) async fn handle_audit(
         })
         .await;
 
-    if env_error_handled {
-        1
-    } else {
-        result.exit_code
-    }
+    result.exit_code
 }
 
 pub(crate) async fn handle_audit_all(
@@ -78,10 +75,12 @@ pub(crate) async fn handle_audit_all(
                 true
             }
             PackageEvent::Progress { .. } => true,
+            // The summary line is printed only when the run was not clean, at its
+            // verdict's level.
             PackageEvent::Completed {
-                result: OperationResult::Success(_),
+                result: OperationResult::Success(success),
                 ..
-            } => true,
+            } if success.outcome() == Outcome::Clean => true,
             _ => false,
         })
         .await;

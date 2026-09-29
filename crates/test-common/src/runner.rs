@@ -36,6 +36,7 @@ enum Response {
 pub struct FakeCommandRunner {
     responses: HashMap<String, Response>,
     calls: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    cancels: HashMap<String, CancellationToken>,
 }
 
 impl FakeCommandRunner {
@@ -139,6 +140,14 @@ impl FakeCommandRunner {
         self.calls.lock().unwrap().clone()
     }
 
+    /// Cancel `token` when `command` runs, as a Ctrl+C landing while it runs
+    /// would. The command still answers as scripted.
+    #[must_use]
+    pub fn cancelling(mut self, command: &str, token: &CancellationToken) -> Self {
+        self.cancels.insert(command.to_string(), token.clone());
+        self
+    }
+
     /// How many commands this runner has been asked to run.
     #[must_use]
     pub fn call_count(&self) -> usize {
@@ -150,6 +159,9 @@ impl FakeCommandRunner {
             .lock()
             .unwrap()
             .push((command.to_string(), working_dir.to_path_buf()));
+        if let Some(token) = self.cancels.get(command) {
+            token.cancel();
+        }
 
         match self.responses.get(command) {
             Some(Response::Output {

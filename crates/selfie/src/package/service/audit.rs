@@ -100,12 +100,12 @@ where
     // `valid_packages` drops a file that could not be loaded, and audit is the
     // command a user runs precisely to be told what selfie found. Reporting
     // nothing would mean an unreadable spec is audited by neither this run nor
-    // the user, so it warns per file the way `validate_all` does.
-    //
-    // A warning rather than an error: whether `audit --all` exits non-zero on an
-    // unparsable file is user-visible behavior and belongs to its own change.
+    // the user, so it warns per file the way `validate_all` does, and counts it
+    // as a refusal: the run could not audit everything it was asked to.
+    let mut refused_count = 0;
     for invalid in packages.invalid_packages() {
         sender.send_spec_skipped(invalid.clone()).await;
+        refused_count += 1;
     }
 
     // A spec whose `environments:` a shadowing key hides parses, so it reaches
@@ -114,9 +114,7 @@ where
     // environment here, and absent from the run with no diagnostic. `audit <name>`
     // refuses the same file, so this run has to say it left it out.
     //
-    // A warning rather than an error, as for an unparsable file above: whether
-    // `audit --all` exits non-zero over one file is user-visible behavior and
-    // belongs to its own change.
+    // Counted as a refusal, as an unparsable file is above.
     let (readable, refused) = super::steps::separate_refused(
         packages.valid_packages(),
         super::steps::Shown::Current(config.environment()),
@@ -128,6 +126,7 @@ where
                 spec.package_name, spec.reason
             ))
             .await;
+        refused_count += 1;
     }
     let package_names: Vec<String> = readable
         .into_iter()
@@ -137,6 +136,7 @@ where
 
     let total_packages = package_names.len();
     let max_concurrent = config.max_concurrency().get();
+    let mut tally = AuditTally::default();
 
     // Audit packages concurrently in chunks, bounded by max_concurrency.
     // Uses chunks+join_all (not semaphore+spawn) because the function takes
@@ -151,18 +151,50 @@ where
             .map(|name| audit_single_in_bulk(name, repo, config, command_runner, sender, token))
             .collect();
 
-        futures::future::join_all(futures).await;
+        for result in futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            tally.count(&result);
+        }
     }
 
-    OperationResult::Success(OperationSuccess::Generic(format!(
-        "Audit completed for {total_packages} package(s)",
-    )))
+    OperationResult::Success(OperationSuccess::PackagesAudited {
+        audited_count: total_packages,
+        conflict_count: tally.conflicts,
+        not_installed_count: tally.not_installed,
+        error_count: tally.errors,
+        refused_count,
+        environment: config.environment().to_string(),
+        steps_completed: (progress.current_step(), progress.total_steps()).into(),
+    })
 }
 
-/// Audit a single package within a bulk operation.
+/// What the audits in a bulk run found, counted as they finish.
+#[derive(Default)]
+struct AuditTally {
+    conflicts: usize,
+    not_installed: usize,
+    errors: usize,
+}
+
+impl AuditTally {
+    fn count(&mut self, result: &AuditResult) {
+        match result {
+            AuditResult::Conflicts { .. } => self.conflicts += 1,
+            AuditResult::NotInstalled => self.not_installed += 1,
+            AuditResult::Error(_) => self.errors += 1,
+            AuditResult::Clean { .. } | AuditResult::NoAuditCommand => {}
+        }
+    }
+}
+
+/// Audit a single package within a bulk operation, and return what it found.
 ///
 /// Errors are emitted as events rather than propagated, so the bulk
-/// operation can continue with remaining packages.
+/// operation can continue with remaining packages. `None` when the run was
+/// cancelled before this package was audited.
 async fn audit_single_in_bulk<PR, CR>(
     package_name: &str,
     repo: &PR,
@@ -170,12 +202,13 @@ async fn audit_single_in_bulk<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
-) where
+) -> Option<AuditResult>
+where
     PR: PackageRepository,
     CR: CommandRunner,
 {
     if token.is_cancelled() {
-        return;
+        return None;
     }
 
     // Each concurrent audit gets its own progress tracker (3 steps: fetch + env check + audit)
@@ -191,8 +224,9 @@ async fn audit_single_in_bulk<PR, CR>(
                     audit_command: None,
                     result: AuditResult::Error("Failed to load package".to_string()),
                 };
+                let result = audit_result.result.clone();
                 sender.send_audit_result(audit_result).await;
-                return;
+                return Some(result);
             }
         };
 
@@ -216,8 +250,9 @@ async fn audit_single_in_bulk<PR, CR>(
                     config.environment()
                 )),
             };
+            let result = audit_result.result.clone();
             sender.send_audit_result(audit_result).await;
-            return;
+            return Some(result);
         }
     };
 
@@ -233,7 +268,9 @@ async fn audit_single_in_bulk<PR, CR>(
     )
     .await;
 
+    let result = audit_result.result.clone();
     sender.send_audit_result(audit_result).await;
+    Some(result)
 }
 
 async fn get_audit_command(
@@ -952,6 +989,91 @@ mod tests {
         }
 
         assert_eq!(audit_results.len(), 2, "Should have 2 audit results");
+    }
+
+    // The bulk result counts what each audit found, one package per kind, so a
+    // count taken from the wrong kind shows up as a wrong number.
+    #[tokio::test]
+    async fn audit_all_counts_what_each_audit_found() {
+        use crate::package::port::ListPackagesOutput;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+
+        let packages: Vec<_> = [
+            ("clean-pkg", Some("clean")),
+            ("conflict-pkg", Some("conflict")),
+            ("missing-pkg", Some("missing")),
+            ("broken-pkg", Some("broken")),
+            ("quiet-pkg", None),
+        ]
+        .into_iter()
+        .map(|(name, audit)| {
+            PackageBuilder::default()
+                .name(name)
+                .environment("test", |b| {
+                    let b = b.install("echo install");
+                    match audit {
+                        Some(cmd) => b.audit_some(cmd),
+                        None => b,
+                    }
+                })
+                .path(temp_dir.path().join(format!("{name}.yml")))
+                .build()
+        })
+        .collect();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let listed = packages.clone();
+        mock_repo
+            .expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(listed.iter().cloned().map(Ok).collect())));
+        mock_repo.expect_get_package().returning(move |name| {
+            let package = packages.iter().find(|p| p.name() == name).unwrap().clone();
+            let path = package.path().clone();
+            Ok(GetPackage::from_existing(package, path))
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner.expect_execute().returning(|cmd, _| {
+            let output = match cmd {
+                "clean" => mock_command_output("clean-pkg\n", true),
+                "conflict" => mock_command_output("other-manager\n", true),
+                "missing" => mock_command_output("", true),
+                _ => mock_command_output("", false),
+            };
+            Box::pin(async move { Ok(output) })
+        });
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        match result {
+            OperationResult::Success(OperationSuccess::PackagesAudited {
+                audited_count,
+                conflict_count,
+                not_installed_count,
+                error_count,
+                refused_count,
+                ..
+            }) => {
+                assert_eq!(audited_count, 5);
+                assert_eq!(conflict_count, 1);
+                assert_eq!(not_installed_count, 1);
+                assert_eq!(error_count, 1);
+                assert_eq!(refused_count, 0);
+            }
+            other => panic!("expected PackagesAudited, got: {other:?}"),
+        }
     }
 
     // `valid_packages` drops a file that could not be loaded, so the warning is

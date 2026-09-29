@@ -120,7 +120,6 @@ mod tests {
             .await;
 
         assert_eq!(result.exit_code, 0);
-        assert!(!result.had_errors);
     }
 
     #[tokio::test]
@@ -162,7 +161,6 @@ mod tests {
             .await;
 
         assert_eq!(result.exit_code, 0);
-        assert!(!result.had_errors);
     }
 
     #[tokio::test]
@@ -186,7 +184,6 @@ mod tests {
             .await;
 
         assert_eq!(result.exit_code, 1);
-        assert!(result.had_errors);
     }
 
     #[test]

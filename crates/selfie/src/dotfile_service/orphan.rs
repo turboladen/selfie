@@ -196,6 +196,10 @@ pub(super) struct Findings {
     pub(super) gone: Vec<String>,
     /// Records to attribute, as `(target, package)`.
     pub(super) attributions: Vec<(String, String)>,
+    /// Records left unjudged because something kept the check from seeing
+    /// every entry. Zero when there was simply nothing deployable to judge
+    /// against.
+    pub(super) unjudged: usize,
 }
 
 impl Findings {
@@ -238,7 +242,16 @@ pub(super) async fn check<F: FileSystem>(
                 .send_warning(shortfall_warning(shortfall, unproduced.len()))
                 .await;
         }
-        return Findings::default();
+        // With nothing deployable in this environment there is nothing the check
+        // missed; every other shortfall leaves records it could not judge.
+        let unjudged = match shortfall {
+            Shortfall::NothingProduced => 0,
+            _ => unproduced.len(),
+        };
+        return Findings {
+            unjudged,
+            ..Findings::default()
+        };
     }
 
     let mut findings = Findings {

@@ -26,7 +26,7 @@ use selfie::{
     config::SelfieConfigBuilder,
     fs::RealFileSystem,
     package::{
-        event::{OperationResult, PackageEvent},
+        event::{CheckVerdict, OperationResult, OperationSuccess, PackageEvent},
         git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
@@ -108,18 +108,22 @@ async fn a_failing_check_still_reports_why_it_failed() {
 
     let events: Vec<PackageEvent> = service.check("creds").await.collect().await;
 
-    let failure = events
+    let verdict = events
         .iter()
         .find_map(|e| match e {
             PackageEvent::Completed {
-                result: OperationResult::Failure(f),
+                result:
+                    OperationResult::Success(OperationSuccess::PackageChecked {
+                        verdict: verdict @ CheckVerdict::NotInstalled { .. },
+                        ..
+                    }),
                 ..
-            } => Some(f),
+            } => Some(verdict),
             _ => None,
         })
-        .expect("a failing check must complete as a failure");
+        .expect("a failing check must complete as not installed");
 
-    let rendered = format!("{failure:?}");
+    let rendered = format!("{verdict:?}");
     assert!(
         rendered.contains("vault sealed"),
         "stderr must survive so the failure stays diagnosable: {rendered}"

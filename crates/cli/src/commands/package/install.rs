@@ -23,8 +23,6 @@ pub(crate) async fn handle_install(
 
     let event_stream = service.install(package_name, options).await;
 
-    let mut env_error_handled = false;
-
     // Spinner for TTY; static fallback otherwise
     let mut spinner: Option<OperationHandle> = if display.is_tty() {
         Some(display.start_operation(format!("Installing {package_name}...")))
@@ -48,7 +46,6 @@ pub(crate) async fn handle_install(
                     s.finish_clear();
                 }
                 display_environment_error(package_name, failure, config, display);
-                env_error_handled = true;
                 return true;
             }
 
@@ -127,8 +124,8 @@ pub(crate) async fn handle_install(
                                 return true;
                             }
                             OperationResult::Failure(_) => {
-                                // Clear spinner but let default handler set exit_code
-                                // and print detailed error messages
+                                // Clear the spinner and let the default handler
+                                // print the detailed error.
                                 s.finish_clear();
                                 return false;
                             }
@@ -141,11 +138,7 @@ pub(crate) async fn handle_install(
         })
         .await;
 
-    if env_error_handled {
-        1
-    } else {
-        result.exit_code
-    }
+    result.exit_code
 }
 
 /// Display environment error with helpful suggestions from the typed failure data

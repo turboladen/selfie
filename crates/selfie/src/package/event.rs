@@ -5,10 +5,8 @@
 //! to a terminal while the MCP server collects the same events into JSON, with
 //! neither choice reaching into the library.
 
-pub mod error;
 pub mod metadata;
 
-pub use self::error::StreamedError;
 pub use self::metadata::OperationType;
 
 /// Represents the completion status of steps in an operation
@@ -242,35 +240,6 @@ impl EventSender {
         self.send(PackageEvent::Info {
             operation_info,
             output,
-        })
-        .await;
-    }
-
-    /// Send an error event
-    ///
-    /// Currently unused — terminal errors flow through `OperationResult::Failure`
-    /// via `send_completed`. Retained for future non-terminal error events.
-    #[allow(dead_code)]
-    pub(crate) async fn send_error<SE>(&self, error: SE, message: impl fmt::Display)
-    where
-        StreamedError: From<SE>,
-    {
-        let operation_info = self.touch_operation_info();
-        let msg = message.to_string();
-        let streamed_error = StreamedError::from(error);
-
-        tracing::error!(
-            operation_type = operation_info.operation_type.to_string(),
-            package_name = &operation_info.package_name,
-            environment = &operation_info.environment,
-            message = &msg,
-            error = %streamed_error,
-        );
-
-        self.send(PackageEvent::Error {
-            operation_info,
-            error: streamed_error,
-            message: msg,
         })
         .await;
     }
@@ -671,6 +640,35 @@ pub enum OperationResult {
     Failure(OperationFailure),
 }
 
+impl OperationResult {
+    /// How the operation scores; see [`Outcome`].
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        // The one verdict: the CLI's exit code and the MCP envelope both come
+        // from here, so neither decides for itself what a result means.
+        match self {
+            OperationResult::Success(success) => success.outcome(),
+            OperationResult::Failure(_) => Outcome::Failed,
+        }
+    }
+}
+
+/// How an operation ended: clean, a finding, or a failure.
+///
+/// A cancelled operation has no outcome: it ends with
+/// [`PackageEvent::Canceled`] rather than a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Did everything it was asked, and found nothing to report.
+    Clean,
+    /// Finished, and its answer is a finding: something it was asked to look
+    /// for, such as drift or an audit conflict, is there.
+    Found,
+    /// Did not do everything it was asked: it failed, or refused part of the
+    /// work.
+    Failed,
+}
+
 /// Typed success information for operations
 #[derive(Debug, Clone)]
 pub enum OperationSuccess {
@@ -678,7 +676,7 @@ pub enum OperationSuccess {
     PackageChecked {
         package_name: String,
         environment: String,
-        check_result: CheckResult,
+        verdict: CheckVerdict,
         steps_completed: StepCount,
     },
     /// Package audit operation completed
@@ -686,6 +684,23 @@ pub enum OperationSuccess {
         package_name: String,
         environment: String,
         audit_result: AuditResult,
+        steps_completed: StepCount,
+    },
+    /// Every package with an entry for this environment audited, and what the
+    /// audits found.
+    PackagesAudited {
+        /// Packages audited, including those with no audit command.
+        audited_count: usize,
+        /// Packages installed from a source they do not expect.
+        conflict_count: usize,
+        /// Packages nothing provides.
+        not_installed_count: usize,
+        /// Packages whose audit could not run.
+        error_count: usize,
+        /// Spec files left out because they could not be loaded or selfie will
+        /// not read them.
+        refused_count: usize,
+        environment: String,
         steps_completed: StepCount,
     },
     /// Package installation operation completed
@@ -763,7 +778,11 @@ pub enum OperationSuccess {
     SpecsValidated {
         validated_count: usize,
         error_count: usize,
+        /// Specs validated with warnings.
         warning_count: usize,
+        /// Warnings about the run that belong to no validated spec, such as a
+        /// spec file that could not be used or a missing dotfiles directory.
+        other_warning_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -787,9 +806,8 @@ pub enum OperationSuccess {
         /// listed also contributes 1 and no entries. So this counts *outcomes*, matching
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
-        /// Non-zero makes [`had_refusals`](Self::had_refusals) true, which is
-        /// what every adapter reads to decide that the run did not do what was
-        /// asked. Named for the common case: most of what lands here was
+        /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed: the run
+        /// did not do what was asked. Named for the common case: most of what lands here was
         /// *declined* by selfie rather than failing, and `perform_deploy` is
         /// explicit that a refusal is not a failure.
         refused_count: usize,
@@ -827,6 +845,9 @@ pub enum OperationSuccess {
         /// Recorded targets no entry deploys to any more whose files are still
         /// there. Not drift and not a refusal.
         orphan_count: usize,
+        /// Recorded targets the orphan check could not judge, because something
+        /// it warned about kept it from seeing every entry. Not a refusal.
+        unjudged_count: usize,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1141,12 +1162,25 @@ impl std::fmt::Display for OperationSuccess {
         match self {
             OperationSuccess::PackageChecked {
                 package_name,
-                check_result,
+                verdict,
                 steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' check completed {check_result} {steps_completed}"
+                "Package '{package_name}' check completed {verdict} {steps_completed}"
+            ),
+            OperationSuccess::PackagesAudited {
+                audited_count,
+                conflict_count,
+                not_installed_count,
+                error_count,
+                refused_count,
+                ..
+            } => write!(
+                f,
+                "Audit completed for {audited_count} package(s): {conflict_count} with conflicts, \
+                 {not_installed_count} not installed, {error_count} could not be audited, \
+                 {refused_count} spec(s) left out"
             ),
             OperationSuccess::PackageAudited {
                 package_name,
@@ -1276,10 +1310,11 @@ impl std::fmt::Display for OperationSuccess {
                 validated_count,
                 error_count,
                 warning_count,
+                other_warning_count,
                 steps_completed,
                 ..
             } => {
-                let status = if *error_count > 0 {
+                let mut status = if *error_count > 0 {
                     format!(
                         "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings"
                     )
@@ -1288,6 +1323,9 @@ impl std::fmt::Display for OperationSuccess {
                 } else {
                     format!("{validated_count} package(s) validated successfully")
                 };
+                if *other_warning_count > 0 {
+                    status.push_str(&format!(", {other_warning_count} other warning(s)"));
+                }
                 write!(f, "Spec validation completed: {status} {steps_completed}")
             }
             OperationSuccess::DotfilesApplied {
@@ -1311,13 +1349,20 @@ impl std::fmt::Display for OperationSuccess {
                 refused_count,
                 unverified_count,
                 orphan_count,
+                unjudged_count,
                 steps_completed,
                 ..
             } => {
+                let unjudged = if *unjudged_count == 0 {
+                    String::new()
+                } else {
+                    format!(", {unjudged_count} not checked for orphans")
+                };
                 write!(
                     f,
                     "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused, {unverified_count} not verifiable{} {steps_completed}",
+                     {refused_count} refused, {unverified_count} not verifiable{}{unjudged} \
+                     {steps_completed}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -1458,13 +1503,13 @@ impl OperationSuccess {
     pub fn package_checked(
         package_name: String,
         environment: String,
-        check_result: CheckResult,
+        verdict: CheckVerdict,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageChecked {
             package_name,
             environment,
-            check_result,
+            verdict,
             steps_completed,
         }
     }
@@ -1555,6 +1600,7 @@ impl OperationSuccess {
         validated_count: usize,
         error_count: usize,
         warning_count: usize,
+        other_warning_count: usize,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
@@ -1562,6 +1608,7 @@ impl OperationSuccess {
             validated_count,
             error_count,
             warning_count,
+            other_warning_count,
             environment,
             steps_completed,
         }
@@ -1701,7 +1748,8 @@ impl OperationSuccess {
             | OperationSuccess::PackageUpdated { package_name, .. }
             | OperationSuccess::PackageRemoved { package_name, .. } => Some(package_name),
             OperationSuccess::DotfileTracked { name, .. } => Some(name),
-            OperationSuccess::PackageListGenerated { .. }
+            OperationSuccess::PackagesAudited { .. }
+            | OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfilesApplied { .. }
@@ -1716,12 +1764,11 @@ impl OperationSuccess {
 
     /// Whether this success also refused to do something it was asked to do.
     ///
-    /// The one place that question is answered, so the CLI's exit code and the
-    /// MCP server's result envelope cannot disagree about it. An operation that
-    /// completed while declining part of its work is still a completed
-    /// operation — which is why this is a property of a success rather than a
-    /// failure — so a caller that reads only the completion has to ask this to
-    /// learn that part of the work did not happen.
+    /// The one place that question is answered. [`outcome`](Self::outcome)
+    /// scores such a success Failed, and that is what decides an exit code or a
+    /// result envelope; ask this only to tell a refusal apart from other
+    /// failures. An operation that completed while declining part of its work is
+    /// still a completed operation, which is why this is a property of a success.
     ///
     /// True only for the variants [`refused_count`](Self::refused_count) answers for;
     /// every other variant is false. Give a variant a refusal count when it gains
@@ -1733,11 +1780,11 @@ impl OperationSuccess {
 
     /// How many refusals this success carries, for operations that count them.
     ///
-    /// `None` where the question does not apply. Two variants answer it,
-    /// [`DotfilesApplied`](Self::DotfilesApplied) and
-    /// [`DotfileDriftChecked`](Self::DotfileDriftChecked) — and `Some(0)` is
-    /// distinct from `None`, being a run that could have refused something and
-    /// did not.
+    /// `None` where the question does not apply. Three variants answer it:
+    /// [`DotfilesApplied`](Self::DotfilesApplied),
+    /// [`DotfileDriftChecked`](Self::DotfileDriftChecked) and
+    /// [`PackagesAudited`](Self::PackagesAudited). `Some(0)` is distinct from
+    /// `None`, being a run that could have refused something and did not.
     ///
     /// Exists so an adapter can report the number rather than the fact. The MCP
     /// server puts it in its own JSON field: an assistant told only that
@@ -1750,7 +1797,8 @@ impl OperationSuccess {
         // that counts refusals would otherwise reach an adapter reporting none.
         match self {
             OperationSuccess::DotfilesApplied { refused_count, .. }
-            | OperationSuccess::DotfileDriftChecked { refused_count, .. } => Some(*refused_count),
+            | OperationSuccess::DotfileDriftChecked { refused_count, .. }
+            | OperationSuccess::PackagesAudited { refused_count, .. } => Some(*refused_count),
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
@@ -1789,6 +1837,7 @@ impl OperationSuccess {
             OperationSuccess::DotfilesApplied { .. }
             | OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackagesAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
@@ -1819,6 +1868,7 @@ impl OperationSuccess {
             // Every variant listed, as in `refused_count`.
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackagesAudited { .. }
             | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
@@ -1838,12 +1888,107 @@ impl OperationSuccess {
         }
     }
 
+    /// How this success scores; see [`Outcome`].
+    ///
+    /// [`Outcome::Failed`] when the operation refused part of its work, and
+    /// [`Outcome::Found`] when it finished and found what it was asked to look
+    /// for. A refusal outranks a finding: an answer with a hole in it is not a
+    /// complete answer, whatever else it found.
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        // Refusals are answered once, by `had_refusals`, for every variant.
+        if self.had_refusals() {
+            return Outcome::Failed;
+        }
+        // Every variant listed, as in `refused_count`, so a variant added later has
+        // to say how it scores rather than inherit `Clean`.
+        match self {
+            // Records the orphan check could not judge leave part of the question
+            // unanswered, which the run warned about: a finding, not a refusal.
+            OperationSuccess::DotfileDriftChecked {
+                drift_count,
+                orphan_count,
+                unjudged_count,
+                ..
+            } => {
+                if *drift_count > 0 || *orphan_count > 0 || *unjudged_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
+            // Apply is asked to deploy, not to find anything. A conflict left for
+            // the user and an orphan are reported, and the README promises neither
+            // makes the exit code non-zero.
+            OperationSuccess::DotfilesApplied { .. } => Outcome::Clean,
+            OperationSuccess::PackageAudited { audit_result, .. } => match audit_result {
+                AuditResult::Clean { .. } => Outcome::Clean,
+                AuditResult::Conflicts { .. } | AuditResult::NotInstalled => Outcome::Found,
+                // Neither can answer the question: one audit did not run, and the
+                // other has nothing to run.
+                AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
+            },
+            // A package with no audit command is left out of every count: across
+            // many packages, not having one is ordinary.
+            OperationSuccess::PackagesAudited {
+                conflict_count,
+                not_installed_count,
+                error_count,
+                ..
+            } => {
+                if *error_count > 0 {
+                    Outcome::Failed
+                } else if *conflict_count > 0 || *not_installed_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
+            OperationSuccess::PackageChecked { verdict, .. } => match verdict {
+                CheckVerdict::Installed => Outcome::Clean,
+                CheckVerdict::NotInstalled { .. } => Outcome::Found,
+            },
+            OperationSuccess::PackageValidated { status, .. } => status.outcome(),
+            // `error_count` is never above zero here today: a run with an error
+            // completes as a failure instead.
+            OperationSuccess::SpecsValidated {
+                error_count,
+                warning_count,
+                other_warning_count,
+                ..
+            } => {
+                if *error_count > 0 {
+                    Outcome::Failed
+                } else if *warning_count > 0 || *other_warning_count > 0 {
+                    Outcome::Found
+                } else {
+                    Outcome::Clean
+                }
+            }
+            OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => Outcome::Clean,
+        }
+    }
+
     /// Gets the environment from the success result if available
     #[must_use]
     pub fn environment(&self) -> Option<&str> {
         match self {
             OperationSuccess::PackageChecked { environment, .. }
             | OperationSuccess::PackageAudited { environment, .. }
+            | OperationSuccess::PackagesAudited { environment, .. }
             | OperationSuccess::PackageInstalled { environment, .. }
             | OperationSuccess::PackageValidated { environment, .. }
             | OperationSuccess::SpecInfoRetrieved { environment, .. }
@@ -1873,6 +2018,9 @@ impl OperationSuccess {
                 steps_completed, ..
             }
             | OperationSuccess::PackageAudited {
+                steps_completed, ..
+            }
+            | OperationSuccess::PackagesAudited {
                 steps_completed, ..
             }
             | OperationSuccess::PackageInstalled {
@@ -2193,13 +2341,6 @@ pub enum PackageEvent {
         message: String,
     },
 
-    /// Error occurred but operation continues
-    Error {
-        operation_info: OperationInfo,
-        error: StreamedError,
-        message: String,
-    },
-
     /// Package information loaded
     PackageInfoLoaded {
         operation_info: OperationInfo,
@@ -2422,6 +2563,14 @@ pub enum PackageEvent {
         /// verifying, since checking one would run its commands. Not counted in
         /// `total_deployed` or `refused_count`.
         unverified_count: usize,
+        /// Recorded targets no entry deploys to any more whose files are still
+        /// there. Not drift and not a refusal.
+        orphan_count: usize,
+        /// Recorded targets the drift check could not judge for orphans.
+        unjudged_count: usize,
+        /// How the drift check itself scored: [`Outcome::Failed`] when it refused
+        /// something, failed, or ended without a result.
+        drift_outcome: Outcome,
     },
 
     /// A commit was created during sync push
@@ -2624,6 +2773,35 @@ pub enum CheckResult {
     Error(String),
 }
 
+/// What a check that ran found.
+///
+/// Carries no stdout, since a check command may print a credential. The full
+/// output travels only in [`PackageEvent::CheckResultCompleted`].
+#[derive(Debug, Clone)]
+pub enum CheckVerdict {
+    /// The check command succeeded.
+    Installed,
+    /// The check command ran and exited non-zero.
+    NotInstalled {
+        command: String,
+        exit_code: Option<i32>,
+        stderr: crate::commands::BoundedText,
+    },
+}
+
+impl std::fmt::Display for CheckVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckVerdict::Installed => f.write_str("successfully"),
+            CheckVerdict::NotInstalled {
+                exit_code: Some(code),
+                ..
+            } => write!(f, "and found it not installed (exit code {code})"),
+            CheckVerdict::NotInstalled { .. } => f.write_str("and found it not installed"),
+        }
+    }
+}
+
 /// Structured data for audit results
 #[derive(Debug, Clone)]
 pub struct AuditResultData {
@@ -2669,6 +2847,18 @@ pub enum ValidationStatus {
     HasWarnings,
     #[strum(to_string = "with errors")]
     HasErrors,
+}
+
+impl ValidationStatus {
+    /// How a validation with this status scores; see [`Outcome`].
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            ValidationStatus::Valid => Outcome::Clean,
+            ValidationStatus::HasWarnings => Outcome::Found,
+            ValidationStatus::HasErrors => Outcome::Failed,
+        }
+    }
 }
 
 /// Individual validation issue
@@ -2827,10 +3017,7 @@ mod tests {
         let success = OperationSuccess::PackageChecked {
             package_name: "test-package".to_string(),
             environment: "test".to_string(),
-            check_result: CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+            verdict: CheckVerdict::Installed,
             steps_completed: step_count,
         };
 
@@ -2884,5 +3071,251 @@ mod tests {
         // The exhaustive match above is the real test — it forces a compile
         // error when new variants are added to PackageError.
         let _ = categorize;
+    }
+
+    fn drift(drift: usize, orphan: usize, refused: usize, unverified: usize) -> OperationSuccess {
+        OperationSuccess::DotfileDriftChecked {
+            drift_count: drift,
+            total_count: 3,
+            refused_count: refused,
+            unverified_count: unverified,
+            orphan_count: orphan,
+            unjudged_count: 0,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn applied(conflict: usize, orphan: usize, refused: usize) -> OperationSuccess {
+        OperationSuccess::DotfilesApplied {
+            deployed_count: 1,
+            skipped_count: 0,
+            conflict_count: conflict,
+            refused_count: refused,
+            orphan_count: orphan,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn audited(result: AuditResult) -> OperationSuccess {
+        OperationSuccess::PackageAudited {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            audit_result: result,
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn validated(status: ValidationStatus) -> OperationSuccess {
+        OperationSuccess::PackageValidated {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            status,
+            warning_count: None,
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn specs_validated(errors: usize, warnings: usize) -> OperationSuccess {
+        OperationSuccess::SpecsValidated {
+            validated_count: 3,
+            error_count: errors,
+            warning_count: warnings,
+            other_warning_count: 0,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    fn audited_all(
+        conflicts: usize,
+        not_installed: usize,
+        errors: usize,
+        refused: usize,
+    ) -> OperationSuccess {
+        OperationSuccess::PackagesAudited {
+            audited_count: 4,
+            conflict_count: conflicts,
+            not_installed_count: not_installed,
+            error_count: errors,
+            refused_count: refused,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(1, 1),
+        }
+    }
+
+    // Each counted variant along every axis that scores it, plus a mixed case
+    // per variant so the precedence is pinned, not just each axis alone.
+    #[test]
+    fn each_success_scores_by_what_it_found() {
+        let cases = [
+            ("drift clean", drift(0, 0, 0, 0), Outcome::Clean),
+            ("drift unverified only", drift(0, 0, 0, 2), Outcome::Clean),
+            ("drift drifted", drift(1, 0, 0, 0), Outcome::Found),
+            ("drift orphan", drift(0, 1, 0, 0), Outcome::Found),
+            ("drift refused", drift(0, 0, 1, 0), Outcome::Failed),
+            (
+                "drift with unjudged records",
+                OperationSuccess::DotfileDriftChecked {
+                    drift_count: 0,
+                    total_count: 3,
+                    refused_count: 0,
+                    unverified_count: 0,
+                    orphan_count: 0,
+                    unjudged_count: 2,
+                    environment: "test".to_string(),
+                    steps_completed: StepCount::new(1, 1),
+                },
+                Outcome::Found,
+            ),
+            (
+                "drift refused and drifted",
+                drift(2, 1, 1, 0),
+                Outcome::Failed,
+            ),
+            ("apply clean", applied(0, 0, 0), Outcome::Clean),
+            ("apply conflict", applied(1, 0, 0), Outcome::Clean),
+            ("apply orphan", applied(0, 1, 0), Outcome::Clean),
+            ("apply refused", applied(0, 0, 1), Outcome::Failed),
+            (
+                "apply refused and conflicted",
+                applied(1, 1, 1),
+                Outcome::Failed,
+            ),
+            (
+                "audit clean",
+                audited(AuditResult::Clean {
+                    sources: vec!["brew".to_string()],
+                }),
+                Outcome::Clean,
+            ),
+            (
+                "audit conflict",
+                audited(AuditResult::Conflicts {
+                    sources: vec!["npm".to_string()],
+                    expected: vec!["brew".to_string()],
+                }),
+                Outcome::Found,
+            ),
+            (
+                "audit not installed",
+                audited(AuditResult::NotInstalled),
+                Outcome::Found,
+            ),
+            (
+                "audit error",
+                audited(AuditResult::Error("boom".to_string())),
+                Outcome::Failed,
+            ),
+            (
+                "audit no command",
+                audited(AuditResult::NoAuditCommand),
+                Outcome::Failed,
+            ),
+            (
+                "validated",
+                validated(ValidationStatus::Valid),
+                Outcome::Clean,
+            ),
+            (
+                "validated with warnings",
+                validated(ValidationStatus::HasWarnings),
+                Outcome::Found,
+            ),
+            (
+                "validated with errors",
+                validated(ValidationStatus::HasErrors),
+                Outcome::Failed,
+            ),
+            ("all validated", specs_validated(0, 0), Outcome::Clean),
+            (
+                "all validated with warnings about the run",
+                OperationSuccess::specs_validated(
+                    3,
+                    0,
+                    0,
+                    1,
+                    "test".to_string(),
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Found,
+            ),
+            (
+                "all validated with warnings",
+                specs_validated(0, 2),
+                Outcome::Found,
+            ),
+            (
+                "all validated with errors",
+                specs_validated(1, 2),
+                Outcome::Failed,
+            ),
+            ("audit all clean", audited_all(0, 0, 0, 0), Outcome::Clean),
+            (
+                "audit all conflict",
+                audited_all(1, 0, 0, 0),
+                Outcome::Found,
+            ),
+            (
+                "audit all not installed",
+                audited_all(0, 1, 0, 0),
+                Outcome::Found,
+            ),
+            ("audit all error", audited_all(0, 0, 1, 0), Outcome::Failed),
+            (
+                "audit all refused",
+                audited_all(0, 0, 0, 1),
+                Outcome::Failed,
+            ),
+            (
+                "audit all refused and conflicted",
+                audited_all(1, 1, 0, 1),
+                Outcome::Failed,
+            ),
+            (
+                "check installed",
+                OperationSuccess::package_checked(
+                    "p".to_string(),
+                    "test".to_string(),
+                    CheckVerdict::Installed,
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Clean,
+            ),
+            (
+                "check not installed",
+                OperationSuccess::package_checked(
+                    "p".to_string(),
+                    "test".to_string(),
+                    CheckVerdict::NotInstalled {
+                        command: "false".to_string(),
+                        exit_code: Some(1),
+                        stderr: crate::commands::BoundedText::bound(b""),
+                    },
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Found,
+            ),
+            (
+                "generic",
+                OperationSuccess::Generic("done".to_string()),
+                Outcome::Clean,
+            ),
+        ];
+        for (name, success, expected) in cases {
+            assert_eq!(success.outcome(), expected, "{name}");
+            assert_eq!(
+                OperationResult::Success(success).outcome(),
+                expected,
+                "{name}, through OperationResult"
+            );
+        }
+    }
+
+    #[test]
+    fn every_failure_is_failed() {
+        let failure = OperationResult::Failure(OperationFailure::Generic("no".to_string()));
+        assert_eq!(failure.outcome(), Outcome::Failed);
     }
 }

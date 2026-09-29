@@ -202,15 +202,40 @@ selfie --help
 
 ## Exit codes
 
-A `selfie` command that runs exits with one of these three codes. Scripts and CI steps should branch
-on them rather than on output text. A command line selfie cannot parse — an unknown flag, a missing
-argument — is rejected by the argument parser before any of this applies, and exits `2`.
+Every `selfie` command exits with one of these codes. Scripts and CI steps should branch on them
+rather than on output text.
 
-| Code  | Meaning                                                                       |
-| ----- | ----------------------------------------------------------------------------- |
-| `0`   | The command did everything it was asked to do.                                |
-| `1`   | The command failed, **or refused part of its work**. See below.               |
-| `130` | The command was interrupted (Ctrl+C). This is the usual `128 + SIGINT` value. |
+| Code  | Meaning                                                                                         |
+| ----- | ----------------------------------------------------------------------------------------------- |
+| `0`   | Clean: the command did what it was asked and found nothing to report.                           |
+| `1`   | Failed: an error, **a refusal**, a declined `spec create`, or a run that ends without a result. |
+| `2`   | Usage: the command line could not be parsed.                                                    |
+| `3`   | Found: the command did what it was asked, and **found what it was asked to look for**.          |
+| `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                                     |
+
+A failure outranks a finding: a command that refused part of its work exits `1` even if it also
+found something, since its answer has a hole in it. A code is never renumbered or reused. A new one
+takes the next free value from `3` to `63`; `64` to `78` (the `sysexits.h` codes) and `126` and up
+(reserved by shells) are never used.
+
+### What each command reports
+
+| Command               | Clean (`0`)                                                             | Found (`3`)                                                               | Failed (`1`)                                                             |
+| --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `apply`               | deployed, up to date, or conflicts skipped                              | never                                                                     | a refused entry; an error; a write that could not be recorded            |
+| `dotfiles drift`      | in sync; nothing deploys on this machine                                | drift; an orphaned target; the orphan check could not finish and said why | a refused entry; an error                                                |
+| `package check`       | the check command exited 0                                              | the check command exited non-zero, for any reason (not installed)         | no check command; selfie's own timeout; the command could not be started |
+| `package audit`       | no conflict                                                             | a conflict; not installed                                                 | the audit command exited non-zero; no audit command                      |
+| `package audit --all` | every audited package clean; a package with no audit command is skipped | a conflict; not installed                                                 | an audit command exited non-zero; a spec left out                        |
+| `spec validate`       | no warnings                                                             | warnings                                                                  | errors; the spec does not parse                                          |
+| `config validate`     | no warnings                                                             | warnings, including unrecognized keys                                     | errors; the file cannot be loaded                                        |
+| `spec create`         | created                                                                 | never                                                                     | declined, because the name already exists; an error                      |
+
+A configured command's exit status is all selfie knows about it. Your shell reports a command killed
+by a signal as an ordinary non-zero status, so a check that was killed reads as "not installed". An
+audit reports "not installed" when its command exits 0 and prints no source; an audit command that
+exits non-zero is a failure. An informational note, such as the one saying `apply` runs a spec's
+commands, never makes a run exit `3`.
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
 `selfie package install` does. A name that matches no package, names a package file that could not
@@ -273,7 +298,11 @@ still reported, and still exits `1`. A preview whose job is to tell you what `ap
 not report success for a run that would refuse.
 
 The MCP server applies the same contract: a refusal comes back as an error result with
-`"status": "refused"`, so an assistant is not told the deploy worked.
+`"status": "refused"`, so an assistant is not told the deploy worked. A result that could not answer
+without refusing anything, such as an audit whose command failed, is an error result with
+`"status": "failed"`. A finding is a successful call with `"status": "found"`, and a cancelled
+operation an error result with `"status": "cancelled"`. Every result also carries `outcome`:
+`"clean"`, `"found"` or `"failed"`, or `"cancelled"` for a cancelled operation.
 
 ## Documentation
 

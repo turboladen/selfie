@@ -18,7 +18,7 @@ use crate::{
     },
     package::event::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
-        OperationSuccess, PackageEvent, StepCount, metadata::OperationType,
+        OperationSuccess, Outcome, PackageEvent, StepCount, metadata::OperationType,
     },
     privilege::{Privilege, SudoPolicy, WriteScope},
 };
@@ -228,6 +228,10 @@ where
                     refused_count: summary.refused_count,
                     warned,
                     unverified_count: summary.unverified,
+                    orphan_count: summary.orphan_count,
+                    unjudged_count: summary.unjudged_count,
+                    // A check that reported no result is a failed one.
+                    drift_outcome: summary.outcome.unwrap_or(Outcome::Failed),
                 })
                 .await;
 
@@ -1305,6 +1309,12 @@ struct DriftSummary {
     warned: usize,
     /// How many secret-bearing entries the check reported without verifying.
     unverified: usize,
+    /// How many orphaned targets the check reported.
+    orphan_count: usize,
+    /// How many recorded targets the check could not judge for orphans.
+    unjudged_count: usize,
+    /// How the check scored, when it reported a result.
+    outcome: Option<Outcome>,
     /// The failure message, when the check failed.
     error: Option<String>,
     /// Why the check was cancelled, when it was.
@@ -1345,24 +1355,31 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             }
             PackageEvent::Completed {
                 result:
-                    OperationResult::Success(OperationSuccess::DotfileDriftChecked {
-                        drift_count: _,
-                        total_count,
-                        refused_count,
-                        unverified_count,
-                        ..
-                    }),
+                    OperationResult::Success(
+                        ref success @ OperationSuccess::DotfileDriftChecked {
+                            total_count,
+                            refused_count,
+                            unverified_count,
+                            orphan_count,
+                            unjudged_count,
+                            ..
+                        },
+                    ),
                 ..
             } => {
                 summary.total_deployed = total_count;
                 summary.refused_count = refused_count;
                 summary.unverified = unverified_count;
+                summary.orphan_count = orphan_count;
+                summary.unjudged_count = unjudged_count;
+                summary.outcome = Some(success.outcome());
             }
             PackageEvent::Completed {
                 result: OperationResult::Failure(failure),
                 ..
             } => {
                 summary.error = Some(failure.to_string());
+                summary.outcome = Some(Outcome::Failed);
             }
             // Recorded rather than swallowed. Under the catch-all below, an
             // interrupted drift check left the summary at its defaults and the
@@ -1429,6 +1446,72 @@ fn categorize_pull_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── collect_drift_summary's verdict ─────────────────────────────────────
+
+    fn op_info() -> crate::package::event::OperationInfo {
+        crate::package::event::OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::DotfileDrift,
+            package_name: String::new(),
+            environment: "test".to_string(),
+            context: OperationContext::default(),
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    fn drift_checked(drift: usize, orphan: usize, refused: usize) -> PackageEvent {
+        PackageEvent::Completed {
+            operation_info: op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                drift_count: drift,
+                total_count: 2,
+                refused_count: refused,
+                unverified_count: 0,
+                orphan_count: orphan,
+                unjudged_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }
+    }
+
+    // The summary carries the drift check's own verdict, and a check that failed
+    // or reported nothing is Failed rather than left unset.
+    #[tokio::test]
+    async fn the_drift_summary_carries_the_checks_outcome() {
+        let failed = PackageEvent::Completed {
+            operation_info: op_info(),
+            result: OperationResult::Failure(OperationFailure::Generic("boom".to_string())),
+        };
+        let cases = [
+            (
+                "clean",
+                vec![drift_checked(0, 0, 0)],
+                Some(Outcome::Clean),
+                0,
+            ),
+            (
+                "orphan only",
+                vec![drift_checked(0, 1, 0)],
+                Some(Outcome::Found),
+                1,
+            ),
+            (
+                "refused",
+                vec![drift_checked(0, 0, 1)],
+                Some(Outcome::Failed),
+                0,
+            ),
+            ("failed", vec![failed], Some(Outcome::Failed), 0),
+            ("no result", vec![], None, 0),
+        ];
+        for (name, events, outcome, orphans) in cases {
+            let summary = collect_drift_summary(Box::pin(futures::stream::iter(events))).await;
+            assert_eq!(summary.outcome, outcome, "{name}");
+            assert_eq!(summary.orphan_count, orphans, "{name}");
+        }
+    }
 
     // ─── infer_package_name tests ────────────────────────────────────────────
 
@@ -2019,6 +2102,7 @@ mod tests {
                     refused_count: 0,
                     unverified_count: 0,
                     orphan_count: 0,
+                    unjudged_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(0, 0),
                 }),
@@ -2067,6 +2151,7 @@ mod tests {
                 refused_count: 2,
                 unverified_count: 0,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(4, 4),
             }),
@@ -2098,6 +2183,7 @@ mod tests {
                 refused_count: 0,
                 unverified_count: 3,
                 orphan_count: 0,
+                unjudged_count: 0,
                 environment: "test".to_string(),
                 steps_completed: crate::package::event::StepCount::new(1, 1),
             }),
@@ -2131,6 +2217,7 @@ mod tests {
                     refused_count: 0,
                     unverified_count: 0,
                     orphan_count: 0,
+                    unjudged_count: 0,
                     environment: "test".to_string(),
                     steps_completed: crate::package::event::StepCount::new(3, 3),
                 }),
@@ -2288,6 +2375,7 @@ mod tests {
                         refused_count: 1,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2465,6 +2553,7 @@ mod tests {
                         refused_count: 2,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2555,6 +2644,7 @@ mod tests {
                         refused_count: 0,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),
@@ -2721,6 +2811,7 @@ mod tests {
                         refused_count: 2,
                         unverified_count: 0,
                         orphan_count: 0,
+                        unjudged_count: 0,
                         environment: "test".to_string(),
                         steps_completed: StepCount::new(0, 0),
                     }),

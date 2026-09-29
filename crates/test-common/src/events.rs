@@ -108,37 +108,6 @@ pub fn assert_has_progress_steps(events: &[PackageEvent], expected_steps: &[&str
     }
 }
 
-/// The message from every error event.
-#[must_use]
-pub fn get_error_messages(events: &[PackageEvent]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|e| {
-            if let PackageEvent::Error { message, .. } = e {
-                Some(message.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Assert no error event occurred.
-///
-/// # Panics
-///
-/// Panics if `events` has errors.
-pub fn assert_no_errors(events: &[PackageEvent]) {
-    let error_count = count_events_of_type(events, |e| matches!(e, PackageEvent::Error { .. }));
-    assert_eq!(
-        error_count,
-        0,
-        "Expected no error events, but found {} errors: {:?}",
-        error_count,
-        get_error_messages(events)
-    );
-}
-
 /// Build an `OperationInfo` for constructing test events.
 #[must_use]
 pub fn create_test_operation_info(

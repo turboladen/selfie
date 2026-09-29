@@ -11,7 +11,8 @@ use crate::{
     package::{
         Package, SpecOrigin,
         event::{
-            EventSender, OperationResult, OperationSuccess, ValidationResultData, ValidationStatus,
+            EventSender, OperationResult, OperationSuccess, Outcome, ValidationResultData,
+            ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -58,7 +59,9 @@ where
 
     // Every unparsable file is reported, but only the ones apply could have used
     // are errors: a dotfiles copy a package spec shadows is not one, as it is not
-    // one for apply. Collection refuses exactly those, one refusal per file.
+    // one for apply. Collection refuses exactly those, one refusal per file. The
+    // warnings count apart from specs with warnings: some name no spec at all.
+    let collection_warnings = warnings.len();
     for warning in warnings {
         warning.send(sender).await;
     }
@@ -104,14 +107,16 @@ where
         let issues = &super::validate::all_issues(package, source, environment);
         let validation_issues = super::validate::issue_payload(issues);
 
-        let status = if issues.has_errors() {
-            error_count += 1;
-            ValidationStatus::HasErrors
-        } else if issues.has_warnings() {
-            warning_count += 1;
-            ValidationStatus::HasWarnings
-        } else {
-            ValidationStatus::Valid
+        let status = match issues.outcome() {
+            Outcome::Failed => {
+                error_count += 1;
+                ValidationStatus::HasErrors
+            }
+            Outcome::Found => {
+                warning_count += 1;
+                ValidationStatus::HasWarnings
+            }
+            Outcome::Clean => ValidationStatus::Valid,
         };
 
         let validation_result = ValidationResultData {
@@ -144,6 +149,7 @@ where
             valid_packages.len(),
             0,
             warning_count,
+            collection_warnings,
             environment.to_string(),
             (progress.current_step(), progress.total_steps()).into(),
         ))
