@@ -36,8 +36,9 @@ pub(crate) async fn handle_check(
                 }
                 true
             }
+            // The summary is the result every run prints, so a success is left to
+            // the shared handler.
             PackageEvent::Completed { result, .. } => match result {
-                OperationResult::Success(_) => true,
                 OperationResult::Failure(failure) if failure.is_environment_error() => {
                     display_environment_error(package_name, failure, config, display);
                     true

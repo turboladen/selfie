@@ -1,7 +1,5 @@
 use selfie::package::{
-    event::{
-        AuditResult, AuditResultData, OperationFailure, OperationResult, Outcome, PackageEvent,
-    },
+    event::{AuditResult, AuditResultData, OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
     service::PackageService,
 };
@@ -36,10 +34,9 @@ pub(crate) async fn handle_audit(
                 }
                 true
             }
-            // A clean result says nothing the result lines above did not. Anything
-            // else takes the default rendering, at the level of its verdict.
+            // The summary is left to the shared handler at every outcome: it is
+            // the line that names the environment the audit ran in.
             PackageEvent::Completed { result, .. } => match result {
-                OperationResult::Success(success) if success.outcome() == Outcome::Clean => true,
                 OperationResult::Failure(failure) if failure.is_environment_error() => {
                     display_environment_error(package_name, failure, config, display);
                     true
@@ -69,12 +66,6 @@ pub(crate) async fn handle_audit_all(
                 display_audit_summary_line(audit_result, config, display);
                 true
             }
-            // The summary line is printed only when the run was not clean, at its
-            // verdict's level.
-            PackageEvent::Completed {
-                result: OperationResult::Success(success),
-                ..
-            } if success.outcome() == Outcome::Clean => true,
             _ => false,
         })
         .await;

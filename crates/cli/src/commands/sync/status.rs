@@ -124,20 +124,22 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                     "{refused_count} refusal(s) left dotfiles unchecked -- see the warnings above"
                 ));
             }
+            // The drift line is part of this command's answer, so it is on
+            // stdout, marked by what it found.
             if drifted_targets.is_empty() {
                 let (line, clean) =
                     no_drift_line(*total_deployed, *drift_outcome, *warned, *unverified);
-                if clean {
-                    display.print_success(line);
-                } else {
-                    display.print_warning(line);
-                }
+                let outcome = if clean { Outcome::Clean } else { Outcome::Found };
+                display.print_result(outcome, line);
             } else {
                 let count = drifted_targets.len();
-                display.print_warning(format!(
-                    "Dotfile drift: {count} drifted out of {}",
-                    deployed_phrase(*total_deployed, *unverified)
-                ));
+                display.print_result(
+                    Outcome::Found,
+                    format!(
+                        "Dotfile drift: {count} drifted out of {}",
+                        deployed_phrase(*total_deployed, *unverified)
+                    ),
+                );
                 // Show drifted file paths (shortened)
                 for target in drifted_targets {
                     let short = shorten_path(target);

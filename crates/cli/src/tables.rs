@@ -77,7 +77,8 @@ impl ValidationTableReporter {
         self
     }
 
-    pub(crate) fn print(&self) {
-        eprintln!("{}", self.table);
+    /// Print the table on stdout: a validator's issues are its answer.
+    pub(crate) fn print(&self, display: &crate::display_manager::DisplayManager) {
+        display.println(&self.table);
     }
 }

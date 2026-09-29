@@ -600,6 +600,36 @@ impl DisplayManager {
         });
     }
 
+    /// Print a command's summary line (stdout), marked by how the run came out:
+    /// ✓ for Clean, ⚠ for Found, ✗ for Failed.
+    ///
+    /// The summary is the answer, so it goes to stdout whatever the outcome.
+    pub(crate) fn print_result(
+        &self,
+        outcome: selfie::package::event::Outcome,
+        message: impl Display,
+    ) {
+        use selfie::package::event::Outcome;
+
+        let message = message.to_string();
+        self.record_stdout(&message);
+        let (mark, line) = match outcome {
+            Outcome::Clean => ("✓", style(message.as_str()).green()),
+            Outcome::Found => ("⚠", style(message.as_str()).yellow()),
+            Outcome::Failed => ("✗", style(message.as_str()).red()),
+        };
+        if self.use_colors {
+            let mark = match outcome {
+                Outcome::Clean => style(mark).green().bold(),
+                Outcome::Found => style(mark).yellow().bold(),
+                Outcome::Failed => style(mark).red().bold(),
+            };
+            self.mp.suspend(|| println!("{mark} {line}"));
+        } else {
+            self.mp.suspend(|| println!("{mark} {message}"));
+        }
+    }
+
     /// Print a success message (stdout)
     pub(crate) fn print_success(&self, message: impl Display) {
         let message = message.to_string();

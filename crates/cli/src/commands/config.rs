@@ -49,16 +49,19 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         outcome => outcome,
     };
 
+    // The issues, the notes and the verdict are what this command was asked for,
+    // so all of them go to stdout. Only a file that would not load, above, is an
+    // error about the run.
     if outcome == Outcome::Failed {
-        display.print_error("Validation failed.");
+        display.print_result(outcome, "Validation failed.");
 
         let mut table_reporter = ValidationTableReporter::new(display.use_colors());
         table_reporter
             .setup(vec!["Category", "Field", "Message", "Suggestion"])
             .add_validation_errors(&result.issues().errors())
             .add_validation_warnings(&result.issues().warnings())
-            .print();
-        crate::config::report_config_notices(&cli_notices, display);
+            .print(display);
+        crate::config::print_config_notices(&cli_notices, display);
         Exit::Failed.code()
     } else {
         if result.issues().has_warnings() {
@@ -66,14 +69,14 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             table_reporter
                 .setup(vec!["Category", "Field", "Message", "Suggestion"])
                 .add_validation_warnings(&result.issues().warnings())
-                .print();
+                .print(display);
         }
-        crate::config::report_config_notices(&cli_notices, display);
+        crate::config::print_config_notices(&cli_notices, display);
 
         if outcome == Outcome::Clean {
-            display.print_success("Configuration is valid.");
+            display.print_result(outcome, "Configuration is valid.");
         } else {
-            display.print_warning("Configuration is usable, with warnings.");
+            display.print_result(outcome, "Configuration is usable, with warnings.");
         }
 
         // Each value as a run would take it from the file: `~` expanded and

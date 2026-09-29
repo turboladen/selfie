@@ -805,6 +805,8 @@ pub enum OperationSuccess {
         package_name: String,
         environment: String,
         status: ValidationStatus,
+        /// Errors found; nonzero exactly when `status` is `HasErrors`.
+        error_count: usize,
         warning_count: Option<usize>,
         steps_completed: StepCount,
     },
@@ -866,7 +868,14 @@ pub enum OperationSuccess {
     /// Bulk spec validation operation completed
     SpecsValidated {
         validated_count: usize,
+        /// Specs validated with errors.
         error_count: usize,
+        /// Spec files that could not be read or parsed, and so were not
+        /// validated. Each is an error.
+        unparsable_count: usize,
+        /// Names several spec files claim, and directories that could not be
+        /// listed, so that their specs were not validated. Each is an error.
+        uncollected_count: usize,
         /// Specs validated with warnings.
         warning_count: usize,
         /// Warnings about the run that belong to no validated spec, such as a
@@ -1294,21 +1303,26 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::PackageValidated {
                 package_name,
                 status,
+                error_count,
                 warning_count,
                 steps_completed,
                 ..
-            } => {
-                let status_msg = match status {
-                    ValidationStatus::HasWarnings => {
-                        format!("with {} warning(s)", warning_count.unwrap_or(0))
-                    }
-                    _ => status.to_string(),
-                };
-                write!(
+            } => match status {
+                ValidationStatus::HasErrors => write!(
                     f,
-                    "Package '{package_name}' validation completed {status_msg} {steps_completed}"
-                )
-            }
+                    "Package '{package_name}' validation failed with {error_count} error(s) and {} warning(s) {steps_completed}",
+                    warning_count.unwrap_or(0)
+                ),
+                ValidationStatus::HasWarnings => write!(
+                    f,
+                    "Package '{package_name}' validation completed with {} warning(s) {steps_completed}",
+                    warning_count.unwrap_or(0)
+                ),
+                ValidationStatus::Valid => write!(
+                    f,
+                    "Package '{package_name}' validation completed {status} {steps_completed}"
+                ),
+            },
             OperationSuccess::SpecInfoRetrieved {
                 package_name,
                 steps_completed,
@@ -1392,14 +1406,16 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::SpecsValidated {
                 validated_count,
                 error_count,
+                unparsable_count,
+                uncollected_count,
                 warning_count,
                 other_warning_count,
                 steps_completed,
                 ..
             } => {
-                let mut status = if *error_count > 0 {
+                let mut status = if *error_count + *unparsable_count + *uncollected_count > 0 {
                     format!(
-                        "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings"
+                        "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings, {unparsable_count} unparsable, {uncollected_count} ambiguous or unlistable"
                     )
                 } else if *warning_count > 0 {
                     format!("{validated_count} package(s) validated, {warning_count} with warnings")
@@ -1641,6 +1657,7 @@ impl OperationSuccess {
         package_name: String,
         environment: String,
         status: ValidationStatus,
+        error_count: usize,
         warning_count: Option<usize>,
         steps_completed: StepCount,
     ) -> Self {
@@ -1648,6 +1665,7 @@ impl OperationSuccess {
             package_name,
             environment,
             status,
+            error_count,
             warning_count,
             steps_completed,
         }
@@ -1683,9 +1701,12 @@ impl OperationSuccess {
 
     /// Create a `SpecsValidated` success variant
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn specs_validated(
         validated_count: usize,
         error_count: usize,
+        unparsable_count: usize,
+        uncollected_count: usize,
         warning_count: usize,
         other_warning_count: usize,
         environment: String,
@@ -1694,6 +1715,8 @@ impl OperationSuccess {
         OperationSuccess::SpecsValidated {
             validated_count,
             error_count,
+            unparsable_count,
+            uncollected_count,
             warning_count,
             other_warning_count,
             environment,
@@ -2036,15 +2059,17 @@ impl OperationSuccess {
                 CheckVerdict::NotInstalled { .. } => Outcome::Found,
             },
             OperationSuccess::PackageValidated { status, .. } => status.outcome(),
-            // `error_count` is never above zero here today: a run with an error
-            // completes as a failure instead.
+            // A spec that could not be read, or a name several files claim, is an
+            // error like a spec with errors: the run could not validate it.
             OperationSuccess::SpecsValidated {
                 error_count,
+                unparsable_count,
+                uncollected_count,
                 warning_count,
                 other_warning_count,
                 ..
             } => {
-                if *error_count > 0 {
+                if *error_count + *unparsable_count + *uncollected_count > 0 {
                     Outcome::Failed
                 } else if *warning_count > 0 || *other_warning_count > 0 {
                     Outcome::Found
@@ -3210,6 +3235,7 @@ mod tests {
             package_name: "p".to_string(),
             environment: "test".to_string(),
             status,
+            error_count: 0,
             warning_count: None,
             steps_completed: StepCount::new(1, 1),
         }
@@ -3219,6 +3245,8 @@ mod tests {
         OperationSuccess::SpecsValidated {
             validated_count: 3,
             error_count: errors,
+            unparsable_count: 0,
+            uncollected_count: 0,
             warning_count: warnings,
             other_warning_count: 0,
             environment: "test".to_string(),
@@ -3333,11 +3361,43 @@ mod tests {
                     3,
                     0,
                     0,
+                    0,
+                    0,
                     1,
                     "test".to_string(),
                     StepCount::new(1, 1),
                 ),
                 Outcome::Found,
+            ),
+            // A spec that could not be read, or a name several files claim, fails
+            // the run like a spec with errors.
+            (
+                "a spec could not be read",
+                OperationSuccess::specs_validated(
+                    3,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    "test".to_string(),
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Failed,
+            ),
+            (
+                "a name several files claim",
+                OperationSuccess::specs_validated(
+                    3,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    "test".to_string(),
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Failed,
             ),
             (
                 "all validated with warnings",

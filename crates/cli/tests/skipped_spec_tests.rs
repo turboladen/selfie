@@ -182,7 +182,7 @@ fn drift_output(temp_dir: &tempfile::TempDir) -> (Option<i32>, String, String) {
 // A spec `dotfiles drift` could not load is a refusal: none of its dotfiles was
 // examined, so the check fails rather than printing a clean line under the warning
 // that names the spec. The clean line and the failed one carry the same sentence
-// and differ by stream and marker, so both are asserted.
+// and differ by marker; both are the answer, on stdout.
 #[test]
 fn drift_does_not_claim_a_clean_check_over_a_spec_it_could_not_load() {
     let temp_dir = sandbox_with_one_unparsable_spec();
@@ -198,8 +198,8 @@ fn drift_does_not_claim_a_clean_check_over_a_spec_it_could_not_load() {
         "must not claim a clean check over an unloaded spec: {stdout}"
     );
     assert!(
-        stderr.contains("✗ Dotfile drift check") && stderr.contains("1 refused"),
-        "must count the spec it could not load as refused: {stderr}"
+        stdout.contains("✗ Dotfile drift check") && stdout.contains("1 refused"),
+        "must count the spec it could not load as refused: {stdout}"
     );
     assert_eq!(code, Some(1), "output was: {stdout}{stderr}");
 }
@@ -263,9 +263,9 @@ fn apply_all_exits_1_over_a_spec_it_could_not_load_and_a_named_apply_does_not() 
         .output()
         .unwrap();
 
-    let all_stderr = String::from_utf8_lossy(&all.stderr);
-    assert!(all_stderr.contains("1 refused"), "{all_stderr}");
-    assert_eq!(all.status.code(), Some(1), "{all_stderr}");
+    let all_stdout = String::from_utf8_lossy(&all.stdout);
+    assert!(all_stdout.contains("1 refused"), "{all_stdout}");
+    assert_eq!(all.status.code(), Some(1), "{all_stdout}");
     assert_eq!(
         named.status.code(),
         Some(0),

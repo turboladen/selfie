@@ -70,8 +70,9 @@ fn apply_names_the_orphan_and_exits_zero() {
     );
 }
 
-// Drift's summary is a warning, not a success, when it found an orphan, and an
-// orphan is a finding drift was asked to look for.
+// Drift's summary is marked as a finding, not a success, when it found an
+// orphan, and an orphan is a finding drift was asked to look for. Both are
+// drift's answer, so both are on stdout.
 #[test]
 fn drift_warns_in_its_summary_and_exits_three() {
     let temp = moved_target();
@@ -81,13 +82,20 @@ fn drift_warns_in_its_summary_and_exits_three() {
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
     assert_eq!(code, Some(3), "{stdout}{stderr}");
-    assert!(stderr.contains("Orphaned"), "{stderr}");
     assert!(
-        stderr.contains("1 orphaned") && !stdout.contains("1 orphaned"),
-        "the summary must be the warning, not the success line:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stdout.contains("Orphaned") && !stderr.contains("Orphaned"),
+        "{stdout}{stderr}"
+    );
+    let summary = stdout
+        .lines()
+        .find(|line| line.contains("1 orphaned"))
+        .unwrap_or_else(|| panic!("the summary counts the orphan:\n{stdout}"));
+    assert!(
+        summary.starts_with('⚠') && !stderr.contains("1 orphaned"),
+        "the summary must be marked as a finding, on stdout:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("0 drifted"),
-        "nothing but the orphan may make the summary a warning:\n{stderr}"
+        summary.contains("0 drifted"),
+        "nothing but the orphan may make the summary a finding:\n{summary}"
     );
 }

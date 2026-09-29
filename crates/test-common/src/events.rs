@@ -68,16 +68,31 @@ pub fn assert_successful_operation(events: &[PackageEvent]) {
     );
 }
 
-/// Assert the operation completed with a failure result.
+/// Assert the operation completed with an [`OperationResult::Failure`]: an
+/// error, not an answer.
 ///
 /// # Panics
-/// Panics if the event sequence doesn't match expected failed operation pattern.
+/// Panics if the operation has no result, or its result is not a failure.
 pub fn assert_failed_operation(events: &[PackageEvent]) {
-    // Should have a completion result that is a failure
     let result = get_operation_result(events).expect("Should have an operation result");
     assert!(
         matches!(result, OperationResult::Failure(_)),
         "Operation result should be failure, got: {result:?}"
+    );
+}
+
+/// Assert the operation answered, and its answer is that the run failed, such
+/// as a validation that found errors.
+///
+/// # Panics
+/// Panics if the operation has no result, its result is a failure, or its
+/// outcome is not Failed.
+pub fn assert_failed_answer(events: &[PackageEvent]) {
+    let result = get_operation_result(events).expect("Should have an operation result");
+    assert!(
+        matches!(result, OperationResult::Success(_))
+            && result.outcome() == selfie::package::event::Outcome::Failed,
+        "Operation should answer with a Failed outcome, got: {result:?}"
     );
 }
 

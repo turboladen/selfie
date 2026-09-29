@@ -63,7 +63,8 @@ command_timeout: 30
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
+    // The issues are `config validate`'s answer, on stdout.
+    cmd.assert().failure().stdout(predicate::str::contains(
         "The `environment` setting is missing",
     ));
 }
@@ -82,7 +83,7 @@ command_timeout: 30
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("relative and cannot be resolved"));
+        .stdout(predicate::str::contains("relative and cannot be resolved"));
 }
 
 // =============================================================================

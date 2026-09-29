@@ -8,7 +8,8 @@
 use futures::StreamExt;
 use selfie::package::{
     event::{
-        ConsoleOutput, EventStream, OperationInfo, OperationResult, Outcome, PackageEvent, StepKind,
+        ConsoleOutput, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
+        PackageEvent, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
@@ -215,10 +216,13 @@ impl EventProcessor {
                 // The level follows the library's verdict, so a run that refused
                 // part of its work reads as an error and one that found drift as
                 // a warning. The exit code was scored in `process_events`.
-                OperationResult::Success(success) => match success.outcome() {
-                    Outcome::Clean => self.display.print_success(success.to_string()),
-                    Outcome::Found => self.display.print_warning(success.to_string()),
-                    Outcome::Failed => {
+                // The summary is the answer, so it goes to stdout at every outcome,
+                // marked by it. A run that failed on a success, as a refusal does,
+                // also joins the error summary. An `OperationFailure` is an error,
+                // not an answer, and stays on stderr below.
+                OperationResult::Success(success) => {
+                    let outcome = success.outcome();
+                    if outcome == Outcome::Failed {
                         self.display.collect_error(ErrorDetail {
                             package_name: operation_info.package_name,
                             operation: operation_info.operation_type.to_string(),
@@ -227,9 +231,9 @@ impl EventProcessor {
                             stderr: None,
                             message: success.to_string(),
                         });
-                        self.display.print_error(success.to_string());
                     }
-                },
+                    self.display.print_result(outcome, success.to_string());
+                }
                 OperationResult::Failure(err) => {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
@@ -466,27 +470,37 @@ impl EventProcessor {
             PackageEvent::DotfileDriftDetected {
                 target, drift_type, ..
             } => {
+                // Drift is what `dotfiles drift` was asked to find: its answer.
                 let short_target = crate::display_manager::shorten_path(&target);
-                self.display
-                    .print_warning(format!("  Drift in {short_target}: {drift_type}"));
+                self.display.print_result(
+                    Outcome::Found,
+                    format!("  Drift in {short_target}: {drift_type}"),
+                );
             }
 
             // A warning: the file is one the user may still want, and nothing
             // will manage it again unless they act.
             PackageEvent::DotfileOrphaned {
+                operation_info,
                 source,
                 target,
                 package,
-                ..
             } => {
                 let short_target = crate::display_manager::shorten_path(&target);
                 let by = package
                     .map(|package| format!(" by package '{package}'"))
                     .unwrap_or_default();
-                self.display.print_warning(format!(
+                let line = format!(
                     "  Orphaned {short_target}: deployed from {source}{by}, and no entry deploys \
                      to it now. selfie leaves it in place; check whether you still need it"
-                ));
+                );
+                // An orphan is part of what `dotfiles drift` is asked to find, so
+                // there it is the answer. Elsewhere it is a warning about the run.
+                if matches!(operation_info.operation_type, OperationType::DotfileDrift) {
+                    self.display.print_result(Outcome::Found, line);
+                } else {
+                    self.display.print_warning(line);
+                }
             }
 
             PackageEvent::PostInstallNote { note, .. } => {
@@ -969,6 +983,46 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.starts_with('✓')), "{lines:?}");
+    }
+
+    // A summary is the answer at every outcome, so it goes to stdout; an error
+    // is not, and stays on stderr.
+    #[tokio::test]
+    async fn a_found_summary_goes_to_stdout_and_a_failure_to_stderr() {
+        use crate::display_manager::Stream;
+        use selfie::package::event::{CheckVerdict, OperationFailure, OperationSuccess};
+
+        let found = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Success(OperationSuccess::PackageChecked {
+                package_name: "bat".to_string(),
+                environment: "test".to_string(),
+                verdict: CheckVerdict::NotInstalled {
+                    command: "false".to_string(),
+                    exit_code: Some(1),
+                    stderr: selfie::commands::BoundedText::bound(b""),
+                },
+                steps_completed: (1, 1).into(),
+            }),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![found]).await;
+        assert!(
+            printed
+                .iter()
+                .any(|(stream, line)| *stream == Stream::Stdout && line.contains("'bat'")),
+            "{printed:?}"
+        );
+        assert!(
+            printed.iter().all(|(stream, _)| *stream == Stream::Stdout),
+            "{printed:?}"
+        );
+
+        let failed = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::Generic("broken".to_string())),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
+        assert_eq!(printed, vec![(Stream::Stderr, "broken".to_string())]);
     }
 
     fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {
