@@ -55,6 +55,11 @@ decide how to display information about that event to the user in the current UI
 - **Validation reads an entry's fields directly (`source()`, `command()`, `vars()`), never
   `content_source()`.** That answers apply's question — may this deploy — so gating a check on it
   lets one defect suppress every other diagnostic for the same entry.
+- **Exit codes come from the CLI's `Exit` enum, never a bare integer.** 0 clean, 1 failed, 2 usage,
+  3 found what was asked about, 130 cancelled; `docs/adr/0006-command-output-contract.md` says which
+  situation is which per command. A new code takes the next free value in 3–63, never 64–78
+  (`sysexits.h`) or 126 and up (shell-reserved), is never renumbered, and lands with its row in
+  README's exit-code table in the same commit.
 
 ## MCP server (`selfie-mcp`)
 
