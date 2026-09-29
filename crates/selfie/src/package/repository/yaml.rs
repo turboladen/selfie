@@ -40,6 +40,36 @@ fn preserving_kind(error: FileSystemError) -> std::io::Error {
     }
 }
 
+/// Every entry in the spec directory `dir`, or why it could not be listed.
+///
+/// Every reader of a spec directory lists it through this, so each classifies
+/// a directory it cannot read the same way.
+///
+/// # Errors
+///
+/// [`PackageListError`] carrying `dir` and what is at it, when that is not a
+/// directory or its entries cannot be read.
+pub(crate) fn list_spec_directory<F: FileSystem + ?Sized>(
+    fs: &F,
+    dir: &Path,
+) -> Result<Vec<PathBuf>, PackageListError> {
+    // One probe, not two, and `path_exists` is not it: that answers false for a
+    // dangling symlink, a symlink loop and a directory behind a parent that denies
+    // access alike, so a caller acting on it cannot tell an empty path from one it
+    // was not allowed to look at.
+    match fs.directory_state(dir) {
+        DirectoryState::Directory => {}
+        // Every other state travels whole. The error carries the path and the
+        // classification made here, so no consumer stats the path again: that is
+        // how one of them came to call an unreadable directory "not found" and
+        // offer a `mkdir -p` that cannot work.
+        state => return Err(PackageListError::new(dir.to_path_buf(), state)),
+    }
+    fs.list_directory(dir)
+        .map_err(preserving_kind)
+        .map_err(|error| PackageListError::from_listing(fs, dir.to_path_buf(), &error))
+}
+
 impl<F: FileSystem> YamlPackageRepository<F> {
     /// A repository over `package_dir`, whose specs are of kind `origin`.
     ///
@@ -51,24 +81,6 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             fs,
             package_dir,
             origin,
-        }
-    }
-
-    /// The error for a package directory that cannot be listed, or `None` when it
-    /// can be.
-    ///
-    /// One probe, not two, and `path_exists` is not it: that answers false for a
-    /// dangling symlink, a symlink loop and a directory behind a parent that denies
-    /// access alike, so a caller acting on it cannot tell an empty path from one it was
-    /// not allowed to look at. This asks the shared classification instead, once.
-    fn unlistable_directory_error(&self) -> Option<PackageListError> {
-        match self.fs.directory_state(&self.package_dir) {
-            DirectoryState::Directory => None,
-            // Every other state travels whole. The error carries this directory's path
-            // and the classification made here, so no consumer stats the path again:
-            // that is how one of them came to call an unreadable directory "not found"
-            // and offer a `mkdir -p` that cannot work.
-            state => Some(PackageListError::new(self.package_dir.clone(), state)),
         }
     }
 
@@ -86,8 +98,8 @@ impl<F: FileSystem> YamlPackageRepository<F> {
     /// converge, that is the wrong property to have. It also makes `spec list`,
     /// `validate --all`, and `audit --all` report in a stable order, and makes
     /// the "multiple files match this name" error name them predictably.
-    fn list_yaml_files(&self, dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-        let entries = self.fs.list_directory(dir).map_err(preserving_kind)?;
+    fn list_yaml_files(&self, dir: &Path) -> Result<Vec<PathBuf>, PackageListError> {
+        let entries = list_spec_directory(&self.fs, dir)?;
 
         // The same question `filter_matching_packages` and the sync guard ask,
         // so enumeration cannot admit a file name resolution rejects or skip
@@ -142,23 +154,6 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // sometimes between runs on one.
         matches.sort();
         matches
-    }
-
-    /// List directory entries and find matching package files, also reporting how many
-    /// entries were examined (for error diagnostics in `get_package`).
-    fn find_package_files_with_context(
-        &self,
-        name: &str,
-        files_examined: &mut usize,
-    ) -> Result<Vec<PathBuf>, std::io::Error> {
-        let entries = self
-            .fs
-            .list_directory(&self.package_dir)
-            .map_err(preserving_kind)?;
-
-        *files_examined = entries.len();
-
-        Ok(Self::filter_matching_packages(name, entries))
     }
 
     // The only read of a package file in the crate, and the only place the
@@ -291,17 +286,11 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
-        // Check if package directory exists first
-        if let Some(error) = self.unlistable_directory_error() {
-            return Err(PackageRepoError::PackageListError(error));
-        }
-
         let search_patterns = vec![format!("{}.yml", name), format!("{}.yaml", name)];
-        let mut files_examined = 0;
 
-        let package_files = self
-            .find_package_files_with_context(name, &mut files_examined)
-            .map_err(|e| PackageRepoError::IoError(Arc::new(e)))?;
+        let entries = list_spec_directory(&self.fs, &self.package_dir)?;
+        let files_examined = entries.len();
+        let package_files = Self::filter_matching_packages(name, entries);
 
         if package_files.is_empty() {
             return Err(PackageError::PackageNotFound {
@@ -363,14 +352,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError> {
-        if let Some(error) = self.unlistable_directory_error() {
-            return Err(error);
-        }
-
-        // Get all YAML files in the directory
-        let yaml_files = self
-            .list_yaml_files(&self.package_dir)
-            .map_err(|e| PackageListError::from_listing(&self.fs, self.package_dir.clone(), &e))?;
+        let yaml_files = self.list_yaml_files(&self.package_dir)?;
 
         // Parse each file into a Package
         let mut packages: Vec<Result<Package, PackageParseError>> = Vec::new();
@@ -383,16 +365,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError> {
-        if let Some(error) = self.unlistable_directory_error() {
-            return Err(error);
-        }
-
-        let entries = self
-            .fs
-            .list_directory(&self.package_dir)
-            .map_err(preserving_kind)
-            .map_err(|e| PackageListError::from_listing(&self.fs, self.package_dir.clone(), &e))?;
-
+        let entries = list_spec_directory(&self.fs, &self.package_dir)?;
         Ok(Self::filter_matching_packages(name, entries))
     }
 
@@ -1124,6 +1097,48 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.is_absent(), "expected an absence, got {error:?}");
         assert_eq!(error.path(), nonexistent_dir);
+    }
+
+    // A lookup by name lists the same directory as a full listing, so it must
+    // classify an unreadable one the same way. As a bare IO error it would tell
+    // `spec info` a different story from `spec list` about one directory.
+    #[test]
+    fn a_named_lookup_classifies_an_unreadable_directory_as_a_listing_does() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use crate::fs::RealFileSystem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            eprintln!("SKIP: this user can list a 0o000 directory");
+            return;
+        }
+
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            locked.clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let result = repo.get_package("vim");
+        // Restored before asserting, so a failure leaves a directory TempDir can
+        // remove.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match result {
+            Err(PackageRepoError::PackageListError(error)) => {
+                assert!(
+                    matches!(error.state(), DirectoryState::Unlistable(_)),
+                    "got {:?}",
+                    error.state()
+                );
+                assert_eq!(error.path(), locked);
+            }
+            Err(other) => panic!("expected a listing error, got {other:?}"),
+            Ok(_) => panic!("an unreadable directory must not answer a lookup"),
+        }
     }
 
     // An unreadable directory must arrive as `Unlistable`, not as `Directory`.

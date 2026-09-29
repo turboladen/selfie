@@ -208,12 +208,10 @@ fn the_optional_directories_keep_their_defaults() {
     );
 }
 
-// A flag value is used exactly as typed — `~` is expanded for the same setting
-// in the configuration file, but not here. This pins the divergence rather than
-// hiding it: an equivalence test using absolute paths would pass while this
-// difference went unrecorded.
+// A `~` in a flag is expanded as it is in the configuration file. No shell
+// expands the `~` after `=`, so this is the form that reaches selfie as written.
 #[test]
-fn a_tilde_in_a_flag_is_not_expanded() {
+fn a_tilde_in_a_flag_is_expanded() {
     let temp = sandbox_without_config();
 
     let (ok, combined) = run(
@@ -221,17 +219,16 @@ fn a_tilde_in_a_flag_is_not_expanded() {
         &[
             "--environment",
             "test-env",
-            "--package-directory",
-            "~/packages",
+            "--package-directory=~/packages",
             "package",
             "list",
         ],
     );
 
-    assert!(!ok, "a literal ~ cannot resolve, got:\n{combined}");
+    assert!(ok, "~ names the sandbox's home directory, got:\n{combined}");
     assert!(
-        combined.contains("~/packages"),
-        "the unexpanded value must appear in the error, got:\n{combined}"
+        !combined.contains("~/packages"),
+        "the unexpanded value must not be what was read, got:\n{combined}"
     );
 }
 

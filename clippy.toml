@@ -1,8 +1,8 @@
-# Deserializing YAML into selfie's own types goes through `selfie::yaml::parse`,
-# which suppresses source snippets and answers a classified failure. A parse made
-# directly against serde-saphyr quotes the file it was reading into its error, and
-# those errors reach the CLI and the MCP server's JSON. Selfie's own config file is
-# the exception, and reaches the `config` crate instead.
+# Deserializing YAML into selfie's own types goes through `selfie::yaml::parse` or
+# `selfie::yaml::parse_reporting_ignored`, which suppress source snippets and answer
+# a classified failure. A parse made directly against serde-saphyr quotes the file
+# it was reading into its error, and those errors reach the CLI and the MCP
+# server's JSON.
 #
 # Every deserializing entry point serde-saphyr exports at its crate root with the
 # features selfie enables, not the four spellings someone happens to reach for

@@ -1,6 +1,7 @@
 pub mod common;
 
 use common::{sandboxed_command, setup_default_test_config, setup_test_config};
+use predicates::prelude::*;
 
 #[test]
 fn test_validate_valid_config() {
@@ -21,9 +22,11 @@ fn test_validate_valid_config() {
 #[test]
 fn config_validate_reports_the_dotfiles_and_state_directories() {
     let temp_dir = setup_default_test_config();
-    // The loader canonicalizes the package directory and the home directory,
-    // so both derived paths print in canonical form: `/private/var/...` where
-    // the sandbox was minted as `/var/...` on macOS.
+    // The package directory prints as written, so the dotfiles default beside
+    // it does too. The home directory is canonicalized when `~` is resolved, so
+    // the state default prints as `/private/var/...` where the sandbox was minted
+    // as `/var/...` on macOS.
+    let written = temp_dir.path();
     let root = temp_dir.path().canonicalize().unwrap();
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
@@ -32,7 +35,7 @@ fn config_validate_reports_the_dotfiles_and_state_directories() {
         .success()
         .stdout(predicates::str::contains(format!(
             "dotfiles_directory: {}",
-            root.join("dotfiles").display()
+            written.join("dotfiles").display()
         )))
         .stdout(predicates::str::contains(format!(
             "state_directory: {}",
@@ -52,9 +55,32 @@ package_directory: "/test/packages"
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
+    // Validate's own row, not the refusal every other command gives.
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("environment"));
+        .stderr(predicates::str::contains("Validation failed."))
+        .stderr(predicates::str::contains(
+            "The `environment` setting is missing",
+        ));
+}
+
+// A flag does not fill the gap for this command, which reports the file. Nor
+// does the gap stop it: the other commands refuse such a file before they run.
+#[test]
+fn a_missing_environment_is_reported_as_a_row() {
+    let packages = tempfile::tempdir().unwrap();
+    let yaml = format!("package_directory: \"{}\"\n", packages.path().display());
+
+    let temp_dir = setup_test_config(&yaml);
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["--environment", "flag-env", "config", "validate"]);
+
+    cmd.assert()
+        .stderr(predicates::str::contains("Validation failed."))
+        .stderr(predicates::str::contains(
+            "The `environment` setting is missing",
+        ))
+        .stderr(predicates::str::contains("does not set every required setting").not());
 }
 
 #[test]
@@ -74,8 +100,10 @@ package_directory: "relative/path"
         .stderr(predicates::str::contains("relative and cannot be resolved"));
 }
 
+// Every command that reads the package directory fails without it, so
+// validate reports its absence as an error.
 #[test]
-fn test_validate_config_with_nonexistent_directory_shows_warning() {
+fn test_validate_config_with_nonexistent_directory_shows_error() {
     // Use a guaranteed-nonexistent path under a fresh temp dir
     let pkg_tmp = tempfile::tempdir().unwrap();
     let nonexistent = pkg_tmp.path().join("does-not-exist");
@@ -89,7 +117,7 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .success()
+        .stderr(predicates::str::contains("Validation failed."))
         .stderr(predicates::str::contains("does not exist"));
 }
 
@@ -99,15 +127,13 @@ fn test_validate_config_with_nonexistent_directory_shows_warning() {
 // `use_colors: true` read back as false.
 #[test]
 fn a_flag_does_not_change_the_cli_settings_this_reports() {
-    let yaml = r#"
-environment: "test-env"
-package_directory: "/test/packages"
-cli:
-  use_colors: true
-  verbose: true
-"#;
+    let packages = tempfile::tempdir().unwrap();
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"\ncli:\n  use_colors: true\n  verbose: true\n",
+        packages.path().display()
+    );
 
-    let temp_dir = setup_test_config(yaml);
+    let temp_dir = setup_test_config(&yaml);
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["--no-color", "config", "validate"]);
 
@@ -116,4 +142,28 @@ cli:
     cmd.assert()
         .stdout(predicates::str::contains("use_colors: true"))
         .stdout(predicates::str::contains("verbose: true"));
+}
+
+// A fresh machine: the named state directory is not there yet, and selfie
+// creates it on the first write. That needs nothing done, so it is a note and
+// the file still validates.
+#[test]
+fn a_state_directory_not_there_yet_is_a_note_not_a_warning() {
+    let packages = tempfile::tempdir().unwrap();
+    let state = packages.path().join("state-not-there-yet");
+    let yaml = format!(
+        "environment: \"test-env\"\npackage_directory: \"{}\"\nstate_directory: \"{}\"\n",
+        packages.path().display(),
+        state.display()
+    );
+
+    let temp_dir = setup_test_config(&yaml);
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["config", "validate"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("is not there yet"))
+        .stdout(predicates::str::contains("Configuration is valid."))
+        .stderr(predicates::str::contains("Validation failed.").not());
 }

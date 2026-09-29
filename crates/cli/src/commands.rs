@@ -252,6 +252,8 @@ fn dispatch_config_command(
     debug!("Handling config command: {:?}", command);
 
     match command {
+        // Not reached: `main` runs `config validate` before it resolves a
+        // configuration, so the command can report a file no run could use.
         ConfigSubcommands::Validate => config::handle_validate(&display, fs),
     }
 }

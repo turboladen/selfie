@@ -5,7 +5,7 @@ use anyhow::Result;
 use rmcp::{ServiceExt, transport::io::stdio};
 use selfie::{
     commands::ShellCommandRunner,
-    config::{YamlLoader, loader::ConfigLoader},
+    config::{Overrides, YamlLoader, loader::ConfigLoader},
     fs::RealFileSystem,
     package::{
         SpecOrigin, git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
@@ -51,21 +51,33 @@ async fn async_main() -> Result<()> {
     let fs = RealFileSystem;
     let loaded = YamlLoader::new(&fs).load_config()?;
 
-    tracing::warn!(
-        "Config loaded: environment={}, package_directory={}",
-        loaded.config().environment(),
-        loaded.config().package_directory().display()
-    );
-
     // Also carried into `selfie_config_get` below. stderr from an MCP server is
     // often invisible to the assistant driving it, so the tool response is where
-    // a warning actually gets read.
+    // a warning actually gets read. Logged before resolving, since a misspelled
+    // key may be the very setting that is missing.
     for ignored in loaded.ignored_keys() {
         tracing::warn!("{} {}", ignored.message(), ignored.suggestion());
     }
 
+    // The server has no flags, so the file alone must name every required
+    // setting.
+    let config = loaded
+        .config()
+        .resolve(&fs, &Overrides::default())
+        .map_err(|missing| {
+            anyhow::anyhow!(
+                "The configuration file {} does not set every required setting. {missing}",
+                loaded.path().display()
+            )
+        })?;
+
+    tracing::warn!(
+        "Config loaded: environment={}, package_directory={}",
+        config.environment(),
+        config.package_directory().display()
+    );
+
     let ignored_keys = loaded.ignored_keys().to_vec();
-    let config = loaded.into_config();
 
     let repo = YamlPackageRepository::new(
         fs,

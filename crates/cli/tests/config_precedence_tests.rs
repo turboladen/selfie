@@ -1,7 +1,7 @@
 //! These tests check which directory each command actually reads when a flag
 //! and the configuration file disagree.
 //!
-//! The unit tests over `build_cli_config` prove that function applies its
+//! The unit tests over `resolve_config` prove that function applies its
 //! overrides. They would all still pass if nothing downstream ever received the
 //! result, so these drive the real binary instead and assert on what it printed
 //! or wrote.
@@ -182,6 +182,95 @@ fn without_a_flag_the_config_files_package_directory_decides() {
         .success()
         .stdout(predicate::str::contains("from-config-pkg"))
         .stdout(predicate::str::contains("from-flag-pkg").not());
+}
+
+// A file may carry only some settings and leave the rest to flags.
+#[test]
+fn a_partial_config_file_takes_the_rest_from_flags() {
+    let temp = fixture();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        "cli:\n  verbose: false\n",
+    )
+    .unwrap();
+
+    sandboxed_command(&temp)
+        .args(["--environment", SELFIE_ENV, "-p"])
+        .arg(temp.path().join("flag-packages"))
+        .args(["package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-flag-pkg"));
+}
+
+// Its control: with nothing to fill the gap, the run names both settings, the
+// file and the flag for each.
+#[test]
+fn a_partial_config_file_without_flags_names_both_settings() {
+    let temp = fixture();
+    let config = temp.path().join(".config/selfie/config.yaml");
+    fs::write(&config, "cli:\n  verbose: false\n").unwrap();
+
+    sandboxed_command(&temp)
+        .args(["package", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(config.display().to_string()))
+        .stderr(predicate::str::contains("`environment:` (--environment)"))
+        .stderr(predicate::str::contains(
+            "`package_directory:` (--package-directory)",
+        ))
+        .stderr(predicate::str::contains("No configuration file found").not());
+}
+
+// A misspelled key is reported before the refusal it leads to, since it is
+// likely the setting the run is missing.
+#[test]
+fn a_misspelled_required_key_is_named_before_the_refusal() {
+    let temp = fixture();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "envronment: {SELFIE_ENV}\npackage_directory: {}\n",
+            temp.path().join("config-packages").display()
+        ),
+    )
+    .unwrap();
+
+    sandboxed_command(&temp)
+        .args(["package", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`envronment` is not a recognized setting",
+        ))
+        .stderr(predicate::str::contains("`environment:` (--environment)"));
+}
+
+// An empty flag counts as not given, so the file's value stands. Taken as given,
+// `--environment ''` would match no package and list nothing as relevant.
+#[test]
+fn an_empty_environment_flag_keeps_the_files_value() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .args(["--environment", "", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-config-pkg"));
+}
+
+// The path flags never deliver an empty value: the argument parser refuses one
+// before selfie sees it, unlike `--environment`.
+#[test]
+fn an_empty_package_directory_flag_is_refused_by_the_parser() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .args(["-p", "", "package", "list"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("a value is required"));
 }
 
 #[test]
@@ -389,24 +478,44 @@ fn a_state_directory_flag_naming_a_file_is_refused() {
     );
 }
 
-// A `~` in a flag value is not expanded, so `--state-directory='~/state'` is a
-// relative path. It is refused as one, and no directory named `~` appears in
-// the working directory.
+// A `~` in a flag value is expanded as it is in the file. No shell expands the
+// `~` after `=`, so taken as written it would name `./~/state` under the working
+// directory.
 #[test]
-fn a_literal_tilde_state_directory_is_refused_and_creates_nothing() {
+fn a_tilde_state_directory_flag_lands_under_home() {
     let temp = fixture();
 
     sandboxed_command(&temp)
         .current_dir(temp.path())
         .args(["--state-directory=~/state", "apply", "-y"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("~/state"))
-        .stderr(predicate::str::contains("not an absolute path"));
+        .success();
 
+    assert_state_records_the_fixture(&temp.path().join("state/deploy-state.yml"), temp.path());
     assert!(
         !temp.path().join("~").exists(),
         "a directory literally named `~` was created in the working directory"
+    );
+}
+
+// `~name` is another user's home, which selfie does not look up, so it stays
+// relative and is refused as one. It is not taken from the working directory,
+// which would create `./~nosuchuser`.
+#[test]
+fn a_tilde_user_state_directory_is_refused_and_creates_nothing() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["--state-directory=~nosuchuser/state", "apply", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("~nosuchuser/state"))
+        .stderr(predicate::str::contains("not an absolute path"));
+
+    assert!(
+        !temp.path().join("~nosuchuser").exists(),
+        "a directory named `~nosuchuser` was created in the working directory"
     );
     assert!(
         !temp.path().join("sentinel-target").exists(),
@@ -414,8 +523,49 @@ fn a_literal_tilde_state_directory_is_refused_and_creates_nothing() {
     );
 }
 
-// Its control. Also pins the rest of the order for this field: the file's value
-// beats the home fallback.
+// Whitespace names no directory, so the flag counts as not given and the
+// file's value stands, as it does for `--environment`.
+#[test]
+fn a_whitespace_package_directory_flag_keeps_the_files_value() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["-p", " ", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-config-pkg"));
+}
+
+// A relative path flag is taken from the working directory, as any command's
+// path argument is.
+#[test]
+fn a_relative_package_directory_flag_is_taken_from_the_working_directory() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["-p", "flag-packages", "package", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from-flag-pkg"));
+}
+
+// A relative state directory would move with the working directory. Made
+// absolute when it is given, it cannot.
+#[test]
+fn a_relative_state_directory_flag_is_taken_from_the_working_directory() {
+    let temp = fixture();
+
+    sandboxed_command(&temp)
+        .current_dir(temp.path())
+        .args(["--state-directory", "rel-state", "apply", "-y"])
+        .assert()
+        .success();
+
+    assert_state_records_the_fixture(&temp.path().join("rel-state/deploy-state.yml"), temp.path());
+}
+
 #[test]
 fn without_a_flag_the_config_files_state_directory_decides() {
     let temp = fixture_naming_both_directories_in_the_config_file();

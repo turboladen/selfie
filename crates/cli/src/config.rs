@@ -12,7 +12,10 @@
 
 use std::path::PathBuf;
 
-use selfie::config::{IgnoredKey, LoadedConfig, SelfieConfig, SelfieConfigBuilder};
+use selfie::{
+    config::{ConfigFile, IgnoredKey, LoadedConfig, Overrides, RequiredSetting, SelfieConfig},
+    fs::FileSystem,
+};
 use serde::Deserialize;
 
 use crate::{cli::ClapCli, display_manager::DisplayManager};
@@ -108,12 +111,12 @@ pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayM
     }
 }
 
-/// The `cli:` section, taken from the parse the library already did.
+/// The `cli:` section, parsed from the text the library already read.
 ///
 /// Returns the defaults and a notice when the section is present but is not a
 /// mapping.
 pub(crate) fn cli_section(loaded: &LoadedConfig) -> CliSectionLoad {
-    match loaded.frontend_section::<CliSection>("cli") {
+    match loaded.cli_section::<CliSection>() {
         Ok(Some(section)) => CliSectionLoad {
             notices: section
                 .ignored_keys()
@@ -206,114 +209,120 @@ impl CliConfig {
     }
 }
 
-/// The error returned when neither a configuration file nor the command-line
+/// Where the settings a run lacked were looked for.
+#[derive(Debug)]
+pub(crate) enum SettingsSource {
+    /// No configuration file was found in `searched`, so only the flags were read.
+    NoFile { searched: PathBuf },
+    /// The file at `path` was read, and the flags on top of it.
+    File { path: PathBuf },
+}
+
+/// The error returned when neither the configuration file nor the command-line
 /// flags supplied every required setting.
 ///
 /// `environment` and `package_directory` have no default and no fallback, so a
 /// run that supplies neither has nothing to work from.
 #[derive(Debug)]
 pub(crate) struct MissingRequiredSettings {
-    searched: PathBuf,
-    missing: Vec<&'static str>,
+    source: SettingsSource,
+    missing: Vec<RequiredSetting>,
+}
+
+fn flag(setting: RequiredSetting) -> &'static str {
+    match setting {
+        RequiredSetting::Environment => "--environment",
+        RequiredSetting::PackageDirectory => "--package-directory",
+    }
 }
 
 impl std::fmt::Display for MissingRequiredSettings {
     // Names **every** missing setting, not the first one. Reporting them one per
     // run turns a fresh-machine bootstrap into a guessing game.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "No configuration file found in {}, and not every required setting was supplied on the command line.\nMissing: {}\nSupply the missing flags, or create {}/config.yaml with `environment:` and `package_directory:`.",
-            self.searched.display(),
-            self.missing.join(", "),
-            self.searched.display(),
-        )
+        match &self.source {
+            SettingsSource::NoFile { searched } => write!(
+                f,
+                "No configuration file found in {}, and not every required setting was supplied on the command line.\nMissing: {}\nSupply the missing flags, or create {}/config.yaml with `environment:` and `package_directory:`.",
+                searched.display(),
+                self.missing
+                    .iter()
+                    .map(|setting| flag(*setting))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                searched.display(),
+            ),
+            SettingsSource::File { path } => write!(
+                f,
+                "The configuration file {} does not set every required setting, and the command line did not supply the rest.\nMissing: {}\nAdd them to the file, or pass the flags.",
+                path.display(),
+                self.missing
+                    .iter()
+                    .map(|setting| format!("`{}:` ({})", setting.key(), flag(*setting)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        }
     }
 }
 
 impl std::error::Error for MissingRequiredSettings {}
 
+// A blank value is dropped first, by the library's own rule: it counts as not
+// given, as it does in the file, and `std::path::absolute` would turn one into
+// `./ `. A value starting with `~` is left for the library to expand, so
+// `~user/x` stays as written, exactly as the same value in the file does,
+// instead of becoming `./~user/x`.
+fn flag_path(path: Option<&PathBuf>) -> Option<PathBuf> {
+    let path = path.filter(|path| !selfie::config::is_blank(path.as_os_str()))?;
+    let names_home = path.as_os_str().as_encoded_bytes().first() == Some(&b'~');
+    if path.is_absolute() || names_home {
+        return Some(path.clone());
+    }
+    Some(std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+}
+
 impl ClapCli {
-    /// Build a configuration from flags alone, for a machine with no config file.
+    /// The settings given on the command line, which take precedence over the
+    /// configuration file's.
     ///
-    /// Only `environment` and `package_directory` are required — every other
-    /// setting has a default, so a flags-only run and a two-key file produce the
-    /// same configuration.
+    /// A relative path is taken from the working directory, as a path argument
+    /// to any command is.
+    pub(crate) fn overrides(&self) -> Overrides {
+        Overrides {
+            environment: self.environment.clone(),
+            package_directory: flag_path(self.package_directory.as_ref()),
+            dotfiles_directory: flag_path(self.dotfiles_directory.as_ref()),
+            state_directory: flag_path(self.state_directory.as_ref()),
+        }
+    }
+
+    /// Resolve the configuration `file` read from `source` under this command
+    /// line's flags.
     ///
     /// # Errors
     ///
-    /// [`MissingRequiredSettings`] naming every required setting not supplied.
-    pub(crate) fn config_from_flags(
+    /// [`MissingRequiredSettings`] naming every required setting neither
+    /// supplied.
+    pub(crate) fn resolve_config(
         &self,
-        searched: PathBuf,
+        fs: &impl FileSystem,
+        file: &ConfigFile,
+        source: SettingsSource,
     ) -> Result<SelfieConfig, MissingRequiredSettings> {
-        // An empty value counts as not supplied. `--environment ''` parses to
-        // `Some("")`, which would otherwise satisfy the check and build a config
-        // whose environment matches no package's — and with no file, nothing
-        // downstream validates it, so the run fails much later with a confusing
-        // "no environment" from whichever command got there first.
-        let environment = self
-            .environment
-            .as_ref()
-            .filter(|value| !value.trim().is_empty());
-        let package_directory = self
-            .package_directory
-            .as_ref()
-            .filter(|value| !value.as_os_str().is_empty());
-
-        let mut missing = Vec::new();
-        if environment.is_none() {
-            missing.push("--environment");
-        }
-        if package_directory.is_none() {
-            missing.push("--package-directory");
-        }
-        if !missing.is_empty() {
-            return Err(MissingRequiredSettings { searched, missing });
-        }
-
-        // The builder applies exactly the defaults the file path applies:
-        // `command_timeout`, `max_concurrency`, `stop_on_error`, and `None` for
-        // the two optional directories so they keep their fallbacks.
-        //
-        // `build_cli_config` overwrites both of these a moment later, from the
-        // same flags — so the values set here are replaced by identical ones,
-        // and a mutation to them changes nothing observable. Set them anyway:
-        // this function returns a `SelfieConfig`, and one carrying an empty
-        // environment would be a half-built value waiting for a second caller
-        // to use it directly and forget the other half.
-        let mut builder = SelfieConfigBuilder::default();
-        if let Some(env) = environment {
-            builder = builder.environment(env);
-        }
-        if let Some(dir) = package_directory {
-            builder = builder.package_directory(dir);
-        }
-
-        Ok(builder.build())
+        file.resolve(fs, &self.overrides())
+            .map_err(|missing| MissingRequiredSettings {
+                source,
+                missing: missing.missing().to_vec(),
+            })
     }
 
-    /// Apply CLI flag overrides to build a `CliConfig`.
+    /// Apply the CLI's own flags to build a `CliConfig`.
     pub(crate) fn build_cli_config(
         &self,
-        mut selfie_config: SelfieConfig,
+        selfie_config: SelfieConfig,
         mut cli_section: CliSection,
     ) -> CliConfig {
-        // Override core fields
-        if let Some(env) = self.environment.as_ref() {
-            selfie_config.environment_mut().clone_from(env);
-        }
-        if let Some(dir) = self.package_directory.as_ref() {
-            selfie_config.package_directory_mut().clone_from(dir);
-        }
-        if let Some(dir) = self.dotfiles_directory.as_ref() {
-            *selfie_config.dotfiles_directory_mut() = Some(dir.clone());
-        }
-        if let Some(dir) = self.state_directory.as_ref() {
-            *selfie_config.state_directory_mut() = Some(dir.clone());
-        }
-
-        // Override CLI-specific fields
         if self.verbose {
             cli_section.verbose = true;
         }
@@ -373,6 +382,25 @@ mod tests {
         }
     }
 
+    // The file `default_selfie_config` would have been read from.
+    const FILE: &str = "environment: original-env\npackage_directory: /original/path\n";
+
+    // `args` resolved over the file `yaml`, then given the CLI's own flags. The
+    // paths name nothing on disk, so they are kept as written.
+    fn resolved_with(args: &ClapCli, yaml: &str) -> CliConfig {
+        let file: ConfigFile = selfie::yaml::parse(yaml).unwrap();
+        let selfie = args
+            .resolve_config(
+                &selfie::fs::RealFileSystem,
+                &file,
+                SettingsSource::File {
+                    path: PathBuf::from("/config.yaml"),
+                },
+            )
+            .unwrap();
+        args.build_cli_config(selfie, CliSection::default())
+    }
+
     fn default_selfie_config() -> SelfieConfig {
         SelfieConfigBuilder::default()
             .environment("original-env")
@@ -390,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_environment_override() {
+    fn test_resolve_config_environment_override() {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: None,
@@ -401,7 +429,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(config.environment(), "cli-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/original/path"));
         assert!(!config.verbose());
@@ -409,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_package_dir_override() {
+    fn test_resolve_config_package_dir_override() {
         let args = FakeArgs {
             environment: None,
             package_directory: Some("/cli/path"),
@@ -420,7 +448,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(config.environment(), "original-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/cli/path"));
     }
@@ -443,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_multiple_overrides() {
+    fn test_resolve_config_multiple_overrides() {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: Some("/cli/path"),
@@ -454,7 +482,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(config.environment(), "cli-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/cli/path"));
         assert!(config.verbose());
@@ -462,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_no_overrides() {
+    fn test_resolve_config_no_overrides() {
         let args = FakeArgs {
             environment: None,
             package_directory: None,
@@ -473,7 +501,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(config.environment(), "original-env");
         assert_eq!(config.package_directory(), &PathBuf::from("/original/path"));
         assert!(!config.verbose());
@@ -481,15 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_preserves_execution_settings() {
-        let selfie_config = SelfieConfigBuilder::default()
-            .environment("original-env")
-            .package_directory("/original/path")
-            .command_timeout_unchecked(120)
-            .stop_on_error(false)
-            .max_concurrency_unchecked(8)
-            .build();
-
+    fn test_resolve_config_preserves_execution_settings() {
         let args = FakeArgs {
             environment: Some("cli-env"),
             package_directory: None,
@@ -500,7 +520,10 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(selfie_config, CliSection::default());
+        let config = resolved_with(
+            &args,
+            &format!("{FILE}command_timeout: 120\nstop_on_error: false\nmax_concurrency: 8\n"),
+        );
         assert_eq!(config.command_timeout().as_secs(), 120);
         assert!(!config.selfie_config().stop_on_error());
         assert_eq!(config.selfie_config().max_concurrency().get(), 8);
@@ -563,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_dotfiles_dir_override() {
+    fn test_resolve_config_dotfiles_dir_override() {
         let args = FakeArgs {
             environment: None,
             package_directory: None,
@@ -574,7 +597,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(
             config.selfie_config().dotfiles_directory(),
             PathBuf::from("/cli/configs")
@@ -582,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_state_dir_override() {
+    fn test_resolve_config_state_dir_override() {
         let args = FakeArgs {
             environment: None,
             package_directory: None,
@@ -593,7 +616,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(
             config.selfie_config().state_directory(),
             Some(&PathBuf::from("/cli/state"))
@@ -601,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_config_all_directory_overrides() {
+    fn test_resolve_config_all_directory_overrides() {
         let args = FakeArgs {
             environment: None,
             package_directory: Some("/cli/packages"),
@@ -612,7 +635,7 @@ mod tests {
         }
         .into_cli();
 
-        let config = args.build_cli_config(default_selfie_config(), CliSection::default());
+        let config = resolved_with(&args, FILE);
         assert_eq!(config.package_directory(), &PathBuf::from("/cli/packages"));
         assert_eq!(
             config.selfie_config().dotfiles_directory(),
@@ -621,6 +644,56 @@ mod tests {
         assert_eq!(
             config.selfie_config().state_directory(),
             Some(&PathBuf::from("/cli/state"))
+        );
+    }
+
+    // An empty flag counts as not given, so the file's value stands. Without the
+    // file's value to fall back to, it would build a run whose environment
+    // matches no package.
+    #[test]
+    fn an_empty_flag_keeps_the_files_value() {
+        // Only `--environment`: the parser refuses an empty path flag itself.
+        let args = ClapCli::parse_from(["selfie", "--environment", "", "config", "validate"]);
+
+        let config = resolved_with(&args, FILE);
+
+        assert_eq!(config.environment(), "original-env");
+        assert_eq!(config.package_directory(), &PathBuf::from("/original/path"));
+    }
+
+    // A file that exists but leaves a setting out names the file, the key and the
+    // flag, since either one fills it.
+    #[test]
+    fn a_partial_file_names_the_key_and_the_flag() {
+        let args = ClapCli::parse_from(["selfie", "config", "validate"]);
+        let file: ConfigFile = selfie::yaml::parse("cli:\n  verbose: true\n").unwrap();
+
+        let message = args
+            .resolve_config(
+                &selfie::fs::RealFileSystem,
+                &file,
+                SettingsSource::File {
+                    path: PathBuf::from("/home/me/.config/selfie/config.yaml"),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            message.contains("/home/me/.config/selfie/config.yaml"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`environment:` (--environment)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`package_directory:` (--package-directory)"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("No configuration file found"),
+            "{message}"
         );
     }
 }

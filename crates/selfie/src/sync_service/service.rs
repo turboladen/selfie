@@ -1217,10 +1217,10 @@ impl SpecDirectories {
     fn resolve(repo_root: &Path, package_dir: &Path, dotfiles_dir: &Path) -> Self {
         // Every path is resolved before any is compared. They arrive by different
         // routes -- the git adapter canonicalizes the root it discovers, while a
-        // package directory named with `--package-directory` is stored exactly as
-        // typed -- so one symlinked path, or a `/tmp` that resolves to
-        // `/private/tmp`, makes the same directory compare unequal to itself, and
-        // the per-file gate, credential egress included, stops running.
+        // package directory is kept as written, symlinks and all -- so one
+        // symlinked path, or a `/tmp` that resolves to `/private/tmp`, makes the
+        // same directory compare unequal to itself, and the per-file gate,
+        // credential egress included, stops running.
         let resolve =
             |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let repo_root = resolve(repo_root);
@@ -3668,7 +3668,7 @@ mod name_collision_tests {
     }
 
     // The repo root arrives canonicalized from the git adapter, while a package
-    // directory named on the command line arrives exactly as typed. Comparing
+    // directory arrives as written, symlinks unresolved. Comparing
     // the two verbatim decides that no changed file is a spec, and the whole
     // per-file gate -- the credential-egress refusal among it -- passes a push
     // it must refuse.

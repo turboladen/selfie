@@ -59,9 +59,19 @@ pub enum ConfigLoadError {
     #[error("Multiple configuration files found: {}", .0.join(", "))]
     MultipleFound(Vec<String>),
 
-    /// Configuration file content is invalid or malformed
-    #[error(transparent)]
-    ConfigError(#[from] ::config::ConfigError),
+    /// The configuration file is not valid YAML, or does not describe a configuration.
+    ///
+    /// The message names where and what kind of problem, and never quotes the file.
+    // `failure` rather than `source`: thiserror treats a field named `source` as
+    // the cause, and anyhow would then print the reason a second time.
+    #[error(
+        "Cannot parse the configuration file {}: {failure}",
+        .path.display()
+    )]
+    Parse {
+        path: PathBuf,
+        failure: crate::yaml::ParseFailure,
+    },
 
     /// The configuration file is a fifo, socket or device node, not a regular file
     ///

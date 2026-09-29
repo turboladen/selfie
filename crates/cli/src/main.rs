@@ -21,7 +21,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use display_manager::DisplayManager;
 use selfie::{
-    config::{ConfigLoadError, YamlLoader, loader::ConfigLoader},
+    config::{ConfigFile, ConfigLoadError, YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
 use tokio_util::sync::CancellationToken;
@@ -88,6 +88,21 @@ async fn main() -> anyhow::Result<()> {
 
     let fs = RealFileSystem;
 
+    // `config validate` reports the file, not a run built from it, so it must not
+    // be stopped by what it exists to report: a missing setting, an empty one, or
+    // a file that will not load at all. It never reaches `dispatch_command`.
+    if let cli::ClapCommands::Config(cli::ConfigCommands {
+        command: cli::ConfigSubcommands::Validate,
+    }) = &args.command
+    {
+        let use_colors = !args.no_color
+            && YamlLoader::new(&fs).load_config().map_or(true, |loaded| {
+                crate::config::cli_section(&loaded).section.use_colors
+            });
+        let display = DisplayManager::new(use_colors);
+        process::exit(commands::config::handle_validate(&display, &fs));
+    }
+
     // Load and process configuration
     let (config, notices) = {
         // A missing file is not a failure when the flags carry what it would
@@ -96,10 +111,24 @@ async fn main() -> anyhow::Result<()> {
         // be treated as absent and silently replaced by the flags.
         let (selfie_config, mut notices, cli_load) = match YamlLoader::new(&fs).load_config() {
             Ok(loaded) => {
-                let notices = crate::config::library_config_notices(loaded.ignored_keys());
-                // From the same parse, not a second read of the same file.
+                let mut notices = crate::config::library_config_notices(loaded.ignored_keys());
+                // From the text the library read, not a second read of the file.
                 let cli_load = crate::config::cli_section(&loaded);
-                (loaded.into_config(), notices, cli_load)
+                let source = crate::config::SettingsSource::File {
+                    path: loaded.path().to_path_buf(),
+                };
+                match args.resolve_config(&fs, loaded.config(), source) {
+                    Ok(selfie_config) => (selfie_config, notices, cli_load),
+                    // Reported before the refusal: a key the file misspells is
+                    // ignored, and may be the very setting that is missing.
+                    Err(missing) => {
+                        notices.extend(cli_load.notices);
+                        let display =
+                            DisplayManager::new(!args.no_color && cli_load.section.use_colors);
+                        crate::config::report_config_notices(&notices, &display);
+                        return Err(missing.into());
+                    }
+                }
             }
             Err(ConfigLoadError::NotFound { searched }) => {
                 debug!(
@@ -108,7 +137,11 @@ async fn main() -> anyhow::Result<()> {
                 );
                 // No file, so no `cli:` section to read and nothing to report.
                 (
-                    args.config_from_flags(searched)?,
+                    args.resolve_config(
+                        &fs,
+                        &ConfigFile::default(),
+                        crate::config::SettingsSource::NoFile { searched },
+                    )?,
                     Vec::new(),
                     crate::config::CliSectionLoad::default(),
                 )
@@ -134,18 +167,7 @@ async fn main() -> anyhow::Result<()> {
 
     // After `display` exists, so the warnings honor `--no-color`, and before
     // dispatch, so they are not buried under a command's own output.
-    //
-    // Skipped for `config validate`, which reports the same keys itself as rows
-    // in its table. Printing here as well showed every ignored key twice, in two
-    // formats, in the one command whose entire job is reporting them.
-    if !matches!(
-        args.command,
-        cli::ClapCommands::Config(cli::ConfigCommands {
-            command: cli::ConfigSubcommands::Validate
-        })
-    ) {
-        crate::config::report_config_notices(&notices, &display);
-    }
+    crate::config::report_config_notices(&notices, &display);
 
     // Set up graceful shutdown: first SIGINT/SIGTERM cancels in-flight operations,
     // second signal forces immediate exit.

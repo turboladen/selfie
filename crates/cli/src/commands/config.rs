@@ -26,12 +26,18 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     // Covers the ignored keys as well as the settings.
     let result = loaded.validate(fs);
 
-    // `main` suppresses notices for this command, so both halves are reported
-    // here. They print as notices because only the library builds a
+    // `main` hands this command over before it reports notices, so both halves
+    // are reported here. They print as notices because only the library builds a
     // `ValidationIssue`.
     let cli_load = crate::config::cli_section(&loaded);
     let cli_notices = cli_load.notices;
     let raw_config = loaded.config();
+
+    // Notes need nothing done, so they neither fail validation nor stop it
+    // reporting the file as valid.
+    for note in result.issues().infos() {
+        display.print_info(note.message());
+    }
 
     if result.issues().has_errors() {
         display.print_error("Validation failed.");
@@ -59,11 +65,21 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             display.print_success("Configuration is valid.");
         }
 
-        report_with_style(display, "environment:", raw_config.environment());
+        // Each value as a run would take it from the file: `~` expanded and
+        // defaults filled in. Both required settings are present here, since a
+        // file without one fails validation above.
+        report_with_style(
+            display,
+            "environment:",
+            raw_config.environment().unwrap_or_default(),
+        );
         report_with_style(
             display,
             "package_directory:",
-            raw_config.package_directory().display(),
+            raw_config
+                .package_directory(fs)
+                .unwrap_or_default()
+                .display(),
         );
         // The directories in effect: the configured value, or the default the
         // file leaves selfie to derive. Whether either exists is reported in the
@@ -72,13 +88,15 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         report_with_style(
             display,
             "dotfiles_directory:",
-            raw_config.dotfiles_directory().display(),
+            raw_config
+                .dotfiles_directory(fs)
+                .unwrap_or_default()
+                .display(),
         );
         report_with_style(
             display,
             "state_directory:",
-            match selfie::fs::state_directory(fs, raw_config.state_directory().map(|p| p.as_path()))
-            {
+            match selfie::fs::state_directory(fs, raw_config.state_directory(fs).as_deref()) {
                 Ok(directory) => directory.display().to_string(),
                 Err(error) => format!("(unresolved: {error})"),
             },
@@ -132,7 +150,15 @@ mod tests {
             package_directory: "/test/packages"
         "#;
         fs.mock_config_file(config_dir, config_yaml);
-        fs.mock_expand_path("/test/packages", "/test/packages");
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+        // No deploy state has been written yet.
+        fs.expect_read_file()
+            .withf(|path| path.ends_with("deploy-state.yml"))
+            .returning(|_| {
+                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
         // The report and the validation both resolve the default state
         // directory under the home directory when the file names none.
         mock_home(&mut fs);
@@ -187,9 +213,17 @@ mod tests {
             package_directory: "/test/packages"
         "#;
         fs.mock_config_file(config_dir, config_yaml);
-        fs.mock_expand_path("/test/packages", "/test/packages");
         mock_home(&mut fs);
         fs.mock_directories_exist();
+        fs.expect_list_directory().returning(|_| Ok(Vec::new()));
+        // No deploy state has been written yet.
+        fs.expect_read_file()
+            .withf(|path| path.ends_with("deploy-state.yml"))
+            .returning(|_| {
+                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )))
+            });
 
         let result = handle_validate(&display, &fs);
         assert_eq!(result, 1);

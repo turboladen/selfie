@@ -57,6 +57,13 @@ impl UnlistedDotfilesDirectory {
             DirectoryState::Directory => Self::Unlistable(error),
         }
     }
+
+    /// Whether a command reading the standalone dotfiles refuses to go on: it
+    /// cannot claim what it read is complete. An absent directory holds nothing,
+    /// so a command warns about it and carries on.
+    pub(crate) fn refuses_collection(&self) -> bool {
+        matches!(self, Self::Unlistable(_) | Self::Unknown(_))
+    }
 }
 
 /// The warning for a command that carries on without the standalone dotfiles in

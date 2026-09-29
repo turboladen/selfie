@@ -84,6 +84,34 @@ impl IgnoredKey {
     }
 }
 
+/// The keys on the way to an ignored value, outermost first.
+///
+/// `Option` and newtype wrappers add no key, so they add no segment: a key
+/// inside an optional section reads `["cli", "verbos"]`.
+// The structured path and not its `Display`: that joins keys with `.`, so a
+// top-level key spelled `cli.verbose` and a `verbose` inside `cli:` would
+// render the same string.
+pub(crate) fn ignored_segments(path: &serde_ignored::Path<'_>) -> Vec<String> {
+    use serde_ignored::Path;
+
+    match path {
+        Path::Root => Vec::new(),
+        Path::Seq { parent, index } => {
+            let mut segments = ignored_segments(parent);
+            segments.push(index.to_string());
+            segments
+        }
+        Path::Map { parent, key } => {
+            let mut segments = ignored_segments(parent);
+            segments.push(key.clone());
+            segments
+        }
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => ignored_segments(parent),
+    }
+}
+
 /// Turn the paths `serde_ignored` collected into the ones the library owns.
 ///
 /// Drops frontend sections and anything nested inside one — those belong to the
@@ -91,17 +119,18 @@ impl IgnoredKey {
 /// every user on every run.
 pub(crate) fn library_ignored_keys<I>(paths: I) -> Vec<IgnoredKey>
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item = Vec<String>>,
 {
     paths
         .into_iter()
-        .filter(|path| {
+        .filter(|segments| {
             // A nested path cannot occur today -- an ignored subtree is reported
             // as its root -- so this is belt and braces rather than a live case.
-            let top_level = path.split('.').next().unwrap_or(path);
-            !FRONTEND_SECTIONS.contains(&top_level)
+            segments
+                .first()
+                .is_some_and(|top_level| !FRONTEND_SECTIONS.contains(&top_level.as_str()))
         })
-        .map(IgnoredKey::new)
+        .map(|segments| IgnoredKey::new(segments.join(".")))
         .collect()
 }
 
@@ -131,85 +160,98 @@ impl<T> SectionLoad<T> {
 /// Loading returns diagnostics rather than emitting them: it happens before any
 /// event stream exists, and the library has no terminal to write to. Each
 /// frontend decides how to show them.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoadedConfig {
-    config: super::SelfieConfig,
+    path: std::path::PathBuf,
+    config: super::ConfigFile,
     ignored_keys: Vec<IgnoredKey>,
-    // Kept as parsed, not as text: a frontend that re-read the file would parse
-    // it with its own YAML library, and two libraries disagree about anchors,
-    // merge keys, duplicate keys and YAML 1.1 scalars.
-    sections: std::collections::BTreeMap<String, ::config::Value>,
+    // The text rather than a parsed tree. A frontend's section is parsed from it
+    // through the same entry point as the library's settings, so the two parses
+    // cannot disagree about anchors, merge keys or scalars.
+    text: String,
+}
+
+// Written by hand to leave out the file's text: a debug print of this must not
+// put every value in the user's configuration on stderr.
+impl std::fmt::Debug for LoadedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedConfig")
+            .field("config", &self.config)
+            .field("ignored_keys", &self.ignored_keys)
+            .finish_non_exhaustive()
+    }
+}
+
+// The `cli:` section alone. Every other key is ignored, and filtered out of
+// what the frontend is told.
+#[derive(serde::Deserialize)]
+struct CliOnly<T> {
+    cli: Option<T>,
 }
 
 impl LoadedConfig {
     pub(crate) fn new(
-        config: super::SelfieConfig,
+        path: std::path::PathBuf,
+        config: super::ConfigFile,
         ignored_keys: Vec<IgnoredKey>,
-        sections: std::collections::BTreeMap<String, ::config::Value>,
+        text: String,
     ) -> Self {
         Self {
+            path,
             config,
             ignored_keys,
-            sections,
+            text,
         }
     }
 
-    /// Deserialize a frontend's own section from the parse the library already did.
+    /// Deserialize the `cli:` section.
     ///
-    /// `None` when the file has no such section. The keys `T` did not consume
-    /// come back alongside it, so a frontend can report a misspelling inside its
-    /// own section the way the library reports one at the top level.
+    /// `None` when the file has no such section, or the section is empty. The
+    /// keys `T` did not consume come back alongside it, so the CLI can report a
+    /// misspelling inside its own section the way the library reports one at the
+    /// top level.
     ///
     /// # Errors
     ///
-    /// [`ConfigLoadError::ConfigError`] if the section is present but is not
-    /// shaped like `T` — `cli: true` where a mapping belongs. The rest of the
-    /// file is still usable, so a frontend should report this and fall back to
-    /// its defaults rather than abort.
-    ///
-    /// [`ConfigLoadError::ConfigError`]: super::loader::ConfigLoadError::ConfigError
-    pub fn frontend_section<T>(
-        &self,
-        name: &str,
-    ) -> Result<Option<SectionLoad<T>>, super::loader::ConfigLoadError>
+    /// [`ParseFailure`](crate::yaml::ParseFailure) if the section is present but
+    /// is not shaped like `T` — `cli: true` where a mapping belongs. The rest of
+    /// the file is still usable, so a frontend should report this and fall back
+    /// to its defaults rather than abort.
+    pub fn cli_section<T>(&self) -> Result<Option<SectionLoad<T>>, crate::yaml::ParseFailure>
     where
         T: serde::de::DeserializeOwned,
     {
-        let Some(section) = self.sections.get(name) else {
-            return Ok(None);
-        };
-
-        // A bare `cli:` with nothing under it parses as null, and deserializing a
-        // struct from null fails. Treated as absent instead: writing an empty
-        // section is a legitimate thing to do, and reporting it as malformed
-        // would be a fresh false positive from the code that exists to remove
-        // them. `cli: true` is a different matter and still reports.
-        if matches!(section.kind, ::config::ValueKind::Nil) {
-            return Ok(None);
-        }
-
-        // Paths are rooted at the section, so a key inside it arrives as
-        // `verbos` rather than `cli.verbos` -- the frontend names its own keys
-        // without having to strip a prefix off a joined string.
-        //
-        // A top-level key *spelled* `"cli.verbose"` does not arrive here at all:
-        // the `config` crate reads a dotted key as path syntax and merges it into
-        // the `cli` table, so it is read as this section's `verbose`. Surprising,
-        // and pinned by `a_dotted_top_level_key_is_merged_into_the_section`.
-        let mut ignored_paths = Vec::new();
-        let value: T = serde_ignored::deserialize(section.clone(), |path| {
-            ignored_paths.push(path.to_string());
+        // Keys are reported relative to the section, so a key inside it arrives
+        // as `verbos` rather than `cli.verbos`. A top-level key spelled
+        // `cli.verbose` is one segment, not two, so it is not this section's.
+        let mut ignored_keys = Vec::new();
+        let parsed: CliOnly<T> = crate::yaml::parse_reporting_ignored(&self.text, |path| {
+            if let Some((section, key)) = ignored_segments(path).split_first()
+                && section == "cli"
+                && !key.is_empty()
+            {
+                ignored_keys.push(IgnoredKey::new(key.join(".")));
+            }
         })?;
 
-        Ok(Some(SectionLoad {
+        // A bare `cli:` parses as null, which is `None` here: writing an empty
+        // section is a legitimate thing to do. `cli: true` still fails above.
+        Ok(parsed.cli.map(|value| SectionLoad {
             value,
-            ignored_keys: ignored_paths.into_iter().map(IgnoredKey::new).collect(),
+            ignored_keys,
         }))
     }
 
-    /// The settings themselves.
+    /// The file that was read.
     #[must_use]
-    pub fn config(&self) -> &super::SelfieConfig {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// What the file says. Resolve it into the settings a run uses with
+    /// [`ConfigFile::resolve`](super::ConfigFile::resolve).
+    #[must_use]
+    pub fn config(&self) -> &super::ConfigFile {
         &self.config
     }
 
@@ -218,23 +260,21 @@ impl LoadedConfig {
     pub fn ignored_keys(&self) -> &[IgnoredKey] {
         &self.ignored_keys
     }
-
-    /// Take the settings, discarding the diagnostics.
-    ///
-    /// For a caller that has already reported them, or one that has no way to.
-    #[must_use]
-    pub fn into_config(self) -> super::SelfieConfig {
-        self.config
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Each key is a one-segment path; `cli.verbose` here is a key spelled with a
+    // dot, not a key inside `cli:`.
+    fn top_level(keys: &[&str]) -> Vec<Vec<String>> {
+        keys.iter().map(|key| vec![(*key).to_string()]).collect()
+    }
+
     #[test]
     fn an_unrecognized_key_is_reported_generically() {
-        let keys = library_ignored_keys(vec!["totally_bogus".to_string()]);
+        let keys = library_ignored_keys(top_level(&["totally_bogus"]));
 
         assert_eq!(keys.len(), 1);
         assert!(keys[0].message().contains("totally_bogus"));
@@ -246,7 +286,7 @@ mod tests {
 
     #[test]
     fn a_renamed_key_names_its_replacement() {
-        let keys = library_ignored_keys(vec!["configs_directory".to_string()]);
+        let keys = library_ignored_keys(top_level(&["configs_directory"]));
 
         assert_eq!(keys.len(), 1);
         assert!(keys[0].message().contains("configs_directory"));
@@ -259,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_renamed_key_is_matched_regardless_of_case() {
-        let keys = library_ignored_keys(vec!["Configs_Directory".to_string()]);
+        let keys = library_ignored_keys(top_level(&["Configs_Directory"]));
 
         assert_eq!(keys.len(), 1);
         assert!(
@@ -273,7 +313,7 @@ mod tests {
     // what they typed, not the canonical spelling it matched.
     #[test]
     fn a_renamed_key_message_quotes_the_users_own_spelling() {
-        let keys = library_ignored_keys(vec!["Configs_Directory".to_string()]);
+        let keys = library_ignored_keys(top_level(&["Configs_Directory"]));
 
         assert_eq!(keys[0].key(), "Configs_Directory");
         assert!(keys[0].message().contains("Configs_Directory"));
@@ -283,10 +323,7 @@ mod tests {
     // Validation must not stop at the first problem.
     #[test]
     fn two_ignored_keys_are_both_reported() {
-        let keys = library_ignored_keys(vec![
-            "configs_directory".to_string(),
-            "nonsense".to_string(),
-        ]);
+        let keys = library_ignored_keys(top_level(&["configs_directory", "nonsense"]));
 
         assert_eq!(keys.len(), 2);
     }
@@ -296,23 +333,34 @@ mod tests {
     // warning fires for every user on every run.
     #[test]
     fn a_frontend_section_is_not_reported() {
-        let keys = library_ignored_keys(vec!["cli".to_string()]);
+        let keys = library_ignored_keys(top_level(&["cli"]));
 
         assert!(keys.is_empty());
     }
 
     #[test]
     fn a_key_nested_inside_a_frontend_section_is_not_reported() {
-        let keys = library_ignored_keys(vec!["cli.verbose".to_string()]);
+        let keys = library_ignored_keys(vec![vec!["cli".to_string(), "verbose".to_string()]]);
 
         assert!(keys.is_empty());
+    }
+
+    // A top-level key spelled with a dot belongs to no frontend. Matching on the
+    // joined string would read it as `verbose` inside `cli:` and drop it.
+    #[test]
+    fn a_top_level_key_spelled_with_a_dot_is_reported() {
+        let keys = library_ignored_keys(top_level(&["cli.verbose"]));
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key(), "cli.verbose");
+        assert!(keys[0].message().contains("not a recognized setting"));
     }
 
     // A misspelled *section* is nobody's, so it is reported — otherwise `clu:`
     // would be silently dropped by both the library and the CLI.
     #[test]
     fn a_misspelled_frontend_section_is_reported() {
-        let keys = library_ignored_keys(vec!["clu".to_string()]);
+        let keys = library_ignored_keys(top_level(&["clu"]));
 
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key(), "clu");

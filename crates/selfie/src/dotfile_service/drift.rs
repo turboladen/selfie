@@ -49,7 +49,10 @@ where
     // Drift only reads, so an unusable state file is reported and the check runs
     // against an empty one: every entry then shows as untracked, which is the
     // honest answer while the file cannot be read.
-    let deploy_state = match load_deploy_state(filesystem, config) {
+    let deploy_state = match load_deploy_state(
+        filesystem,
+        config.state_directory().map(std::path::PathBuf::as_path),
+    ) {
         StateLoad::Usable(loaded) => {
             if let Some(warning) = loaded.directory_warning() {
                 sender.send_warning(warning.to_string()).await;

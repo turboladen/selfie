@@ -1,17 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(test)]
 use std::sync::Arc;
 
-use config::FileFormat;
-
 use crate::{
-    config::SelfieConfig,
+    config::ConfigFile,
     fs::{FileSystem, FileSystemError},
 };
 
 use super::{
-    diagnostics::{FRONTEND_SECTIONS, LoadedConfig, library_ignored_keys},
+    diagnostics::{LoadedConfig, ignored_segments, library_ignored_keys},
     loader::{
         ConfigLoadError, ConfigLoader, irregular_config_refusal, unresolvable_config_refusal,
     },
@@ -20,7 +18,7 @@ use super::{
 /// YAML-based configuration loader implementation
 ///
 /// Loads application configuration from YAML files in standard locations.
-/// Supports both `.yaml` and `.yml` file extensions and handles path expansion.
+/// Supports both `.yaml` and `.yml` file extensions.
 pub struct YamlLoader<'a, F: FileSystem> {
     /// File system abstraction for reading files and paths
     fs: &'a F,
@@ -38,7 +36,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// Load configuration from YAML files in standard locations
     ///
     /// Searches for `config.yaml` or `config.yml` in the user's configuration directory
-    /// and loads the first one found. Performs path expansion for the package directory.
+    /// and loads the first one found. A file that omits a setting still loads.
     ///
     /// # Errors
     ///
@@ -47,7 +45,6 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
     /// - Multiple configuration files are found (both .yaml and .yml)
     /// - File system access fails
     /// - YAML content is malformed or invalid
-    /// - Required configuration fields are missing
     /// - Configuration field types are incorrect
     fn load_config(&self) -> Result<LoadedConfig, ConfigLoadError> {
         let config_paths = match self.find_config_file_paths() {
@@ -81,9 +78,6 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
             });
         }
 
-        // Start with default configuration
-        let mut builder = config::Config::builder();
-
         let config_path = &config_paths[0];
 
         // Before the read, not after it. `find_config_file_paths` selects a path
@@ -95,51 +89,25 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
 
         let file_contents = self.fs.read_file(config_path)?;
 
-        builder = builder.add_source(config::File::from_str(&file_contents, FileFormat::Yaml));
-
-        // Build the config
-        let config = builder.build()?;
-
-        // Lift out each frontend's section *before* deserializing, so a frontend
-        // reads its own settings from this parse instead of opening the file
-        // again with a different YAML library.
-        let sections: std::collections::BTreeMap<String, config::Value> = FRONTEND_SECTIONS
-            .iter()
-            .filter_map(|name| {
-                config
-                    .get::<config::Value>(name)
-                    .ok()
-                    .map(|value| ((*name).to_string(), value))
-            })
-            .collect();
-
         // Every key it did not consume, rather than dropping them.
         // `serde_ignored` wraps the deserializer, so the set is serde's own
         // answer and cannot go stale when a field is added here.
         let mut ignored_paths = Vec::new();
-        let mut selfie_config: SelfieConfig =
-            serde_ignored::deserialize(config, |path| ignored_paths.push(path.to_string()))?;
+        let config: ConfigFile = crate::yaml::parse_reporting_ignored(&file_contents, |path| {
+            ignored_paths.push(ignored_segments(path));
+        })
+        .map_err(|failure| ConfigLoadError::Parse {
+            path: config_path.clone(),
+            failure,
+        })?;
         let ignored_keys = library_ignored_keys(ignored_paths);
 
-        // Special handling for ~ expansion on path fields
-        if let Ok(expanded) = self.fs.expand_path(selfie_config.package_directory()) {
-            selfie_config.package_directory = expanded;
-        }
-        // For dotfiles_directory and state_directory, expand ~ without canonicalizing.
-        // These directories may not exist yet (especially state_directory on first run),
-        // so canonicalize() would fail. Instead, resolve just "~" and join the rest.
-        if let Some(ref dotfiles_dir) = selfie_config.dotfiles_directory
-            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, dotfiles_dir)
-        {
-            selfie_config.dotfiles_directory = Some(expanded);
-        }
-        if let Some(ref state_dir) = selfie_config.state_directory
-            && let Ok(Some(expanded)) = expand_tilde_only(self.fs, state_dir)
-        {
-            selfie_config.state_directory = Some(expanded);
-        }
-
-        Ok(LoadedConfig::new(selfie_config, ignored_keys, sections))
+        Ok(LoadedConfig::new(
+            config_path.clone(),
+            config,
+            ignored_keys,
+            file_contents,
+        ))
     }
 
     /// Find configuration file paths in standard locations
@@ -184,8 +152,8 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
 /// Expand a leading `~` or `~/` to the home directory without canonicalizing,
 /// so a directory that does not exist yet still expands.
 ///
-/// `Ok(None)` when the path has no such prefix and is used as written: `~user/x`,
-/// `~typo` and `~//x` are not expanded.
+/// `~//x` is `~/x`. `Ok(None)` when the path has no such prefix and is used as
+/// written: `~user/x` and `~typo` are not expanded.
 ///
 /// # Errors
 ///
@@ -195,19 +163,20 @@ pub(super) fn expand_tilde_only(
     fs: &impl FileSystem,
     path: &Path,
 ) -> Result<Option<PathBuf>, FileSystemError> {
-    let path_str = path.to_string_lossy();
-    let rest = match path_str.strip_prefix('~') {
-        Some("") => None,
-        Some(rest) => match rest.strip_prefix('/') {
-            Some(rest) if !rest.starts_with('/') => Some(rest.to_string()),
-            _ => return Ok(None),
-        },
-        None => return Ok(None),
-    };
-    let home = fs.expand_path(&PathBuf::from("~"))?;
-    Ok(Some(match rest {
-        Some(rest) if !rest.is_empty() => home.join(rest),
-        _ => home,
+    // By component rather than as text, so a path that is not UTF-8 passes
+    // through intact, and extra slashes after `~/` fall away as a shell reads
+    // them. Joined as text, `~//x` makes `/x` replace the home directory.
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::Normal(first)) if first == "~" => {}
+        _ => return Ok(None),
+    }
+    let rest = components.as_path();
+    let home = fs.expand_path(Path::new("~"))?;
+    Ok(Some(if rest.as_os_str().is_empty() {
+        home
+    } else {
+        home.join(rest)
     }))
 }
 
@@ -341,10 +310,14 @@ mod tests {
 
             let package_dir = Path::new("/test/packages");
             fs.mock_path_exists(&package_dir, true);
-            fs.mock_expand_path(&package_dir, &package_dir);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check the loaded values
             assert_eq!(config.environment, "test-env");
@@ -386,10 +359,14 @@ mod tests {
         "#;
 
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check basic settings
             assert_eq!(config.environment, "test-env");
@@ -421,10 +398,10 @@ mod tests {
             assert!(result.is_err());
             if let Err(err) = result {
                 match err {
-                    ConfigLoadError::ConfigError(_) => {
+                    ConfigLoadError::Parse { .. } => {
                         // Expected error type
                     }
-                    _ => panic!("Expected ConfigError, got: {err:?}"),
+                    _ => panic!("Expected Parse, got: {err:?}"),
                 }
             }
         }
@@ -442,18 +419,18 @@ mod tests {
 
             fs.mock_config_file(config_dir, incomplete_yaml);
 
-            let loader = YamlLoader::new(&fs);
-            let result = loader.load_config();
+            // A partial file loads; what it lacks is named when it is resolved,
+            // where an override may still supply it.
+            let loaded = YamlLoader::new(&fs).load_config().unwrap();
+            let error = loaded
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap_err();
 
-            assert!(result.is_err());
-            if let Err(err) = result {
-                match err {
-                    ConfigLoadError::ConfigError(_) => {
-                        // Expected error type for missing fields
-                    }
-                    _ => panic!("Expected ConfigError, got: {err:?}"),
-                }
-            }
+            assert_eq!(
+                error.missing(),
+                [crate::config::RequiredSetting::Environment]
+            );
         }
 
         #[test]
@@ -471,9 +448,11 @@ mod tests {
             fs.mock_config_file(config_dir, invalid_types_yaml);
 
             let loader = YamlLoader::new(&fs);
-            let result = loader.load_config();
+            let message = loader.load_config().unwrap_err().to_string();
 
-            assert!(result.is_err());
+            // The failure says where, never what was there.
+            assert!(message.contains("line 4"), "got: {message}");
+            assert!(!message.contains("not-a-number"), "got: {message}");
         }
 
         #[test]
@@ -491,10 +470,15 @@ mod tests {
             let expanded_path = home_dir.join("packages");
 
             fs.mock_config_file(config_dir, tilde_yaml);
-            fs.mock_expand_path(Path::new("~/packages"), &expanded_path);
+            fs.mock_expand_path(Path::new("~"), home_dir);
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             assert_eq!(config.package_directory, expanded_path);
         }
@@ -517,10 +501,14 @@ mod tests {
             fs.mock_path_exists(&config_dir.join("config.yml"), false);
             fs.mock_read_file(&config_path, minimal_yaml);
             mock_regular_file(&mut fs);
-            fs.mock_expand_path(Path::new("/test/packages"), Path::new("/test/packages"));
 
             let loader = YamlLoader::new(&fs);
-            let config = loader.load_config().unwrap().into_config();
+            let config = loader
+                .load_config()
+                .unwrap()
+                .config()
+                .resolve(&fs, &crate::config::Overrides::default())
+                .unwrap();
 
             // Check defaults were properly applied
             assert_eq!(config.environment, "test-env");
@@ -574,10 +562,10 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                ConfigLoadError::ConfigError(_) => {
+                ConfigLoadError::Parse { .. } => {
                     // Expected config error for invalid YAML
                 }
-                _ => panic!("Expected ConfigError for invalid YAML"),
+                _ => panic!("Expected Parse for invalid YAML"),
             }
         }
 
@@ -782,13 +770,12 @@ mod tests {
 
         // The wording and filtering have their own tests beside the types. These
         // drive the real loader instead, because what they pin is the behavior of
-        // `serde_ignored` over the `config` crate's deserializer -- which keys it
+        // `serde_ignored` over serde-saphyr's deserializer -- which keys it
         // reports, and in what shape.
         fn ignored_keys_for(config_yaml: &str) -> Vec<String> {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             YamlLoader::new(&fs)
                 .load_config()
@@ -889,38 +876,37 @@ mod tests {
             assert!(keys.is_empty(), "expected no diagnostics, got: {keys:?}");
         }
 
-        // The `cli:` section comes back from the parse the library already did,
-        // so a frontend never opens the file a second time with a second YAML
-        // library. These pin what that hands back.
+        // The `cli:` section is parsed from the text the library already read,
+        // through the same entry point, so a frontend never opens the file a
+        // second time with a second YAML library. These pin what that hands back.
         #[derive(Debug, serde::Deserialize)]
         struct FakeSection {
             #[serde(default)]
             verbose: bool,
         }
 
-        fn load_section(config_yaml: &str) -> Result<Option<(bool, Vec<String>)>, ConfigLoadError> {
+        fn load_section(
+            config_yaml: &str,
+        ) -> Result<Option<(bool, Vec<String>)>, crate::yaml::ParseFailure> {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
             fs.mock_config_file(config_dir, config_yaml);
-            fs.mock_expand_path("/test/packages", "/test/packages");
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
-            Ok(loaded
-                .frontend_section::<FakeSection>("cli")?
-                .map(|section| {
-                    let keys = section
-                        .ignored_keys()
-                        .iter()
-                        .map(|k| k.key().to_string())
-                        .collect();
-                    (section.value().verbose, keys)
-                }))
+            Ok(loaded.cli_section::<FakeSection>()?.map(|section| {
+                let keys = section
+                    .ignored_keys()
+                    .iter()
+                    .map(|k| k.key().to_string())
+                    .collect();
+                (section.value().verbose, keys)
+            }))
         }
 
         const BASE: &str = "environment: \"test-env\"\npackage_directory: \"/test/packages\"\n";
 
         #[test]
-        fn a_frontend_section_is_read_from_the_library_s_own_parse() {
+        fn the_cli_section_is_read_from_the_text_the_library_read() {
             let (verbose, ignored) = load_section(&format!("{BASE}cli:\n  verbose: true\n"))
                 .unwrap()
                 .unwrap();
@@ -939,34 +925,85 @@ mod tests {
             assert_eq!(ignored, vec!["verbos".to_string()]);
         }
 
-        // A dotted top-level key is **path syntax** to the `config` crate, not a
-        // key whose name contains a dot: `"cli.verbose": true` is merged into the
-        // `cli` table and read as that section's `verbose`. So it is consumed
-        // rather than ignored, at either level.
-        //
-        // Worth pinning because the obvious reading is the opposite one, and
-        // because it is why a top-level key can no longer be mistaken for one
-        // inside a section: reading the section from this same parse means there
-        // is no second, differently-parsed view to disagree with.
+        // The loaded file keeps its text for the `cli:` section, and a debug print
+        // of it must not carry that text: an unknown key may hold anything.
         #[test]
-        fn a_dotted_top_level_key_is_merged_into_the_section() {
+        fn a_debug_print_leaves_out_the_file_text() {
+            let loaded = load(&format!("{BASE}stray_token: abc-planted-value\n")).unwrap();
+
+            let printed = format!("{loaded:?}");
+
+            assert!(!printed.contains("abc-planted-value"), "{printed}");
+        }
+
+        // A top-level key spelled `cli.verbose` is a key with a dot in its name,
+        // not path syntax. It belongs to no section, so the library reports it and
+        // the CLI section neither reads it nor reports it.
+        #[test]
+        fn a_literal_dotted_key_is_reported_by_the_library() {
             let mut fs = MockFileSystem::default();
             let config_dir = Path::new("/home/test/.config/selfie");
-            fs.mock_config_file(config_dir, &format!("{BASE}\"cli.verbose\": true\n"));
-            fs.mock_expand_path("/test/packages", "/test/packages");
+            fs.mock_config_file(
+                config_dir,
+                &format!("{BASE}\"cli.verbose\": true\ncli:\n  verbose: false\n"),
+            );
 
             let loaded = YamlLoader::new(&fs).load_config().unwrap();
-            let section = loaded
-                .frontend_section::<FakeSection>("cli")
-                .unwrap()
-                .expect("the dotted key creates the section");
+            let keys: Vec<&str> = loaded.ignored_keys().iter().map(|k| k.key()).collect();
+            assert_eq!(keys, vec!["cli.verbose"]);
 
-            assert!(section.value().verbose, "it is read as the section's key");
+            let section = loaded
+                .cli_section::<FakeSection>()
+                .unwrap()
+                .expect("the file has a cli: section");
             assert!(
-                loaded.ignored_keys().is_empty(),
-                "and so is not reported at the top level, got: {:?}",
-                loaded.ignored_keys()
+                section.ignored_keys().is_empty(),
+                "the dotted key is not the section's, got: {:?}",
+                section.ignored_keys()
             );
+            assert!(!section.value().verbose, "and it is not merged into it");
+        }
+
+        // Each pins a value that a reader coercing between types would take
+        // differently.
+        fn load(config_yaml: &str) -> Result<LoadedConfig, ConfigLoadError> {
+            let mut fs = MockFileSystem::default();
+            let config_dir = Path::new("/home/test/.config/selfie");
+            fs.mock_config_file(config_dir, config_yaml);
+            YamlLoader::new(&fs).load_config()
+        }
+
+        #[test]
+        fn a_number_is_not_a_boolean() {
+            let result = load(&format!("{BASE}stop_on_error: 1\n"));
+
+            assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+        }
+
+        #[test]
+        fn a_timeout_with_a_fraction_is_refused() {
+            let result = load(&format!("{BASE}command_timeout: 60.0\n"));
+
+            assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+        }
+
+        #[test]
+        fn a_numeric_looking_environment_is_kept_as_written() {
+            let loaded = load("environment: 010\npackage_directory: \"/test/packages\"\n").unwrap();
+
+            assert_eq!(loaded.config().environment(), Some("010"));
+        }
+
+        #[test]
+        fn a_merge_key_is_merged() {
+            let loaded = load(
+                "defaults: &defaults\n  command_timeout: 90\n<<: *defaults\nenvironment: test-env\npackage_directory: \"/test/packages\"\n",
+            )
+            .unwrap();
+
+            assert_eq!(loaded.config().command_timeout().as_secs(), 90);
+            let keys: Vec<&str> = loaded.ignored_keys().iter().map(|k| k.key()).collect();
+            assert_eq!(keys, vec!["defaults"]);
         }
 
         // An empty section is a legitimate thing to write. It parses as null, and
@@ -1019,9 +1056,9 @@ mod tests {
         }
     }
 
-    // Only `~` and `~/` name the home directory. `~user` is another user's, which
-    // this does not look up, and `~typo` and `~//x` are not the home directory
-    // either, so each is left as written.
+    // Only `~` and `~/` name the home directory, however many slashes follow.
+    // `~user` is another user's, which this does not look up, and `~typo` is not
+    // the home directory either, so each is left as written.
     mod expand_tilde_only {
         use std::path::{Path, PathBuf};
 
@@ -1045,11 +1082,41 @@ mod tests {
             );
         }
 
+        // A second slash must not make the rest absolute: joined as `/x`, it
+        // would name `/x` instead of a path under the home directory.
         #[test]
-        fn leaves_another_user_a_typo_and_a_double_slash_as_written() {
+        fn extra_slashes_after_the_tilde_name_the_same_directory() {
+            for (path, expanded) in [
+                ("~//x", "/home/me/x"),
+                ("~///x", "/home/me/x"),
+                ("~//", "/home/me"),
+            ] {
+                assert_eq!(
+                    super::super::expand_tilde_only(&home(), Path::new(path)).unwrap(),
+                    Some(PathBuf::from(expanded)),
+                    "{path}"
+                );
+            }
+        }
+
+        // A name that is not UTF-8 after `~/` is kept byte for byte.
+        #[test]
+        fn a_path_that_is_not_utf8_expands_intact() {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+            let path = Path::new(OsStr::from_bytes(b"~/x\xe9"));
+
+            assert_eq!(
+                super::super::expand_tilde_only(&home(), path).unwrap(),
+                Some(Path::new("/home/me").join(OsStr::from_bytes(b"x\xe9")))
+            );
+        }
+
+        #[test]
+        fn leaves_another_user_and_a_typo_as_written() {
             // No expansion is mocked here, so asking the port would fail.
             let fs = MockFileSystem::default();
-            for path in ["~user/x", "~typo", "~//x"] {
+            for path in ["~user/x", "~typo"] {
                 assert_eq!(
                     super::super::expand_tilde_only(&fs, Path::new(path)).unwrap(),
                     None,

@@ -18,6 +18,21 @@ Selfie looks for configuration files in this order:
 You can also override the configuration directory using the `SELFIE_CONFIG_DIR` environment
 variable.
 
+### How the file is read
+
+Each setting is read as its own type:
+
+- `stop_on_error` takes `true` or `false`. `1` and `0` are refused.
+- `command_timeout` and `max_concurrency` take whole numbers, so `60.0` is refused.
+- `environment` is text exactly as written, so `environment: 010` names the environment `010`.
+
+A YAML merge key (`<<: *anchor`) is merged into the mapping it sits in. A key spelled with a dot,
+such as `cli.verbose: true`, is a key of that name and not a path: selfie reports it as an
+unrecognized setting and does not read it as `verbose` under `cli:`.
+
+When the file cannot be parsed, selfie names the kind of problem and the line and column where it
+is, and never quotes the file.
+
 ## Environment Variables
 
 Selfie recognizes several environment variables that affect its behavior:
@@ -144,8 +159,10 @@ package_directory: /home/user/my-packages
 package_directory: ~/dev-packages
 ```
 
-A leading `~` or `~/` is expanded to your home directory. `~user` and environment variables are not
-expanded.
+A leading `~` or `~/` is expanded to your home directory, and extra slashes after it are ignored, so
+`~//dev-packages` is `~/dev-packages`. `~user` and environment variables are not expanded. Nothing
+else is resolved: a symlinked path is used and shown as written, and a relative path is relative to
+the directory selfie runs in, which `selfie config validate` reports as an error.
 
 ## Optional Settings
 
@@ -218,10 +235,11 @@ never read, so exporting `XDG_STATE_HOME` moves nothing. Set `state_directory` h
 state_directory: ~/.local/state/selfie
 ```
 
-A directory you name must be an absolute path, as `package_directory` must. It does not have to
-exist: selfie creates it on the first write that needs it, whether you name the path here or leave
-the setting out and take the default. `selfie config validate` reports the directory in effect
-either way.
+A directory you name in the file must be an absolute path, as `package_directory` must;
+`--state-directory` takes a relative path from the current directory. It does not have to exist:
+selfie creates it on the first write that needs it, whether you name the path here or leave the
+setting out and take the default. `selfie config validate` reports the directory in effect either
+way.
 
 What selfie will not do is put its state where something else already is. A path occupied by a file,
 or by a symlink whose destination is gone, is refused before any dotfile is deployed, naming what is
@@ -425,14 +443,16 @@ settings: `dotfiles_directory` falls back to a sibling of the package directory 
 `state_directory` to `~/.local/state/selfie`. Supply neither flag and selfie names **both**, along
 with the directory it searched.
 
-This applies only to a file that is **absent**. A config file that exists but cannot be read, cannot
-be parsed, or is not a regular file is still an error — the flags do not paper over a file you are
-in the middle of editing.
+Flags also fill _gaps_ in a file that exists. A file holding only a `cli:` section, or only one of
+the two required settings, works when the flags supply the rest. When neither the file nor a flag
+supplies a required setting, selfie names each one, with the key and the flag that would set it.
 
-Nor do flags fill _gaps_ in a file that exists. A configuration file must carry both `environment`
-and `package_directory` itself; a file holding only a `cli:` section fails even with both flags
-supplied. Flags override settings that are present and stand in for a file that is not there — they
-are not merged into a partial one. Making them merge is tracked separately.
+An empty value counts as not given, whether it is in the file or on the command line.
+`--environment ''` leaves the file's `environment` in force, and `environment: ""` in the file with
+no flag is reported as missing. The path flags cannot be given an empty value at all.
+
+A config file that exists but cannot be read, cannot be parsed, or is not a regular file is still an
+error — the flags do not paper over a file you are in the middle of editing.
 
 **The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
 colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
@@ -445,34 +465,26 @@ the tracing level is chosen from the flag before the file is read.
 read; the flags override _fields_ in whatever file that was. Setting both is normal, and the flag
 still wins for the field it names.
 
-**A flag value is not processed the way the same value in the file is.** `~` is expanded for the
-path settings in the configuration file; a flag value is used exactly as typed. Your shell expands a
-bare `~/packages`, but neither bash nor zsh expands `--package-directory=~/packages`, so that form
-reaches selfie as the literal string and fails with `Package directory not found: ~/packages` even
-though the identical value works in the file. Use the separated form (`-p ~/packages`) or an
-absolute path. `selfie config validate` reads only the file, so it checks no flag value; a relative
-`--state-directory` is refused when the command runs instead.
+**A path flag is processed the way the same value in the file is, and a relative one is made
+absolute.** `~` is expanded in `--package-directory`, `--dotfiles-directory` and
+`--state-directory`, including in the `--package-directory=~/packages` form that no shell expands. A
+relative path is taken from the current directory when selfie starts, as any command's path argument
+is. `~user` is not expanded, so `--state-directory=~user/state` is refused as not absolute and
+creates nothing.
 
-`--package-directory` and `--state-directory` fail loudly; `--dotfiles-directory` does not:
-
-- `--state-directory='~/state'` is refused as not absolute, so
-  `selfie --state-directory='~/state' apply -y` exits 1 and creates nothing. An absolute path that
-  does not exist is **not** refused: selfie creates the directory on the first write that needs it,
-  by flag exactly as by config file. What it will not do is put its state where something else
-  already is, so an absolute path occupied by a file, or one selfie cannot read, is refused before
-  anything is deployed.
-- `--dotfiles-directory='~/dotfiles'` creates nothing, so the standalone dotfiles repository is
-  dropped: every standalone dotfile disappears from `selfie dotfiles list` and is skipped by
-  `selfie apply`, which still reports success. selfie warns once on stderr naming the directory,
-  because the path was given rather than defaulted — the run's exit status does not change.
+An absolute state directory that does not exist is **not** refused: selfie creates the directory on
+the first write that needs it, by flag exactly as by config file. What it will not do is put its
+state where something else already is, so a path occupied by a file, or one selfie cannot read, is
+refused before anything is deployed.
 
 **`selfie config validate` reports the file, not the effective settings.** It deliberately reloads
 what is on disk and applies no overrides, including to `verbose` and `use_colors`, so that a flag
-cannot hide a problem in the file it is masking. It therefore still fails when there is no config
-file at all, even on a run that would otherwise succeed from flags — there is no file for it to
-report on. Passing `-p` and reading back the file's `package_directory` is expected — it is not the
-flag being ignored. Use `selfie package list`, which prints the package directory it actually read,
-to see the effective value.
+cannot hide a problem in the file it is masking. A required setting the file leaves out is reported
+as an error even when a flag supplies it on this run. It still fails when there is no config file at
+all, even on a run that would otherwise succeed from flags — there is no file for it to report on.
+Passing `-p` and reading back the file's `package_directory` is expected — it is not the flag being
+ignored. Use `selfie package list`, which prints the package directory it actually read, to see the
+effective value.
 
 **Two paths are not covered by any flag.** A dotfile `target` beginning with `~`, and the
 deploy-state fallback used when no `state_directory` is configured, both resolve against `HOME`.
@@ -528,17 +540,25 @@ This checks:
 - Path accessibility
 - Environment name validity
 
-`package_directory` and `dotfiles_directory` are reported as the commands that read them treat them.
-A path holding a regular file, or a fifo, socket or device node, is an error, since no directory can
-be created there. Every other way the path fails to hold a directory is a warning: nothing there, a
-symlink to nothing, a path running through something that is not a directory, or a path selfie could
-not check. A missing directory is offered a correction of the setting if the path is a typo, or a
-`mkdir -p` command.
+`package_directory` and `dotfiles_directory` are listed the way the commands that read them list
+them, and reported as those commands treat what they find:
 
-`state_directory` gets the verdict a run reaches over the same path, in the run's own words. A
-missing one is a warning that it is not there yet, since selfie creates it on first use, and that
-the path may be a typo. Anything else in its way, or a path selfie could not check, is an error,
-because every command that records a deploy refuses to run over it.
+- `package_directory` is an **error** whenever it cannot be listed, since every command that reads
+  it fails: nothing there, a file, a symlink to nothing, a directory whose entries cannot be read,
+  or a path selfie could not check. A missing directory is offered a correction of the setting if
+  the path is a typo, or a `mkdir -p` command.
+- `dotfiles_directory` is a **warning** when no directory is there, since the reading commands carry
+  on without standalone dotfiles, and an **error** when it is a directory selfie cannot list or a
+  path it could not check, such as a symlink loop, since they refuse to go on. A missing directory
+  is also refused by `dotfiles track`, which validate still reports as a warning.
+
+`state_directory` gets the verdict a run reaches over the same path, in the run's own words:
+validate loads the deploy state as a run does. A missing directory is an informational note, not a
+warning, that it is not there yet, since selfie creates it on first use, and that the path may be a
+typo; it does not stop the file validating. Anything else in its way, a path selfie could not check,
+a state file it cannot read (such as one inside a mode `000` directory), and a state file that is
+empty or does not parse are errors, because every command that records a deploy refuses to run over
+them.
 
 When `dotfiles_directory` or `state_directory` is not set, the default the commands use is checked
 the same way. Nothing at an unset default is not reported, since that is the ordinary state of a

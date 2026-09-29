@@ -124,28 +124,31 @@ pub(super) fn collect_packages<R: PackageRepository>(
                 unparsable_in_dotfiles = unparsable_paths(&output);
                 dotfiles_packages = output.valid_packages().cloned().collect();
             }
-            Err(error) => match super::directory::UnlistedDotfilesDirectory::classify(
-                error,
-                dotfiles_directory_is_expected,
-            ) {
-                super::directory::UnlistedDotfilesDirectory::OrdinarilyAbsent => {}
-                super::directory::UnlistedDotfilesDirectory::Absent { path, reason } => {
-                    warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
-                }
-                // Both refuse the run, because neither can claim the collection
-                // is complete. They are pushed as different warnings so the
-                // sentence a user reads says which one happened: one asserts a
-                // directory is there and unreadable, the other cannot say even
-                // that.
-                super::directory::UnlistedDotfilesDirectory::Unlistable(error) => {
-                    warnings.push(ApplyWarning::UnreadableRepository(error));
+            Err(error) => {
+                use super::directory::UnlistedDotfilesDirectory as Unlisted;
+
+                // Whether it refuses is the classification's to say, so `config
+                // validate` reaches the same verdict by asking it.
+                let unlisted = Unlisted::classify(error, dotfiles_directory_is_expected);
+                if unlisted.refuses_collection() {
                     refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
                 }
-                super::directory::UnlistedDotfilesDirectory::Unknown(error) => {
-                    warnings.push(ApplyWarning::UncheckableRepository(error));
-                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
+                match unlisted {
+                    Unlisted::OrdinarilyAbsent => {}
+                    Unlisted::Absent { path, reason } => {
+                        warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
+                    }
+                    // Pushed as different warnings so the sentence a user reads
+                    // says which one happened: one asserts a directory is there and
+                    // unreadable, the other cannot say even that.
+                    Unlisted::Unlistable(error) => {
+                        warnings.push(ApplyWarning::UnreadableRepository(error));
+                    }
+                    Unlisted::Unknown(error) => {
+                        warnings.push(ApplyWarning::UncheckableRepository(error));
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -380,5 +383,63 @@ mod tests {
                 PathBuf::from("/dotfiles/spec.yml")
             ]
         );
+    }
+
+    // A dotfiles repository whose listing failed with the directory in `state`.
+    fn unlisted_dotfiles(state: crate::fs::DirectoryState) -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(move || {
+            Err(crate::package::port::PackageListError::new(
+                PathBuf::from("/dotfiles"),
+                state.clone(),
+            ))
+        });
+        repo.expect_resolved_directory().return_const(None);
+        repo
+    }
+
+    fn collected_over(dotfiles: &MockPackageRepository) -> Collected {
+        let packages = repo_holding("/packages/spec.yml", None);
+        collect_packages(
+            &packages,
+            dotfiles,
+            NameCollision::PackagesWin,
+            true,
+            "test",
+        )
+        .unwrap()
+    }
+
+    // A loop gives nothing to classify, so what is behind it is unknown and may
+    // hold standalone dotfiles. The collection cannot claim to be complete.
+    #[test]
+    fn a_looping_dotfiles_directory_refuses_the_collection() {
+        let dotfiles = unlisted_dotfiles(crate::fs::DirectoryState::Unknown(std::sync::Arc::new(
+            std::io::Error::other("Too many levels of symbolic links"),
+        )));
+
+        let collected = collected_over(&dotfiles);
+
+        assert!(matches!(
+            collected.refusals.as_slice(),
+            [CollectionRefusal::UnreadableDotfilesDirectory]
+        ));
+    }
+
+    // Its control: a directory that is simply not there holds nothing, so it is
+    // a warning and no refusal.
+    #[test]
+    fn an_absent_dotfiles_directory_does_not_refuse_the_collection() {
+        let dotfiles = unlisted_dotfiles(crate::fs::DirectoryState::Absent(
+            crate::fs::AbsentReason::Empty,
+        ));
+
+        let collected = collected_over(&dotfiles);
+
+        assert!(collected.refusals.is_empty());
+        assert!(matches!(
+            collected.warnings.as_slice(),
+            [ApplyWarning::AbsentDotfilesDirectory { .. }]
+        ));
     }
 }
