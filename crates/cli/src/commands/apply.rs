@@ -168,7 +168,7 @@ impl ConflictResolver for InteractiveConflictResolver {
         match detail {
             ConflictDetail::Diff { source, diff } => {
                 self.display
-                    .print_progress(format!("{} → {short_target}", shorten_path(source)));
+                    .println(format!("  {} → {short_target}", shorten_path(source)));
                 self.display.print_diff(diff);
 
                 match self.prompt(Prompt::RepositoryFile) {

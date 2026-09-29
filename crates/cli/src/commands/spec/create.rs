@@ -85,7 +85,6 @@ pub(crate) async fn handle_create(
                 created_file_path = Some(file_path.clone());
                 false // Let default handler print success message
             }
-            PackageEvent::Progress { .. } if !config.verbose() => true, // Suppress in non-verbose
             _ => false, // Default handling for everything else
         })
         .await;

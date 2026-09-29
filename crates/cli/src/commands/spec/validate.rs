@@ -19,7 +19,7 @@ pub(crate) async fn handle_validate(
 ) -> i32 {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    display.print_progress(format!("Validating {package_name}..."));
+    display.print_status(format!("Validating {package_name}..."));
 
     let event_stream = service.validate(package_name, None).await;
 
@@ -39,7 +39,7 @@ pub(crate) async fn handle_validate_all(
 ) -> i32 {
     tracing::debug!("Running validate --all command");
 
-    display.print_progress("Validating all packages...");
+    display.print_status("Validating all packages...");
 
     let event_stream = service.validate_all().await;
 
@@ -63,9 +63,6 @@ fn handle_validate_event(
         } => {
             display_validation_result(validation_result, config, display);
             true // Handled
-        }
-        PackageEvent::Progress { .. } => {
-            true // Handled - suppress progress for validate
         }
         _ => false, // Use default handling for other events
     }

@@ -19,7 +19,7 @@ use std::process;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use display_manager::DisplayManager;
+use display_manager::{DisplayManager, Verbosity};
 use selfie::{
     config::{ConfigFile, ConfigLoadError, YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
@@ -29,11 +29,14 @@ use tracing::debug;
 
 use crate::{cli::ClapCli, commands::dispatch_command};
 
-/// Install the tracing subscriber: DEBUG when `verbose`, WARN otherwise.
+/// Install the tracing subscriber: DEBUG to stderr when `verbose`, nothing
+/// otherwise.
 fn init_tracing(verbose: bool) {
     if verbose {
+        // stderr, so a verbose run's stdout holds only the command's answer.
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::stderr)
             .init();
     } else {
         // Use a no-op subscriber to disable output while keeping trace calls
@@ -82,10 +85,6 @@ async fn main() -> anyhow::Result<()> {
 
     let args = ClapCli::parse();
 
-    // Initialize tracing based on verbose flag
-    init_tracing(args.verbose);
-    debug!("CLI arguments: {:#?}", &args);
-
     let fs = RealFileSystem;
 
     // `config validate` reports the file, not a run built from it, so it must not
@@ -95,16 +94,24 @@ async fn main() -> anyhow::Result<()> {
         command: cli::ConfigSubcommands::Validate,
     }) = &args.command
     {
-        let use_colors = !args.no_color
-            && YamlLoader::new(&fs).load_config().map_or(true, |loaded| {
-                crate::config::cli_section(&loaded).section.use_colors
-            });
-        let display = DisplayManager::new(use_colors);
+        let section = YamlLoader::new(&fs)
+            .load_config()
+            .ok()
+            .map(|loaded| crate::config::cli_section(&loaded).section);
+        let use_colors = !args.no_color && section.as_ref().is_none_or(|s| s.use_colors);
+        let verbose = args.verbose || section.as_ref().is_some_and(|s| s.verbose);
+        init_tracing(verbose);
+        debug!("CLI arguments: {:#?}", &args);
+        let display = DisplayManager::new(use_colors).with_verbosity(Verbosity::from(verbose));
         process::exit(commands::config::handle_validate(&display, &fs));
     }
 
+    // Logged once tracing is up, which waits for the config: `cli: verbose` in
+    // the file turns it on as well as the flag does.
+    let mut config_debug = None;
+
     // Load and process configuration
-    let (config, notices) = {
+    let loaded = (|| -> anyhow::Result<(config::CliConfig, Vec<config::ConfigNotice>)> {
         // A missing file is not a failure when the flags carry what it would
         // have supplied. Every other load error still is. In particular, a
         // config file that exists but is a fifo, socket or device node must not
@@ -131,10 +138,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Err(ConfigLoadError::NotFound { searched }) => {
-                debug!(
+                config_debug = Some(format!(
                     "No configuration file in {}; building from flags",
                     searched.display()
-                );
+                ));
                 // No file, so no `cli:` section to read and nothing to report.
                 (
                     args.resolve_config(
@@ -155,15 +162,28 @@ async fn main() -> anyhow::Result<()> {
         // source.
         notices.extend(cli_load.notices);
 
-        (
+        Ok((
             args.build_cli_config(selfie_config, cli_load.section),
             notices,
-        )
-    };
+        ))
+    })();
 
+    // A config that failed to load cannot say whether to be verbose, so the flag
+    // alone decides, and a verbose run still logs what it knows before failing.
+    init_tracing(
+        loaded
+            .as_ref()
+            .map_or(args.verbose, |(config, _)| config.verbose()),
+    );
+    debug!("CLI arguments: {:#?}", &args);
+    if let Some(line) = config_debug {
+        debug!("{line}");
+    }
+    let (config, notices) = loaded?;
     debug!("Final config: {:#?}", &config);
 
-    let display = DisplayManager::new(config.use_colors());
+    let display =
+        DisplayManager::new(config.use_colors()).with_verbosity(Verbosity::from(config.verbose()));
 
     // After `display` exists, so the warnings honor `--no-color`, and before
     // dispatch, so they are not buried under a command's own output.

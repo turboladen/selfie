@@ -174,9 +174,6 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             ..
         } => true,
 
-        // Suppress started/progress for status (it's a fast operation)
-        PackageEvent::Started { .. } | PackageEvent::Progress { .. } => true,
-
         _ => false,
     }
 }
@@ -385,13 +382,14 @@ mod tests {
         assert!(handle_status_event(&event, &display, false));
     }
 
+    // The header is the shared handler's, shown only under `--verbose`.
     #[test]
-    fn suppresses_started_and_progress() {
+    fn leaves_started_to_the_shared_handler() {
         let display = DisplayManager::new(false);
         let started = PackageEvent::Started {
             operation_info: make_operation_info(),
         };
-        assert!(handle_status_event(&started, &display, false));
+        assert!(!handle_status_event(&started, &display, false));
     }
 
     #[test]

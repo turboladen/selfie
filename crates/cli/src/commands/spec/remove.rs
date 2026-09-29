@@ -148,7 +148,6 @@ pub(crate) async fn handle_remove(
             PackageEvent::SpecSkipped { error, .. } => {
                 already_reported.contains(error.package_path())
             }
-            PackageEvent::Progress { .. } => true,
             PackageEvent::Completed { result, .. } => {
                 if let OperationResult::Success(_) = result {
                     display.print_success(format!(

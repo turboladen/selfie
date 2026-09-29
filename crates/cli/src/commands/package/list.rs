@@ -5,7 +5,7 @@ use selfie::package::{event, service::PackageService};
 
 use crate::{
     config::CliConfig,
-    display_manager::{DisplayManager, INDENT, OperationHandle},
+    display_manager::{DisplayManager, INDENT},
     status_style,
 };
 
@@ -21,8 +21,6 @@ enum ListItemResult {
 /// Mutable state accumulated while processing list events.
 #[derive(Default)]
 struct ListState {
-    /// Single progress spinner showing "Checking (N/M)..." (TTY only).
-    progress_spinner: Option<OperationHandle>,
     /// Buffered (name, formatted_line) pairs for sorted output at the end.
     buffered_lines: Vec<(String, String)>,
     max_name_len: usize,
@@ -55,15 +53,12 @@ impl ListCommand<'_> {
         let display = &self.display;
         let show_all = self.show_all;
         let use_colors = config.use_colors();
-        let is_tty = display.is_tty();
 
         let mut state = ListState::default();
 
         let result = processor
             .process_events(event_stream, |event| {
-                handle_list_event(
-                    event, config, display, use_colors, show_all, is_tty, &mut state,
-                )
+                handle_list_event(event, config, display, use_colors, show_all, &mut state)
             })
             .await;
         result.exit_code
@@ -146,7 +141,6 @@ fn handle_list_event(
     display: &DisplayManager,
     use_colors: bool,
     show_all: bool,
-    is_tty: bool,
     state: &mut ListState,
 ) -> bool {
     match event {
@@ -154,17 +148,9 @@ fn handle_list_event(
             state.max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
             state.total_packages = packages.len();
             state.checked_count = 0;
-
-            if is_tty && !packages.is_empty() {
-                // Single progress spinner — results are buffered and printed
-                // sorted after all checks complete. Using one spinner avoids
-                // the rendering issues that arise when 100+ spinners tick
-                // simultaneously in MultiProgress.
-                state.progress_spinner = Some(display.start_list_spinner(format!(
-                    "Checking packages (0/{})...",
-                    state.total_packages
-                )));
-            }
+            // Results are buffered and printed sorted once every check is done.
+            // The wait is the library's waiting step, shown by the shared
+            // handler.
             true
         }
 
@@ -182,23 +168,10 @@ fn handle_list_event(
             let prefix = plain_prefix(&result, use_colors);
             let line = format!("{prefix} {content}");
             state.buffered_lines.push((package_item.name.clone(), line));
-
-            // Update progress spinner (TTY only)
-            if let Some(ref progress) = state.progress_spinner {
-                progress.set_message(format!(
-                    "Checking packages ({}/{})...",
-                    state.checked_count, state.total_packages
-                ));
-            }
             true
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Clear progress spinner before printing results
-            if let Some(handle) = state.progress_spinner.take() {
-                handle.finish_clear();
-            }
-
             // Print buffered lines sorted by name
             state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
             for (_, line) in &state.buffered_lines {
@@ -275,10 +248,6 @@ fn handle_list_event(
                 display.println(format!("{valid} packages"));
             }
             true
-        }
-
-        event::PackageEvent::Progress { .. } => {
-            true // Suppress — spinner is the progress indicator
         }
 
         _ => false,
@@ -358,21 +327,18 @@ mod tests {
         let display = DisplayManager::new(false);
         let use_colors = config.use_colors();
         let mut state = ListState::default();
-        handle_list_event(
-            event, config, &display, use_colors, show_all, false, &mut state,
-        )
+        handle_list_event(event, config, &display, use_colors, show_all, &mut state)
     }
 
-    // Helper to call handle_list_event with explicit is_tty flag
-    fn test_handle_event_with_tty(
+    // Helper to call handle_list_event with a state the test inspects
+    fn test_handle_event_with_state(
         event: &event::PackageEvent,
         config: &CliConfig,
-        is_tty: bool,
         state: &mut ListState,
     ) -> bool {
         let display = DisplayManager::new(false);
         let use_colors = config.use_colors();
-        handle_list_event(event, config, &display, use_colors, false, is_tty, state)
+        handle_list_event(event, config, &display, use_colors, false, state)
     }
 
     #[test]
@@ -650,71 +616,8 @@ mod tests {
         assert!(result);
     }
 
-    #[test]
-    fn test_handle_list_event_non_tty_skips_spinner() {
-        // When stdout is piped (is_tty=false), no progress spinner should be
-        // created; output goes to buffered_lines printed at the end.
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut state = ListState::default();
-
-        let packages = vec![PackageListItem {
-            name: "alpha".to_string(),
-
-            environments: vec![TEST_ENV.to_string()],
-            status: None,
-        }];
-
-        let event = event::PackageEvent::PackageListReady {
-            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
-            packages,
-        };
-
-        test_handle_event_with_tty(&event, &config, false, &mut state);
-
-        assert!(
-            state.progress_spinner.is_none(),
-            "Non-TTY mode must not create a progress spinner"
-        );
-    }
-
-    #[test]
-    fn test_handle_list_event_tty_creates_progress_spinner() {
-        // When both stdout and stderr are terminals (is_tty=true),
-        // a single progress spinner should be created for the checking phase.
-        let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut state = ListState::default();
-
-        let packages = vec![
-            PackageListItem {
-                name: "alpha".to_string(),
-
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-            PackageListItem {
-                name: "beta".to_string(),
-
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-        ];
-
-        let event = event::PackageEvent::PackageListReady {
-            operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
-            packages,
-        };
-
-        test_handle_event_with_tty(&event, &config, true, &mut state);
-
-        assert!(
-            state.progress_spinner.is_some(),
-            "TTY mode should create a progress spinner"
-        );
-        assert_eq!(state.total_packages, 2);
-    }
-
     // Helper: send Ready + two out-of-order Completed events and return the state.
-    fn send_buffered_results(is_tty: bool) -> ListState {
+    fn send_buffered_results() -> ListState {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = ListState::default();
 
@@ -735,7 +638,7 @@ mod tests {
                 },
             ],
         };
-        test_handle_event_with_tty(&ready_event, &config, is_tty, &mut state);
+        test_handle_event_with_state(&ready_event, &config, &mut state);
 
         let completed_zebra = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
@@ -749,7 +652,7 @@ mod tests {
                 }),
             },
         };
-        test_handle_event_with_tty(&completed_zebra, &config, is_tty, &mut state);
+        test_handle_event_with_state(&completed_zebra, &config, &mut state);
 
         let completed_alpha = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
@@ -764,14 +667,14 @@ mod tests {
                 }),
             },
         };
-        test_handle_event_with_tty(&completed_alpha, &config, is_tty, &mut state);
+        test_handle_event_with_state(&completed_alpha, &config, &mut state);
 
         state
     }
 
     #[test]
-    fn test_non_tty_buffers_results() {
-        let state = send_buffered_results(false);
+    fn results_are_buffered_until_the_list_loads() {
+        let state = send_buffered_results();
 
         assert_eq!(state.buffered_lines.len(), 2, "Results should be buffered");
         // Buffered in arrival order (zebra first, alpha second)
@@ -781,26 +684,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tty_buffers_results() {
-        // The key change: TTY mode now buffers results too (instead of
-        // resolving per-package spinners in-place).
-        let state = send_buffered_results(true);
-
-        assert_eq!(
-            state.buffered_lines.len(),
-            2,
-            "TTY mode must also buffer results"
-        );
-        assert_eq!(state.buffered_lines[0].0, "zebra");
-        assert_eq!(state.buffered_lines[1].0, "alpha");
-        assert_eq!(state.checked_count, 2);
-    }
-
-    #[test]
     fn test_package_list_loaded_sorts_buffered_lines() {
         // Verify that PackageListLoaded sorts the buffered lines by name.
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let mut state = send_buffered_results(false);
+        let mut state = send_buffered_results();
 
         // Confirm arrival order before PackageListLoaded
         assert_eq!(state.buffered_lines[0].0, "zebra");
@@ -817,7 +704,7 @@ mod tests {
                 environment_stats: std::collections::HashMap::new(),
             },
         };
-        test_handle_event_with_tty(&loaded_event, &config, false, &mut state);
+        test_handle_event_with_state(&loaded_event, &config, &mut state);
 
         // After PackageListLoaded, buffered lines must be sorted alphabetically
         assert_eq!(state.buffered_lines[0].0, "alpha");
@@ -905,8 +792,9 @@ mod tests {
         assert!(result);
     }
 
+    // A step is left to the shared handler, which decides what shows.
     #[test]
-    fn test_handle_list_event_progress_suppressed() {
+    fn a_list_step_is_left_to_the_shared_handler() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
 
         let event = event::PackageEvent::Progress {
@@ -918,8 +806,7 @@ mod tests {
             kind: selfie::package::event::StepKind::Local,
         };
 
-        // Progress events should be suppressed (return true = handled)
         let result = test_handle_event(&event, &config, false);
-        assert!(result);
+        assert!(!result);
     }
 }

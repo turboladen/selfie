@@ -23,22 +23,19 @@ pub(crate) async fn handle_audit(
 ) -> i32 {
     tracing::debug!("Running audit command for package: {}", package_name);
 
-    display.print_progress(format!("Auditing {package_name}..."));
-
     let event_stream = service.audit(package_name).await;
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
             PackageEvent::AuditResultCompleted { audit_result, .. } => {
-                if config.verbose() {
+                if display.is_verbose() {
                     display_audit_result_card(audit_result, config, display);
                 } else {
                     display_audit_output_only(audit_result, display);
                 }
                 true
             }
-            PackageEvent::Progress { .. } => true,
             // A clean result says nothing the result lines above did not. Anything
             // else takes the default rendering, at the level of its verdict.
             PackageEvent::Completed { result, .. } => match result {
@@ -63,8 +60,6 @@ pub(crate) async fn handle_audit_all(
 ) -> i32 {
     tracing::debug!("Running audit command for all packages");
 
-    display.print_progress("Auditing all packages...");
-
     let event_stream = service.audit_all().await;
 
     let processor = EventProcessor::new(display.clone());
@@ -74,7 +69,6 @@ pub(crate) async fn handle_audit_all(
                 display_audit_summary_line(audit_result, config, display);
                 true
             }
-            PackageEvent::Progress { .. } => true,
             // The summary line is printed only when the run was not clean, at its
             // verdict's level.
             PackageEvent::Completed {

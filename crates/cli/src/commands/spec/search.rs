@@ -13,7 +13,7 @@ pub(crate) async fn handle_search(
 ) -> i32 {
     tracing::debug!("Running spec search command (pattern={pattern:?})");
 
-    display.print_progress(format!("Searching specs for \"{pattern}\"..."));
+    display.print_status(format!("Searching specs for \"{pattern}\"..."));
 
     let event_stream = service.search(pattern).await;
 

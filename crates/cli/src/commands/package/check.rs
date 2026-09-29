@@ -7,7 +7,7 @@ use selfie::package::{
 use crate::{
     commands::common,
     config::CliConfig,
-    display_manager::{DisplayManager, INDENT, OperationHandle},
+    display_manager::{DisplayManager, INDENT},
     event_processor::EventProcessor,
     formatters::format_key,
     status_style,
@@ -21,66 +21,30 @@ pub(crate) async fn handle_check(
 ) -> i32 {
     tracing::debug!("Running check command for package: {}", package_name);
 
-    // Spinner for TTY; static fallback otherwise
-    let mut spinner: Option<OperationHandle> = if display.is_tty() {
-        Some(display.start_operation(format!("Checking {package_name}...")))
-    } else {
-        display.print_progress(format!("Checking {package_name}..."));
-        None
-    };
-
     let event_stream = service.check(package_name).await;
 
-    let verbose = config.verbose();
+    let verbose = display.is_verbose();
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
-        .process_events(event_stream, |event| {
-            match event {
-                PackageEvent::CheckResultCompleted { check_result, .. } => {
-                    // Finalize spinner before displaying results
-                    if let Some(s) = spinner.take() {
-                        s.finish_clear();
-                    }
-                    if verbose {
-                        display_check_result_card(check_result, config, display);
-                    } else {
-                        display_check_output_only(check_result, display);
-                    }
+        .process_events(event_stream, |event| match event {
+            PackageEvent::CheckResultCompleted { check_result, .. } => {
+                if verbose {
+                    display_check_result_card(check_result, config, display);
+                } else {
+                    display_check_output_only(check_result, display);
+                }
+                true
+            }
+            PackageEvent::Completed { result, .. } => match result {
+                OperationResult::Success(_) => true,
+                OperationResult::Failure(failure) if failure.is_environment_error() => {
+                    display_environment_error(package_name, failure, config, display);
                     true
                 }
-                PackageEvent::Progress {
-                    step,
-                    total_steps,
-                    message,
-                    ..
-                } => {
-                    if verbose {
-                        false // Use default progress handling
-                    } else if let Some(s) = spinner.as_ref() {
-                        s.update_progress(*step, *total_steps, message);
-                        true
-                    } else {
-                        display.print_progress(message);
-                        true
-                    }
-                }
-                PackageEvent::Completed { result, .. } => {
-                    // Finalize spinner on completion if not already done
-                    if let Some(s) = spinner.take() {
-                        s.finish_clear();
-                    }
-                    match result {
-                        OperationResult::Success(_) => true,
-                        OperationResult::Failure(failure) if failure.is_environment_error() => {
-                            display_environment_error(package_name, failure, config, display);
-                            true
-                        }
-                        _ => false,
-                    }
-                }
                 _ => false,
-            }
+            },
+            _ => false,
         })
         .await;
 

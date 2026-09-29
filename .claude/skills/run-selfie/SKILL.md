@@ -38,7 +38,6 @@ your command:
 ```bash
 just sandbox-run package list
 # -> sandbox HOME: /var/folders/.../selfie-sandbox.XXXXXX
-# -> ℹ Package list in environment 'sandbox'
 # -> ⚠ sandbox-sentinel  No check
 # -> Package directory: .../selfie-sandbox.XXXXXX/packages
 # -> 1 packages

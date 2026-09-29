@@ -51,14 +51,16 @@ fn test_failing_recommend_does_not_fail_parent_install() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "parent-pkg"]);
 
-    // Parent should succeed even though recommend failed.
-    // Recommend start goes to stdout; failure warning goes to stderr.
+    // Parent should succeed even though recommend failed. The recommend's
+    // install is a waiting step naming it, and its failure a warning, both on
+    // stderr.
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Installing recommended: broken-rec",
+        .stderr(predicate::str::contains(
+            "Running the install command for broken-rec",
         ))
-        .stderr(predicate::str::contains("broken-rec failed"));
+        .stderr(predicate::str::contains("broken-rec failed"))
+        .stdout(predicate::str::contains("broken-rec failed").not());
 }
 
 #[test]

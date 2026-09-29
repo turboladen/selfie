@@ -44,15 +44,12 @@ pub(crate) async fn handle_list(
                 render_listing(dotfile_list, &config_for_handler, &display_for_handler);
                 true
             }
-            // The envelope every service-driven command prints is noise on a
-            // listing: the header repeats the environment the table is about,
-            // and the completion line repeats the count the table just gave.
-            // `spec search` suppresses its own for the same reason.
+            // The completion line repeats the count the table just gave. `spec
+            // search` suppresses its own for the same reason.
             //
             // Only a SUCCESSFUL completion: a failure must still print, and only
             // the default handler renders one.
-            PackageEvent::Started { .. }
-            | PackageEvent::Completed {
+            PackageEvent::Completed {
                 result: OperationResult::Success(_),
                 ..
             } => true,

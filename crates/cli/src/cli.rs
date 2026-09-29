@@ -56,8 +56,9 @@ pub struct ClapCli {
 
     /// Enable verbose output for debugging and detailed information
     ///
-    /// Shows additional debug information including command execution details,
-    /// configuration loading process, and internal operation steps.
+    /// Shows each command's operation header, every step, the output of the
+    /// commands selfie runs, and debug logs, all on stderr. Setting `verbose:
+    /// true` under `cli:` in the config file does the same.
     #[clap(long, short = 'v', global = true, default_value_t = false)]
     pub(crate) verbose: bool,
 
