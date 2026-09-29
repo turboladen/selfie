@@ -256,7 +256,7 @@ target it cannot read, or a source file it cannot read. Each refusal is named in
 summary line counts them:
 
 ```
-Dotfiles applied: 2 deployed, 1 skipped, 0 conflict(s), 1 refused (4/4 steps)
+Dotfiles applied in environment 'macos': 2 deployed, 1 skipped, 0 conflict(s), 1 refused
 ```
 
 Whole packages are refused too, when the problem is in the file rather than in one entry: any

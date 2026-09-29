@@ -41,7 +41,7 @@ just sandbox-run package list
 # -> ⚠ sandbox-sentinel  No check
 # -> Package directory: .../selfie-sandbox.XXXXXX/packages
 # -> 1 packages
-# -> ✓ Package listing completed with 1 valid package(s) (2/2 steps)
+# -> ✓ Package listing completed with 1 valid package(s) in environment 'sandbox'
 
 just sandbox-run spec info sandbox-sentinel
 just sandbox-run config validate
@@ -102,8 +102,8 @@ node .claude/skills/run-selfie/driver.mjs list-tools "$home"
 node .claude/skills/run-selfie/driver.mjs call "$home" selfie_package_list '{}'
 # -> { "data": [ { "environments": ["sandbox"], "name": "sandbox-sentinel",
 # ->     "status": "installed", "type": "package_list_item" } ],
-# ->   "result": { "message": "Package listing completed with 1 valid package(s) (2/2 steps)",
-# ->     "status": "success" } }
+# ->   "result": { "message": "Package listing completed with 1 valid package(s) in environment 'sandbox'",
+# ->     "status": "success", "steps": { "completed": 2, "total": 2 } } }
 
 node .claude/skills/run-selfie/driver.mjs call "$home" selfie_config_get '{}'
 node .claude/skills/run-selfie/driver.mjs call "$home" selfie_spec_info '{"package":"sandbox-sentinel"}'

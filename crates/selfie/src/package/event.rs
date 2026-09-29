@@ -23,12 +23,6 @@ impl StepCount {
     }
 }
 
-impl std::fmt::Display for StepCount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}/{} steps)", self.completed, self.total)
-    }
-}
-
 /// Whether a progress step waits on something outside selfie.
 ///
 /// A consumer shows a waiting step until its [`PackageEvent::StepEnded`]; a
@@ -712,12 +706,9 @@ pub struct OperationContext {
 ///     match result {
 ///         OperationResult::Success(OperationSuccess::PackageInstalled {
 ///             package_name,
-///             steps_completed,
+///             was_already_installed,
 ///             ..
-///         }) => format!(
-///             "{package_name} installed ({}/{} steps)",
-///             steps_completed.completed, steps_completed.total
-///         ),
+///         }) if was_already_installed => format!("{package_name} was already installed"),
 ///         OperationResult::Success(_) => "done".to_string(),
 ///         OperationResult::Failure(failure) => format!("failed: {failure}"),
 ///     }
@@ -1250,16 +1241,19 @@ fn orphaned_clause(orphan_count: usize) -> String {
 }
 
 impl std::fmt::Display for OperationSuccess {
+    // Each message names the environment when the answer depends on it, and
+    // never a step count: the count is `steps_completed`, a field for whoever
+    // wants it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OperationSuccess::PackageChecked {
                 package_name,
+                environment,
                 verdict,
-                steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' check completed {verdict} {steps_completed}"
+                "Package '{package_name}' check completed {verdict} in environment '{environment}'"
             ),
             OperationSuccess::PackagesAudited {
                 audited_count,
@@ -1267,127 +1261,123 @@ impl std::fmt::Display for OperationSuccess {
                 not_installed_count,
                 error_count,
                 refused_count,
+                environment,
                 ..
             } => write!(
                 f,
-                "Audit completed for {audited_count} package(s): {conflict_count} with conflicts, \
-                 {not_installed_count} not installed, {error_count} could not be audited, \
-                 {refused_count} spec(s) left out"
+                "Audit completed for {audited_count} package(s) in environment '{environment}': \
+                 {conflict_count} with conflicts, {not_installed_count} not installed, \
+                 {error_count} could not be audited, {refused_count} spec(s) left out"
             ),
             OperationSuccess::PackageAudited {
                 package_name,
+                environment,
                 audit_result,
-                steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' audit completed {audit_result} {steps_completed}"
+                "Package '{package_name}' audit completed {audit_result} in environment '{environment}'"
             ),
             OperationSuccess::PackageInstalled {
                 package_name,
+                environment,
                 was_already_installed,
                 executable_path,
-                steps_completed,
                 ..
             } => {
-                let status = if *was_already_installed {
-                    match executable_path {
-                        Some(path) => format!("was already installed at: {path}"),
-                        None => "was already installed".to_string(),
-                    }
+                // The path goes last, so the environment clause does not read as
+                // part of it.
+                let (status, at) = if *was_already_installed {
+                    (
+                        "was already installed",
+                        executable_path.as_ref().map(|path| format!(", at {path}")),
+                    )
                 } else {
-                    "installation completed successfully".to_string()
+                    ("installation completed successfully", None)
                 };
-                write!(f, "Package '{package_name}' {status} {steps_completed}")
+                write!(
+                    f,
+                    "Package '{package_name}' {status} in environment '{environment}'{}",
+                    at.unwrap_or_default()
+                )
             }
             OperationSuccess::PackageValidated {
                 package_name,
+                environment,
                 status,
                 error_count,
                 warning_count,
-                steps_completed,
                 ..
             } => match status {
                 ValidationStatus::HasErrors => write!(
                     f,
-                    "Package '{package_name}' validation failed with {error_count} error(s) and {} warning(s) {steps_completed}",
+                    "Package '{package_name}' validation failed with {error_count} error(s) and {} warning(s) in environment '{environment}'",
                     warning_count.unwrap_or(0)
                 ),
                 ValidationStatus::HasWarnings => write!(
                     f,
-                    "Package '{package_name}' validation completed with {} warning(s) {steps_completed}",
+                    "Package '{package_name}' validation completed with {} warning(s) in environment '{environment}'",
                     warning_count.unwrap_or(0)
                 ),
                 ValidationStatus::Valid => write!(
                     f,
-                    "Package '{package_name}' validation completed {status} {steps_completed}"
+                    "Package '{package_name}' validation completed {status} in environment '{environment}'"
                 ),
             },
-            OperationSuccess::SpecInfoRetrieved {
-                package_name,
-                steps_completed,
-                ..
-            } => write!(
+            OperationSuccess::SpecInfoRetrieved { package_name, .. } => write!(
                 f,
-                "Package '{package_name}' spec info retrieved successfully {steps_completed}"
+                "Package '{package_name}' spec info retrieved successfully"
             ),
             OperationSuccess::PackageStatusChecked {
                 package_name,
-                steps_completed,
+                environment,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' status checked successfully {steps_completed}"
+                "Package '{package_name}' status checked successfully in environment '{environment}'"
             ),
             OperationSuccess::PackageListGenerated {
                 valid_count,
                 invalid_count,
                 refused_specs,
-                steps_completed,
+                environment,
                 ..
             } => {
                 let status =
                     listing_counts(*valid_count, *invalid_count, *refused_specs, "package");
                 write!(
                     f,
-                    "Package listing completed with {status} {steps_completed}"
+                    "Package listing completed with {status} in environment '{environment}'"
                 )
             }
             OperationSuccess::PackageCreated {
                 package_name,
                 file_path,
-                steps_completed,
                 ..
             } => write!(
                 f,
-                "Package '{package_name}' created at {} {steps_completed}",
+                "Package '{package_name}' created at {}",
                 file_path.display()
             ),
-            OperationSuccess::PackageUpdated {
-                package_name,
-                steps_completed,
-                ..
-            } => write!(
-                f,
-                "Package '{package_name}' updated successfully {steps_completed}"
-            ),
+            OperationSuccess::PackageUpdated { package_name, .. } => {
+                write!(f, "Package '{package_name}' updated successfully")
+            }
             OperationSuccess::PackageRemoved {
                 package_name,
                 file_path,
                 dependent_packages,
-                steps_completed,
                 ..
             } => {
                 if dependent_packages.is_empty() {
                     write!(
                         f,
-                        "Package '{package_name}' removed from {} {steps_completed}",
+                        "Package '{package_name}' removed from {}",
                         file_path.display()
                     )
                 } else {
                     write!(
                         f,
-                        "Package '{package_name}' removed from {} (had {} dependent package(s)) {steps_completed}",
+                        "Package '{package_name}' removed from {} (had {} dependent package(s))",
                         file_path.display(),
                         dependent_packages.len()
                     )
@@ -1397,11 +1387,14 @@ impl std::fmt::Display for OperationSuccess {
                 valid_count,
                 invalid_count,
                 refused_specs,
-                steps_completed,
+                environment,
                 ..
             } => {
                 let status = listing_counts(*valid_count, *invalid_count, *refused_specs, "spec");
-                write!(f, "Spec listing completed with {status} {steps_completed}")
+                write!(
+                    f,
+                    "Spec listing completed with {status} in environment '{environment}'"
+                )
             }
             OperationSuccess::SpecsValidated {
                 validated_count,
@@ -1410,7 +1403,7 @@ impl std::fmt::Display for OperationSuccess {
                 uncollected_count,
                 warning_count,
                 other_warning_count,
-                steps_completed,
+                environment,
                 ..
             } => {
                 let mut status = if *error_count + *unparsable_count + *uncollected_count > 0 {
@@ -1425,7 +1418,10 @@ impl std::fmt::Display for OperationSuccess {
                 if *other_warning_count > 0 {
                     status.push_str(&format!(", {other_warning_count} other warning(s)"));
                 }
-                write!(f, "Spec validation completed: {status} {steps_completed}")
+                write!(
+                    f,
+                    "Spec validation completed in environment '{environment}': {status}"
+                )
             }
             OperationSuccess::DotfilesApplied {
                 deployed_count,
@@ -1433,12 +1429,13 @@ impl std::fmt::Display for OperationSuccess {
                 conflict_count,
                 refused_count,
                 orphan_count,
-                steps_completed,
+                environment,
                 ..
             } => {
                 write!(
                     f,
-                    "Dotfiles applied: {deployed_count} deployed, {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused{} {steps_completed}",
+                    "Dotfiles applied in environment '{environment}': {deployed_count} deployed, \
+                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused{}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -1449,7 +1446,7 @@ impl std::fmt::Display for OperationSuccess {
                 unverified_count,
                 orphan_count,
                 unjudged_count,
-                steps_completed,
+                environment,
                 ..
             } => {
                 let unjudged = if *unjudged_count == 0 {
@@ -1459,9 +1456,9 @@ impl std::fmt::Display for OperationSuccess {
                 };
                 write!(
                     f,
-                    "Dotfile drift check: {drift_count} drifted out of {total_count}, \
-                     {refused_count} refused, {unverified_count} not verifiable{}{unjudged} \
-                     {steps_completed}",
+                    "Dotfile drift check in environment '{environment}': {drift_count} drifted out \
+                     of {total_count}, {refused_count} refused, {unverified_count} not \
+                     verifiable{}{unjudged}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -1469,41 +1466,21 @@ impl std::fmt::Display for OperationSuccess {
                 name,
                 target_path,
                 was_already_tracked: true,
-                steps_completed,
                 ..
-            } => {
-                write!(
-                    f,
-                    "Already tracking '{target_path}' in spec '{name}' {steps_completed}"
-                )
-            }
+            } => write!(f, "Already tracking '{target_path}' in spec '{name}'"),
             OperationSuccess::DotfileTracked {
-                name,
-                target_path,
-                steps_completed,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Now tracking '{target_path}' in spec '{name}' {steps_completed}"
-                )
-            }
-            OperationSuccess::SyncPushComplete {
-                commits_pushed,
-                steps_completed,
-            } => {
+                name, target_path, ..
+            } => write!(f, "Now tracking '{target_path}' in spec '{name}'"),
+            OperationSuccess::SyncPushComplete { commits_pushed, .. } => {
                 let label = crate::pluralize(*commits_pushed, "commit", "commits");
-                write!(
-                    f,
-                    "Pushed {commits_pushed} {label} to remote {steps_completed}"
-                )
+                write!(f, "Pushed {commits_pushed} {label} to remote")
             }
             OperationSuccess::SyncPullComplete {
                 commits_pulled,
                 packages_updated,
                 packages_added,
                 packages_removed,
-                steps_completed,
+                ..
             } => {
                 let label = crate::pluralize(*commits_pulled, "commit", "commits");
                 let mut parts = Vec::new();
@@ -1517,26 +1494,20 @@ impl std::fmt::Display for OperationSuccess {
                     parts.push(format!("removed: {}", packages_removed.join(", ")));
                 }
                 if parts.is_empty() {
-                    write!(
-                        f,
-                        "Pulled {commits_pulled} {label} from remote {steps_completed}"
-                    )
+                    write!(f, "Pulled {commits_pulled} {label} from remote")
                 } else {
                     write!(
                         f,
-                        "Pulled {commits_pulled} {label} from remote ({}) {steps_completed}",
+                        "Pulled {commits_pulled} {label} from remote ({})",
                         parts.join("; ")
                     )
                 }
             }
-            OperationSuccess::SyncPullUpToDate { steps_completed } => {
-                write!(f, "Already up to date with remote {steps_completed}")
+            OperationSuccess::SyncPullUpToDate { .. } => {
+                write!(f, "Already up to date with remote")
             }
-            OperationSuccess::SyncNothingToPush { steps_completed } => {
-                write!(
-                    f,
-                    "Nothing to push — working tree is clean {steps_completed}"
-                )
+            OperationSuccess::SyncNothingToPush { .. } => {
+                write!(f, "Nothing to push — working tree is clean")
             }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
@@ -3062,18 +3033,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_step_count_display() {
-        let step_count = StepCount::new(3, 5);
-        assert_eq!(format!("{step_count}"), "(3/5 steps)");
-    }
-
-    #[test]
     fn test_step_count_usize_usage() {
         // Test direct usize construction
         let step_count = StepCount::new(7usize, 10usize);
         assert_eq!(step_count.completed, 7);
         assert_eq!(step_count.total, 10);
-        assert_eq!(format!("{step_count}"), "(7/10 steps)");
 
         // Test From<(usize, usize)> conversion
         let step_count_from_usize: StepCount = (3usize, 5usize).into();
@@ -3146,8 +3110,259 @@ mod tests {
 
         assert_eq!(
             format!("{success}"),
-            "Package 'test-package' check completed successfully (2/3 steps)"
+            "Package 'test-package' check completed successfully in environment 'test'"
         );
+    }
+
+    // An install that found the package names where, after the environment, so
+    // the clause is not read as part of the path.
+    #[test]
+    fn an_already_installed_package_names_its_path_last() {
+        let message = OperationSuccess::PackageInstalled {
+            package_name: "bat".to_string(),
+            environment: "mac".to_string(),
+            was_already_installed: true,
+            executable_path: Some("/opt/bin/bat".to_string()),
+            steps_completed: StepCount::new(4, 4),
+        }
+        .to_string();
+
+        assert_eq!(
+            message,
+            "Package 'bat' was already installed in environment 'mac', at /opt/bin/bat"
+        );
+    }
+
+    // Every variant's message, with a step count no other field could produce:
+    // none may carry the count, and exactly the variants whose answer depends on
+    // the environment name it.
+    #[test]
+    fn a_message_names_the_environment_it_depends_on_and_no_step_count() {
+        let steps = StepCount::new(7, 9);
+        let name = || "pkg".to_string();
+        let env = || "env-x".to_string();
+        let path = || std::path::PathBuf::from("/p/pkg.yaml");
+        // (message, names the environment)
+        let cases: Vec<(OperationSuccess, bool)> = vec![
+            (
+                OperationSuccess::PackageChecked {
+                    package_name: name(),
+                    environment: env(),
+                    verdict: CheckVerdict::Installed,
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackagesAudited {
+                    audited_count: 1,
+                    conflict_count: 2,
+                    not_installed_count: 3,
+                    error_count: 4,
+                    refused_count: 5,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageAudited {
+                    package_name: name(),
+                    environment: env(),
+                    audit_result: AuditResult::NoAuditCommand,
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageInstalled {
+                    package_name: name(),
+                    environment: env(),
+                    was_already_installed: true,
+                    executable_path: Some("/bin/pkg".to_string()),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageValidated {
+                    package_name: name(),
+                    environment: env(),
+                    status: ValidationStatus::HasErrors,
+                    error_count: 2,
+                    warning_count: Some(1),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            // Each status writes its own message, so each gets a row.
+            (
+                OperationSuccess::PackageValidated {
+                    package_name: name(),
+                    environment: env(),
+                    status: ValidationStatus::HasWarnings,
+                    error_count: 0,
+                    warning_count: Some(1),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageValidated {
+                    package_name: name(),
+                    environment: env(),
+                    status: ValidationStatus::Valid,
+                    error_count: 0,
+                    warning_count: None,
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::SpecInfoRetrieved {
+                    package_name: name(),
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::PackageStatusChecked {
+                    package_name: name(),
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageListGenerated {
+                    valid_count: 1,
+                    invalid_count: 2,
+                    refused_specs: 3,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::PackageCreated {
+                    package_name: name(),
+                    file_path: path(),
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::PackageUpdated {
+                    package_name: name(),
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::PackageRemoved {
+                    package_name: name(),
+                    file_path: path(),
+                    environment: env(),
+                    dependent_packages: vec!["dep".to_string()],
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::SpecListGenerated {
+                    valid_count: 1,
+                    invalid_count: 2,
+                    refused_specs: 3,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::SpecsValidated {
+                    validated_count: 1,
+                    error_count: 2,
+                    unparsable_count: 3,
+                    uncollected_count: 4,
+                    warning_count: 5,
+                    other_warning_count: 6,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::DotfilesApplied {
+                    deployed_count: 1,
+                    skipped_count: 2,
+                    conflict_count: 3,
+                    refused_count: 4,
+                    orphan_count: 5,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::DotfileDriftChecked {
+                    drift_count: 1,
+                    total_count: 2,
+                    refused_count: 3,
+                    unverified_count: 4,
+                    orphan_count: 5,
+                    unjudged_count: 6,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                true,
+            ),
+            (
+                OperationSuccess::DotfileTracked {
+                    name: name(),
+                    source_path: path(),
+                    target_path: "~/.pkg".to_string(),
+                    was_already_tracked: false,
+                    environment: env(),
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::SyncPushComplete {
+                    commits_pushed: 2,
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::SyncPullUpToDate {
+                    steps_completed: steps,
+                },
+                false,
+            ),
+            (
+                OperationSuccess::SyncNothingToPush {
+                    steps_completed: steps,
+                },
+                false,
+            ),
+        ];
+
+        for (success, names_environment) in cases {
+            let message = success.to_string();
+            assert!(
+                !message.contains("steps") && !message.contains("7/9"),
+                "{message}"
+            );
+            assert_eq!(
+                message.contains("in environment 'env-x'"),
+                names_environment,
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -3164,7 +3379,7 @@ mod tests {
 
         assert_eq!(
             format!("{success}"),
-            "Package 'test-package' installation completed successfully (1/1 steps)"
+            "Package 'test-package' installation completed successfully in environment 'test'"
         );
     }
 

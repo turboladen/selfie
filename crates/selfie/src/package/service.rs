@@ -104,7 +104,7 @@ impl ProgressTracker {
     }
 
     /// Advance one step that selfie does itself, and emit its progress event,
-    /// with the step numbers appended to `message` — "Loading packages (1/2)".
+    /// carrying `message` and the step numbers.
     pub(crate) async fn next(&mut self, sender: &EventSender, message: impl std::fmt::Display) {
         self.advance(sender, StepKind::Local, message).await;
     }
@@ -132,9 +132,10 @@ impl ProgressTracker {
         message: impl std::fmt::Display,
     ) {
         self.current_step += 1;
-        let enhanced_message = format!("{} ({}/{})", message, self.current_step, self.total_steps);
+        // The numbers travel as the event's fields, not in the message: a display
+        // that shows them formats them itself.
         sender
-            .send_progress(self.current_step, self.total_steps, kind, enhanced_message)
+            .send_progress(self.current_step, self.total_steps, kind, message)
             .await;
     }
 

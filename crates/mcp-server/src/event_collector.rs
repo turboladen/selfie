@@ -137,6 +137,16 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     {
         result_data["unjudged_count"] = (*unjudged_count).into();
     }
+    // The step count is a field because no message carries one. A failure has
+    // no count to give.
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let Some(steps) = s.steps_completed()
+    {
+        result_data["steps"] = serde_json::json!({
+            "completed": steps.completed,
+            "total": steps.total,
+        });
+    }
 
     EventCollectorResult {
         success,
@@ -698,6 +708,54 @@ mod tests {
             context: OperationContext::default(),
             timestamp: Instant::now(),
         }
+    }
+
+    // The step count is a field of the result and no part of its message. Two
+    // different numbers, so a swap of completed and total shows.
+    #[tokio::test]
+    async fn a_success_reports_its_steps_as_fields() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 1,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 0,
+                orphan_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(2, 3),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(
+            result.data["result"]["steps"],
+            serde_json::json!({ "completed": 2, "total": 3 })
+        );
+        let message = result.data["result"]["message"].as_str().unwrap();
+        assert!(!message.contains("steps"), "{message}");
+    }
+
+    // A result with no step count has no `steps` field, rather than a made-up one.
+    #[tokio::test]
+    async fn a_generic_success_has_no_steps_field() {
+        use selfie::package::event::OperationSuccess;
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(
+            result.data["result"].get("steps").is_none(),
+            "{}",
+            result.data
+        );
     }
 
     // An assistant that reports a deploy has to be able to tell the user how to

@@ -191,10 +191,7 @@ async fn a_listing_waits_on_its_check_commands_and_counts_them() {
 
     let events = collect_events(service.list(false).await).await;
 
-    assert_eq!(
-        waiting(&events),
-        vec!["Checking 1 package (2/2)".to_string()]
-    );
+    assert_eq!(waiting(&events), vec!["Checking 1 package".to_string()]);
 }
 
 // Control: no package has a check command, so the listing runs none.

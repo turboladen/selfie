@@ -236,19 +236,13 @@ where
             if output.is_success() {
                 if is_final_execution {
                     sender
-                        .send_debug(format!(
-                            "Final command execution completed successfully (step {}/{})",
-                            progress.current_step(),
-                            progress.total_steps()
-                        ))
+                        .send_debug("Final command execution completed successfully")
                         .await;
                 }
             } else {
                 sender
                     .send_warning(format!(
-                        "Command failed at step {}/{}: exit code {}",
-                        progress.current_step(),
-                        progress.total_steps(),
+                        "The `{command_type}` command failed with exit code {}",
                         output.exit_code()
                     ))
                     .await;

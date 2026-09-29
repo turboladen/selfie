@@ -127,9 +127,9 @@ fn every_command_prints_its_result_on_stdout() {
 }
 
 // A check command that succeeds silently still gets a result line, naming the
-// package.
+// package and the environment it was checked in.
 #[test]
-fn a_silent_passing_check_prints_a_result_line() {
+fn a_silent_passing_check_names_the_package_and_environment() {
     let temp_dir = sandbox();
 
     let output = sandboxed_command(&temp_dir)
@@ -140,9 +140,9 @@ fn a_silent_passing_check_prints_a_result_line() {
 
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(
-        stdout
-            .lines()
-            .any(|line| line.contains("'bat'") && line.contains("check completed")),
+        stdout.lines().any(|line| line.contains("'bat'")
+            && line.contains("check completed")
+            && line.contains("in environment 'test-env'")),
         "{stdout}"
     );
 }
@@ -195,4 +195,24 @@ fn a_validator_prints_its_verdict_on_stdout() {
         "the notice is part of the answer: {stdout}"
     );
     assert!(!stderr.contains("verbos"), "{stderr}");
+}
+
+// `sync status` relays drift, which depends on the environment, so its drift
+// line names it, on stdout.
+#[test]
+fn sync_status_names_the_environment_of_its_drift_line() {
+    let temp_dir = sandbox();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["sync", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("drift") && line.contains("in environment 'test-env'")),
+        "{stdout}"
+    );
 }

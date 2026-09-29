@@ -102,6 +102,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
         }
 
         PackageEvent::SyncDriftSummary {
+            operation_info,
             drifted_targets,
             total_deployed,
             refused_count,
@@ -129,14 +130,23 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             if drifted_targets.is_empty() {
                 let (line, clean) =
                     no_drift_line(*total_deployed, *drift_outcome, *warned, *unverified);
-                let outcome = if clean { Outcome::Clean } else { Outcome::Found };
-                display.print_result(outcome, line);
+                let outcome = if clean {
+                    Outcome::Clean
+                } else {
+                    Outcome::Found
+                };
+                // Drift depends on the environment, so the line names it.
+                display.print_result(
+                    outcome,
+                    format!("{line} in environment '{}'", operation_info.environment),
+                );
             } else {
                 let count = drifted_targets.len();
                 display.print_result(
                     Outcome::Found,
                     format!(
-                        "Dotfile drift: {count} drifted out of {}",
+                        "Dotfile drift in environment '{}': {count} drifted out of {}",
+                        operation_info.environment,
                         deployed_phrase(*total_deployed, *unverified)
                     ),
                 );
